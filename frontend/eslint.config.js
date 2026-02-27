@@ -1,16 +1,29 @@
 import js from "@eslint/js";
-import tseslint from "typescript-eslint";
+import tsParser from "@typescript-eslint/parser";
+import tsPlugin from "@typescript-eslint/eslint-plugin";
 import reactHooks from "eslint-plugin-react-hooks";
 
-export default tseslint.config(
+export default [
   js.configs.recommended,
-  ...tseslint.configs.recommended,
   {
     files: ["src/**/*.{ts,tsx}"],
-    plugins: { "react-hooks": reactHooks },
+    languageOptions: {
+      parser: tsParser,
+      parserOptions: {
+        ecmaVersion: "latest",
+        sourceType: "module",
+        ecmaFeatures: { jsx: true },
+      },
+    },
+    plugins: {
+      "@typescript-eslint": tsPlugin,
+      "react-hooks": reactHooks,
+    },
     rules: {
+      ...tsPlugin.configs.recommended.rules,
       ...reactHooks.configs.recommended.rules,
+      "no-undef": "off",
       "no-console": ["warn", { allow: ["warn", "error"] }],
     },
   }
-);
+];
