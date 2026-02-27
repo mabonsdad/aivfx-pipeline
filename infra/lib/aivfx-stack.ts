@@ -1,0 +1,302 @@
+import * as cdk from "aws-cdk-lib";
+import { Construct } from "constructs";
+import * as apigwv2 from "aws-cdk-lib/aws-apigatewayv2";
+import * as apigwv2Authorizers from "aws-cdk-lib/aws-apigatewayv2-authorizers";
+import * as apigwv2Integrations from "aws-cdk-lib/aws-apigatewayv2-integrations";
+import * as cloudfront from "aws-cdk-lib/aws-cloudfront";
+import * as cognito from "aws-cdk-lib/aws-cognito";
+import * as lambda from "aws-cdk-lib/aws-lambda";
+import * as lambdaEventSources from "aws-cdk-lib/aws-lambda-event-sources";
+import * as s3 from "aws-cdk-lib/aws-s3";
+import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
+import * as sqs from "aws-cdk-lib/aws-sqs";
+import { S3BucketOrigin } from "aws-cdk-lib/aws-cloudfront-origins";
+
+export class AivfxStack extends cdk.Stack {
+  constructor(scope: Construct, id: string, props?: cdk.StackProps) {
+    super(scope, id, props);
+
+    const appName = this.node.tryGetContext("appName") ?? process.env.APP_NAME ?? "aivfx";
+    const allowedOriginsRaw = process.env.ALLOWED_WEB_ORIGINS ?? "https://www.shwsh.co.uk,https://s3.eu-west-2.amazonaws.com";
+    const allowedOrigins = allowedOriginsRaw
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean);
+
+    const webBucket = new s3.Bucket(this, "WebBucket", {
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      enforceSSL: true,
+      versioned: true,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      autoDeleteObjects: false,
+    });
+
+    const assetsBucket = new s3.Bucket(this, "AssetsBucket", {
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      enforceSSL: true,
+      versioned: true,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      cors: [
+        {
+          allowedMethods: [s3.HttpMethods.GET, s3.HttpMethods.PUT, s3.HttpMethods.HEAD],
+          allowedOrigins,
+          allowedHeaders: ["*"],
+          exposedHeaders: ["ETag"],
+          maxAge: 300,
+        },
+      ],
+    });
+
+    const metadataBucket = new s3.Bucket(this, "MetadataBucket", {
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      enforceSSL: true,
+      versioned: true,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    const distribution = new cloudfront.Distribution(this, "WebDistribution", {
+      defaultBehavior: {
+        origin: S3BucketOrigin.withOriginAccessControl(webBucket),
+        viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+        cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
+      },
+      defaultRootObject: "index.html",
+      errorResponses: [
+        { httpStatus: 404, responseHttpStatus: 200, responsePagePath: "/index.html", ttl: cdk.Duration.seconds(0) },
+        { httpStatus: 403, responseHttpStatus: 200, responsePagePath: "/index.html", ttl: cdk.Duration.seconds(0) },
+      ],
+      minimumProtocolVersion: cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021,
+    });
+
+    const userPool = new cognito.UserPool(this, "UserPool", {
+      userPoolName: `${appName}-users`,
+      selfSignUpEnabled: true,
+      signInAliases: { email: true },
+      standardAttributes: {
+        email: { required: true, mutable: true },
+      },
+      passwordPolicy: {
+        minLength: 12,
+        requireUppercase: true,
+        requireLowercase: true,
+        requireDigits: true,
+        requireSymbols: true,
+      },
+      accountRecovery: cognito.AccountRecovery.EMAIL_ONLY,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    const userPoolClient = new cognito.UserPoolClient(this, "UserPoolClient", {
+      userPool,
+      authFlows: {
+        userPassword: true,
+        userSrp: true,
+      },
+      oAuth: {
+        callbackUrls: [...allowedOrigins, "http://localhost:5173"],
+        logoutUrls: [...allowedOrigins, "http://localhost:5173"],
+        scopes: [cognito.OAuthScope.OPENID, cognito.OAuthScope.EMAIL, cognito.OAuthScope.PROFILE],
+      },
+      generateSecret: false,
+      preventUserExistenceErrors: true,
+    });
+
+    const userPoolDomain = userPool.addDomain("UserPoolDomain", {
+      cognitoDomain: {
+        domainPrefix: `${appName}-${this.account}-${this.region}`.toLowerCase().replace(/[^a-z0-9-]/g, "").slice(0, 63),
+      },
+    });
+
+    const apiKeysSecret = new secretsmanager.Secret(this, "ApiKeysSecret", {
+      secretName: `${appName}/external-api-keys`,
+      secretObjectValue: {
+        GEMINI_API_KEY: cdk.SecretValue.unsafePlainText("SET_ME"),
+        LUMA_API_KEY: cdk.SecretValue.unsafePlainText("SET_ME"),
+      },
+    });
+
+    const dlq = new sqs.Queue(this, "JobsDLQ", {
+      retentionPeriod: cdk.Duration.days(14),
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+    });
+
+    const jobsQueue = new sqs.Queue(this, "JobsQueue", {
+      visibilityTimeout: cdk.Duration.minutes(15),
+      retentionPeriod: cdk.Duration.days(4),
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+      deadLetterQueue: {
+        maxReceiveCount: 3,
+        queue: dlq,
+      },
+    });
+
+    const backendCodePath = `${__dirname}/../../backend`;
+
+    const layerArns = [process.env.FFMPEG_LAYER_ARN, process.env.REQUESTS_LAYER_ARN, process.env.LUMALABS_LAYER_ARN]
+      .filter((arn): arn is string => !!arn);
+    const externalLayers = layerArns.map((arn, index) =>
+      lambda.LayerVersion.fromLayerVersionArn(this, `ExternalLayer${index}`, arn),
+    );
+
+    const apiFn = new lambda.Function(this, "ApiFunction", {
+      runtime: lambda.Runtime.PYTHON_3_10,
+      architecture: lambda.Architecture.ARM_64,
+      handler: "src/api_handler.handler",
+      code: lambda.Code.fromAsset(backendCodePath, {
+        exclude: ["tests", "__pycache__", ".pytest_cache", "*.pyc"],
+      }),
+      timeout: cdk.Duration.seconds(29),
+      memorySize: 2048,
+      environment: {
+        ASSETS_BUCKET: assetsBucket.bucketName,
+        METADATA_BUCKET: metadataBucket.bucketName,
+        JOBS_QUEUE_URL: jobsQueue.queueUrl,
+        SECRETS_ARN: apiKeysSecret.secretArn,
+        CORS_ALLOWED_ORIGINS: allowedOrigins.join(","),
+        MAX_UPLOAD_BYTES: String(2 * 1024 * 1024 * 1024),
+        MAX_PROMPT_CHARS: "2000",
+      },
+      tracing: lambda.Tracing.ACTIVE,
+      layers: externalLayers,
+    });
+
+    const workerFn = new lambda.Function(this, "WorkerFunction", {
+      runtime: lambda.Runtime.PYTHON_3_10,
+      architecture: lambda.Architecture.ARM_64,
+      handler: "src/worker_handler.handler",
+      code: lambda.Code.fromAsset(backendCodePath, {
+        exclude: ["tests", "__pycache__", ".pytest_cache", "*.pyc"],
+      }),
+      timeout: cdk.Duration.minutes(15),
+      memorySize: 10240,
+      ephemeralStorageSize: cdk.Size.gibibytes(10),
+      environment: {
+        ASSETS_BUCKET: assetsBucket.bucketName,
+        METADATA_BUCKET: metadataBucket.bucketName,
+        JOBS_QUEUE_URL: jobsQueue.queueUrl,
+        SECRETS_ARN: apiKeysSecret.secretArn,
+        CORS_ALLOWED_ORIGINS: allowedOrigins.join(","),
+        MAX_PROMPT_CHARS: "2000",
+      },
+      tracing: lambda.Tracing.ACTIVE,
+      layers: externalLayers,
+    });
+
+    workerFn.addEventSource(
+      new lambdaEventSources.SqsEventSource(jobsQueue, {
+        batchSize: 1,
+        maxConcurrency: 4,
+      }),
+    );
+
+    jobsQueue.grantSendMessages(apiFn);
+    jobsQueue.grantConsumeMessages(workerFn);
+
+    assetsBucket.grantReadWrite(apiFn);
+    assetsBucket.grantReadWrite(workerFn);
+    metadataBucket.grantReadWrite(apiFn);
+    metadataBucket.grantReadWrite(workerFn);
+    apiKeysSecret.grantRead(apiFn);
+    apiKeysSecret.grantRead(workerFn);
+
+    const integration = new apigwv2Integrations.HttpLambdaIntegration("ApiIntegration", apiFn);
+    const jwtAuthorizer = new apigwv2Authorizers.HttpJwtAuthorizer(
+      "CognitoJwtAuthorizer",
+      `https://cognito-idp.${this.region}.amazonaws.com/${userPool.userPoolId}`,
+      {
+        jwtAudience: [userPoolClient.userPoolClientId],
+      },
+    );
+
+    const httpApi = new apigwv2.HttpApi(this, "HttpApi", {
+      createDefaultStage: false,
+      corsPreflight: {
+        allowCredentials: true,
+        allowHeaders: ["authorization", "content-type"],
+        allowMethods: [
+          apigwv2.CorsHttpMethod.GET,
+          apigwv2.CorsHttpMethod.POST,
+          apigwv2.CorsHttpMethod.PATCH,
+          apigwv2.CorsHttpMethod.DELETE,
+          apigwv2.CorsHttpMethod.OPTIONS,
+        ],
+        allowOrigins: allowedOrigins,
+      },
+    });
+
+    new apigwv2.CfnStage(this, "DefaultStage", {
+      apiId: httpApi.apiId,
+      stageName: "$default",
+      autoDeploy: true,
+      defaultRouteSettings: {
+        throttlingBurstLimit: 30,
+        throttlingRateLimit: 10,
+      },
+    });
+
+    httpApi.addRoutes({
+      path: "/health",
+      methods: [apigwv2.HttpMethod.GET],
+      integration,
+    });
+
+    httpApi.addRoutes({
+      path: "/",
+      methods: [apigwv2.HttpMethod.ANY],
+      integration,
+      authorizer: jwtAuthorizer,
+    });
+
+    httpApi.addRoutes({
+      path: "/{proxy+}",
+      methods: [apigwv2.HttpMethod.ANY],
+      integration,
+      authorizer: jwtAuthorizer,
+    });
+
+    new cdk.CfnOutput(this, "WebUrl", {
+      value: `https://${distribution.distributionDomainName}`,
+      description: "CloudFront URL for static web app",
+    });
+
+    new cdk.CfnOutput(this, "WebBucketName", {
+      value: webBucket.bucketName,
+    });
+
+    new cdk.CfnOutput(this, "CloudFrontDistributionId", {
+      value: distribution.distributionId,
+    });
+
+    new cdk.CfnOutput(this, "ApiUrl", {
+      value: httpApi.apiEndpoint,
+      description: "HTTP API endpoint",
+    });
+
+    new cdk.CfnOutput(this, "CognitoUserPoolId", {
+      value: userPool.userPoolId,
+    });
+
+    new cdk.CfnOutput(this, "CognitoUserPoolClientId", {
+      value: userPoolClient.userPoolClientId,
+    });
+
+    new cdk.CfnOutput(this, "CognitoDomain", {
+      value: userPoolDomain.domainName,
+    });
+
+    new cdk.CfnOutput(this, "AssetsBucketName", {
+      value: assetsBucket.bucketName,
+    });
+
+    new cdk.CfnOutput(this, "MetadataBucketName", {
+      value: metadataBucket.bucketName,
+    });
+
+    new cdk.CfnOutput(this, "SecretsArn", {
+      value: apiKeysSecret.secretArn,
+    });
+  }
+}

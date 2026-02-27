@@ -1,0 +1,5 @@
+aws-lambda-powertools==3.8.0
+pydantic==2.10.6
+requests==2.32.3
+tenacity==9.0.0
+Pillow==11.1.0

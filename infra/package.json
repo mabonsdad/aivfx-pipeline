@@ -1,0 +1,21 @@
+{
+  "name": "aivfx-infra",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "tsc",
+    "cdk": "cdk",
+    "synth": "cdk synth",
+    "deploy": "cdk deploy --require-approval never"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.2",
+    "aws-cdk": "2.178.1",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.7.3"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "2.178.1",
+    "constructs": "^10.4.2"
+  }
+}

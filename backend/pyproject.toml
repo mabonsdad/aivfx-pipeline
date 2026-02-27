@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aivfx-backend"
+version = "0.1.0"
+description = "Serverless backend for AI-assisted VFX micro-pipeline"
+requires-python = ">=3.10"
+dependencies = [
+  "aws-lambda-powertools==3.8.0",
+  "pydantic==2.10.6",
+  "requests==2.32.3",
+  "tenacity==9.0.0",
+  "Pillow==11.1.0"
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

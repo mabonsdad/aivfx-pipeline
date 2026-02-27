@@ -1,0 +1,21 @@
+{
+  "name": "event-agent",
+  "private": true,
+  "packageManager": "pnpm@9.15.1",
+  "scripts": {
+    "dev:avatar-app": "pnpm --filter avatar-app dev",
+    "dev:agent-console": "pnpm --filter agent-console dev",
+    "rag:admin": "tsx scripts/rag-admin.ts",
+    "dev:frontend": "cd frontend && npm run dev",
+    "build:frontend": "cd frontend && npm run build",
+    "check:backend": "python3 -m py_compile $(find backend/src -name '*.py')",
+    "build:infra": "cd infra && npm run build"
+  },
+  "dependencies": {
+    "openai": "^4.77.3"
+  },
+  "devDependencies": {
+    "dotenv": "^16.4.7",
+    "tsx": "^4.19.2"
+  }
+}

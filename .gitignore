@@ -1,0 +1,33 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# env files
+.env
+.env.*
+!.env.example
+
+# logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.log
+
+# build output
+.next/
+out/
+dist/
+build/
+coverage/
+*.pyc
+**/__pycache__/
+infra/cdk.out/
+infra/bin/*.js
+infra/bin/*.d.ts
+infra/lib/*.js
+infra/lib/*.d.ts
+
+# misc
+.DS_Store
+*.tsbuildinfo
