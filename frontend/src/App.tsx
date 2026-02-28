@@ -21,6 +21,12 @@ function frameCount(task: TaskDetail | undefined): number {
   return task?.video?.editSource?.frameCount ?? 0;
 }
 
+function fpsValue(task: TaskDetail | undefined): number {
+  const fps = task?.video?.editSource?.fps;
+  if (!fps || !fps.den) return 30;
+  return fps.num / fps.den;
+}
+
 export default function App() {
   const queryClient = useQueryClient();
   const {
@@ -56,6 +62,7 @@ export default function App() {
   const [selectedGenIds, setSelectedGenIds] = useState<string[]>([]);
   const [temporalFeatherFrames, setTemporalFeatherFrames] = useState(0);
   const [jobIds, setJobIds] = useState<string[]>([]);
+  const timelineVideoRef = useRef<HTMLVideoElement | null>(null);
 
   useEffect(() => {
     currentUser().then((user) => setIsAuthed(!!user));
@@ -77,7 +84,6 @@ export default function App() {
     queryKey: ["task", selectedTaskId],
     queryFn: async () => apiClient.getTask(selectedTaskId as string),
     enabled: isAuthed && !!selectedTaskId,
-    refetchInterval: 5000,
   });
 
   const task = taskQuery.data;
@@ -88,6 +94,17 @@ export default function App() {
     const maxFrame = Math.max(0, frameCount(task) - 1);
     if (currentFrameIndex > maxFrame) setCurrentFrameIndex(maxFrame);
   }, [currentFrameIndex, setCurrentFrameIndex, task]);
+
+  useEffect(() => {
+    if (!task?.video?.editSource) return;
+    const videoEl = timelineVideoRef.current;
+    if (!videoEl) return;
+    const fps = fpsValue(task);
+    const targetSeconds = currentFrameIndex / fps;
+    if (Math.abs(videoEl.currentTime - targetSeconds) > 0.06) {
+      videoEl.currentTime = targetSeconds;
+    }
+  }, [currentFrameIndex, task]);
 
   useEffect(() => {
     const onKey = (ev: KeyboardEvent) => {
@@ -380,7 +397,21 @@ export default function App() {
               <div className="space-y-4">
                 <h3 className="text-lg font-semibold">Timeline & Segment Selection</h3>
                 {task?.video?.editSource?.downloadUrl ? (
-                  <video className="max-h-[360px] w-full rounded-lg border border-ink/10" src={task.video.editSource.downloadUrl} controls />
+                  <video
+                    ref={timelineVideoRef}
+                    className="max-h-[360px] w-full rounded-lg border border-ink/10"
+                    src={task.video.editSource.downloadUrl}
+                    controls
+                    onTimeUpdate={(e) => {
+                      const totalFrames = frameCount(task);
+                      if (!totalFrames) return;
+                      const fps = fpsValue(task);
+                      const nextFrame = Math.max(0, Math.min(totalFrames - 1, Math.round(e.currentTarget.currentTime * fps)));
+                      if (nextFrame !== currentFrameIndex) {
+                        setCurrentFrameIndex(nextFrame);
+                      }
+                    }}
+                  />
                 ) : (
                   <p className="text-sm text-ink/70">Ingest must complete before timeline is available.</p>
                 )}
