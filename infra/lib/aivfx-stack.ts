@@ -20,6 +20,18 @@ export class AivfxStack extends cdk.Stack {
     const webBucketOverride = process.env.WEB_BUCKET_OVERRIDE?.trim() ?? "";
     const manageAppCloudFront = (process.env.MANAGE_APP_CLOUDFRONT ?? "false").toLowerCase() === "true";
     const webPublicBaseUrl = process.env.WEB_PUBLIC_BASE_URL?.trim() ?? "";
+    const cognitoRedirectSignInRaw =
+      process.env.COGNITO_REDIRECT_SIGN_IN_URLS ?? "https://www.shwsh.co.uk/experiments/aivfx/,http://localhost:5173/";
+    const cognitoRedirectSignOutRaw =
+      process.env.COGNITO_REDIRECT_SIGN_OUT_URLS ?? "https://www.shwsh.co.uk/experiments/aivfx/,http://localhost:5173/";
+    const cognitoRedirectSignInUrls = cognitoRedirectSignInRaw
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean);
+    const cognitoRedirectSignOutUrls = cognitoRedirectSignOutRaw
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean);
     const allowedOriginsRaw = process.env.ALLOWED_WEB_ORIGINS ?? "https://www.shwsh.co.uk,https://s3.eu-west-2.amazonaws.com";
     const allowedOrigins = allowedOriginsRaw
       .split(",")
@@ -107,8 +119,8 @@ export class AivfxStack extends cdk.Stack {
         userSrp: true,
       },
       oAuth: {
-        callbackUrls: [...allowedOrigins, "http://localhost:5173"],
-        logoutUrls: [...allowedOrigins, "http://localhost:5173"],
+        callbackUrls: cognitoRedirectSignInUrls,
+        logoutUrls: cognitoRedirectSignOutUrls,
         scopes: [cognito.OAuthScope.OPENID, cognito.OAuthScope.EMAIL, cognito.OAuthScope.PROFILE],
       },
       generateSecret: false,
@@ -120,6 +132,7 @@ export class AivfxStack extends cdk.Stack {
         domainPrefix: `${appName}-${this.account}-${this.region}`.toLowerCase().replace(/[^a-z0-9-]/g, "").slice(0, 63),
       },
     });
+    const cognitoHostedUiDomain = `${userPoolDomain.domainName}.auth.${this.region}.amazoncognito.com`;
 
     const apiKeysSecret = new secretsmanager.Secret(this, "ApiKeysSecret", {
       secretName: `${appName}/external-api-keys`,
@@ -295,7 +308,7 @@ export class AivfxStack extends cdk.Stack {
     });
 
     new cdk.CfnOutput(this, "CognitoDomain", {
-      value: userPoolDomain.domainName,
+      value: cognitoHostedUiDomain,
     });
 
     new cdk.CfnOutput(this, "AssetsBucketName", {

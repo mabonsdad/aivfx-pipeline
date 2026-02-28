@@ -47,6 +47,8 @@ jobs:
           REQUESTS_LAYER_ARN: ${{ vars.REQUESTS_LAYER_ARN }}
           LUMALABS_LAYER_ARN: ${{ vars.LUMALABS_LAYER_ARN }}
           ALLOWED_WEB_ORIGINS: https://www.shwsh.co.uk,https://s3.eu-west-2.amazonaws.com
+          COGNITO_REDIRECT_SIGN_IN_URLS: https://www.shwsh.co.uk/experiments/aivfx/,https://s3.eu-west-2.amazonaws.com/shwsh.co.uk/experiments/aivfx/,http://localhost:5173/
+          COGNITO_REDIRECT_SIGN_OUT_URLS: https://www.shwsh.co.uk/experiments/aivfx/,https://s3.eu-west-2.amazonaws.com/shwsh.co.uk/experiments/aivfx/,http://localhost:5173/
           APP_NAME: aivfx
           WEB_BUCKET_OVERRIDE: ${{ vars.WEB_BUCKET_OVERRIDE }}
           MANAGE_APP_CLOUDFRONT: "false"
