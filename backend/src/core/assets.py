@@ -54,13 +54,12 @@ class AssetStore:
         self.s3 = boto3.client("s3")
 
     def presign_put(self, key: str, *, expires: int = 900, content_type: str | None = None) -> str:
+        # Keep browser uploads CORS-friendly by signing only bucket/key.
+        # Bucket-level default encryption handles SSE at rest.
         params: dict[str, Any] = {
             "Bucket": self.assets_bucket,
             "Key": key,
-            "ServerSideEncryption": "AES256",
         }
-        if content_type:
-            params["ContentType"] = content_type
         return self.s3.generate_presigned_url(
             ClientMethod="put_object",
             Params=params,
