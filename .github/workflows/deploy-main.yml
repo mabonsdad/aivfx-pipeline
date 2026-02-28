@@ -48,6 +48,9 @@ jobs:
           LUMALABS_LAYER_ARN: ${{ vars.LUMALABS_LAYER_ARN }}
           ALLOWED_WEB_ORIGINS: https://www.shwsh.co.uk,https://s3.eu-west-2.amazonaws.com
           APP_NAME: aivfx
+          WEB_BUCKET_OVERRIDE: ${{ vars.WEB_BUCKET_OVERRIDE }}
+          MANAGE_APP_CLOUDFRONT: "false"
+          WEB_PUBLIC_BASE_URL: https://www.shwsh.co.uk/experiments/aivfx/
         run: |
           cd infra
           npm install
@@ -94,6 +97,12 @@ jobs:
           aws s3 sync frontend/dist s3://${TARGET_BUCKET}/${WEB_PREFIX}/ --delete
 
       - name: Invalidate CloudFront
-        if: ${{ env.STACK_DISTRIBUTION_ID != '' }}
+        env:
+          WEB_CLOUDFRONT_DISTRIBUTION_ID: ${{ vars.WEB_CLOUDFRONT_DISTRIBUTION_ID }}
         run: |
-          aws cloudfront create-invalidation --distribution-id ${STACK_DISTRIBUTION_ID} --paths "/${WEB_PREFIX}/*"
+          TARGET_DISTRIBUTION_ID=${WEB_CLOUDFRONT_DISTRIBUTION_ID:-$STACK_DISTRIBUTION_ID}
+          if [ -z "$TARGET_DISTRIBUTION_ID" ]; then
+            echo "No CloudFront distribution configured for invalidation; skipping."
+            exit 0
+          fi
+          aws cloudfront create-invalidation --distribution-id ${TARGET_DISTRIBUTION_ID} --paths "/${WEB_PREFIX}/*"

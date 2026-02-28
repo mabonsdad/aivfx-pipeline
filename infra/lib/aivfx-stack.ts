@@ -17,20 +17,29 @@ export class AivfxStack extends cdk.Stack {
     super(scope, id, props);
 
     const appName = this.node.tryGetContext("appName") ?? process.env.APP_NAME ?? "aivfx";
+    const webBucketOverride = process.env.WEB_BUCKET_OVERRIDE?.trim() ?? "";
+    const manageAppCloudFront = (process.env.MANAGE_APP_CLOUDFRONT ?? "false").toLowerCase() === "true";
+    const webPublicBaseUrl = process.env.WEB_PUBLIC_BASE_URL?.trim() ?? "";
     const allowedOriginsRaw = process.env.ALLOWED_WEB_ORIGINS ?? "https://www.shwsh.co.uk,https://s3.eu-west-2.amazonaws.com";
     const allowedOrigins = allowedOriginsRaw
       .split(",")
       .map((value) => value.trim())
       .filter(Boolean);
 
-    const webBucket = new s3.Bucket(this, "WebBucket", {
-      encryption: s3.BucketEncryption.S3_MANAGED,
-      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
-      enforceSSL: true,
-      versioned: true,
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
-      autoDeleteObjects: false,
-    });
+    if (manageAppCloudFront && webBucketOverride) {
+      throw new Error("MANAGE_APP_CLOUDFRONT=true cannot be combined with WEB_BUCKET_OVERRIDE");
+    }
+
+    const webBucket: s3.IBucket = webBucketOverride
+      ? s3.Bucket.fromBucketName(this, "WebBucketImported", webBucketOverride)
+      : new s3.Bucket(this, "WebBucket", {
+          encryption: s3.BucketEncryption.S3_MANAGED,
+          blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+          enforceSSL: true,
+          versioned: true,
+          removalPolicy: cdk.RemovalPolicy.RETAIN,
+          autoDeleteObjects: false,
+        });
 
     const assetsBucket = new s3.Bucket(this, "AssetsBucket", {
       encryption: s3.BucketEncryption.S3_MANAGED,
@@ -57,19 +66,21 @@ export class AivfxStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
-    const distribution = new cloudfront.Distribution(this, "WebDistribution", {
-      defaultBehavior: {
-        origin: S3BucketOrigin.withOriginAccessControl(webBucket),
-        viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-        cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
-      },
-      defaultRootObject: "index.html",
-      errorResponses: [
-        { httpStatus: 404, responseHttpStatus: 200, responsePagePath: "/index.html", ttl: cdk.Duration.seconds(0) },
-        { httpStatus: 403, responseHttpStatus: 200, responsePagePath: "/index.html", ttl: cdk.Duration.seconds(0) },
-      ],
-      minimumProtocolVersion: cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021,
-    });
+    const distribution = manageAppCloudFront
+      ? new cloudfront.Distribution(this, "WebDistribution", {
+          defaultBehavior: {
+            origin: S3BucketOrigin.withOriginAccessControl(webBucket),
+            viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+            cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
+          },
+          defaultRootObject: "index.html",
+          errorResponses: [
+            { httpStatus: 404, responseHttpStatus: 200, responsePagePath: "/index.html", ttl: cdk.Duration.seconds(0) },
+            { httpStatus: 403, responseHttpStatus: 200, responsePagePath: "/index.html", ttl: cdk.Duration.seconds(0) },
+          ],
+          minimumProtocolVersion: cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021,
+        })
+      : undefined;
 
     const userPool = new cognito.UserPool(this, "UserPool", {
       userPoolName: `${appName}-users`,
@@ -258,8 +269,8 @@ export class AivfxStack extends cdk.Stack {
     });
 
     new cdk.CfnOutput(this, "WebUrl", {
-      value: `https://${distribution.distributionDomainName}`,
-      description: "CloudFront URL for static web app",
+      value: distribution ? `https://${distribution.distributionDomainName}` : webPublicBaseUrl,
+      description: distribution ? "CloudFront URL for static web app" : "External/public web URL",
     });
 
     new cdk.CfnOutput(this, "WebBucketName", {
@@ -267,7 +278,7 @@ export class AivfxStack extends cdk.Stack {
     });
 
     new cdk.CfnOutput(this, "CloudFrontDistributionId", {
-      value: distribution.distributionId,
+      value: distribution?.distributionId ?? "",
     });
 
     new cdk.CfnOutput(this, "ApiUrl", {

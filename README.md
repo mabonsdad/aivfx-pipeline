@@ -81,7 +81,10 @@ Set repository variables:
 - `FFMPEG_LAYER_ARN`
 - `REQUESTS_LAYER_ARN`
 - `LUMALABS_LAYER_ARN`
-- `WEB_BUCKET_OVERRIDE` (optional, for existing bucket such as `shwsh.co.uk`)
+- `WEB_BUCKET_OVERRIDE` (set to existing bucket such as `shwsh.co.uk`)
+- `WEB_CLOUDFRONT_DISTRIBUTION_ID` (optional; existing distribution to invalidate for `/experiments/aivfx/*`)
+
+By default, deployment does **not** create or manage an app CloudFront distribution (`MANAGE_APP_CLOUDFRONT=false` in workflow), so existing cert/domain setup for `shwsh.co.uk` and `www.shwsh.co.uk` is not modified by this stack.
 
 ### Manual deploy
 
