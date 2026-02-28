@@ -86,6 +86,7 @@ jobs:
           VITE_COGNITO_REDIRECT_SIGN_IN=https://www.shwsh.co.uk/${WEB_PREFIX}/
           VITE_COGNITO_REDIRECT_SIGN_OUT=https://www.shwsh.co.uk/${WEB_PREFIX}/
           VITE_COGNITO_REGION=${AWS_REGION}
+          VITE_BASE_PATH=/${WEB_PREFIX}/
           EOT
           npm run build
 
