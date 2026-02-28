@@ -7,6 +7,7 @@ from typing import Any
 
 import boto3
 import requests
+from botocore.config import Config
 
 
 @dataclass(frozen=True)
@@ -49,9 +50,13 @@ class AssetPaths:
 
 
 class AssetStore:
-    def __init__(self, assets_bucket: str):
+    def __init__(self, assets_bucket: str, aws_region: str):
         self.assets_bucket = assets_bucket
-        self.s3 = boto3.client("s3")
+        self.s3 = boto3.client(
+            "s3",
+            region_name=aws_region,
+            config=Config(signature_version="s3v4", s3={"addressing_style": "virtual"}),
+        )
 
     def presign_put(self, key: str, *, expires: int = 900, content_type: str | None = None) -> str:
         # Keep browser uploads CORS-friendly by signing only bucket/key.

@@ -539,7 +539,7 @@ def process_job_record(record: dict[str, Any], *, settings: Any) -> None:
     job_id = body["jobId"]
 
     store = S3JsonStore(settings.metadata_bucket)
-    asset_store = AssetStore(settings.assets_bucket)
+    asset_store = AssetStore(settings.assets_bucket, settings.aws_region)
 
     job = store.load_job(user_id, job_id)
     task = store.load_task(user_id, task_id)

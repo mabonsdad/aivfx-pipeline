@@ -232,7 +232,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
         return error_response(401, str(exc), origin=origin)
 
     store = S3JsonStore(settings.metadata_bucket)
-    asset_store = AssetStore(settings.assets_bucket)
+    asset_store = AssetStore(settings.assets_bucket, settings.aws_region)
     queue = JobQueue(settings.jobs_queue_url)
 
     request_id = event.get("requestContext", {}).get("requestId")
