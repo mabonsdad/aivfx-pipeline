@@ -40,6 +40,7 @@ def generate_image_edit(
     model: str,
     prompt: str,
     input_image_bytes: bytes,
+    mask_image_bytes: bytes | None = None,
     input_mime_type: str = "image/png",
 ) -> bytes:
     model_id = GEMINI_MODEL_MAP[model]
@@ -48,19 +49,38 @@ def generate_image_edit(
         "x-goog-api-key": api_key,
         "content-type": "application/json",
     }
+    parts: list[dict[str, Any]] = [
+        {"text": prompt},
+        {
+            "inline_data": {
+                "mime_type": input_mime_type,
+                "data": base64.b64encode(input_image_bytes).decode("utf-8"),
+            }
+        },
+    ]
+    if mask_image_bytes:
+        parts.append(
+            {
+                "text": (
+                    "Use the next image as an edit mask. White areas should be edited, "
+                    "black areas should remain unchanged, and gray areas should blend."
+                )
+            }
+        )
+        parts.append(
+            {
+                "inline_data": {
+                    "mime_type": "image/png",
+                    "data": base64.b64encode(mask_image_bytes).decode("utf-8"),
+                }
+            }
+        )
+
     payload: dict[str, Any] = {
         "contents": [
             {
                 "role": "user",
-                "parts": [
-                    {"text": prompt},
-                    {
-                        "inline_data": {
-                            "mime_type": input_mime_type,
-                            "data": base64.b64encode(input_image_bytes).decode("utf-8"),
-                        }
-                    },
-                ],
+                "parts": parts,
             }
         ],
         "generationConfig": {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { type PointerEvent, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ReactCompareSlider, ReactCompareSliderImage } from "react-compare-slider";
 
@@ -118,11 +118,9 @@ export default function App() {
   const [prompt, setPrompt] = useState("");
   const [model, setModel] = useState<"nano_banana" | "nano_banana_pro">("nano_banana");
   const [patchPrompt, setPatchPrompt] = useState("");
-  const [patchRect, setPatchRect] = useState({ x: 0, y: 0, width: 256, height: 256 });
+  const [patchBrushSize, setPatchBrushSize] = useState(24);
   const [featherPx, setFeatherPx] = useState(24);
-  const [bleedPx, setBleedPx] = useState(32);
-  const [maskFile, setMaskFile] = useState<File | null>(null);
-  const [customPatchFile, setCustomPatchFile] = useState<File | null>(null);
+  const [maskHasPaint, setMaskHasPaint] = useState(false);
   const [lumaModel, setLumaModel] = useState<"ray-2" | "ray-flash-2">("ray-2");
   const [advancedMode, setAdvancedMode] = useState("flex_1");
   const [lumaPrompt, setLumaPrompt] = useState("");
@@ -138,6 +136,9 @@ export default function App() {
   const compareOriginalRef = useRef<HTMLVideoElement | null>(null);
   const compareVariantRef = useRef<HTMLVideoElement | null>(null);
   const syncLockRef = useRef(false);
+  const patchOverlayCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const patchMaskCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const patchDrawStateRef = useRef<{ drawing: boolean; x: number; y: number } | null>(null);
 
   useEffect(() => {
     currentUser().then((user) => setIsAuthed(!!user));
@@ -178,6 +179,12 @@ export default function App() {
   const editFirstFrame = (firstFrameId ? task?.frames[firstFrameId] : null) ?? (selectedSegment ? task?.frames[selectedSegment.startFrameId] : null) ?? null;
   const editLastFrame = (lastFrameId ? task?.frames[lastFrameId] : null) ?? (selectedSegment ? task?.frames[selectedSegment.endFrameId] : null) ?? null;
   const activeEditFrame = editFrameTab === "first" ? editFirstFrame : editLastFrame;
+  const activeFrameDimensions = useMemo(() => {
+    const width = task?.video?.editSource?.width;
+    const height = task?.video?.editSource?.height;
+    if (!activeEditFrame || !width || !height) return null;
+    return { width, height };
+  }, [activeEditFrame, task?.video?.editSource?.height, task?.video?.editSource?.width]);
 
   useEffect(() => {
     setFirstFrameId(null);
@@ -194,6 +201,33 @@ export default function App() {
       queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
     }
   }, [queryClient, selectedTaskId, tab]);
+
+  useEffect(() => {
+    if (!activeFrameDimensions) {
+      setMaskHasPaint(false);
+      patchDrawStateRef.current = null;
+      return;
+    }
+    const { width, height } = activeFrameDimensions;
+    const maskCanvas = patchMaskCanvasRef.current ?? document.createElement("canvas");
+    maskCanvas.width = width;
+    maskCanvas.height = height;
+    const maskCtx = maskCanvas.getContext("2d");
+    if (maskCtx) {
+      maskCtx.fillStyle = "black";
+      maskCtx.fillRect(0, 0, width, height);
+    }
+    patchMaskCanvasRef.current = maskCanvas;
+    const overlay = patchOverlayCanvasRef.current;
+    if (overlay) {
+      overlay.width = width;
+      overlay.height = height;
+      const overlayCtx = overlay.getContext("2d");
+      overlayCtx?.clearRect(0, 0, width, height);
+    }
+    patchDrawStateRef.current = null;
+    setMaskHasPaint(false);
+  }, [activeEditFrame?.frameId, activeFrameDimensions]);
 
   useEffect(() => {
     const status = pendingCreateJobQuery.data?.status;
@@ -308,28 +342,42 @@ export default function App() {
   const patchEditMutation = useMutation({
     mutationFn: async (frameId: string) => {
       if (!selectedTaskId) throw new Error("Select a task");
+      if (!activeFrameDimensions) throw new Error("Frame dimensions unavailable");
+      if (!maskHasPaint) throw new Error("Draw a mask before generating a patch variant");
+      const patchRect = {
+        x: 0,
+        y: 0,
+        width: activeFrameDimensions.width,
+        height: activeFrameDimensions.height,
+      };
       const init = await apiClient.patchInit(selectedTaskId, frameId, {
         patchRect,
         featherPx,
-        bleedPx,
-        hasMask: !!maskFile,
+        bleedPx: 0,
+        hasMask: true,
       });
-
-      if (customPatchFile) {
-        await fetch(init.patchUploadUrl, {
-          method: "PUT",
-          headers: { "content-type": "image/png" },
-          body: customPatchFile,
-        });
+      if (!init.maskUploadUrl || !init.maskKey) {
+        throw new Error("Mask upload URL missing");
       }
-
-      if (maskFile && init.maskUploadUrl) {
-        await fetch(init.maskUploadUrl, {
-          method: "PUT",
-          headers: { "content-type": "image/png" },
-          body: maskFile,
-        });
-      }
+      const maskBlob = await new Promise<Blob>((resolve, reject) => {
+        const canvas = patchMaskCanvasRef.current;
+        if (!canvas) {
+          reject(new Error("Mask canvas unavailable"));
+          return;
+        }
+        canvas.toBlob((blob) => {
+          if (!blob) {
+            reject(new Error("Failed to export mask"));
+            return;
+          }
+          resolve(blob);
+        }, "image/png");
+      });
+      await fetch(init.maskUploadUrl, {
+        method: "PUT",
+        headers: { "content-type": "image/png" },
+        body: maskBlob,
+      });
 
       return apiClient.patchSubmit(selectedTaskId, frameId, {
         model,
@@ -338,7 +386,7 @@ export default function App() {
         maskKey: init.maskKey,
         patchRect,
         featherPx,
-        bleedPx,
+        bleedPx: 0,
       });
     },
     onSuccess: (result) => setJobIds((prev) => Array.from(new Set([...prev, result.jobId]))),
@@ -499,6 +547,108 @@ export default function App() {
     if (video.currentTime >= segmentWindow.endSec) {
       video.currentTime = segmentWindow.startSec;
     }
+  }
+
+  function mapPointerToMaskCoordinates(event: PointerEvent<HTMLCanvasElement>, canvas: HTMLCanvasElement) {
+    const maskCanvas = patchMaskCanvasRef.current;
+    if (!maskCanvas) return null;
+    const rect = canvas.getBoundingClientRect();
+    if (!rect.width || !rect.height) return null;
+    const x = ((event.clientX - rect.left) / rect.width) * maskCanvas.width;
+    const y = ((event.clientY - rect.top) / rect.height) * maskCanvas.height;
+    return {
+      x: Math.max(0, Math.min(maskCanvas.width - 1, x)),
+      y: Math.max(0, Math.min(maskCanvas.height - 1, y)),
+    };
+  }
+
+  function paintMaskStroke(x: number, y: number, prev: { x: number; y: number } | null) {
+    const maskCanvas = patchMaskCanvasRef.current;
+    const overlayCanvas = patchOverlayCanvasRef.current;
+    if (!maskCanvas || !overlayCanvas) return;
+
+    const maskCtx = maskCanvas.getContext("2d");
+    const overlayCtx = overlayCanvas.getContext("2d");
+    if (!maskCtx || !overlayCtx) return;
+
+    maskCtx.strokeStyle = "white";
+    maskCtx.fillStyle = "white";
+    maskCtx.lineCap = "round";
+    maskCtx.lineJoin = "round";
+    maskCtx.lineWidth = patchBrushSize;
+
+    overlayCtx.strokeStyle = "rgba(94, 176, 173, 0.85)";
+    overlayCtx.fillStyle = "rgba(94, 176, 173, 0.85)";
+    overlayCtx.lineCap = "round";
+    overlayCtx.lineJoin = "round";
+    overlayCtx.lineWidth = patchBrushSize;
+
+    if (!prev) {
+      maskCtx.beginPath();
+      maskCtx.arc(x, y, patchBrushSize / 2, 0, Math.PI * 2);
+      maskCtx.fill();
+      overlayCtx.beginPath();
+      overlayCtx.arc(x, y, patchBrushSize / 2, 0, Math.PI * 2);
+      overlayCtx.fill();
+    } else {
+      maskCtx.beginPath();
+      maskCtx.moveTo(prev.x, prev.y);
+      maskCtx.lineTo(x, y);
+      maskCtx.stroke();
+      overlayCtx.beginPath();
+      overlayCtx.moveTo(prev.x, prev.y);
+      overlayCtx.lineTo(x, y);
+      overlayCtx.stroke();
+    }
+  }
+
+  function clearPatchMask() {
+    const maskCanvas = patchMaskCanvasRef.current;
+    const overlayCanvas = patchOverlayCanvasRef.current;
+    if (maskCanvas) {
+      const maskCtx = maskCanvas.getContext("2d");
+      if (maskCtx) {
+        maskCtx.fillStyle = "black";
+        maskCtx.fillRect(0, 0, maskCanvas.width, maskCanvas.height);
+      }
+    }
+    if (overlayCanvas) {
+      const overlayCtx = overlayCanvas.getContext("2d");
+      overlayCtx?.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+    }
+    patchDrawStateRef.current = null;
+    setMaskHasPaint(false);
+  }
+
+  function onPatchMaskPointerDown(event: PointerEvent<HTMLCanvasElement>) {
+    const canvas = patchOverlayCanvasRef.current;
+    if (!canvas) return;
+    const coords = mapPointerToMaskCoordinates(event, canvas);
+    if (!coords) return;
+    patchDrawStateRef.current = { drawing: true, x: coords.x, y: coords.y };
+    canvas.setPointerCapture(event.pointerId);
+    paintMaskStroke(coords.x, coords.y, null);
+    setMaskHasPaint(true);
+  }
+
+  function onPatchMaskPointerMove(event: PointerEvent<HTMLCanvasElement>) {
+    const canvas = patchOverlayCanvasRef.current;
+    const state = patchDrawStateRef.current;
+    if (!canvas || !state?.drawing) return;
+    const coords = mapPointerToMaskCoordinates(event, canvas);
+    if (!coords) return;
+    paintMaskStroke(coords.x, coords.y, { x: state.x, y: state.y });
+    patchDrawStateRef.current = { drawing: true, x: coords.x, y: coords.y };
+    setMaskHasPaint(true);
+  }
+
+  function onPatchMaskPointerUp(event: PointerEvent<HTMLCanvasElement>) {
+    const canvas = patchOverlayCanvasRef.current;
+    if (!canvas) return;
+    if (canvas.hasPointerCapture(event.pointerId)) {
+      canvas.releasePointerCapture(event.pointerId);
+    }
+    patchDrawStateRef.current = null;
   }
 
   async function captureCurrentFrameFor(boundary: "first" | "last") {
@@ -856,34 +1006,89 @@ export default function App() {
 
                 <details className="rounded-lg border border-ink/10 p-3">
                   <summary className="cursor-pointer text-sm font-medium">Advanced (Patch Tools)</summary>
-                  <div className="mt-3 space-y-2">
-                    <div className="grid grid-cols-2 gap-2">
-                      <input type="number" value={patchRect.x} onChange={(e) => setPatchRect((s) => ({ ...s, x: Number(e.target.value) }))} className="rounded border border-ink/20 px-2 py-1" placeholder="x" />
-                      <input type="number" value={patchRect.y} onChange={(e) => setPatchRect((s) => ({ ...s, y: Number(e.target.value) }))} className="rounded border border-ink/20 px-2 py-1" placeholder="y" />
-                      <input type="number" value={patchRect.width} onChange={(e) => setPatchRect((s) => ({ ...s, width: Number(e.target.value) }))} className="rounded border border-ink/20 px-2 py-1" placeholder="w" />
-                      <input type="number" value={patchRect.height} onChange={(e) => setPatchRect((s) => ({ ...s, height: Number(e.target.value) }))} className="rounded border border-ink/20 px-2 py-1" placeholder="h" />
-                    </div>
-                    <div className="grid grid-cols-2 gap-2">
-                      <input type="number" value={featherPx} min={0} max={200} onChange={(e) => setFeatherPx(Number(e.target.value))} className="rounded border border-ink/20 px-2 py-1" placeholder="feather px" />
-                      <input type="number" value={bleedPx} min={0} max={300} onChange={(e) => setBleedPx(Number(e.target.value))} className="rounded border border-ink/20 px-2 py-1" placeholder="bleed px" />
-                    </div>
+                  <div className="mt-3 space-y-3">
+                    {activeEditFrame?.imageUrl && activeFrameDimensions ? (
+                      <div className="space-y-2">
+                        <p className="text-xs text-ink/70">
+                          Paint over areas to edit. Painted regions become the mask sent with the frame.
+                        </p>
+                        <div className="relative inline-block max-w-full overflow-hidden rounded-md border border-ink/20 bg-bg">
+                          <img
+                            src={activeEditFrame.imageUrl}
+                            alt="Patch mask base frame"
+                            className="block max-h-[420px] max-w-full select-none"
+                            draggable={false}
+                          />
+                          <canvas
+                            ref={patchOverlayCanvasRef}
+                            width={activeFrameDimensions.width}
+                            height={activeFrameDimensions.height}
+                            className="absolute inset-0 h-full w-full cursor-crosshair touch-none"
+                            onPointerDown={onPatchMaskPointerDown}
+                            onPointerMove={onPatchMaskPointerMove}
+                            onPointerUp={onPatchMaskPointerUp}
+                            onPointerLeave={onPatchMaskPointerUp}
+                            onPointerCancel={onPatchMaskPointerUp}
+                          />
+                        </div>
+                        <div className="grid gap-2 md:grid-cols-3">
+                          <label className="text-xs text-ink/70">
+                            Brush size
+                            <select
+                              value={patchBrushSize}
+                              onChange={(e) => setPatchBrushSize(Number(e.target.value))}
+                              className="mt-1 block w-full rounded border border-ink/20 px-2 py-1 text-sm"
+                            >
+                              {[8, 12, 16, 24, 32, 48, 64].map((size) => (
+                                <option key={size} value={size}>
+                                  {size}px
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          <label className="text-xs text-ink/70">
+                            Feather edge
+                            <select
+                              value={featherPx}
+                              onChange={(e) => setFeatherPx(Number(e.target.value))}
+                              className="mt-1 block w-full rounded border border-ink/20 px-2 py-1 text-sm"
+                            >
+                              {[0, 4, 8, 12, 16, 24, 32, 48, 64, 96, 128, 160, 200].map((value) => (
+                                <option key={value} value={value}>
+                                  {value}px
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          <div className="flex items-end">
+                            <button
+                              type="button"
+                              className="w-full rounded border border-ink/20 bg-white px-3 py-2 text-sm"
+                              onClick={clearPatchMask}
+                            >
+                              Clear mask
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="text-sm text-ink/60">Select a frame above to enable mask painting.</p>
+                    )}
                     <textarea
                       value={patchPrompt}
                       onChange={(e) => setPatchPrompt(e.target.value)}
-                      placeholder="Describe patch edit"
+                      placeholder="Describe the masked edit"
                       className="h-20 w-full rounded-md border border-ink/20 p-2"
                     />
-                    <label className="block text-xs text-ink/70">Optional custom patch PNG</label>
-                    <input type="file" accept="image/png" onChange={(e) => setCustomPatchFile(e.target.files?.[0] ?? null)} />
-                    <label className="block text-xs text-ink/70">Optional mask PNG</label>
-                    <input type="file" accept="image/png" onChange={(e) => setMaskFile(e.target.files?.[0] ?? null)} />
                     <button
                       className="rounded-md bg-accent2 px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-50"
-                      disabled={!activeEditFrame || patchEditMutation.isPending || !patchPrompt.trim()}
+                      disabled={!activeEditFrame || patchEditMutation.isPending || !patchPrompt.trim() || !maskHasPaint}
                       onClick={() => activeEditFrame && patchEditMutation.mutate(activeEditFrame.frameId)}
                     >
                       Generate Patch Variant
                     </button>
+                    {!maskHasPaint ? <p className="text-xs text-ink/60">Draw a mask before generating a patch variant.</p> : null}
+                    {patchEditMutation.error ? <p className="text-xs text-red-600">{patchEditMutation.error.message}</p> : null}
                   </div>
                 </details>
               </div>

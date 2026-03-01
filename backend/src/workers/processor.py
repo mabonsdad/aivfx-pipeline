@@ -346,6 +346,7 @@ def _handle_patch_edit(
         model=payload["model"],
         prompt=payload["prompt"],
         input_image_bytes=patch_bytes,
+        mask_image_bytes=mask_bytes,
     )
 
     variant_id = new_id("var")
