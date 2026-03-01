@@ -40,6 +40,10 @@ from src.models.schemas import (
 logger = Logger()
 tracer = Tracer()
 settings = load_settings()
+LUMA_MODEL_MAX_SECONDS: dict[str, int] = {
+    "ray-2": 10,
+    "ray-flash-2": 15,
+}
 
 
 def _origin(event: dict[str, Any]) -> str | None:
@@ -204,6 +208,11 @@ def _audit_prompt(prompt: str) -> dict[str, Any]:
         "promptHash": prompt_hash(prompt),
         "promptLength": len(prompt),
     }
+
+
+def _segment_duration_seconds(task: dict[str, Any], segment: dict[str, Any]) -> float:
+    fps = _fps(task)
+    return (segment["endFrameExclusive"] - segment["startFrame"]) / float(fps)
 
 
 def _route(event: dict[str, Any]) -> dict[str, Any]:
@@ -464,8 +473,6 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             fps = _fps(task)
             duration_frames = end_exclusive - start_frame
             duration_seconds = duration_frames / float(fps)
-            if all(abs(duration_seconds - allowed) > 1e-3 for allowed in (5.0, 6.0, 10.0)):
-                return error_response(400, "Segment length must resolve to exactly 5, 6, or 10 seconds", origin=origin)
 
             segment["startFrame"] = start_frame
             segment["endFrameExclusive"] = end_exclusive
@@ -612,6 +619,14 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 return error_response(404, "Segment not found", origin=origin)
 
             req = _json_model(SegmentGenerateRequest, event)
+            max_seconds = LUMA_MODEL_MAX_SECONDS.get(req.lumaModel)
+            segment_seconds = _segment_duration_seconds(task, segment)
+            if max_seconds is not None and segment_seconds > float(max_seconds) + 1e-6:
+                return error_response(
+                    400,
+                    f"Segment duration {segment_seconds:.2f}s exceeds max {max_seconds}s for model {req.lumaModel}",
+                    origin=origin,
+                )
             try:
                 prompt = _sanitize_prompt(req.prompt) if req.prompt else None
             except ValueError as exc:

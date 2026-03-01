@@ -27,6 +27,10 @@ function fpsValue(task: TaskDetail | undefined): number {
   return fps.num / fps.den;
 }
 
+function lumaModelMaxDurationSeconds(model: "ray-2" | "ray-flash-2"): number {
+  return model === "ray-2" ? 10 : 15;
+}
+
 function FrameSelectCard({
   title,
   frame,
@@ -209,12 +213,24 @@ export default function App() {
   });
 
   const createSegmentMutation = useMutation({
-    mutationFn: async ({ startFrameIndex, durationSeconds }: { startFrameIndex: number; durationSeconds: 5 | 6 | 10 }) => {
+    mutationFn: async ({ startFrameIndex, endFrameExclusive }: { startFrameIndex: number; endFrameExclusive: number }) => {
       if (!selectedTaskId) throw new Error("Select task");
-      return apiClient.createSegment(selectedTaskId, {
+      const totalFrames = frameCount(task);
+      if (totalFrames > 0 && (startFrameIndex < 0 || endFrameExclusive > totalFrames || endFrameExclusive <= startFrameIndex)) {
+        throw new Error("Invalid frame range for segment");
+      }
+      const fps = fpsValue(task);
+      const durationFrames = Math.max(1, endFrameExclusive - startFrameIndex);
+      const durationSeconds = Math.max(1, Math.ceil(durationFrames / fps));
+      const created = await apiClient.createSegment(selectedTaskId, {
         startFrameIndex,
         durationSeconds,
       });
+      await apiClient.patchSegment(selectedTaskId, created.segmentId, {
+        startFrameIndex,
+        endFrameExclusive,
+      });
+      return created;
     },
     onSuccess: async (result) => {
       setSelectedSegmentId(result.segmentId);
@@ -334,6 +350,8 @@ export default function App() {
   }, [jobQueries, queryClient, selectedTaskId]);
 
   const segmentGenerations = useMemo(() => Object.values(task?.segmentGenerations ?? {}), [task]);
+  const lumaHardLimitSeconds = lumaModelMaxDurationSeconds(lumaModel);
+  const lumaHardLimitFrames = Math.round(lumaHardLimitSeconds * fpsValue(task));
   const timelineDelta = useMemo(() => {
     const fps = fpsValue(task);
     const anchorA = firstFrame?.frameIndex ?? lastFrame?.frameIndex ?? null;
@@ -343,8 +361,8 @@ export default function App() {
     }
     const frames = Math.abs(anchorB - anchorA);
     const seconds = frames / fps;
-    return { frames, seconds, overLimit: seconds > 10 };
-  }, [currentFrameIndex, firstFrame, lastFrame, task]);
+    return { frames, seconds, overLimit: seconds > lumaHardLimitSeconds };
+  }, [currentFrameIndex, firstFrame, lastFrame, lumaHardLimitSeconds, task]);
 
   const selectedRange = useMemo(() => {
     if (!firstFrame || !lastFrame) return null;
@@ -353,16 +371,20 @@ export default function App() {
     const end = Math.max(firstFrame.frameIndex, lastFrame.frameIndex);
     const durationFrames = end - start + 1;
     const durationSec = durationFrames / fps;
-    const supportedDuration = ([5, 6, 10] as const).find((candidate) => durationFrames === Math.round(fps * candidate)) ?? null;
     return {
       startFrame: start,
       endFrameInclusive: end,
       endFrameExclusive: end + 1,
       durationFrames,
       durationSec,
-      supportedDuration,
+      overLimit: durationSec > lumaHardLimitSeconds,
     };
-  }, [firstFrame, lastFrame, task]);
+  }, [firstFrame, lastFrame, lumaHardLimitSeconds, task]);
+
+  const selectedSegmentOverLimit = useMemo(() => {
+    if (!selectedSegment) return false;
+    return selectedSegment.durationSec > lumaHardLimitSeconds + 1e-6;
+  }, [lumaHardLimitSeconds, selectedSegment]);
 
   async function captureCurrentFrameFor(boundary: "first" | "last") {
     const result = await captureMutation.mutateAsync({ frameIndex: currentFrameIndex });
@@ -536,6 +558,9 @@ export default function App() {
                     <p className={`text-xs font-medium ${timelineDelta.overLimit ? "text-red-600" : "text-ink/70"}`}>
                       {timelineDelta.seconds.toFixed(2)}s
                     </p>
+                    <p className="mt-1 text-[10px] text-ink/50">
+                      limit {lumaHardLimitFrames}f / {lumaHardLimitSeconds}s
+                    </p>
                   </div>
 
                   <FrameSelectCard
@@ -548,25 +573,25 @@ export default function App() {
 
                 {selectedRange ? (
                   <div className="space-y-2 rounded-lg border border-ink/10 bg-white p-3">
-                    <p className={`text-xs ${selectedRange.durationSec > 10 ? "text-red-600" : "text-ink/70"}`}>
+                    <p className={`text-xs ${selectedRange.overLimit ? "text-red-600" : "text-ink/70"}`}>
                       Selected range: {selectedRange.startFrame} {"->"} {selectedRange.endFrameInclusive} (
                       {selectedRange.durationFrames} frames / {selectedRange.durationSec.toFixed(2)}s)
                     </p>
                     <button
                       className="rounded-md bg-accent2 px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-50"
-                      disabled={!selectedRange.supportedDuration || createSegmentMutation.isPending}
+                      disabled={createSegmentMutation.isPending}
                       onClick={() =>
                         createSegmentMutation.mutate({
                           startFrameIndex: selectedRange.startFrame,
-                          durationSeconds: selectedRange.supportedDuration as 5 | 6 | 10,
+                          endFrameExclusive: selectedRange.endFrameExclusive,
                         })
                       }
                     >
                       Use Selected Frames as Segment
                     </button>
-                    {!selectedRange.supportedDuration ? (
+                    {selectedRange.overLimit ? (
                       <p className="text-xs text-red-600">
-                        Current backend accepts exact 5s/6s/10s ranges. Keep selecting frames freely; segment commit is enabled when the range matches one of those durations.
+                        This exceeds the current Luma model limit ({lumaHardLimitSeconds}s for {lumaModel}). You can still save the segment, but generation will be blocked until under the hard limit.
                       </p>
                     ) : null}
                   </div>
@@ -787,7 +812,17 @@ export default function App() {
                   </select>
                 ) : null}
 
-                <button className="rounded-md bg-accent px-4 py-2 text-white" onClick={() => generateSegmentMutation.mutate()}>
+                {selectedSegmentOverLimit ? (
+                  <p className="text-xs text-red-600">
+                    Selected segment is {selectedSegment?.durationSec.toFixed(2)}s, exceeding the {lumaModel} limit of {lumaHardLimitSeconds}s.
+                  </p>
+                ) : null}
+
+                <button
+                  className="rounded-md bg-accent px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={!selectedSegmentId || selectedSegmentOverLimit}
+                  onClick={() => generateSegmentMutation.mutate()}
+                >
                   Generate Segment Variant
                 </button>
 

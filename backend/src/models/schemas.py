@@ -18,7 +18,7 @@ class UploadVideoRequest(BaseModel):
 
 class SegmentCreateRequest(BaseModel):
     startFrameIndex: int = Field(ge=0)
-    durationSeconds: Literal[5, 6, 10]
+    durationSeconds: int = Field(ge=1, le=120)
 
 
 class SegmentPatchRequest(BaseModel):

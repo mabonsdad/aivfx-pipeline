@@ -38,7 +38,7 @@ export const apiClient = {
     api<{ frames: Array<{ frameIndex: number; timecode: string; thumbUrl: string }> }>(
       `/tasks/${taskId}/frames/strip?startSec=${startSec}&endSec=${endSec}`,
     ),
-  createSegment: (taskId: string, payload: { startFrameIndex: number; durationSeconds: 5 | 6 | 10 }) =>
+  createSegment: (taskId: string, payload: { startFrameIndex: number; durationSeconds: number }) =>
     api<{ segmentId: string; resolvedStartFrameIndex: number; resolvedEndFrameIndex: number }>(`/tasks/${taskId}/segments`, {
       method: "POST",
       body: JSON.stringify(payload),
