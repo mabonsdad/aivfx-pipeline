@@ -105,6 +105,9 @@ class AssetStore:
     def read_bytes(self, key: str) -> bytes:
         return self.s3.get_object(Bucket=self.assets_bucket, Key=key)["Body"].read()
 
+    def delete_object(self, key: str) -> None:
+        self.s3.delete_object(Bucket=self.assets_bucket, Key=key)
+
 
 def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()

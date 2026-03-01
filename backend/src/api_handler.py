@@ -25,6 +25,7 @@ from src.core.ids import deterministic_frame_id, new_id, prompt_hash
 from src.core.store import S3JsonStore, now_iso
 from src.jobs.queue import JobQueue
 from src.models.schemas import (
+    AssetDeleteRequest,
     FrameCaptureRequest,
     FullEditRequest,
     MergeRequest,
@@ -358,6 +359,96 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             task["status"] = "created"
             store.save_task(task)
             return response(200, {"uploadUrl": upload_url, "s3Key": key}, origin=origin)
+
+        if method == "DELETE" and len(parts) == 3 and parts[2] == "assets":
+            req = _json_model(AssetDeleteRequest, event)
+
+            def _delete_key_if_present(key: str | None) -> None:
+                if not key:
+                    return
+                try:
+                    asset_store.delete_object(key)
+                except ClientError:
+                    logger.warning("Asset delete failed", extra={"taskId": task_id, "key": key})
+
+            if req.assetType == "upload":
+                original = task.get("video", {}).get("original", {})
+                key = original.get("s3Key")
+                if not key:
+                    return error_response(404, "Upload not found", origin=origin)
+                _delete_key_if_present(key)
+                task.setdefault("video", {}).pop("original", None)
+                if not task.get("video", {}).get("editSource"):
+                    task["status"] = "created"
+                store.save_task(task)
+                return response(200, {"ok": True}, origin=origin)
+
+            if req.assetType == "frame_capture":
+                frame_id = req.frameId
+                frame = task.get("frames", {}).get(frame_id or "")
+                if not frame:
+                    return error_response(404, "Frame not found", origin=origin)
+                is_referenced = any(
+                    seg.get("startFrameId") == frame_id or seg.get("endFrameId") == frame_id
+                    for seg in task.get("segments", [])
+                )
+                if is_referenced:
+                    return error_response(400, "Frame is used by segment boundaries", origin=origin)
+                _delete_key_if_present(frame.get("captureKey"))
+                for variant in frame.get("variants", []):
+                    _delete_key_if_present(variant.get("outputKey"))
+                    patch_meta = variant.get("patchMeta", {})
+                    _delete_key_if_present(patch_meta.get("patchOnlyKey"))
+                    _delete_key_if_present(patch_meta.get("maskKey"))
+                task.get("frames", {}).pop(frame_id, None)
+                store.save_task(task)
+                return response(200, {"ok": True}, origin=origin)
+
+            if req.assetType == "frame_variant":
+                frame_id = req.frameId
+                variant_id = req.variantId
+                frame = task.get("frames", {}).get(frame_id or "")
+                if not frame:
+                    return error_response(404, "Frame not found", origin=origin)
+                variants = frame.get("variants", [])
+                variant = next((v for v in variants if v.get("variantId") == variant_id), None)
+                if not variant:
+                    return error_response(404, "Variant not found", origin=origin)
+                _delete_key_if_present(variant.get("outputKey"))
+                patch_meta = variant.get("patchMeta", {})
+                _delete_key_if_present(patch_meta.get("patchOnlyKey"))
+                _delete_key_if_present(patch_meta.get("maskKey"))
+                frame["variants"] = [v for v in variants if v.get("variantId") != variant_id]
+                if frame.get("selectedVariantId") == variant_id:
+                    frame["selectedVariantId"] = frame["variants"][0]["variantId"] if frame["variants"] else None
+                store.save_task(task)
+                return response(200, {"ok": True}, origin=origin)
+
+            if req.assetType == "segment_generation":
+                gen_id = req.genId
+                generation = task.get("segmentGenerations", {}).get(gen_id or "")
+                if not generation:
+                    return error_response(404, "Generation not found", origin=origin)
+                _delete_key_if_present(generation.get("outputKey"))
+                task.get("segmentGenerations", {}).pop(gen_id, None)
+                for segment in task.get("segments", []):
+                    if segment.get("selectedGenerationId") == gen_id:
+                        segment["selectedGenerationId"] = None
+                store.save_task(task)
+                return response(200, {"ok": True}, origin=origin)
+
+            if req.assetType == "export":
+                export_id = req.exportId
+                exports = task.get("exports", [])
+                export_item = next((e for e in exports if e.get("exportId") == export_id), None)
+                if not export_item:
+                    return error_response(404, "Export not found", origin=origin)
+                _delete_key_if_present(export_item.get("outputKey"))
+                task["exports"] = [e for e in exports if e.get("exportId") != export_id]
+                store.save_task(task)
+                return response(200, {"ok": True}, origin=origin)
+
+            return error_response(400, "Unsupported asset type", origin=origin)
 
         if method == "POST" and len(parts) == 3 and parts[2] == "ingest":
             original = task.get("video", {}).get("original")

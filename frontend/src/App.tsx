@@ -7,9 +7,26 @@ import { currentUser, login, logout } from "./lib/auth";
 import { useUiStore } from "./store/uiStore";
 import type { TaskDetail } from "./types/api";
 
-type TabId = "timeline" | "frames" | "generate" | "merge";
+type TabId = "timeline" | "frames" | "generate" | "merge" | "assets";
 
 type NewTaskStage = "idle" | "creating" | "uploading" | "ingesting" | "error";
+
+type LibraryAsset = {
+  id: string;
+  taskId: string;
+  title: string;
+  subtitle: string;
+  createdAt: string;
+  previewUrl: string;
+  downloadUrl: string;
+  mediaType: "image" | "video";
+  deletePayload:
+    | { assetType: "upload" }
+    | { assetType: "frame_capture"; frameId: string }
+    | { assetType: "frame_variant"; frameId: string; variantId: string }
+    | { assetType: "segment_generation"; genId: string }
+    | { assetType: "export"; exportId: string };
+};
 
 function frameCount(task: TaskDetail | undefined): number {
   return task?.video?.editSource?.frameCount ?? 0;
@@ -171,8 +188,21 @@ export default function App() {
       return status === "queued" || status === "running" ? 2000 : false;
     },
   });
+  const assetTaskQueries = useQueries({
+    queries: (tasksQuery.data ?? []).map((taskItem) => ({
+      queryKey: ["task", "assets", taskItem.taskId],
+      queryFn: () => apiClient.getTask(taskItem.taskId),
+      enabled: isAuthed && tab === "assets",
+      refetchOnWindowFocus: false as const,
+    })),
+  });
 
   const task = taskQuery.data;
+  const assetTasks = useMemo(
+    () => assetTaskQueries.map((query) => query.data).filter((item): item is TaskDetail => Boolean(item)),
+    [assetTaskQueries],
+  );
+  const assetsLoading = tab === "assets" && assetTaskQueries.some((query) => query.isPending || query.isFetching) && assetTasks.length === 0;
   const selectedSegment = task?.segments.find((s) => s.segmentId === selectedSegmentId) ?? null;
   const firstFrame = task && firstFrameId ? task.frames[firstFrameId] ?? null : null;
   const lastFrame = task && lastFrameId ? task.frames[lastFrameId] ?? null : null;
@@ -292,6 +322,26 @@ export default function App() {
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["tasks"] });
       setSelectedTaskId(null);
+    },
+  });
+  const deleteAssetMutation = useMutation({
+    mutationFn: async ({
+      taskId,
+      payload,
+    }: {
+      taskId: string;
+      payload: {
+        assetType: "upload" | "frame_capture" | "frame_variant" | "segment_generation" | "export";
+        frameId?: string;
+        variantId?: string;
+        genId?: string;
+        exportId?: string;
+      };
+    }) => apiClient.deleteAsset(taskId, payload),
+    onSuccess: async (_result, variables) => {
+      await queryClient.invalidateQueries({ queryKey: ["tasks"] });
+      await queryClient.invalidateQueries({ queryKey: ["task", variables.taskId] });
+      await queryClient.invalidateQueries({ queryKey: ["task", "assets", variables.taskId] });
     },
   });
 
@@ -499,6 +549,97 @@ export default function App() {
     return selectedSegment.durationSec > lumaHardLimitSeconds + 1e-6;
   }, [lumaHardLimitSeconds, selectedSegment]);
 
+  const uploadAssets = useMemo<LibraryAsset[]>(() => {
+    const assets: LibraryAsset[] = [];
+    for (const taskItem of assetTasks) {
+      const original = taskItem.video?.original;
+      if (!original?.downloadUrl) continue;
+      assets.push({
+        id: `upload:${taskItem.taskId}`,
+        taskId: taskItem.taskId,
+        title: original.filename || "Original Upload",
+        subtitle: taskItem.name,
+        createdAt: taskItem.createdAt,
+        previewUrl: original.downloadUrl,
+        downloadUrl: original.downloadUrl,
+        mediaType: "video",
+        deletePayload: { assetType: "upload" },
+      });
+    }
+    return assets.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }, [assetTasks]);
+
+  const frameAssets = useMemo<LibraryAsset[]>(() => {
+    const assets: LibraryAsset[] = [];
+    for (const taskItem of assetTasks) {
+      for (const frame of Object.values(taskItem.frames ?? {})) {
+        if (frame.imageUrl) {
+          assets.push({
+            id: `capture:${taskItem.taskId}:${frame.frameId}`,
+            taskId: taskItem.taskId,
+            title: `Captured Frame ${frame.frameIndex}`,
+            subtitle: `${taskItem.name} · ${frame.timecode}`,
+            createdAt: taskItem.updatedAt,
+            previewUrl: frame.imageUrl,
+            downloadUrl: frame.imageUrl,
+            mediaType: "image",
+            deletePayload: { assetType: "frame_capture", frameId: frame.frameId },
+          });
+        }
+        for (const variant of frame.variants ?? []) {
+          if (!variant.imageUrl) continue;
+          assets.push({
+            id: `variant:${taskItem.taskId}:${frame.frameId}:${variant.variantId}`,
+            taskId: taskItem.taskId,
+            title: `Edit ${variant.variantId}`,
+            subtitle: `${taskItem.name} · frame ${frame.frameIndex} · ${variant.model}/${variant.type}`,
+            createdAt: variant.createdAt,
+            previewUrl: variant.imageUrl,
+            downloadUrl: variant.imageUrl,
+            mediaType: "image",
+            deletePayload: { assetType: "frame_variant", frameId: frame.frameId, variantId: variant.variantId },
+          });
+        }
+      }
+    }
+    return assets.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }, [assetTasks]);
+
+  const outputVideoAssets = useMemo<LibraryAsset[]>(() => {
+    const assets: LibraryAsset[] = [];
+    for (const taskItem of assetTasks) {
+      for (const generation of Object.values(taskItem.segmentGenerations ?? {})) {
+        if (!generation.downloadUrl) continue;
+        assets.push({
+          id: `generation:${taskItem.taskId}:${generation.genId}`,
+          taskId: taskItem.taskId,
+          title: `Generated Segment ${generation.genId}`,
+          subtitle: `${taskItem.name} · ${generation.luma.model} · ${generation.luma.mode}`,
+          createdAt: generation.createdAt,
+          previewUrl: generation.downloadUrl,
+          downloadUrl: generation.downloadUrl,
+          mediaType: "video",
+          deletePayload: { assetType: "segment_generation", genId: generation.genId },
+        });
+      }
+      for (const exportItem of taskItem.exports ?? []) {
+        if (!exportItem.downloadUrl) continue;
+        assets.push({
+          id: `export:${taskItem.taskId}:${exportItem.exportId}`,
+          taskId: taskItem.taskId,
+          title: `Merged Export ${exportItem.exportId}`,
+          subtitle: taskItem.name,
+          createdAt: exportItem.createdAt,
+          previewUrl: exportItem.downloadUrl,
+          downloadUrl: exportItem.downloadUrl,
+          mediaType: "video",
+          deletePayload: { assetType: "export", exportId: exportItem.exportId },
+        });
+      }
+    }
+    return assets.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }, [assetTasks]);
+
   const segmentWindow = useMemo(() => {
     if (!selectedSegment || !task) return null;
     const fps = fpsValue(task);
@@ -651,6 +792,22 @@ export default function App() {
     patchDrawStateRef.current = null;
   }
 
+  function formatAssetDate(iso: string) {
+    const asDate = new Date(iso);
+    if (Number.isNaN(asDate.getTime())) return iso;
+    return asDate.toLocaleString();
+  }
+
+  async function handleDeleteAsset(item: LibraryAsset) {
+    const ok = window.confirm(`Delete this asset?\n\n${item.title}`);
+    if (!ok) return;
+    try {
+      await deleteAssetMutation.mutateAsync({ taskId: item.taskId, payload: item.deletePayload });
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : "Failed to delete asset");
+    }
+  }
+
   async function captureCurrentFrameFor(boundary: "first" | "last") {
     const result = await captureMutation.mutateAsync({ frameIndex: currentFrameIndex });
     setSelectedFrameId(result.frameId);
@@ -665,6 +822,7 @@ export default function App() {
     { id: "frames", label: "Frame Edit" },
     { id: "generate", label: "Generate" },
     { id: "merge", label: "Merge & Export" },
+    { id: "assets", label: "Asset Library" },
   ];
 
   function openNewTaskModal() {
@@ -763,6 +921,9 @@ export default function App() {
               </div>
             ))}
           </div>
+          <button className="mt-4 text-sm text-accent underline" onClick={() => setTab("assets")}>
+            Open Asset Library
+          </button>
         </aside>
 
         <section className="col-span-12 space-y-4 md:col-span-9">
@@ -1313,6 +1474,105 @@ export default function App() {
                       ) : null}
                     </div>
                   ))}
+                </div>
+              </div>
+            )}
+
+            {tab === "assets" && (
+              <div className="space-y-6">
+                <h3 className="text-lg font-semibold">Asset Library</h3>
+                {assetsLoading ? <p className="text-sm text-ink/60">Loading assets...</p> : null}
+                <div className="space-y-3 rounded-lg border border-ink/10 p-3">
+                  <p className="font-medium">Uploads</p>
+                  {uploadAssets.length === 0 ? (
+                    <p className="text-sm text-ink/60">No uploads found.</p>
+                  ) : (
+                    <div className="space-y-2">
+                      {uploadAssets.map((item) => (
+                        <div key={item.id} className="grid gap-2 rounded border border-ink/10 p-2 md:grid-cols-[140px_1fr_auto] md:items-center">
+                          <video src={item.previewUrl} className="h-20 w-full rounded object-cover" muted />
+                          <div>
+                            <p className="text-sm font-medium">{item.title}</p>
+                            <p className="text-xs text-ink/60">{item.subtitle}</p>
+                            <p className="text-xs text-ink/50">{formatAssetDate(item.createdAt)}</p>
+                          </div>
+                          <div className="flex items-center gap-2 text-sm">
+                            <a href={item.previewUrl} target="_blank" rel="noreferrer" title="Preview">
+                              👁
+                            </a>
+                            <a href={item.downloadUrl} target="_blank" rel="noreferrer" download title="Download">
+                              ⬇
+                            </a>
+                            <button onClick={() => handleDeleteAsset(item)} title="Delete" className="text-red-600">
+                              🗑
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="space-y-3 rounded-lg border border-ink/10 p-3">
+                  <p className="font-medium">Output Frames & Edits</p>
+                  {frameAssets.length === 0 ? (
+                    <p className="text-sm text-ink/60">No frame assets found.</p>
+                  ) : (
+                    <div className="space-y-2">
+                      {frameAssets.map((item) => (
+                        <div key={item.id} className="grid gap-2 rounded border border-ink/10 p-2 md:grid-cols-[140px_1fr_auto] md:items-center">
+                          <img src={item.previewUrl} className="h-20 w-full rounded object-cover" />
+                          <div>
+                            <p className="text-sm font-medium">{item.title}</p>
+                            <p className="text-xs text-ink/60">{item.subtitle}</p>
+                            <p className="text-xs text-ink/50">{formatAssetDate(item.createdAt)}</p>
+                          </div>
+                          <div className="flex items-center gap-2 text-sm">
+                            <a href={item.previewUrl} target="_blank" rel="noreferrer" title="Preview">
+                              👁
+                            </a>
+                            <a href={item.downloadUrl} target="_blank" rel="noreferrer" download title="Download">
+                              ⬇
+                            </a>
+                            <button onClick={() => handleDeleteAsset(item)} title="Delete" className="text-red-600">
+                              🗑
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="space-y-3 rounded-lg border border-ink/10 p-3">
+                  <p className="font-medium">Output Videos</p>
+                  {outputVideoAssets.length === 0 ? (
+                    <p className="text-sm text-ink/60">No output videos found.</p>
+                  ) : (
+                    <div className="space-y-2">
+                      {outputVideoAssets.map((item) => (
+                        <div key={item.id} className="grid gap-2 rounded border border-ink/10 p-2 md:grid-cols-[140px_1fr_auto] md:items-center">
+                          <video src={item.previewUrl} className="h-20 w-full rounded object-cover" muted />
+                          <div>
+                            <p className="text-sm font-medium">{item.title}</p>
+                            <p className="text-xs text-ink/60">{item.subtitle}</p>
+                            <p className="text-xs text-ink/50">{formatAssetDate(item.createdAt)}</p>
+                          </div>
+                          <div className="flex items-center gap-2 text-sm">
+                            <a href={item.previewUrl} target="_blank" rel="noreferrer" title="Preview">
+                              👁
+                            </a>
+                            <a href={item.downloadUrl} target="_blank" rel="noreferrer" download title="Download">
+                              ⬇
+                            </a>
+                            <button onClick={() => handleDeleteAsset(item)} title="Delete" className="text-red-600">
+                              🗑
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
             )}

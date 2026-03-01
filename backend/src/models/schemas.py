@@ -85,6 +85,14 @@ class VariantSelectRequest(BaseModel):
     ok: bool = True
 
 
+class AssetDeleteRequest(BaseModel):
+    assetType: Literal["upload", "frame_capture", "frame_variant", "segment_generation", "export"]
+    frameId: str | None = None
+    variantId: str | None = None
+    genId: str | None = None
+    exportId: str | None = None
+
+
 class TaskFrameVariant(BaseModel):
     variantId: str
     type: Literal["full", "patch"]

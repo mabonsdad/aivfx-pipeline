@@ -90,5 +90,15 @@ export const apiClient = {
   ) => api<{ jobId: string }>(`/tasks/${taskId}/segments/${segmentId}/generate`, { method: "POST", body: JSON.stringify(payload) }),
   merge: (taskId: string, payload: { selectedSegmentGenerationIds: string[]; temporalFeatherFrames: number }) =>
     api<{ jobId: string }>(`/tasks/${taskId}/merge`, { method: "POST", body: JSON.stringify(payload) }),
+  deleteAsset: (
+    taskId: string,
+    payload: {
+      assetType: "upload" | "frame_capture" | "frame_variant" | "segment_generation" | "export";
+      frameId?: string;
+      variantId?: string;
+      genId?: string;
+      exportId?: string;
+    },
+  ) => api<{ ok: true }>(`/tasks/${taskId}/assets`, { method: "DELETE", body: JSON.stringify(payload) }),
   getJob: (jobId: string) => api<JobStatus>(`/jobs/${jobId}`),
 };
