@@ -9,14 +9,6 @@ import type { TaskDetail } from "./types/api";
 
 type TabId = "upload" | "timeline" | "frames" | "generate" | "merge";
 
-const MODE_MAP = {
-  very_low: "adhere_1",
-  low: "adhere_2",
-  medium: "flex_1",
-  high: "flex_2",
-  very_high: "reimagine_1",
-} as const;
-
 function frameCount(task: TaskDetail | undefined): number {
   return task?.video?.editSource?.frameCount ?? 0;
 }
@@ -98,18 +90,20 @@ export default function App() {
   const [maskFile, setMaskFile] = useState<File | null>(null);
   const [customPatchFile, setCustomPatchFile] = useState<File | null>(null);
   const [lumaModel, setLumaModel] = useState<"ray-2" | "ray-flash-2">("ray-2");
-  const [modifyStrength, setModifyStrength] = useState<keyof typeof MODE_MAP>("medium");
   const [advancedMode, setAdvancedMode] = useState("flex_1");
-  const [useAdvancedMode, setUseAdvancedMode] = useState(false);
   const [lumaPrompt, setLumaPrompt] = useState("");
   const [firstFrameVariantId, setFirstFrameVariantId] = useState("");
   const [selectedGenIds, setSelectedGenIds] = useState<string[]>([]);
+  const [selectedPreviewGenId, setSelectedPreviewGenId] = useState<string>("");
   const [temporalFeatherFrames, setTemporalFeatherFrames] = useState(0);
   const [jobIds, setJobIds] = useState<string[]>([]);
   const [firstFrameId, setFirstFrameId] = useState<string | null>(null);
   const [lastFrameId, setLastFrameId] = useState<string | null>(null);
   const [editFrameTab, setEditFrameTab] = useState<"first" | "last">("first");
   const timelineVideoRef = useRef<HTMLVideoElement | null>(null);
+  const compareOriginalRef = useRef<HTMLVideoElement | null>(null);
+  const compareVariantRef = useRef<HTMLVideoElement | null>(null);
+  const syncLockRef = useRef(false);
 
   useEffect(() => {
     currentUser().then((user) => setIsAuthed(!!user));
@@ -310,7 +304,7 @@ export default function App() {
       if (!selectedTaskId || !selectedSegmentId) throw new Error("Select a segment");
       return apiClient.generateSegment(selectedTaskId, selectedSegmentId, {
         lumaModel,
-        mode: useAdvancedMode ? advancedMode : MODE_MAP[modifyStrength],
+        mode: advancedMode,
         prompt: lumaPrompt.trim() || undefined,
         firstFrameVariantId: firstFrameVariantId || undefined,
       });
@@ -360,6 +354,12 @@ export default function App() {
   }, [jobQueries, queryClient, selectedTaskId]);
 
   const segmentGenerations = useMemo(() => Object.values(task?.segmentGenerations ?? {}), [task]);
+  const selectedSegmentGenerations = useMemo(
+    () => segmentGenerations.filter((gen) => !selectedSegmentId || gen.segmentId === selectedSegmentId),
+    [segmentGenerations, selectedSegmentId],
+  );
+  const selectedPreviewGeneration =
+    selectedSegmentGenerations.find((gen) => gen.genId === selectedPreviewGenId) ?? selectedSegmentGenerations[0] ?? null;
   const lumaHardLimitSeconds = lumaModelMaxDurationSeconds(lumaModel);
   const lumaHardLimitFrames = Math.round(lumaHardLimitSeconds * fpsValue(task));
   const timelineDelta = useMemo(() => {
@@ -395,6 +395,56 @@ export default function App() {
     if (!selectedSegment) return false;
     return selectedSegment.durationSec > lumaHardLimitSeconds + 1e-6;
   }, [lumaHardLimitSeconds, selectedSegment]);
+
+  const segmentWindow = useMemo(() => {
+    if (!selectedSegment || !task) return null;
+    const fps = fpsValue(task);
+    const startSec = selectedSegment.startFrame / fps;
+    const endSec = selectedSegment.endFrameExclusive / fps;
+    return {
+      startSec,
+      endSec,
+      startLabel: startSec.toFixed(2),
+      endLabel: endSec.toFixed(2),
+    };
+  }, [selectedSegment, task]);
+
+  const originalSegmentPreviewUrl = useMemo(() => {
+    if (!task?.video?.editSource?.downloadUrl || !segmentWindow) return null;
+    return `${task.video.editSource.downloadUrl}#t=${segmentWindow.startSec},${segmentWindow.endSec}`;
+  }, [segmentWindow, task?.video?.editSource?.downloadUrl]);
+
+  useEffect(() => {
+    if (!selectedSegmentGenerations.length) {
+      setSelectedPreviewGenId("");
+      return;
+    }
+    const stillValid = selectedSegmentGenerations.some((gen) => gen.genId === selectedPreviewGenId);
+    if (!stillValid) {
+      setSelectedPreviewGenId(selectedSegmentGenerations[0].genId);
+    }
+  }, [selectedPreviewGenId, selectedSegmentGenerations]);
+
+  function syncComparePlayhead(source: HTMLVideoElement, target: HTMLVideoElement) {
+    if (syncLockRef.current) return;
+    syncLockRef.current = true;
+    if (Math.abs(target.currentTime - source.currentTime) > 0.08) {
+      target.currentTime = source.currentTime;
+    }
+    window.setTimeout(() => {
+      syncLockRef.current = false;
+    }, 0);
+  }
+
+  function keepOriginalWithinSegment(video: HTMLVideoElement) {
+    if (!segmentWindow) return;
+    if (video.currentTime < segmentWindow.startSec) {
+      video.currentTime = segmentWindow.startSec;
+    }
+    if (video.currentTime >= segmentWindow.endSec) {
+      video.currentTime = segmentWindow.startSec;
+    }
+  }
 
   async function captureCurrentFrameFor(boundary: "first" | "last") {
     const result = await captureMutation.mutateAsync({ frameIndex: currentFrameIndex });
@@ -800,39 +850,23 @@ export default function App() {
                     <option value="ray-2">ray-2</option>
                     <option value="ray-flash-2">ray-flash-2</option>
                   </select>
-                  <select
-                    value={modifyStrength}
-                    onChange={(e) => setModifyStrength(e.target.value as keyof typeof MODE_MAP)}
-                    className="rounded-md border border-ink/20 px-3 py-2"
-                    disabled={useAdvancedMode}
-                  >
-                    <option value="very_low">Very Low (adhere_1)</option>
-                    <option value="low">Low (adhere_2)</option>
-                    <option value="medium">Medium (flex_1)</option>
-                    <option value="high">High (flex_2)</option>
-                    <option value="very_high">Very High (reimagine_1)</option>
+                  <select value={advancedMode} onChange={(e) => setAdvancedMode(e.target.value)} className="rounded-md border border-ink/20 px-3 py-2">
+                    {[
+                      "adhere_1",
+                      "adhere_2",
+                      "adhere_3",
+                      "flex_1",
+                      "flex_2",
+                      "flex_3",
+                      "reimagine_1",
+                      "reimagine_2",
+                      "reimagine_3",
+                    ].map((mode) => (
+                      <option key={mode} value={mode}>
+                        mode: {mode}
+                      </option>
+                    ))}
                   </select>
-                  <label className="flex items-center gap-2 rounded-md border border-ink/20 px-3 py-2">
-                    <input type="checkbox" checked={useAdvancedMode} onChange={(e) => setUseAdvancedMode(e.target.checked)} />
-                    Advanced mode
-                  </label>
-                  {useAdvancedMode && (
-                    <select value={advancedMode} onChange={(e) => setAdvancedMode(e.target.value)} className="rounded-md border border-ink/20 px-3 py-2 md:col-span-2">
-                      {[
-                        "adhere_1",
-                        "adhere_2",
-                        "adhere_3",
-                        "flex_1",
-                        "flex_2",
-                        "flex_3",
-                        "reimagine_1",
-                        "reimagine_2",
-                        "reimagine_3",
-                      ].map((mode) => (
-                        <option key={mode} value={mode}>{mode}</option>
-                      ))}
-                    </select>
-                  )}
                 </div>
 
                 <textarea
@@ -871,35 +905,112 @@ export default function App() {
                   Generate Segment Variant
                 </button>
 
-                <div className="grid gap-3 md:grid-cols-2">
-                  <div className="rounded-lg border border-ink/10 p-3">
-                    <p className="mb-2 font-medium">Original (edit source)</p>
-                    {task?.video?.editSource?.downloadUrl ? <video src={task.video.editSource.downloadUrl} controls className="w-full" /> : null}
-                  </div>
-                  <div className="rounded-lg border border-ink/10 p-3">
-                    <p className="mb-2 font-medium">Generated variants</p>
-                    <div className="space-y-2">
-                      {segmentGenerations.map((gen) => (
-                        <label key={gen.genId} className="block rounded border border-ink/10 p-2">
-                          <div className="mb-1 flex items-center justify-between text-sm">
-                            <span>{gen.genId}</span>
-                            <span className="uppercase text-ink/60">{gen.status}</span>
-                          </div>
-                          {gen.downloadUrl ? <video src={gen.downloadUrl} controls className="mb-2 w-full" /> : null}
-                          <input
-                            type="checkbox"
-                            checked={selectedGenIds.includes(gen.genId)}
-                            onChange={(e) => {
-                              setSelectedGenIds((prev) =>
-                                e.target.checked ? Array.from(new Set([...prev, gen.genId])) : prev.filter((id) => id !== gen.genId),
-                              );
-                            }}
-                          />{" "}
-                          Include in merge
-                        </label>
-                      ))}
+                <div className="space-y-2 rounded-lg border border-ink/10 p-3">
+                  <p className="font-medium">Video Comparison</p>
+                  {segmentWindow ? (
+                    <p className="text-xs text-ink/70">
+                      Showing selected segment only: {segmentWindow.startLabel}s to {segmentWindow.endLabel}s.
+                    </p>
+                  ) : null}
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <div className="rounded-md border border-ink/10 p-2">
+                      <p className="mb-2 text-sm font-medium">Original segment</p>
+                      {originalSegmentPreviewUrl ? (
+                        <video
+                          ref={compareOriginalRef}
+                          src={originalSegmentPreviewUrl}
+                          controls
+                          className="w-full"
+                          onLoadedMetadata={(e) => {
+                            if (segmentWindow) {
+                              e.currentTarget.currentTime = segmentWindow.startSec;
+                            }
+                          }}
+                          onTimeUpdate={(e) => {
+                            keepOriginalWithinSegment(e.currentTarget);
+                            const other = compareVariantRef.current;
+                            if (other) syncComparePlayhead(e.currentTarget, other);
+                          }}
+                          onSeeking={(e) => {
+                            keepOriginalWithinSegment(e.currentTarget);
+                            const other = compareVariantRef.current;
+                            if (other) syncComparePlayhead(e.currentTarget, other);
+                          }}
+                          onPlay={() => {
+                            const other = compareVariantRef.current;
+                            if (other?.src) other.play().catch(() => undefined);
+                          }}
+                          onPause={() => {
+                            compareVariantRef.current?.pause();
+                          }}
+                        />
+                      ) : (
+                        <p className="text-sm text-ink/60">Select a segment to preview the original clip.</p>
+                      )}
+                    </div>
+                    <div className="rounded-md border border-ink/10 p-2">
+                      <p className="mb-2 text-sm font-medium">Generated segment</p>
+                      {selectedPreviewGeneration?.downloadUrl ? (
+                        <video
+                          ref={compareVariantRef}
+                          src={selectedPreviewGeneration.downloadUrl}
+                          controls
+                          className="w-full"
+                          onTimeUpdate={(e) => {
+                            const other = compareOriginalRef.current;
+                            if (other) syncComparePlayhead(e.currentTarget, other);
+                          }}
+                          onSeeking={(e) => {
+                            const other = compareOriginalRef.current;
+                            if (other) syncComparePlayhead(e.currentTarget, other);
+                          }}
+                          onPlay={() => {
+                            const other = compareOriginalRef.current;
+                            if (other?.src) other.play().catch(() => undefined);
+                          }}
+                          onPause={() => {
+                            compareOriginalRef.current?.pause();
+                          }}
+                        />
+                      ) : (
+                        <p className="text-sm text-ink/60">No generated variants yet for this segment.</p>
+                      )}
                     </div>
                   </div>
+                  <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                    {selectedSegmentGenerations.map((gen) => (
+                      <div key={gen.genId} className="rounded border border-ink/10 p-2">
+                        <div className="mb-1 flex items-center justify-between text-xs">
+                          <span>{gen.genId}</span>
+                          <span className="uppercase text-ink/60">{gen.status}</span>
+                        </div>
+                        {gen.downloadUrl ? <video src={gen.downloadUrl} controls className="mb-2 h-28 w-full object-contain" /> : null}
+                        <div className="flex items-center justify-between gap-2">
+                          <button
+                            className="rounded bg-ink px-2 py-1 text-xs text-white"
+                            onClick={() => setSelectedPreviewGenId(gen.genId)}
+                          >
+                            {selectedPreviewGeneration?.genId === gen.genId ? "Selected" : "Compare"}
+                          </button>
+                          <label className="text-xs text-ink/70">
+                            <input
+                              type="checkbox"
+                              checked={selectedGenIds.includes(gen.genId)}
+                              onChange={(e) => {
+                                setSelectedGenIds((prev) =>
+                                  e.target.checked ? Array.from(new Set([...prev, gen.genId])) : prev.filter((id) => id !== gen.genId),
+                                );
+                              }}
+                            />{" "}
+                            Merge
+                          </label>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  {selectedSegmentGenerations.length === 0 ? (
+                    <p className="text-sm text-ink/60">No generated variants for this segment yet.</p>
+                  ) : null}
                 </div>
               </div>
             )}
