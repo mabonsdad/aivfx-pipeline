@@ -188,15 +188,20 @@ def merge_with_segment_replacement(
         # geometry, cadence, sample aspect ratio, and pixel format.
         f"[0:v]fps={fps_str},scale={output_width}:{output_height}:flags=lanczos,setsar=1,format=yuv420p[vorigsrc]",
         f"[1:v]fps={fps_str},scale={output_width}:{output_height}:flags=lanczos,setsar=1,format=yuv420p[vgensrc]",
-        f"[vorigsrc]trim=0:{start_sec},setpts=PTS-STARTPTS[vpre]",
-        f"[vorigsrc]trim={end_sec},setpts=PTS-STARTPTS[vpost]",
-        f"[vgensrc]trim=0:{duration_sec},setpts=PTS-STARTPTS[vgen]",
     ]
 
     if temporal_feather_frames > 0:
+        filter_complex.extend(
+            [
+                "[vorigsrc]split=3[vorigpre][vorigpost][vorigsegsrc]",
+                f"[vorigpre]trim=0:{start_sec},setpts=PTS-STARTPTS[vpre]",
+                f"[vorigpost]trim={end_sec},setpts=PTS-STARTPTS[vpost]",
+                f"[vgensrc]trim=0:{duration_sec},setpts=PTS-STARTPTS[vgen]",
+            ]
+        )
         feather_sec = float(Fraction(temporal_feather_frames, 1) / fps)
         filter_complex.append(
-            "[vorigsrc]trim={s}:{e},setpts=PTS-STARTPTS[vorigseg]".format(s=start_sec, e=end_sec)
+            "[vorigsegsrc]trim={s}:{e},setpts=PTS-STARTPTS[vorigseg]".format(s=start_sec, e=end_sec)
         )
         filter_complex.append(
             (
@@ -206,6 +211,14 @@ def merge_with_segment_replacement(
         )
         concat_src = "[vpre][vblend][vpost]concat=n=3:v=1:a=0[vout]"
     else:
+        filter_complex.extend(
+            [
+                "[vorigsrc]split=2[vorigpre][vorigpost]",
+                f"[vorigpre]trim=0:{start_sec},setpts=PTS-STARTPTS[vpre]",
+                f"[vorigpost]trim={end_sec},setpts=PTS-STARTPTS[vpost]",
+                f"[vgensrc]trim=0:{duration_sec},setpts=PTS-STARTPTS[vgen]",
+            ]
+        )
         concat_src = "[vpre][vgen][vpost]concat=n=3:v=1:a=0[vout]"
 
     filter_complex.append(concat_src)
