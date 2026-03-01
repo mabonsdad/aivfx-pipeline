@@ -44,6 +44,7 @@ LUMA_MODEL_MAX_SECONDS: dict[str, int] = {
     "ray-2": 10,
     "ray-flash-2": 15,
 }
+PRESIGNED_GET_TTL_SECONDS = 3600
 
 
 def _origin(event: dict[str, Any]) -> str | None:
@@ -140,7 +141,7 @@ def _capture_frame_sync(
         frame = frames[frame_id]
         return {
             "frameId": frame_id,
-            "imageUrl": asset_store.presign_get(frame["captureKey"], expires=900),
+            "imageUrl": asset_store.presign_get(frame["captureKey"], expires=PRESIGNED_GET_TTL_SECONDS),
             "timecode": frame["timecode"],
             "frameIndex": frame["frameIndex"],
         }
@@ -175,7 +176,7 @@ def _capture_frame_sync(
 
     return {
         "frameId": frame_id,
-        "imageUrl": asset_store.presign_get(key, expires=900),
+        "imageUrl": asset_store.presign_get(key, expires=PRESIGNED_GET_TTL_SECONDS),
         "timecode": timecode,
         "frameIndex": frame_index,
     }
@@ -305,21 +306,21 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
         decorated = json.loads(json.dumps(task))
         if decorated.get("video", {}).get("original", {}).get("s3Key"):
             decorated["video"]["original"]["downloadUrl"] = asset_store.presign_get(
-                decorated["video"]["original"]["s3Key"], expires=900
+                decorated["video"]["original"]["s3Key"], expires=PRESIGNED_GET_TTL_SECONDS
             )
         if decorated.get("video", {}).get("editSource", {}).get("s3Key"):
             decorated["video"]["editSource"]["downloadUrl"] = asset_store.presign_get(
-                decorated["video"]["editSource"]["s3Key"], expires=900
+                decorated["video"]["editSource"]["s3Key"], expires=PRESIGNED_GET_TTL_SECONDS
             )
         for _, frame in decorated.get("frames", {}).items():
-            frame["imageUrl"] = asset_store.presign_get(frame["captureKey"], expires=900)
+            frame["imageUrl"] = asset_store.presign_get(frame["captureKey"], expires=PRESIGNED_GET_TTL_SECONDS)
             for variant in frame.get("variants", []):
-                variant["imageUrl"] = asset_store.presign_get(variant["outputKey"], expires=900)
+                variant["imageUrl"] = asset_store.presign_get(variant["outputKey"], expires=PRESIGNED_GET_TTL_SECONDS)
         for _, generation in decorated.get("segmentGenerations", {}).items():
             if generation.get("outputKey"):
-                generation["downloadUrl"] = asset_store.presign_get(generation["outputKey"], expires=900)
+                generation["downloadUrl"] = asset_store.presign_get(generation["outputKey"], expires=PRESIGNED_GET_TTL_SECONDS)
         for export in decorated.get("exports", []):
-            export["downloadUrl"] = asset_store.presign_get(export["outputKey"], expires=900)
+            export["downloadUrl"] = asset_store.presign_get(export["outputKey"], expires=PRESIGNED_GET_TTL_SECONDS)
         return response(200, decorated, origin=origin)
 
     if path.startswith("/tasks/"):

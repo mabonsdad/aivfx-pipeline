@@ -125,6 +125,7 @@ export default function App() {
     queryKey: ["task", selectedTaskId],
     queryFn: async () => apiClient.getTask(selectedTaskId as string),
     enabled: isAuthed && !!selectedTaskId,
+    refetchInterval: tab === "generate" ? 4 * 60 * 1000 : false,
   });
 
   const task = taskQuery.data;
@@ -144,6 +145,12 @@ export default function App() {
     if (firstFrameId && !task?.frames[firstFrameId]) setFirstFrameId(null);
     if (lastFrameId && !task?.frames[lastFrameId]) setLastFrameId(null);
   }, [firstFrameId, lastFrameId, task]);
+
+  useEffect(() => {
+    if (tab === "generate" && selectedTaskId) {
+      queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
+    }
+  }, [queryClient, selectedTaskId, tab]);
 
   useEffect(() => {
     const frameId = activeEditFrame?.frameId ?? null;
