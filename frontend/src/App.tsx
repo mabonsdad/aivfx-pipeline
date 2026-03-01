@@ -27,6 +27,47 @@ function fpsValue(task: TaskDetail | undefined): number {
   return fps.num / fps.den;
 }
 
+function FrameSelectCard({
+  title,
+  frame,
+  onSelect,
+  onClear,
+}: {
+  title: string;
+  frame: { frameId: string; frameIndex: number; timecode: string; imageUrl?: string } | null;
+  onSelect: () => void;
+  onClear: () => void;
+}) {
+  return (
+    <div className="rounded-lg border border-ink/10 bg-white p-3">
+      <p className="mb-2 text-sm font-semibold">{title}</p>
+      {frame?.imageUrl ? (
+        <div className="relative">
+          <img src={frame.imageUrl} alt={`${title} preview`} className="h-28 w-full rounded-md object-cover" />
+          <button
+            onClick={onClear}
+            className="absolute right-2 top-2 rounded bg-black/70 p-1 text-white"
+            aria-label={`Remove ${title.toLowerCase()}`}
+            title="Remove selected frame"
+          >
+            <svg viewBox="0 0 24 24" className="h-4 w-4 fill-current" aria-hidden="true">
+              <path d="M9 3h6l1 2h4v2H4V5h4l1-2Zm1 6h2v9h-2V9Zm4 0h2v9h-2V9ZM7 9h2v9H7V9Z" />
+            </svg>
+          </button>
+          <p className="mt-2 text-xs text-ink/70">
+            frame {frame.frameIndex} ({frame.timecode})
+          </p>
+        </div>
+      ) : (
+        <button onClick={onSelect} className="w-full rounded-md border border-ink/20 bg-bg px-3 py-4 text-left">
+          <span className="block text-sm font-medium">Select</span>
+          <span className="text-xs text-ink/60">from current video frame</span>
+        </button>
+      )}
+    </div>
+  );
+}
+
 export default function App() {
   const queryClient = useQueryClient();
   const {
@@ -44,7 +85,6 @@ export default function App() {
   const [tab, setTab] = useState<TabId>("upload");
   const [taskName, setTaskName] = useState("New VFX Task");
   const [uploadFile, setUploadFile] = useState<File | null>(null);
-  const [segmentDuration, setSegmentDuration] = useState<5 | 6 | 10>(5);
   const [prompt, setPrompt] = useState("");
   const [model, setModel] = useState<"nano_banana" | "nano_banana_pro">("nano_banana");
   const [patchPrompt, setPatchPrompt] = useState("");
@@ -62,6 +102,8 @@ export default function App() {
   const [selectedGenIds, setSelectedGenIds] = useState<string[]>([]);
   const [temporalFeatherFrames, setTemporalFeatherFrames] = useState(0);
   const [jobIds, setJobIds] = useState<string[]>([]);
+  const [firstFrameId, setFirstFrameId] = useState<string | null>(null);
+  const [lastFrameId, setLastFrameId] = useState<string | null>(null);
   const timelineVideoRef = useRef<HTMLVideoElement | null>(null);
 
   useEffect(() => {
@@ -89,6 +131,18 @@ export default function App() {
   const task = taskQuery.data;
   const selectedFrame = task && selectedFrameId ? task.frames[selectedFrameId] : null;
   const selectedSegment = task?.segments.find((s) => s.segmentId === selectedSegmentId) ?? null;
+  const firstFrame = task && firstFrameId ? task.frames[firstFrameId] ?? null : null;
+  const lastFrame = task && lastFrameId ? task.frames[lastFrameId] ?? null : null;
+
+  useEffect(() => {
+    setFirstFrameId(null);
+    setLastFrameId(null);
+  }, [selectedTaskId]);
+
+  useEffect(() => {
+    if (firstFrameId && !task?.frames[firstFrameId]) setFirstFrameId(null);
+    if (lastFrameId && !task?.frames[lastFrameId]) setLastFrameId(null);
+  }, [firstFrameId, lastFrameId, task]);
 
   useEffect(() => {
     const maxFrame = Math.max(0, frameCount(task) - 1);
@@ -145,23 +199,21 @@ export default function App() {
   });
 
   const captureMutation = useMutation({
-    mutationFn: async (frameIndex: number) => {
+    mutationFn: async ({ frameIndex }: { frameIndex: number }) => {
       if (!selectedTaskId) throw new Error("Select a task");
       return apiClient.captureFrame(selectedTaskId, frameIndex);
     },
-    onSuccess: async (result) => {
-      setSelectedFrameId(result.frameId);
+    onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
-      setTab("frames");
     },
   });
 
   const createSegmentMutation = useMutation({
-    mutationFn: async () => {
+    mutationFn: async ({ startFrameIndex, durationSeconds }: { startFrameIndex: number; durationSeconds: 5 | 6 | 10 }) => {
       if (!selectedTaskId) throw new Error("Select task");
       return apiClient.createSegment(selectedTaskId, {
-        startFrameIndex: currentFrameIndex,
-        durationSeconds: segmentDuration,
+        startFrameIndex,
+        durationSeconds,
       });
     },
     onSuccess: async (result) => {
@@ -282,6 +334,45 @@ export default function App() {
   }, [jobQueries, queryClient, selectedTaskId]);
 
   const segmentGenerations = useMemo(() => Object.values(task?.segmentGenerations ?? {}), [task]);
+  const timelineDelta = useMemo(() => {
+    const fps = fpsValue(task);
+    const anchorA = firstFrame?.frameIndex ?? lastFrame?.frameIndex ?? null;
+    const anchorB = firstFrame?.frameIndex != null && lastFrame?.frameIndex != null ? lastFrame.frameIndex : currentFrameIndex;
+    if (anchorA == null) {
+      return { frames: 0, seconds: 0, overLimit: false };
+    }
+    const frames = Math.abs(anchorB - anchorA);
+    const seconds = frames / fps;
+    return { frames, seconds, overLimit: seconds > 10 };
+  }, [currentFrameIndex, firstFrame, lastFrame, task]);
+
+  const selectedRange = useMemo(() => {
+    if (!firstFrame || !lastFrame) return null;
+    const fps = fpsValue(task);
+    const start = Math.min(firstFrame.frameIndex, lastFrame.frameIndex);
+    const end = Math.max(firstFrame.frameIndex, lastFrame.frameIndex);
+    const durationFrames = end - start + 1;
+    const durationSec = durationFrames / fps;
+    const supportedDuration = ([5, 6, 10] as const).find((candidate) => durationFrames === Math.round(fps * candidate)) ?? null;
+    return {
+      startFrame: start,
+      endFrameInclusive: end,
+      endFrameExclusive: end + 1,
+      durationFrames,
+      durationSec,
+      supportedDuration,
+    };
+  }, [firstFrame, lastFrame, task]);
+
+  async function captureCurrentFrameFor(boundary: "first" | "last") {
+    const result = await captureMutation.mutateAsync({ frameIndex: currentFrameIndex });
+    setSelectedFrameId(result.frameId);
+    if (boundary === "first") {
+      setFirstFrameId(result.frameId);
+    } else {
+      setLastFrameId(result.frameId);
+    }
+  }
   const tabs: Array<{ id: TabId; label: string }> = [
     { id: "upload", label: "Upload & Ingest" },
     { id: "timeline", label: "Timeline" },
@@ -395,23 +486,25 @@ export default function App() {
 
             {tab === "timeline" && (
               <div className="space-y-4">
-                <h3 className="text-lg font-semibold">Timeline & Segment Selection</h3>
+                <h3 className="text-lg font-semibold">Timeline & Frame Range Selection</h3>
                 {task?.video?.editSource?.downloadUrl ? (
-                  <video
-                    ref={timelineVideoRef}
-                    className="max-h-[360px] w-full rounded-lg border border-ink/10"
-                    src={task.video.editSource.downloadUrl}
-                    controls
-                    onTimeUpdate={(e) => {
-                      const totalFrames = frameCount(task);
-                      if (!totalFrames) return;
-                      const fps = fpsValue(task);
-                      const nextFrame = Math.max(0, Math.min(totalFrames - 1, Math.round(e.currentTarget.currentTime * fps)));
-                      if (nextFrame !== currentFrameIndex) {
-                        setCurrentFrameIndex(nextFrame);
-                      }
-                    }}
-                  />
+                  <div className="mx-auto w-fit max-w-full">
+                    <video
+                      ref={timelineVideoRef}
+                      className="max-h-[360px] max-w-full rounded-lg border border-ink/10"
+                      src={task.video.editSource.downloadUrl}
+                      controls
+                      onTimeUpdate={(e) => {
+                        const totalFrames = frameCount(task);
+                        if (!totalFrames) return;
+                        const fps = fpsValue(task);
+                        const nextFrame = Math.max(0, Math.min(totalFrames - 1, Math.round(e.currentTarget.currentTime * fps)));
+                        if (nextFrame !== currentFrameIndex) {
+                          setCurrentFrameIndex(nextFrame);
+                        }
+                      }}
+                    />
+                  </div>
                 ) : (
                   <p className="text-sm text-ink/70">Ingest must complete before timeline is available.</p>
                 )}
@@ -426,23 +519,58 @@ export default function App() {
                     className="w-full"
                   />
                 </div>
-                <div className="flex flex-wrap gap-2">
-                  <select
-                    value={segmentDuration}
-                    onChange={(e) => setSegmentDuration(Number(e.target.value) as 5 | 6 | 10)}
-                    className="rounded-md border border-ink/20 bg-white px-3 py-2"
-                  >
-                    <option value={5}>5s</option>
-                    <option value={6}>6s</option>
-                    <option value={10}>10s</option>
-                  </select>
-                  <button className="rounded-md bg-accent2 px-4 py-2 text-white" onClick={() => createSegmentMutation.mutate()}>
-                    Add Segment @ Frame {currentFrameIndex}
-                  </button>
-                  <button className="rounded-md bg-ink px-4 py-2 text-white" onClick={() => captureMutation.mutate(currentFrameIndex)}>
-                    Capture Current Frame
-                  </button>
+
+                <div className="grid grid-cols-[1fr_auto_1fr] items-stretch gap-2">
+                  <FrameSelectCard
+                    title="First Frame"
+                    frame={firstFrame}
+                    onSelect={() => captureCurrentFrameFor("first")}
+                    onClear={() => setFirstFrameId(null)}
+                  />
+
+                  <div className="flex w-24 flex-col items-center justify-center text-center">
+                    <p className={`text-xs font-medium ${timelineDelta.overLimit ? "text-red-600" : "text-ink/70"}`}>
+                      {timelineDelta.frames} frames
+                    </p>
+                    <p className="my-1 text-xl text-ink/70">→</p>
+                    <p className={`text-xs font-medium ${timelineDelta.overLimit ? "text-red-600" : "text-ink/70"}`}>
+                      {timelineDelta.seconds.toFixed(2)}s
+                    </p>
+                  </div>
+
+                  <FrameSelectCard
+                    title="Last Frame"
+                    frame={lastFrame}
+                    onSelect={() => captureCurrentFrameFor("last")}
+                    onClear={() => setLastFrameId(null)}
+                  />
                 </div>
+
+                {selectedRange ? (
+                  <div className="space-y-2 rounded-lg border border-ink/10 bg-white p-3">
+                    <p className={`text-xs ${selectedRange.durationSec > 10 ? "text-red-600" : "text-ink/70"}`}>
+                      Selected range: {selectedRange.startFrame} {"->"} {selectedRange.endFrameInclusive} (
+                      {selectedRange.durationFrames} frames / {selectedRange.durationSec.toFixed(2)}s)
+                    </p>
+                    <button
+                      className="rounded-md bg-accent2 px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-50"
+                      disabled={!selectedRange.supportedDuration || createSegmentMutation.isPending}
+                      onClick={() =>
+                        createSegmentMutation.mutate({
+                          startFrameIndex: selectedRange.startFrame,
+                          durationSeconds: selectedRange.supportedDuration as 5 | 6 | 10,
+                        })
+                      }
+                    >
+                      Use Selected Frames as Segment
+                    </button>
+                    {!selectedRange.supportedDuration ? (
+                      <p className="text-xs text-red-600">
+                        Current backend accepts exact 5s/6s/10s ranges. Keep selecting frames freely; segment commit is enabled when the range matches one of those durations.
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
 
                 <div className="grid gap-2">
                   {task?.segments.map((seg) => (
@@ -473,7 +601,7 @@ export default function App() {
                 <div className="grid gap-4 md:grid-cols-2">
                   <div className="space-y-2 rounded-lg border border-ink/10 p-3">
                     <p className="font-medium">Capture</p>
-                    <button className="rounded-md bg-ink px-4 py-2 text-white" onClick={() => captureMutation.mutate(currentFrameIndex)}>
+                    <button className="rounded-md bg-ink px-4 py-2 text-white" onClick={() => captureMutation.mutate({ frameIndex: currentFrameIndex })}>
                       Capture Frame {currentFrameIndex}
                     </button>
                     <div className="max-h-52 space-y-2 overflow-auto">
