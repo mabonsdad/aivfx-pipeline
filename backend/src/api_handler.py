@@ -68,10 +68,13 @@ def _json_model(model_cls, event: dict[str, Any]):
 
 
 def _task_summary(task: dict[str, Any]) -> dict[str, Any]:
+    status = task["status"]
+    if status == "error" and task.get("video", {}).get("editSource", {}).get("s3Key"):
+        status = "ready"
     return {
         "taskId": task["taskId"],
         "name": task["name"],
-        "status": task["status"],
+        "status": status,
         "createdAt": task["createdAt"],
         "updatedAt": task["updatedAt"],
         "video": task.get("video", {}),
@@ -304,6 +307,8 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             return error_response(404, "Task not found", origin=origin)
 
         decorated = json.loads(json.dumps(task))
+        if decorated.get("status") == "error" and decorated.get("video", {}).get("editSource", {}).get("s3Key"):
+            decorated["status"] = "ready"
         if decorated.get("video", {}).get("original", {}).get("s3Key"):
             decorated["video"]["original"]["downloadUrl"] = asset_store.presign_get(
                 decorated["video"]["original"]["s3Key"], expires=PRESIGNED_GET_TTL_SECONDS

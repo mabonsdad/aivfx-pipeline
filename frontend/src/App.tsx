@@ -7,7 +7,9 @@ import { currentUser, login, logout } from "./lib/auth";
 import { useUiStore } from "./store/uiStore";
 import type { TaskDetail } from "./types/api";
 
-type TabId = "upload" | "timeline" | "frames" | "generate" | "merge";
+type TabId = "timeline" | "frames" | "generate" | "merge";
+
+type NewTaskStage = "idle" | "creating" | "uploading" | "ingesting" | "error";
 
 function frameCount(task: TaskDetail | undefined): number {
   return task?.video?.editSource?.frameCount ?? 0;
@@ -64,6 +66,33 @@ function FrameSelectCard({
   );
 }
 
+function uploadFileWithProgress(
+  uploadUrl: string,
+  file: File,
+  contentType: string,
+  onProgress: (pct: number) => void,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("PUT", uploadUrl);
+    xhr.setRequestHeader("content-type", contentType);
+    xhr.upload.onprogress = (event) => {
+      if (!event.lengthComputable) return;
+      onProgress(Math.round((event.loaded / event.total) * 100));
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        onProgress(100);
+        resolve();
+      } else {
+        reject(new Error(`Upload failed (${xhr.status})`));
+      }
+    };
+    xhr.onerror = () => reject(new Error("Upload failed due to network error"));
+    xhr.send(file);
+  });
+}
+
 export default function App() {
   const queryClient = useQueryClient();
   const {
@@ -78,9 +107,14 @@ export default function App() {
   } = useUiStore();
 
   const [isAuthed, setIsAuthed] = useState(false);
-  const [tab, setTab] = useState<TabId>("upload");
-  const [taskName, setTaskName] = useState("New VFX Task");
-  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [tab, setTab] = useState<TabId>("timeline");
+  const [isNewTaskModalOpen, setIsNewTaskModalOpen] = useState(false);
+  const [newTaskName, setNewTaskName] = useState("New VFX Task");
+  const [newTaskFile, setNewTaskFile] = useState<File | null>(null);
+  const [newTaskStage, setNewTaskStage] = useState<NewTaskStage>("idle");
+  const [newTaskError, setNewTaskError] = useState<string | null>(null);
+  const [newTaskUploadPercent, setNewTaskUploadPercent] = useState(0);
+  const [pendingCreateJobId, setPendingCreateJobId] = useState<string | null>(null);
   const [prompt, setPrompt] = useState("");
   const [model, setModel] = useState<"nano_banana" | "nano_banana_pro">("nano_banana");
   const [patchPrompt, setPatchPrompt] = useState("");
@@ -127,6 +161,15 @@ export default function App() {
     enabled: isAuthed && !!selectedTaskId,
     refetchInterval: tab === "generate" ? 4 * 60 * 1000 : false,
   });
+  const pendingCreateJobQuery = useQuery({
+    queryKey: ["job", pendingCreateJobId],
+    queryFn: () => apiClient.getJob(pendingCreateJobId as string),
+    enabled: isAuthed && !!pendingCreateJobId,
+    refetchInterval: (q: { state: { data?: { status?: string } } }) => {
+      const status = q?.state?.data?.status;
+      return status === "queued" || status === "running" ? 2000 : false;
+    },
+  });
 
   const task = taskQuery.data;
   const selectedSegment = task?.segments.find((s) => s.segmentId === selectedSegmentId) ?? null;
@@ -151,6 +194,28 @@ export default function App() {
       queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
     }
   }, [queryClient, selectedTaskId, tab]);
+
+  useEffect(() => {
+    const status = pendingCreateJobQuery.data?.status;
+    if (newTaskStage !== "ingesting" || !status) return;
+    if (status === "complete") {
+      setNewTaskStage("idle");
+      setPendingCreateJobId(null);
+      setNewTaskError(null);
+      setIsNewTaskModalOpen(false);
+      setTab("timeline");
+      queryClient.invalidateQueries({ queryKey: ["tasks"] });
+      if (selectedTaskId) {
+        queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
+      }
+      return;
+    }
+    if (status === "failed") {
+      setNewTaskStage("error");
+      setNewTaskError(pendingCreateJobQuery.data?.error || "Ingest failed");
+      setPendingCreateJobId(null);
+    }
+  }, [newTaskStage, pendingCreateJobQuery.data, queryClient, selectedTaskId]);
 
   useEffect(() => {
     const frameId = activeEditFrame?.frameId ?? null;
@@ -188,28 +253,11 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [currentFrameIndex, setCurrentFrameIndex, task]);
 
-  const createTaskMutation = useMutation({
-    mutationFn: async () => apiClient.createTask(taskName.trim()),
-    onSuccess: async (result) => {
-      await queryClient.invalidateQueries({ queryKey: ["tasks"] });
-      setSelectedTaskId(result.taskId);
-    },
-  });
-
   const deleteTaskMutation = useMutation({
     mutationFn: (taskId: string) => apiClient.deleteTask(taskId),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["tasks"] });
       setSelectedTaskId(null);
-    },
-  });
-
-  const ingestMutation = useMutation({
-    mutationFn: (taskId: string) => apiClient.ingestTask(taskId),
-    onSuccess: async (result) => {
-      setJobIds((prev) => Array.from(new Set([...prev, result.jobId])));
-      await queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
-      setTab("timeline");
     },
   });
 
@@ -463,26 +511,49 @@ export default function App() {
     }
   }
   const tabs: Array<{ id: TabId; label: string }> = [
-    { id: "upload", label: "Upload & Ingest" },
     { id: "timeline", label: "Timeline" },
     { id: "frames", label: "Frame Edit" },
     { id: "generate", label: "Generate" },
     { id: "merge", label: "Merge & Export" },
   ];
 
-  async function handleUploadThenIngest() {
-    if (!selectedTaskId || !uploadFile) return;
-    const upload = await apiClient.createVideoUpload(selectedTaskId, {
-      filename: uploadFile.name,
-      contentType: uploadFile.type || "video/mp4",
-      sizeBytes: uploadFile.size,
-    });
-    await fetch(upload.uploadUrl, {
-      method: "PUT",
-      headers: { "content-type": uploadFile.type || "video/mp4" },
-      body: uploadFile,
-    });
-    ingestMutation.mutate(selectedTaskId);
+  function openNewTaskModal() {
+    setNewTaskName("New VFX Task");
+    setNewTaskFile(null);
+    setNewTaskStage("idle");
+    setNewTaskError(null);
+    setNewTaskUploadPercent(0);
+    setPendingCreateJobId(null);
+    setIsNewTaskModalOpen(true);
+  }
+
+  async function handleCreateTaskWithUpload() {
+    if (!newTaskName.trim() || !newTaskFile) return;
+    try {
+      setNewTaskError(null);
+      setNewTaskUploadPercent(0);
+      setNewTaskStage("creating");
+      const created = await apiClient.createTask(newTaskName.trim());
+      setSelectedTaskId(created.taskId);
+      await queryClient.invalidateQueries({ queryKey: ["tasks"] });
+
+      setNewTaskStage("uploading");
+      const contentType = newTaskFile.type || "video/mp4";
+      const upload = await apiClient.createVideoUpload(created.taskId, {
+        filename: newTaskFile.name,
+        contentType,
+        sizeBytes: newTaskFile.size,
+      });
+      await uploadFileWithProgress(upload.uploadUrl, newTaskFile, contentType, setNewTaskUploadPercent);
+
+      setNewTaskStage("ingesting");
+      const ingest = await apiClient.ingestTask(created.taskId);
+      setPendingCreateJobId(ingest.jobId);
+      setJobIds((prev) => Array.from(new Set([...prev, ingest.jobId])));
+    } catch (error) {
+      setNewTaskStage("error");
+      setNewTaskError(error instanceof Error ? error.message : "Task setup failed");
+    }
   }
 
   if (!isAuthed) {
@@ -510,19 +581,9 @@ export default function App() {
             </button>
           </div>
 
-          <div className="mb-4 flex gap-2">
-            <input
-              value={taskName}
-              onChange={(e) => setTaskName(e.target.value)}
-              className="w-full rounded-md border border-ink/20 bg-white px-2 py-1"
-            />
-            <button
-              className="rounded-md bg-accent px-3 py-1 text-sm text-white"
-              onClick={() => createTaskMutation.mutate()}
-            >
-              Create
-            </button>
-          </div>
+          <button className="mb-4 w-full rounded-md bg-accent px-3 py-2 text-sm text-white" onClick={openNewTaskModal}>
+            Add New Task
+          </button>
 
           <div className="space-y-2">
             {(tasksQuery.data ?? []).map((taskItem) => (
@@ -534,7 +595,17 @@ export default function App() {
               >
                 <button className="w-full text-left" onClick={() => setSelectedTaskId(taskItem.taskId)}>
                   <p className="font-medium">{taskItem.name}</p>
-                  <p className="text-xs uppercase tracking-wide text-ink/60">{taskItem.status}</p>
+                  <p
+                    className={`text-xs uppercase tracking-wide ${
+                      taskItem.status === "error"
+                        ? "text-red-600"
+                        : taskItem.status === "ingesting"
+                          ? "text-amber-600"
+                          : "text-ink/60"
+                    }`}
+                  >
+                    {taskItem.status}
+                  </p>
                 </button>
                 <button className="mt-1 text-xs text-red-600 underline" onClick={() => deleteTaskMutation.mutate(taskItem.taskId)}>
                   Delete
@@ -557,21 +628,6 @@ export default function App() {
                 </button>
               ))}
             </div>
-
-            {tab === "upload" && (
-              <div className="space-y-3">
-                <h3 className="text-lg font-semibold">Upload & Ingest</h3>
-                <input type="file" accept="video/*" onChange={(e) => setUploadFile(e.target.files?.[0] ?? null)} />
-                <button
-                  className="rounded-lg bg-accent px-4 py-2 text-white"
-                  disabled={!selectedTaskId || !uploadFile || ingestMutation.isPending}
-                  onClick={handleUploadThenIngest}
-                >
-                  Upload and Ingest
-                </button>
-                <p className="text-sm text-ink/70">Status: {task?.status ?? "no task selected"}</p>
-              </div>
-            )}
 
             {tab === "timeline" && (
               <div className="space-y-4">
@@ -1078,6 +1134,74 @@ export default function App() {
           </div>
         </section>
       </div>
+      {isNewTaskModalOpen ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="w-full max-w-xl rounded-2xl border border-ink/10 bg-card p-5 shadow-xl">
+            <div className="mb-4 flex items-center justify-between">
+              <h3 className="text-lg font-semibold">Create Task & Upload Video</h3>
+              <button
+                className="text-sm text-ink/60 underline disabled:cursor-not-allowed disabled:opacity-50"
+                onClick={() => setIsNewTaskModalOpen(false)}
+                disabled={newTaskStage === "creating" || newTaskStage === "uploading" || newTaskStage === "ingesting"}
+              >
+                Close
+              </button>
+            </div>
+            <div className="space-y-3">
+              <div>
+                <label className="mb-1 block text-sm font-medium">Task name</label>
+                <input
+                  value={newTaskName}
+                  onChange={(e) => setNewTaskName(e.target.value)}
+                  className="w-full rounded-md border border-ink/20 bg-white px-3 py-2"
+                  disabled={newTaskStage === "creating" || newTaskStage === "uploading" || newTaskStage === "ingesting"}
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-sm font-medium">Video file</label>
+                <input
+                  type="file"
+                  accept="video/*"
+                  onChange={(e) => setNewTaskFile(e.target.files?.[0] ?? null)}
+                  disabled={newTaskStage === "creating" || newTaskStage === "uploading" || newTaskStage === "ingesting"}
+                />
+              </div>
+              {newTaskStage === "uploading" ? (
+                <div>
+                  <p className="mb-1 text-sm text-ink/70">Uploading: {newTaskUploadPercent}%</p>
+                  <div className="h-2 w-full overflow-hidden rounded bg-ink/10">
+                    <div className="h-full bg-accent" style={{ width: `${newTaskUploadPercent}%` }} />
+                  </div>
+                </div>
+              ) : null}
+              {newTaskStage === "ingesting" ? (
+                <div>
+                  <p className="mb-1 text-sm text-ink/70">
+                    Ingesting: {pendingCreateJobQuery.data?.progress ?? 0}% ({pendingCreateJobQuery.data?.status ?? "queued"})
+                  </p>
+                  <div className="h-2 w-full overflow-hidden rounded bg-ink/10">
+                    <div className="h-full bg-accent2" style={{ width: `${pendingCreateJobQuery.data?.progress ?? 0}%` }} />
+                  </div>
+                </div>
+              ) : null}
+              {newTaskError ? <p className="text-sm text-red-600">{newTaskError}</p> : null}
+              <button
+                className="w-full rounded-md bg-accent px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={!newTaskName.trim() || !newTaskFile || newTaskStage === "creating" || newTaskStage === "uploading" || newTaskStage === "ingesting"}
+                onClick={handleCreateTaskWithUpload}
+              >
+                {newTaskStage === "creating"
+                  ? "Creating task..."
+                  : newTaskStage === "uploading"
+                    ? "Uploading..."
+                    : newTaskStage === "ingesting"
+                      ? "Ingesting..."
+                      : "Create Task and Ingest"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </main>
   );
 }

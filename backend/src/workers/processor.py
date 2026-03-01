@@ -596,3 +596,7 @@ def process_job_record(record: dict[str, Any], *, settings: Any) -> None:
     else:
         job["finishedAt"] = now_iso()
         store.save_job(job)
+        if task.get("status") == "error":
+            task["status"] = "ready" if task.get("video", {}).get("editSource", {}).get("s3Key") else "created"
+            task.setdefault("history", []).append({"at": now_iso(), "event": "task.recovered", "jobId": job_id})
+            store.save_task(task)
