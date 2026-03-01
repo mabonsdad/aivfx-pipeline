@@ -173,23 +173,30 @@ def merge_with_segment_replacement(
     end_frame_exclusive: int,
     fps_num: int,
     fps_den: int,
+    output_width: int,
+    output_height: int,
     temporal_feather_frames: int,
 ) -> list[str]:
     fps = Fraction(fps_num, fps_den)
     start_sec = float(Fraction(start_frame, 1) / fps)
     end_sec = float(Fraction(end_frame_exclusive, 1) / fps)
     duration_sec = max(0.0, end_sec - start_sec)
+    fps_str = f"{fps_num}/{fps_den}"
 
     filter_complex = [
-        f"[0:v]trim=0:{start_sec},setpts=PTS-STARTPTS[vpre]",
-        f"[0:v]trim={end_sec},setpts=PTS-STARTPTS[vpost]",
-        f"[1:v]trim=0:{duration_sec},setpts=PTS-STARTPTS[vgen]",
+        # Normalize both streams up front so blend/concat operates on identical
+        # geometry, cadence, sample aspect ratio, and pixel format.
+        f"[0:v]fps={fps_str},scale={output_width}:{output_height}:flags=lanczos,setsar=1,format=yuv420p[vorigsrc]",
+        f"[1:v]fps={fps_str},scale={output_width}:{output_height}:flags=lanczos,setsar=1,format=yuv420p[vgensrc]",
+        f"[vorigsrc]trim=0:{start_sec},setpts=PTS-STARTPTS[vpre]",
+        f"[vorigsrc]trim={end_sec},setpts=PTS-STARTPTS[vpost]",
+        f"[vgensrc]trim=0:{duration_sec},setpts=PTS-STARTPTS[vgen]",
     ]
 
     if temporal_feather_frames > 0:
         feather_sec = float(Fraction(temporal_feather_frames, 1) / fps)
         filter_complex.append(
-            "[0:v]trim={s}:{e},setpts=PTS-STARTPTS[vorigseg]".format(s=start_sec, e=end_sec)
+            "[vorigsrc]trim={s}:{e},setpts=PTS-STARTPTS[vorigseg]".format(s=start_sec, e=end_sec)
         )
         filter_complex.append(
             (
@@ -217,6 +224,16 @@ def merge_with_segment_replacement(
         "0:a?",
         "-c:v",
         "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-color_range",
+        "tv",
+        "-colorspace",
+        "bt709",
+        "-color_primaries",
+        "bt709",
+        "-color_trc",
+        "bt709",
         "-crf",
         "18",
         "-preset",

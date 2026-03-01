@@ -514,6 +514,8 @@ def _handle_merge(
                 end_frame_exclusive=segment["endFrameExclusive"],
                 fps_num=task["video"]["editSource"]["fps"]["num"],
                 fps_den=task["video"]["editSource"]["fps"]["den"],
+                output_width=int(task["video"]["editSource"]["width"]),
+                output_height=int(task["video"]["editSource"]["height"]),
                 temporal_feather_frames=feather_frames,
             )
             applied.append(
