@@ -108,6 +108,7 @@ export default function App() {
   const [jobIds, setJobIds] = useState<string[]>([]);
   const [firstFrameId, setFirstFrameId] = useState<string | null>(null);
   const [lastFrameId, setLastFrameId] = useState<string | null>(null);
+  const [editFrameTab, setEditFrameTab] = useState<"first" | "last">("first");
   const timelineVideoRef = useRef<HTMLVideoElement | null>(null);
 
   useEffect(() => {
@@ -133,10 +134,12 @@ export default function App() {
   });
 
   const task = taskQuery.data;
-  const selectedFrame = task && selectedFrameId ? task.frames[selectedFrameId] : null;
   const selectedSegment = task?.segments.find((s) => s.segmentId === selectedSegmentId) ?? null;
   const firstFrame = task && firstFrameId ? task.frames[firstFrameId] ?? null : null;
   const lastFrame = task && lastFrameId ? task.frames[lastFrameId] ?? null : null;
+  const editFirstFrame = (firstFrameId ? task?.frames[firstFrameId] : null) ?? (selectedSegment ? task?.frames[selectedSegment.startFrameId] : null) ?? null;
+  const editLastFrame = (lastFrameId ? task?.frames[lastFrameId] : null) ?? (selectedSegment ? task?.frames[selectedSegment.endFrameId] : null) ?? null;
+  const activeEditFrame = editFrameTab === "first" ? editFirstFrame : editLastFrame;
 
   useEffect(() => {
     setFirstFrameId(null);
@@ -147,6 +150,13 @@ export default function App() {
     if (firstFrameId && !task?.frames[firstFrameId]) setFirstFrameId(null);
     if (lastFrameId && !task?.frames[lastFrameId]) setLastFrameId(null);
   }, [firstFrameId, lastFrameId, task]);
+
+  useEffect(() => {
+    const frameId = activeEditFrame?.frameId ?? null;
+    if (frameId && frameId !== selectedFrameId) {
+      setSelectedFrameId(frameId);
+    }
+  }, [activeEditFrame?.frameId, selectedFrameId, setSelectedFrameId]);
 
   useEffect(() => {
     const maxFrame = Math.max(0, frameCount(task) - 1);
@@ -239,17 +249,17 @@ export default function App() {
   });
 
   const fullEditMutation = useMutation({
-    mutationFn: async () => {
-      if (!selectedTaskId || !selectedFrameId) throw new Error("Capture/select a frame first");
-      return apiClient.fullEdit(selectedTaskId, selectedFrameId, { model, prompt });
+    mutationFn: async (frameId: string) => {
+      if (!selectedTaskId) throw new Error("Select a task");
+      return apiClient.fullEdit(selectedTaskId, frameId, { model, prompt });
     },
     onSuccess: (result) => setJobIds((prev) => Array.from(new Set([...prev, result.jobId]))),
   });
 
   const patchEditMutation = useMutation({
-    mutationFn: async () => {
-      if (!selectedTaskId || !selectedFrameId) throw new Error("Capture/select a frame first");
-      const init = await apiClient.patchInit(selectedTaskId, selectedFrameId, {
+    mutationFn: async (frameId: string) => {
+      if (!selectedTaskId) throw new Error("Select a task");
+      const init = await apiClient.patchInit(selectedTaskId, frameId, {
         patchRect,
         featherPx,
         bleedPx,
@@ -272,7 +282,7 @@ export default function App() {
         });
       }
 
-      return apiClient.patchSubmit(selectedTaskId, selectedFrameId, {
+      return apiClient.patchSubmit(selectedTaskId, frameId, {
         model,
         prompt: patchPrompt,
         patchKey: init.patchKey,
@@ -623,53 +633,97 @@ export default function App() {
               <div className="space-y-4">
                 <h3 className="text-lg font-semibold">Frame Capture & Edit</h3>
 
-                <div className="grid gap-4 md:grid-cols-2">
-                  <div className="space-y-2 rounded-lg border border-ink/10 p-3">
-                    <p className="font-medium">Capture</p>
-                    <button className="rounded-md bg-ink px-4 py-2 text-white" onClick={() => captureMutation.mutate({ frameIndex: currentFrameIndex })}>
-                      Capture Frame {currentFrameIndex}
-                    </button>
-                    <div className="max-h-52 space-y-2 overflow-auto">
-                      {Object.values(task?.frames ?? {}).map((frame) => (
-                        <button
-                          key={frame.frameId}
-                          onClick={() => setSelectedFrameId(frame.frameId)}
-                          className={`w-full rounded-md border px-3 py-2 text-left ${
-                            frame.frameId === selectedFrameId ? "border-accent bg-accent/10" : "border-ink/10"
-                          }`}
-                        >
-                          <p className="text-sm font-medium">{frame.timecode}</p>
-                          <p className="text-xs text-ink/60">frame {frame.frameIndex}</p>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setEditFrameTab("first")}
+                    className={`rounded-md px-3 py-2 text-sm ${editFrameTab === "first" ? "bg-ink text-white" : "bg-ink/10"}`}
+                  >
+                    First Frame
+                  </button>
+                  <button
+                    onClick={() => setEditFrameTab("last")}
+                    className={`rounded-md px-3 py-2 text-sm ${editFrameTab === "last" ? "bg-ink text-white" : "bg-ink/10"}`}
+                  >
+                    Last Frame (Optional)
+                  </button>
+                </div>
 
-                  <div className="space-y-2 rounded-lg border border-ink/10 p-3">
-                    <p className="font-medium">Full-frame edit</p>
+                <div className="space-y-3 rounded-lg border border-ink/10 bg-white p-3">
+                  <p className="text-sm text-ink/70">
+                    Working on: {editFrameTab === "first" ? "First Frame" : "Last Frame"}
+                    {activeEditFrame ? ` (frame ${activeEditFrame.frameIndex}, ${activeEditFrame.timecode})` : ""}
+                  </p>
+
+                  {activeEditFrame?.imageUrl ? (
+                    <img src={activeEditFrame.imageUrl} alt="Captured frame preview" className="max-h-[420px] w-full rounded-md border border-ink/10 object-contain bg-bg" />
+                  ) : (
+                    <div className="rounded-md border border-dashed border-ink/20 bg-bg p-6 text-sm text-ink/60">
+                      Select frames in the Timeline tab first, then return here to edit.
+                    </div>
+                  )}
+
+                  <textarea
+                    value={prompt}
+                    onChange={(e) => setPrompt(e.target.value)}
+                    placeholder="Describe the edit"
+                    className="h-24 w-full rounded-md border border-ink/20 p-2"
+                  />
+
+                  <div className="flex flex-wrap items-center gap-2">
                     <select
                       value={model}
                       onChange={(e) => setModel(e.target.value as "nano_banana" | "nano_banana_pro")}
-                      className="w-full rounded-md border border-ink/20 px-2 py-2"
+                      className="rounded-md border border-ink/20 px-2 py-2"
                     >
-                      <option value="nano_banana">Nano Banana (gemini-3.1-flash-image-preview)</option>
-                      <option value="nano_banana_pro">Nano Banana Pro (gemini-3-pro-image-preview)</option>
+                      <option value="nano_banana">std</option>
+                      <option value="nano_banana_pro">pro</option>
                     </select>
-                    <textarea
-                      value={prompt}
-                      onChange={(e) => setPrompt(e.target.value)}
-                      placeholder="Describe the edit"
-                      className="h-24 w-full rounded-md border border-ink/20 p-2"
-                    />
-                    <button className="rounded-md bg-accent px-4 py-2 text-white" onClick={() => fullEditMutation.mutate()}>
-                      Generate Full Variant
+                    <button
+                      className="rounded-md bg-accent px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-50"
+                      disabled={!activeEditFrame || fullEditMutation.isPending || !prompt.trim()}
+                      onClick={() => activeEditFrame && fullEditMutation.mutate(activeEditFrame.frameId)}
+                    >
+                      Edit
                     </button>
                   </div>
                 </div>
 
-                <div className="grid gap-4 rounded-lg border border-ink/10 p-3 md:grid-cols-2">
-                  <div className="space-y-2">
-                    <p className="font-medium">Patch edit</p>
+                <div className="space-y-2 rounded-lg border border-ink/10 p-3">
+                  <p className="font-medium">Comparison</p>
+                  {activeEditFrame?.imageUrl ? (
+                    <ReactCompareSlider
+                      itemOne={<ReactCompareSliderImage src={activeEditFrame.imageUrl} alt="Original" />}
+                      itemTwo={
+                        <ReactCompareSliderImage
+                          src={
+                            activeEditFrame.variants.find((v) => v.variantId === activeEditFrame.selectedVariantId)?.imageUrl ??
+                            activeEditFrame.variants[0]?.imageUrl ??
+                            activeEditFrame.imageUrl
+                          }
+                          alt="Variant"
+                        />
+                      }
+                    />
+                  ) : null}
+                  <div className="grid grid-cols-2 gap-2">
+                    {activeEditFrame?.variants.map((variant) => (
+                      <div key={variant.variantId} className="rounded border border-ink/10 p-2">
+                        {variant.imageUrl ? <img src={variant.imageUrl} className="mb-2 h-28 w-full object-contain" /> : null}
+                        <p className="text-xs text-ink/70">{variant.type} / {variant.model}</p>
+                        <button
+                          className="mt-1 rounded bg-ink px-2 py-1 text-xs text-white"
+                          onClick={() => selectVariantMutation.mutate({ frameId: activeEditFrame.frameId, variantId: variant.variantId })}
+                        >
+                          {activeEditFrame.selectedVariantId === variant.variantId ? "Selected" : "Select"}
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <details className="rounded-lg border border-ink/10 p-3">
+                  <summary className="cursor-pointer text-sm font-medium">Advanced (Patch Tools)</summary>
+                  <div className="mt-3 space-y-2">
                     <div className="grid grid-cols-2 gap-2">
                       <input type="number" value={patchRect.x} onChange={(e) => setPatchRect((s) => ({ ...s, x: Number(e.target.value) }))} className="rounded border border-ink/20 px-2 py-1" placeholder="x" />
                       <input type="number" value={patchRect.y} onChange={(e) => setPatchRect((s) => ({ ...s, y: Number(e.target.value) }))} className="rounded border border-ink/20 px-2 py-1" placeholder="y" />
@@ -690,44 +744,15 @@ export default function App() {
                     <input type="file" accept="image/png" onChange={(e) => setCustomPatchFile(e.target.files?.[0] ?? null)} />
                     <label className="block text-xs text-ink/70">Optional mask PNG</label>
                     <input type="file" accept="image/png" onChange={(e) => setMaskFile(e.target.files?.[0] ?? null)} />
-                    <button className="rounded-md bg-accent2 px-4 py-2 text-white" onClick={() => patchEditMutation.mutate()}>
+                    <button
+                      className="rounded-md bg-accent2 px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-50"
+                      disabled={!activeEditFrame || patchEditMutation.isPending || !patchPrompt.trim()}
+                      onClick={() => activeEditFrame && patchEditMutation.mutate(activeEditFrame.frameId)}
+                    >
                       Generate Patch Variant
                     </button>
                   </div>
-
-                  <div className="space-y-2">
-                    <p className="font-medium">Image comparison</p>
-                    {selectedFrame?.imageUrl && selectedFrame.variants.length > 0 && (
-                      <ReactCompareSlider
-                        itemOne={<ReactCompareSliderImage src={selectedFrame.imageUrl} alt="Original" />}
-                        itemTwo={
-                          <ReactCompareSliderImage
-                            src={
-                              selectedFrame.variants.find((v) => v.variantId === selectedFrame.selectedVariantId)?.imageUrl ??
-                              selectedFrame.variants[0].imageUrl ??
-                              selectedFrame.imageUrl
-                            }
-                            alt="Variant"
-                          />
-                        }
-                      />
-                    )}
-                    <div className="grid grid-cols-2 gap-2">
-                      {selectedFrame?.variants.map((variant) => (
-                        <div key={variant.variantId} className="rounded border border-ink/10 p-2">
-                          {variant.imageUrl ? <img src={variant.imageUrl} className="mb-2 h-28 w-full object-contain" /> : null}
-                          <p className="text-xs text-ink/70">{variant.type} / {variant.model}</p>
-                          <button
-                            className="mt-1 rounded bg-ink px-2 py-1 text-xs text-white"
-                            onClick={() => selectVariantMutation.mutate({ frameId: selectedFrame.frameId, variantId: variant.variantId })}
-                          >
-                            {selectedFrame.selectedVariantId === variant.variantId ? "Selected" : "Select"}
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                </div>
+                </details>
               </div>
             )}
 
