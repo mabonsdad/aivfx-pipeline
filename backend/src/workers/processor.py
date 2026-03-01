@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import boto3
-from PIL import Image, ImageFilter
+from PIL import Image, ImageFilter, ImageOps
 from aws_lambda_powertools import Logger
 
 from src.core.assets import AssetPaths, AssetStore
@@ -256,6 +256,21 @@ def _composite_patch(
     return out.getvalue()
 
 
+def _normalize_full_variant(*, source_bytes: bytes, variant_bytes: bytes) -> bytes:
+    source = ImageOps.exif_transpose(Image.open(BytesIO(source_bytes))).convert("RGBA")
+    variant = ImageOps.exif_transpose(Image.open(BytesIO(variant_bytes))).convert("RGBA")
+    if variant.size != source.size:
+        variant = ImageOps.fit(
+            variant,
+            source.size,
+            method=Image.Resampling.LANCZOS,
+            centering=(0.5, 0.5),
+        )
+    out = BytesIO()
+    variant.save(out, format="PNG")
+    return out.getvalue()
+
+
 def _handle_full_edit(
     *,
     job: dict[str, Any],
@@ -280,11 +295,12 @@ def _handle_full_edit(
         prompt=payload["prompt"],
         input_image_bytes=src_bytes,
     )
+    normalized_bytes = _normalize_full_variant(source_bytes=src_bytes, variant_bytes=out_bytes)
 
     variant_id = new_id("var")
     paths = AssetPaths(task["userId"], task["taskId"])
     output_key = paths.frame_variant(frame_id, variant_id)
-    asset_store.put_bytes(output_key, out_bytes, content_type="image/png")
+    asset_store.put_bytes(output_key, normalized_bytes, content_type="image/png")
 
     variant = {
         "variantId": variant_id,

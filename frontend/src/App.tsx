@@ -654,13 +654,11 @@ export default function App() {
                     {activeEditFrame ? ` (frame ${activeEditFrame.frameIndex}, ${activeEditFrame.timecode})` : ""}
                   </p>
 
-                  {activeEditFrame?.imageUrl ? (
-                    <img src={activeEditFrame.imageUrl} alt="Captured frame preview" className="max-h-[420px] w-full rounded-md border border-ink/10 object-contain bg-bg" />
-                  ) : (
+                  {!activeEditFrame ? (
                     <div className="rounded-md border border-dashed border-ink/20 bg-bg p-6 text-sm text-ink/60">
                       Select frames in the Timeline tab first, then return here to edit.
                     </div>
-                  )}
+                  ) : null}
 
                   <textarea
                     value={prompt}
@@ -691,20 +689,42 @@ export default function App() {
                 <div className="space-y-2 rounded-lg border border-ink/10 p-3">
                   <p className="font-medium">Comparison</p>
                   {activeEditFrame?.imageUrl ? (
-                    <ReactCompareSlider
-                      itemOne={<ReactCompareSliderImage src={activeEditFrame.imageUrl} alt="Original" />}
-                      itemTwo={
-                        <ReactCompareSliderImage
-                          src={
-                            activeEditFrame.variants.find((v) => v.variantId === activeEditFrame.selectedVariantId)?.imageUrl ??
-                            activeEditFrame.variants[0]?.imageUrl ??
-                            activeEditFrame.imageUrl
-                          }
-                          alt="Variant"
-                        />
-                      }
-                    />
-                  ) : null}
+                    <div
+                      className="overflow-hidden rounded-md border border-ink/10 bg-bg"
+                      style={{
+                        aspectRatio:
+                          task?.video?.editSource?.width && task?.video?.editSource?.height
+                            ? `${task.video.editSource.width} / ${task.video.editSource.height}`
+                            : undefined,
+                      }}
+                    >
+                      <ReactCompareSlider
+                        className="h-full w-full"
+                        itemOne={
+                          <ReactCompareSliderImage
+                            src={activeEditFrame.imageUrl}
+                            alt="Original"
+                            style={{ height: "100%", width: "100%", objectFit: "contain", objectPosition: "center" }}
+                          />
+                        }
+                        itemTwo={
+                          <ReactCompareSliderImage
+                            src={
+                              activeEditFrame.variants.find((v) => v.variantId === activeEditFrame.selectedVariantId)?.imageUrl ??
+                              activeEditFrame.variants[0]?.imageUrl ??
+                              activeEditFrame.imageUrl
+                            }
+                            alt="Variant"
+                            style={{ height: "100%", width: "100%", objectFit: "contain", objectPosition: "center" }}
+                          />
+                        }
+                      />
+                    </div>
+                  ) : (
+                    <div className="rounded-md border border-dashed border-ink/20 bg-bg p-6 text-sm text-ink/60">
+                      Select a frame in the Timeline tab to start comparing edits.
+                    </div>
+                  )}
                   <div className="grid grid-cols-2 gap-2">
                     {activeEditFrame?.variants.map((variant) => (
                       <div key={variant.variantId} className="rounded border border-ink/10 p-2">
