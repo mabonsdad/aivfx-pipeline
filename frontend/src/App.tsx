@@ -742,11 +742,14 @@ export default function App() {
     }
   }, [selectedPreviewGenId, selectedSegmentGenerations]);
 
-  function syncComparePlayhead(source: HTMLVideoElement, target: HTMLVideoElement) {
+  function syncOriginalToGenerated(generatedVideo: HTMLVideoElement) {
+    const originalVideo = compareOriginalRef.current;
+    if (!originalVideo || !segmentWindow) return;
+    const targetTime = segmentWindow.startSec + generatedVideo.currentTime;
     if (syncLockRef.current) return;
     syncLockRef.current = true;
-    if (Math.abs(target.currentTime - source.currentTime) > 0.08) {
-      target.currentTime = source.currentTime;
+    if (Math.abs(originalVideo.currentTime - targetTime) > 0.05) {
+      originalVideo.currentTime = targetTime;
     }
     window.setTimeout(() => {
       syncLockRef.current = false;
@@ -1430,71 +1433,60 @@ export default function App() {
                       Showing selected segment only: {segmentWindow.startLabel}s to {segmentWindow.endLabel}s.
                     </p>
                   ) : null}
-                  <div className="grid gap-3 md:grid-cols-2">
-                    <div className="rounded-md border border-ink/10 p-2">
-                      <p className="mb-2 text-sm font-medium">Original segment</p>
-                      {originalSegmentPreviewUrl ? (
-                        <video
-                          ref={compareOriginalRef}
-                          src={originalSegmentPreviewUrl}
-                          controls
-                          className="w-full"
-                          onLoadedMetadata={(e) => {
-                            if (segmentWindow) {
-                              e.currentTarget.currentTime = segmentWindow.startSec;
-                            }
-                          }}
-                          onTimeUpdate={(e) => {
-                            keepOriginalWithinSegment(e.currentTarget);
-                            const other = compareVariantRef.current;
-                            if (other) syncComparePlayhead(e.currentTarget, other);
-                          }}
-                          onSeeking={(e) => {
-                            keepOriginalWithinSegment(e.currentTarget);
-                            const other = compareVariantRef.current;
-                            if (other) syncComparePlayhead(e.currentTarget, other);
-                          }}
-                          onPlay={() => {
-                            const other = compareVariantRef.current;
-                            if (other?.src) other.play().catch(() => undefined);
-                          }}
-                          onPause={() => {
-                            compareVariantRef.current?.pause();
-                          }}
-                        />
-                      ) : (
-                        <p className="text-sm text-ink/60">Select a segment to preview the original clip.</p>
-                      )}
+                  {originalSegmentPreviewUrl && selectedPreviewGeneration?.downloadUrl ? (
+                    <div
+                      className="overflow-hidden rounded-md border border-ink/10 bg-bg"
+                      style={{
+                        aspectRatio:
+                          task?.video?.editSource?.width && task?.video?.editSource?.height
+                            ? `${task.video.editSource.width} / ${task.video.editSource.height}`
+                            : undefined,
+                      }}
+                    >
+                      <ReactCompareSlider
+                        className="h-full w-full"
+                        itemOne={
+                          <video
+                            ref={compareOriginalRef}
+                            src={originalSegmentPreviewUrl}
+                            muted
+                            playsInline
+                            className="h-full w-full object-contain"
+                            onLoadedMetadata={(e) => {
+                              if (segmentWindow) {
+                                e.currentTarget.currentTime = segmentWindow.startSec;
+                              }
+                            }}
+                            onTimeUpdate={(e) => keepOriginalWithinSegment(e.currentTarget)}
+                          />
+                        }
+                        itemTwo={
+                          <video
+                            ref={compareVariantRef}
+                            src={selectedPreviewGeneration.downloadUrl}
+                            controls
+                            playsInline
+                            className="h-full w-full object-contain"
+                            onLoadedMetadata={(e) => {
+                              e.currentTarget.currentTime = 0;
+                              syncOriginalToGenerated(e.currentTarget);
+                            }}
+                            onTimeUpdate={(e) => syncOriginalToGenerated(e.currentTarget)}
+                            onSeeking={(e) => syncOriginalToGenerated(e.currentTarget)}
+                            onPlay={(e) => {
+                              syncOriginalToGenerated(e.currentTarget);
+                              compareOriginalRef.current?.play().catch(() => undefined);
+                            }}
+                            onPause={() => {
+                              compareOriginalRef.current?.pause();
+                            }}
+                          />
+                        }
+                      />
                     </div>
-                    <div className="rounded-md border border-ink/10 p-2">
-                      <p className="mb-2 text-sm font-medium">Generated segment</p>
-                      {selectedPreviewGeneration?.downloadUrl ? (
-                        <video
-                          ref={compareVariantRef}
-                          src={selectedPreviewGeneration.downloadUrl}
-                          controls
-                          className="w-full"
-                          onTimeUpdate={(e) => {
-                            const other = compareOriginalRef.current;
-                            if (other) syncComparePlayhead(e.currentTarget, other);
-                          }}
-                          onSeeking={(e) => {
-                            const other = compareOriginalRef.current;
-                            if (other) syncComparePlayhead(e.currentTarget, other);
-                          }}
-                          onPlay={() => {
-                            const other = compareOriginalRef.current;
-                            if (other?.src) other.play().catch(() => undefined);
-                          }}
-                          onPause={() => {
-                            compareOriginalRef.current?.pause();
-                          }}
-                        />
-                      ) : (
-                        <p className="text-sm text-ink/60">No generated variants yet for this segment.</p>
-                      )}
-                    </div>
-                  </div>
+                  ) : (
+                    <p className="text-sm text-ink/60">Select a segment and generated variant to compare.</p>
+                  )}
                   <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
                     {selectedSegmentGenerations.map((gen) => (
                       <div key={gen.genId} className="rounded border border-ink/10 p-2">
