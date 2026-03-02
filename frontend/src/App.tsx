@@ -35,7 +35,7 @@ function normalizeTaskNameInput(value: string): string {
     .replace(/[^a-z0-9_-]+/g, "_")
     .replace(/_+/g, "_")
     .replace(/^[_-]+|[_-]+$/g, "")
-    .slice(0, 12);
+    .slice(0, 15);
 }
 
 function humanizeFilename(value: string): string {
@@ -196,6 +196,11 @@ export default function App() {
     if (!target) return false;
     return (tasksQuery.data ?? []).some((taskItem) => taskItem.name.toLowerCase() === target);
   }, [normalizedNewTaskName, tasksQuery.data]);
+  const showTaskNameExistsWarning =
+    taskNameAlreadyExists &&
+    newTaskStage !== "creating" &&
+    newTaskStage !== "uploading" &&
+    newTaskStage !== "ingesting";
 
   useEffect(() => {
     if (!selectedTaskId && tasksQuery.data?.length) {
@@ -1735,14 +1740,14 @@ export default function App() {
                 <input
                   value={newTaskName}
                   onChange={(e) => setNewTaskName(e.target.value)}
-                  maxLength={12}
+                  maxLength={15}
                   className="w-full rounded-md border border-ink/20 bg-white px-3 py-2"
                   disabled={newTaskStage === "creating" || newTaskStage === "uploading" || newTaskStage === "ingesting"}
                 />
                 <p className="mt-1 text-xs text-ink/60">
-                  Final name: <span className="font-medium">{normalizedNewTaskName || "(invalid)"}</span> (max 12 chars)
+                  Final name: <span className="font-medium">{normalizedNewTaskName || "(invalid)"}</span> (max 15 chars)
                 </p>
-                {taskNameAlreadyExists ? <p className="text-xs text-red-600">Name already used by another task.</p> : null}
+                {showTaskNameExistsWarning ? <p className="text-xs text-red-600">Name already used by another task.</p> : null}
               </div>
               <div>
                 <label className="mb-1 block text-sm font-medium">Video file</label>

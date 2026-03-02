@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field, field_validator
 
 
 class TaskCreateRequest(BaseModel):
-    name: str = Field(min_length=1, max_length=12)
+    name: str = Field(min_length=1, max_length=15)
 
 
 class UploadVideoRequest(BaseModel):

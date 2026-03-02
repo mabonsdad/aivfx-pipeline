@@ -55,17 +55,17 @@ def _normalize_task_name(raw: str) -> str:
     cleaned = re.sub(r"_+", "_", cleaned).strip("_-")
     if not cleaned:
         cleaned = "task"
-    return cleaned[:12]
+    return cleaned[:15]
 
 
 def _unique_task_name(base: str, existing_names: set[str]) -> str:
-    candidate = base[:12]
+    candidate = base[:15]
     if candidate not in existing_names:
         return candidate
     i = 2
     while True:
         suffix = str(i)
-        prefix = candidate[: max(1, 12 - len(suffix))]
+        prefix = candidate[: max(1, 15 - len(suffix))]
         next_candidate = f"{prefix}{suffix}"
         if next_candidate not in existing_names:
             return next_candidate
