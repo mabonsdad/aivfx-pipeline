@@ -5,7 +5,7 @@ import { ReactCompareSlider, ReactCompareSliderImage } from "react-compare-slide
 import { apiClient } from "./api/client";
 import { currentUser, login, logout } from "./lib/auth";
 import { useUiStore } from "./store/uiStore";
-import type { TaskDetail } from "./types/api";
+import type { FrameVariant, SegmentGeneration, SegmentRecord, TaskDetail } from "./types/api";
 
 type TabId = "timeline" | "frames" | "generate" | "merge" | "assets";
 
@@ -46,6 +46,30 @@ function humanizeFilename(value: string): string {
 function keyBasenameFromS3Key(key: string): string {
   const parts = key.split("/");
   return parts[parts.length - 1] || key;
+}
+
+function safeTimestamp(iso: string | undefined): number {
+  if (!iso) return 0;
+  const timestamp = new Date(iso).getTime();
+  return Number.isNaN(timestamp) ? 0 : timestamp;
+}
+
+function truncateIdentifier(value: string, maxLength = 12): string {
+  return value.length <= maxLength ? value : `${value.slice(0, maxLength)}...`;
+}
+
+function formatCompactTimestamp(iso: string | undefined): string {
+  if (!iso) return "unknown time";
+  const asDate = new Date(iso);
+  if (Number.isNaN(asDate.getTime())) return iso;
+  return asDate.toLocaleString(undefined, {
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
 }
 
 function frameCount(task: TaskDetail | undefined): number {
@@ -236,6 +260,11 @@ export default function App() {
   const assetTasks = useMemo(
     () => assetTaskQueries.map((query) => query.data).filter((item): item is TaskDetail => Boolean(item)),
     [assetTaskQueries],
+  );
+  const orderedSegments = useMemo(() => [...(task?.segments ?? [])].reverse(), [task?.segments]);
+  const segmentsById = useMemo(
+    () => new Map((task?.segments ?? []).map((segment) => [segment.segmentId, segment])),
+    [task?.segments],
   );
   const assetsLoading = tab === "assets" && assetTaskQueries.some((query) => query.isPending || query.isFetching) && assetTasks.length === 0;
   const selectedSegment = task?.segments.find((s) => s.segmentId === selectedSegmentId) ?? null;
@@ -572,13 +601,37 @@ export default function App() {
     [jobQueries],
   );
 
-  const segmentGenerations = useMemo(() => Object.values(task?.segmentGenerations ?? {}), [task]);
+  const segmentGenerations = useMemo(
+    () =>
+      Object.values(task?.segmentGenerations ?? {}).sort(
+        (a, b) => safeTimestamp(b.createdAt) - safeTimestamp(a.createdAt),
+      ),
+    [task?.segmentGenerations],
+  );
   const selectedSegmentGenerations = useMemo(
     () =>
       segmentGenerations
         .filter((gen) => !selectedSegmentId || gen.segmentId === selectedSegmentId)
-        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
+        .sort((a, b) => safeTimestamp(b.createdAt) - safeTimestamp(a.createdAt)),
     [segmentGenerations, selectedSegmentId],
+  );
+  const selectedStartFrameVariants = useMemo(
+    () =>
+      selectedSegment && task
+        ? [...(task.frames[selectedSegment.startFrameId]?.variants ?? [])].sort(
+            (a, b) => safeTimestamp(b.createdAt) - safeTimestamp(a.createdAt),
+          )
+        : [],
+    [selectedSegment, task],
+  );
+  const mergeGenerationOptions = useMemo(() => [...segmentGenerations], [segmentGenerations]);
+  const selectedMergeGenerations = useMemo(
+    () =>
+      selectedGenIds
+        .map((genId) => task?.segmentGenerations?.[genId])
+        .filter((generation): generation is SegmentGeneration => Boolean(generation))
+        .sort((a, b) => safeTimestamp(b.createdAt) - safeTimestamp(a.createdAt)),
+    [selectedGenIds, task?.segmentGenerations],
   );
   const selectedPreviewGeneration =
     selectedSegmentGenerations.find((gen) => gen.genId === selectedPreviewGenId) ?? selectedSegmentGenerations[0] ?? null;
@@ -732,6 +785,13 @@ export default function App() {
   }, [segmentWindow, task?.video?.editSource?.downloadUrl]);
 
   useEffect(() => {
+    setSelectedGenIds((previous) => {
+      const filtered = previous.filter((genId) => Boolean(task?.segmentGenerations?.[genId]));
+      return filtered.length === previous.length ? previous : filtered;
+    });
+  }, [task?.segmentGenerations]);
+
+  useEffect(() => {
     if (!selectedSegmentGenerations.length) {
       setSelectedPreviewGenId("");
       return;
@@ -872,6 +932,25 @@ export default function App() {
     const asDate = new Date(iso);
     if (Number.isNaN(asDate.getTime())) return iso;
     return asDate.toLocaleString();
+  }
+
+  function describeSegment(segment: SegmentRecord): string {
+    const endFrameInclusive = Math.max(segment.endFrameExclusive - 1, segment.startFrame);
+    return `f${segment.startFrame}-f${endFrameInclusive} · ${segment.durationSec.toFixed(2)}s · ${segment.startTimecode}→${segment.endTimecode}`;
+  }
+
+  function describeGeneration(generation: SegmentGeneration): string {
+    const segment = segmentsById.get(generation.segmentId);
+    const segmentText = segment ? describeSegment(segment) : generation.segmentId;
+    const outputLabel = generation.outputKey
+      ? humanizeFilename(keyBasenameFromS3Key(generation.outputKey))
+      : truncateIdentifier(generation.genId, 12);
+    return `${outputLabel} · ${generation.luma.model}/${generation.luma.mode} · ${segmentText} · ${formatCompactTimestamp(generation.createdAt)}`;
+  }
+
+  function describeStartFrameVariant(variant: FrameVariant): string {
+    const outputLabel = humanizeFilename(keyBasenameFromS3Key(variant.outputKey));
+    return `${outputLabel} · ${variant.model}/${variant.type} · ${formatCompactTimestamp(variant.createdAt)} · ${truncateIdentifier(variant.variantId, 10)}`;
   }
 
   async function handleDeleteAsset(item: LibraryAsset) {
@@ -1357,9 +1436,9 @@ export default function App() {
                     className="rounded-md border border-ink/20 px-3 py-2"
                   >
                     <option value="">Select segment</option>
-                    {task?.segments.map((segment) => (
+                    {orderedSegments.map((segment) => (
                       <option key={segment.segmentId} value={segment.segmentId}>
-                        {segment.segmentId} ({segment.durationSec}s)
+                        {segment.segmentId} · {describeSegment(segment)}
                       </option>
                     ))}
                   </select>
@@ -1404,9 +1483,9 @@ export default function App() {
                     className="rounded-md border border-ink/20 px-3 py-2"
                   >
                     <option value="">Use selected/original frame</option>
-                    {(task.frames[selectedSegment.startFrameId]?.variants ?? []).map((variant) => (
+                    {selectedStartFrameVariants.map((variant) => (
                       <option key={variant.variantId} value={variant.variantId}>
-                        {variant.variantId} ({variant.model}/{variant.type})
+                        {describeStartFrameVariant(variant)}
                       </option>
                     ))}
                   </select>
@@ -1488,12 +1567,13 @@ export default function App() {
                     <p className="text-sm text-ink/60">Select a segment and generated variant to compare.</p>
                   )}
                   <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                    {selectedSegmentGenerations.map((gen) => (
-                      <div key={gen.genId} className="rounded border border-ink/10 p-2">
+                    {selectedSegmentGenerations.map((gen, index) => (
+                      <div key={gen.genId} className={`rounded border p-2 ${index === 0 ? "border-accent/40 bg-accent/5" : "border-ink/10"}`}>
                         <div className="mb-1 flex items-center justify-between text-xs">
-                          <span>{gen.genId}</span>
+                          <span className={index === 0 ? "font-semibold" : ""}>{describeGeneration(gen)}</span>
                           <span className="uppercase text-ink/60">{gen.status}</span>
                         </div>
+                        <p className="mb-1 text-[11px] text-ink/50">{gen.genId}</p>
                         {gen.downloadUrl ? <video src={gen.downloadUrl} controls className="mb-2 h-28 w-full object-contain" /> : null}
                         <div className="flex items-center justify-between gap-2">
                           <button
@@ -1528,6 +1608,51 @@ export default function App() {
             {tab === "merge" && (
               <div className="space-y-4">
                 <h3 className="text-lg font-semibold">Merge & Export</h3>
+                <label className="block text-sm">Add generated segment (latest first)</label>
+                <select
+                  value=""
+                  onChange={(e) => {
+                    const genId = e.target.value;
+                    if (!genId) return;
+                    setSelectedGenIds((prev) => (prev.includes(genId) ? prev : [...prev, genId]));
+                  }}
+                  className="w-full rounded-md border border-ink/20 px-3 py-2"
+                >
+                  <option value="">Select generation</option>
+                  {mergeGenerationOptions.map((generation) => (
+                    <option key={generation.genId} value={generation.genId}>
+                      {describeGeneration(generation)}
+                    </option>
+                  ))}
+                </select>
+                <div className="space-y-2 rounded-lg border border-ink/10 p-3">
+                  <p className="text-sm font-medium">Selected generations ({selectedMergeGenerations.length})</p>
+                  {selectedMergeGenerations.length === 0 ? (
+                    <p className="text-sm text-ink/60">No generations selected yet.</p>
+                  ) : (
+                    <div className="space-y-2">
+                      {selectedMergeGenerations.map((generation, index) => (
+                        <div
+                          key={generation.genId}
+                          className={`flex items-center justify-between gap-3 rounded border p-2 ${
+                            index === 0 ? "border-accent/40 bg-accent/5" : "border-ink/10"
+                          }`}
+                        >
+                          <div>
+                            <p className={`text-sm ${index === 0 ? "font-semibold" : "font-medium"}`}>{describeGeneration(generation)}</p>
+                            <p className="text-xs text-ink/50">{generation.genId}</p>
+                          </div>
+                          <button
+                            className="rounded border border-ink/20 bg-white px-2 py-1 text-xs"
+                            onClick={() => setSelectedGenIds((prev) => prev.filter((id) => id !== generation.genId))}
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
                 <label className="block text-sm">Temporal feather frames (0-30)</label>
                 <input
                   type="number"
@@ -1539,7 +1664,7 @@ export default function App() {
                 />
                 <button
                   className="rounded-md bg-accent2 px-4 py-2 text-white"
-                  disabled={selectedGenIds.length === 0}
+                  disabled={selectedMergeGenerations.length === 0}
                   onClick={() => mergeMutation.mutate()}
                 >
                   Merge Selected Generations
@@ -1547,7 +1672,10 @@ export default function App() {
                 <div className="space-y-2">
                   {sortedExports.map((exp) => (
                     <div key={exp.exportId} className="rounded border border-ink/10 p-3">
-                      <p className="font-medium">{exp.exportId}</p>
+                      <p className="font-medium">{humanizeFilename(keyBasenameFromS3Key(exp.outputKey || `${exp.exportId}.mp4`))}</p>
+                      <p className="text-xs text-ink/60">
+                        {exp.exportId} · {formatCompactTimestamp(exp.createdAt)}
+                      </p>
                       {exp.downloadUrl ? (
                         <a className="text-sm text-accent underline" href={exp.downloadUrl}>
                           Download merged video
