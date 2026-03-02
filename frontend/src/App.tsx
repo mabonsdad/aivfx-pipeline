@@ -28,6 +28,26 @@ type LibraryAsset = {
     | { assetType: "export"; exportId: string };
 };
 
+function normalizeTaskNameInput(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^[_-]+|[_-]+$/g, "")
+    .slice(0, 12);
+}
+
+function humanizeFilename(value: string): string {
+  const withoutExt = value.replace(/\.[^/.]+$/, "");
+  return withoutExt.replace(/[_-]+/g, " ").trim();
+}
+
+function keyBasenameFromS3Key(key: string): string {
+  const parts = key.split("/");
+  return parts[parts.length - 1] || key;
+}
+
 function frameCount(task: TaskDetail | undefined): number {
   return task?.video?.editSource?.frameCount ?? 0;
 }
@@ -132,6 +152,10 @@ export default function App() {
   const [newTaskError, setNewTaskError] = useState<string | null>(null);
   const [newTaskUploadPercent, setNewTaskUploadPercent] = useState(0);
   const [pendingCreateJobId, setPendingCreateJobId] = useState<string | null>(null);
+  const [uploadAssetsVisible, setUploadAssetsVisible] = useState(6);
+  const [frameAssetsVisible, setFrameAssetsVisible] = useState(6);
+  const [videoAssetsVisible, setVideoAssetsVisible] = useState(6);
+  const [jobsVisible, setJobsVisible] = useState(6);
   const [prompt, setPrompt] = useState("");
   const [model, setModel] = useState<"nano_banana" | "nano_banana_pro">("nano_banana_pro");
   const [patchPrompt, setPatchPrompt] = useState("");
@@ -166,6 +190,12 @@ export default function App() {
     queryFn: async () => (await apiClient.listTasks()).tasks,
     enabled: isAuthed,
   });
+  const normalizedNewTaskName = useMemo(() => normalizeTaskNameInput(newTaskName), [newTaskName]);
+  const taskNameAlreadyExists = useMemo(() => {
+    const target = normalizedNewTaskName.toLowerCase();
+    if (!target) return false;
+    return (tasksQuery.data ?? []).some((taskItem) => taskItem.name.toLowerCase() === target);
+  }, [normalizedNewTaskName, tasksQuery.data]);
 
   useEffect(() => {
     if (!selectedTaskId && tasksQuery.data?.length) {
@@ -209,6 +239,13 @@ export default function App() {
   const editFirstFrame = (firstFrameId ? task?.frames[firstFrameId] : null) ?? (selectedSegment ? task?.frames[selectedSegment.startFrameId] : null) ?? null;
   const editLastFrame = (lastFrameId ? task?.frames[lastFrameId] : null) ?? (selectedSegment ? task?.frames[selectedSegment.endFrameId] : null) ?? null;
   const activeEditFrame = editFrameTab === "first" ? editFirstFrame : editLastFrame;
+  const activeEditVariants = useMemo(
+    () =>
+      [...(activeEditFrame?.variants ?? [])].sort(
+        (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+      ),
+    [activeEditFrame?.variants],
+  );
   const activeFrameDimensions = useMemo(() => {
     const width = task?.video?.editSource?.width;
     const height = task?.video?.editSource?.height;
@@ -233,6 +270,14 @@ export default function App() {
       queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
     }
   }, [queryClient, selectedTaskId, tab]);
+
+  useEffect(() => {
+    if (tab === "assets") {
+      setUploadAssetsVisible(6);
+      setFrameAssetsVisible(6);
+      setVideoAssetsVisible(6);
+    }
+  }, [tab]);
 
   useEffect(() => {
     if (!activeFrameWidth || !activeFrameHeight) {
@@ -509,14 +554,33 @@ export default function App() {
       }
     }
   }, [jobQueries, queryClient, selectedTaskId]);
+  const sortedJobs = useMemo(
+    () =>
+      jobQueries
+        .map((query) => query.data)
+        .filter((job): job is NonNullable<typeof job> => Boolean(job))
+        .sort(
+          (a, b) =>
+            new Date(b.updatedAt ?? b.createdAt ?? 0).getTime() -
+            new Date(a.updatedAt ?? a.createdAt ?? 0).getTime(),
+        ),
+    [jobQueries],
+  );
 
   const segmentGenerations = useMemo(() => Object.values(task?.segmentGenerations ?? {}), [task]);
   const selectedSegmentGenerations = useMemo(
-    () => segmentGenerations.filter((gen) => !selectedSegmentId || gen.segmentId === selectedSegmentId),
+    () =>
+      segmentGenerations
+        .filter((gen) => !selectedSegmentId || gen.segmentId === selectedSegmentId)
+        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
     [segmentGenerations, selectedSegmentId],
   );
   const selectedPreviewGeneration =
     selectedSegmentGenerations.find((gen) => gen.genId === selectedPreviewGenId) ?? selectedSegmentGenerations[0] ?? null;
+  const sortedExports = useMemo(
+    () => [...(task?.exports ?? [])].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
+    [task?.exports],
+  );
   const lumaHardLimitSeconds = lumaModelMaxDurationSeconds(lumaModel);
   const lumaHardLimitFrames = Math.round(lumaHardLimitSeconds * fpsValue(task));
   const timelineDelta = useMemo(() => {
@@ -561,7 +625,7 @@ export default function App() {
       assets.push({
         id: `upload:${taskItem.taskId}`,
         taskId: taskItem.taskId,
-        title: original.filename || "Original Upload",
+        title: humanizeFilename(keyBasenameFromS3Key(original.s3Key || original.filename || "orig.mp4")),
         subtitle: taskItem.name,
         createdAt: taskItem.createdAt,
         previewUrl: original.downloadUrl,
@@ -581,9 +645,9 @@ export default function App() {
           assets.push({
             id: `capture:${taskItem.taskId}:${frame.frameId}`,
             taskId: taskItem.taskId,
-            title: `Captured Frame ${frame.frameIndex}`,
+            title: humanizeFilename(keyBasenameFromS3Key(frame.captureKey)),
             subtitle: `${taskItem.name} · ${frame.timecode}`,
-            createdAt: taskItem.updatedAt,
+            createdAt: frame.createdAt ?? taskItem.updatedAt,
             previewUrl: frame.imageUrl,
             downloadUrl: frame.imageUrl,
             mediaType: "image",
@@ -595,7 +659,7 @@ export default function App() {
           assets.push({
             id: `variant:${taskItem.taskId}:${frame.frameId}:${variant.variantId}`,
             taskId: taskItem.taskId,
-            title: `Edit ${variant.variantId}`,
+            title: humanizeFilename(keyBasenameFromS3Key(variant.outputKey)),
             subtitle: `${taskItem.name} · frame ${frame.frameIndex} · ${variant.model}/${variant.type}`,
             createdAt: variant.createdAt,
             previewUrl: variant.imageUrl,
@@ -617,7 +681,7 @@ export default function App() {
         assets.push({
           id: `generation:${taskItem.taskId}:${generation.genId}`,
           taskId: taskItem.taskId,
-          title: `Generated Segment ${generation.genId}`,
+          title: humanizeFilename(keyBasenameFromS3Key(generation.outputKey || `${generation.genId}.mp4`)),
           subtitle: `${taskItem.name} · ${generation.luma.model} · ${generation.luma.mode}`,
           createdAt: generation.createdAt,
           previewUrl: generation.downloadUrl,
@@ -631,7 +695,7 @@ export default function App() {
         assets.push({
           id: `export:${taskItem.taskId}:${exportItem.exportId}`,
           taskId: taskItem.taskId,
-          title: `Merged Export ${exportItem.exportId}`,
+          title: humanizeFilename(keyBasenameFromS3Key(exportItem.outputKey || `${exportItem.exportId}.mp4`)),
           subtitle: taskItem.name,
           createdAt: exportItem.createdAt,
           previewUrl: exportItem.downloadUrl,
@@ -844,8 +908,20 @@ export default function App() {
     try {
       setNewTaskError(null);
       setNewTaskUploadPercent(0);
+      const normalizedTaskName = normalizeTaskNameInput(newTaskName);
+      if (!normalizedTaskName) {
+        setNewTaskStage("error");
+        setNewTaskError("Task name must include letters or numbers");
+        return;
+      }
+      if (taskNameAlreadyExists) {
+        setNewTaskStage("error");
+        setNewTaskError("Task name already exists. Choose a unique name.");
+        return;
+      }
       setNewTaskStage("creating");
-      const created = await apiClient.createTask(newTaskName.trim());
+      setNewTaskName(normalizedTaskName);
+      const created = await apiClient.createTask(normalizedTaskName);
       setSelectedTaskId(created.taskId);
       await queryClient.invalidateQueries({ queryKey: ["tasks"] });
 
@@ -1138,8 +1214,8 @@ export default function App() {
                         itemTwo={
                           <ReactCompareSliderImage
                             src={
-                              activeEditFrame.variants.find((v) => v.variantId === activeEditFrame.selectedVariantId)?.imageUrl ??
-                              activeEditFrame.variants[0]?.imageUrl ??
+                              activeEditVariants.find((v) => v.variantId === activeEditFrame.selectedVariantId)?.imageUrl ??
+                              activeEditVariants[0]?.imageUrl ??
                               activeEditFrame.imageUrl
                             }
                             alt="Variant"
@@ -1154,15 +1230,19 @@ export default function App() {
                     </div>
                   )}
                   <div className="grid grid-cols-2 gap-2">
-                    {activeEditFrame?.variants.map((variant) => (
+                    {activeEditVariants.map((variant) => (
                       <div key={variant.variantId} className="rounded border border-ink/10 p-2">
                         {variant.imageUrl ? <img src={variant.imageUrl} className="mb-2 h-28 w-full object-contain" /> : null}
                         <p className="text-xs text-ink/70">{variant.type} / {variant.model}</p>
                         <button
                           className="mt-1 rounded bg-ink px-2 py-1 text-xs text-white"
-                          onClick={() => selectVariantMutation.mutate({ frameId: activeEditFrame.frameId, variantId: variant.variantId })}
+                          disabled={!activeEditFrame}
+                          onClick={() => {
+                            if (!activeEditFrame) return;
+                            selectVariantMutation.mutate({ frameId: activeEditFrame.frameId, variantId: variant.variantId });
+                          }}
                         >
-                          {activeEditFrame.selectedVariantId === variant.variantId ? "Selected" : "Select"}
+                          {activeEditFrame?.selectedVariantId === variant.variantId ? "Selected" : "Select"}
                         </button>
                       </div>
                     ))}
@@ -1468,7 +1548,7 @@ export default function App() {
                   Merge Selected Generations
                 </button>
                 <div className="space-y-2">
-                  {task?.exports.map((exp) => (
+                  {sortedExports.map((exp) => (
                     <div key={exp.exportId} className="rounded border border-ink/10 p-3">
                       <p className="font-medium">{exp.exportId}</p>
                       {exp.downloadUrl ? (
@@ -1492,11 +1572,16 @@ export default function App() {
                     <p className="text-sm text-ink/60">No uploads found.</p>
                   ) : (
                     <div className="space-y-2">
-                      {uploadAssets.map((item) => (
-                        <div key={item.id} className="grid gap-2 rounded border border-ink/10 p-2 md:grid-cols-[140px_1fr_auto] md:items-center">
+                      {uploadAssets.slice(0, uploadAssetsVisible).map((item, index) => (
+                        <div
+                          key={item.id}
+                          className={`grid gap-2 rounded border p-2 md:grid-cols-[140px_1fr_auto] md:items-center ${
+                            index === 0 ? "border-accent/40 bg-accent/5" : "border-ink/10"
+                          }`}
+                        >
                           <video src={item.previewUrl} className="h-20 w-full rounded object-cover" muted />
                           <div>
-                            <p className="text-sm font-medium">{item.title}</p>
+                            <p className={`text-sm ${index === 0 ? "font-semibold" : "font-medium"}`}>{item.title}</p>
                             <p className="text-xs text-ink/60">{item.subtitle}</p>
                             <p className="text-xs text-ink/50">{formatAssetDate(item.createdAt)}</p>
                           </div>
@@ -1513,6 +1598,11 @@ export default function App() {
                           </div>
                         </div>
                       ))}
+                      {uploadAssetsVisible < uploadAssets.length ? (
+                        <button className="text-sm text-accent underline" onClick={() => setUploadAssetsVisible((count) => count + 6)}>
+                          More...
+                        </button>
+                      ) : null}
                     </div>
                   )}
                 </div>
@@ -1523,11 +1613,16 @@ export default function App() {
                     <p className="text-sm text-ink/60">No frame assets found.</p>
                   ) : (
                     <div className="space-y-2">
-                      {frameAssets.map((item) => (
-                        <div key={item.id} className="grid gap-2 rounded border border-ink/10 p-2 md:grid-cols-[140px_1fr_auto] md:items-center">
+                      {frameAssets.slice(0, frameAssetsVisible).map((item, index) => (
+                        <div
+                          key={item.id}
+                          className={`grid gap-2 rounded border p-2 md:grid-cols-[140px_1fr_auto] md:items-center ${
+                            index === 0 ? "border-accent/40 bg-accent/5" : "border-ink/10"
+                          }`}
+                        >
                           <img src={item.previewUrl} className="h-20 w-full rounded object-cover" />
                           <div>
-                            <p className="text-sm font-medium">{item.title}</p>
+                            <p className={`text-sm ${index === 0 ? "font-semibold" : "font-medium"}`}>{item.title}</p>
                             <p className="text-xs text-ink/60">{item.subtitle}</p>
                             <p className="text-xs text-ink/50">{formatAssetDate(item.createdAt)}</p>
                           </div>
@@ -1544,6 +1639,11 @@ export default function App() {
                           </div>
                         </div>
                       ))}
+                      {frameAssetsVisible < frameAssets.length ? (
+                        <button className="text-sm text-accent underline" onClick={() => setFrameAssetsVisible((count) => count + 6)}>
+                          More...
+                        </button>
+                      ) : null}
                     </div>
                   )}
                 </div>
@@ -1554,11 +1654,16 @@ export default function App() {
                     <p className="text-sm text-ink/60">No output videos found.</p>
                   ) : (
                     <div className="space-y-2">
-                      {outputVideoAssets.map((item) => (
-                        <div key={item.id} className="grid gap-2 rounded border border-ink/10 p-2 md:grid-cols-[140px_1fr_auto] md:items-center">
+                      {outputVideoAssets.slice(0, videoAssetsVisible).map((item, index) => (
+                        <div
+                          key={item.id}
+                          className={`grid gap-2 rounded border p-2 md:grid-cols-[140px_1fr_auto] md:items-center ${
+                            index === 0 ? "border-accent/40 bg-accent/5" : "border-ink/10"
+                          }`}
+                        >
                           <video src={item.previewUrl} className="h-20 w-full rounded object-cover" muted />
                           <div>
-                            <p className="text-sm font-medium">{item.title}</p>
+                            <p className={`text-sm ${index === 0 ? "font-semibold" : "font-medium"}`}>{item.title}</p>
                             <p className="text-xs text-ink/60">{item.subtitle}</p>
                             <p className="text-xs text-ink/50">{formatAssetDate(item.createdAt)}</p>
                           </div>
@@ -1575,6 +1680,11 @@ export default function App() {
                           </div>
                         </div>
                       ))}
+                      {videoAssetsVisible < outputVideoAssets.length ? (
+                        <button className="text-sm text-accent underline" onClick={() => setVideoAssetsVisible((count) => count + 6)}>
+                          More...
+                        </button>
+                      ) : null}
                     </div>
                   )}
                 </div>
@@ -1585,20 +1695,23 @@ export default function App() {
           <div className="rounded-2xl border border-ink/10 bg-card p-4">
             <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide">Jobs</h3>
             <div className="space-y-2 text-sm">
-              {jobQueries.length === 0 && <p className="text-ink/60">No jobs yet.</p>}
-              {jobQueries.map((jq) => {
-                const job = jq.data;
-                if (!job) return null;
+              {sortedJobs.length === 0 && <p className="text-ink/60">No jobs yet.</p>}
+              {sortedJobs.slice(0, jobsVisible).map((job, index) => {
                 return (
-                  <div key={job.jobId} className="rounded border border-ink/10 p-2">
+                  <div key={job.jobId} className={`rounded border p-2 ${index === 0 ? "border-accent/40 bg-accent/5" : "border-ink/10"}`}>
                     <p className="font-medium">
                       {job.jobId} <span className="text-ink/60">({job.type})</span>
                     </p>
-                    <p className="text-xs uppercase">{job.status} - {job.progress}%</p>
+                    <p className={`text-xs uppercase ${index === 0 ? "font-semibold" : ""}`}>{job.status} - {job.progress}%</p>
                     {job.error ? <p className="text-xs text-red-600">{job.error}</p> : null}
                   </div>
                 );
               })}
+              {jobsVisible < sortedJobs.length ? (
+                <button className="text-sm text-accent underline" onClick={() => setJobsVisible((count) => count + 6)}>
+                  More...
+                </button>
+              ) : null}
             </div>
           </div>
         </section>
@@ -1622,9 +1735,14 @@ export default function App() {
                 <input
                   value={newTaskName}
                   onChange={(e) => setNewTaskName(e.target.value)}
+                  maxLength={12}
                   className="w-full rounded-md border border-ink/20 bg-white px-3 py-2"
                   disabled={newTaskStage === "creating" || newTaskStage === "uploading" || newTaskStage === "ingesting"}
                 />
+                <p className="mt-1 text-xs text-ink/60">
+                  Final name: <span className="font-medium">{normalizedNewTaskName || "(invalid)"}</span> (max 12 chars)
+                </p>
+                {taskNameAlreadyExists ? <p className="text-xs text-red-600">Name already used by another task.</p> : null}
               </div>
               <div>
                 <label className="mb-1 block text-sm font-medium">Video file</label>
@@ -1656,7 +1774,15 @@ export default function App() {
               {newTaskError ? <p className="text-sm text-red-600">{newTaskError}</p> : null}
               <button
                 className="w-full rounded-md bg-accent px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-50"
-                disabled={!newTaskName.trim() || !newTaskFile || newTaskStage === "creating" || newTaskStage === "uploading" || newTaskStage === "ingesting"}
+                disabled={
+                  !newTaskName.trim() ||
+                  !normalizedNewTaskName ||
+                  taskNameAlreadyExists ||
+                  !newTaskFile ||
+                  newTaskStage === "creating" ||
+                  newTaskStage === "uploading" ||
+                  newTaskStage === "ingesting"
+                }
                 onClick={handleCreateTaskWithUpload}
               >
                 {newTaskStage === "creating"

@@ -32,6 +32,10 @@ from src.integrations.luma import create_modify_generation, get_generation
 logger = Logger()
 
 
+def _asset_paths(task: dict[str, Any]) -> AssetPaths:
+    return AssetPaths(user_id=task["userId"], task_id=task["taskId"], file_prefix=task.get("filePrefix", ""))
+
+
 def _download_s3(s3, bucket: str, key: str, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     s3.download_file(bucket, key, str(path))
@@ -95,7 +99,7 @@ def _handle_ingest(
     settings: Any,
 ) -> dict[str, Any]:
     s3 = boto3.client("s3")
-    asset_paths = AssetPaths(user_id=task["userId"], task_id=task["taskId"])
+    asset_paths = _asset_paths(task)
 
     original_key = task["video"]["original"]["s3Key"]
     _job_progress(job, store, 5, "running", "Downloading source video")
@@ -298,7 +302,7 @@ def _handle_full_edit(
     normalized_bytes = _normalize_full_variant(source_bytes=src_bytes, variant_bytes=out_bytes)
 
     variant_id = new_id("var")
-    paths = AssetPaths(task["userId"], task["taskId"])
+    paths = _asset_paths(task)
     output_key = paths.frame_variant(frame_id, variant_id)
     asset_store.put_bytes(output_key, normalized_bytes, content_type="image/png")
 
@@ -350,7 +354,7 @@ def _handle_patch_edit(
     )
 
     variant_id = new_id("var")
-    paths = AssetPaths(task["userId"], task["taskId"])
+    paths = _asset_paths(task)
     patch_only_key = paths.frame_patch(frame_id, variant_id)
     asset_store.put_bytes(patch_only_key, edited_patch, content_type="image/png")
 
@@ -406,7 +410,7 @@ def _handle_segment_generate(
     gen_id = payload["genId"]
     segment = next(s for s in task["segments"] if s["segmentId"] == segment_id)
 
-    paths = AssetPaths(task["userId"], task["taskId"])
+    paths = _asset_paths(task)
     s3 = boto3.client("s3")
     segment_key = _ensure_segment_clip(
         s3=s3,
@@ -488,7 +492,7 @@ def _handle_merge(
     payload = job["payload"]
     selected = payload["selectedSegmentGenerationIds"]
     feather_frames = int(payload.get("temporalFeatherFrames", 0))
-    paths = AssetPaths(task["userId"], task["taskId"])
+    paths = _asset_paths(task)
 
     with tempfile.TemporaryDirectory() as td:
         td_path = Path(td)

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import mimetypes
+import re
 from dataclasses import dataclass
 from typing import Any
+from pathlib import Path
 
 import boto3
 import requests
@@ -14,39 +16,53 @@ from botocore.config import Config
 class AssetPaths:
     user_id: str
     task_id: str
+    file_prefix: str = ""
+
+    def _filename(self, stem: str, ext: str) -> str:
+        safe_ext = ext if ext.startswith(".") else f".{ext}"
+        return f"{self.file_prefix}{stem}{safe_ext}"
 
     def task_prefix(self) -> str:
         return f"users/{self.user_id}/tasks/{self.task_id}"
 
     def original_video(self, filename: str) -> str:
-        return f"{self.task_prefix()}/original/{filename}"
+        ext = Path(filename).suffix or ".mp4"
+        return f"{self.task_prefix()}/original/{self._filename('orig', ext)}"
 
     def edit_source(self) -> str:
-        return f"{self.task_prefix()}/edit_source/edit.mp4"
+        return f"{self.task_prefix()}/edit_source/{self._filename('editsource', '.mp4')}"
 
     def thumbs_prefix(self) -> str:
         return f"{self.task_prefix()}/thumbs"
 
     def frame_capture(self, frame_id: str) -> str:
-        return f"{self.task_prefix()}/frames/{frame_id}/capture.png"
+        short_frame = re.sub(r"[^a-zA-Z0-9]+", "", frame_id)[-8:]
+        return f"{self.task_prefix()}/frames/{frame_id}/{self._filename(f'capframe{short_frame}', '.png')}"
 
     def frame_variant(self, frame_id: str, variant_id: str) -> str:
-        return f"{self.task_prefix()}/frames/{frame_id}/variants/{variant_id}.png"
+        short_frame = re.sub(r"[^a-zA-Z0-9]+", "", frame_id)[-6:]
+        short_var = re.sub(r"[^a-zA-Z0-9]+", "", variant_id)[-6:]
+        return f"{self.task_prefix()}/frames/{frame_id}/variants/{self._filename(f'frame{short_frame}_edit{short_var}', '.png')}"
 
     def frame_patch(self, frame_id: str, variant_id: str) -> str:
-        return f"{self.task_prefix()}/frames/{frame_id}/patches/{variant_id}.png"
+        short_var = re.sub(r"[^a-zA-Z0-9]+", "", variant_id)[-8:]
+        return f"{self.task_prefix()}/frames/{frame_id}/patches/{self._filename(f'patch{short_var}', '.png')}"
 
     def frame_mask(self, frame_id: str, variant_id: str) -> str:
-        return f"{self.task_prefix()}/frames/{frame_id}/masks/{variant_id}.png"
+        short_var = re.sub(r"[^a-zA-Z0-9]+", "", variant_id)[-8:]
+        return f"{self.task_prefix()}/frames/{frame_id}/masks/{self._filename(f'mask{short_var}', '.png')}"
 
     def segment_original(self, segment_id: str) -> str:
-        return f"{self.task_prefix()}/segments/{segment_id}/original.mp4"
+        short_seg = re.sub(r"[^a-zA-Z0-9]+", "", segment_id)[-8:]
+        return f"{self.task_prefix()}/segments/{segment_id}/{self._filename(f'seg{short_seg}_orig', '.mp4')}"
 
     def segment_generated(self, segment_id: str, generation_id: str) -> str:
-        return f"{self.task_prefix()}/segments/{segment_id}/generated/{generation_id}.mp4"
+        short_gen = re.sub(r"[^a-zA-Z0-9]+", "", generation_id)[-8:]
+        return f"{self.task_prefix()}/segments/{segment_id}/generated/{self._filename(f'output{short_gen}', '.mp4')}"
 
     def export_output(self, export_id: str) -> str:
-        return f"{self.task_prefix()}/exports/{export_id}.mp4"
+        short_export = re.sub(r"[^a-zA-Z0-9]+", "", export_id)[-8:]
+        return f"{self.task_prefix()}/exports/{self._filename(f'output{short_export}', '.mp4')}"
 
 
 class AssetStore:

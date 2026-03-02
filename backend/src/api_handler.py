@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import tempfile
 from io import BytesIO
+from datetime import datetime, timezone
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
@@ -46,6 +48,49 @@ LUMA_MODEL_MAX_SECONDS: dict[str, int] = {
     "ray-flash-2": 15,
 }
 PRESIGNED_GET_TTL_SECONDS = 3600
+
+
+def _normalize_task_name(raw: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9_-]+", "_", raw.strip().lower())
+    cleaned = re.sub(r"_+", "_", cleaned).strip("_-")
+    if not cleaned:
+        cleaned = "task"
+    return cleaned[:12]
+
+
+def _unique_task_name(base: str, existing_names: set[str]) -> str:
+    candidate = base[:12]
+    if candidate not in existing_names:
+        return candidate
+    i = 2
+    while True:
+        suffix = str(i)
+        prefix = candidate[: max(1, 12 - len(suffix))]
+        next_candidate = f"{prefix}{suffix}"
+        if next_candidate not in existing_names:
+            return next_candidate
+        i += 1
+
+
+def _build_file_prefix(task_name: str, task_id: str, existing_prefixes: set[str]) -> str:
+    date_part = datetime.now(timezone.utc).strftime("%y%m%d")
+    name_alnum = re.sub(r"[^a-zA-Z0-9]+", "", task_name.lower())
+    seed = f"{name_alnum}{re.sub(r'[^a-zA-Z0-9]+', '', task_id.lower())}zzzzz"
+    base_root = (seed[:5]).ljust(5, "x")
+    candidate = f"{base_root}-{date_part}-"
+    if candidate not in existing_prefixes:
+        return candidate
+    for idx in range(5, len(seed)):
+        root = (seed[idx - 4 : idx + 1]).ljust(5, "x")
+        candidate = f"{root}-{date_part}-"
+        if candidate not in existing_prefixes:
+            return candidate
+    fallback = re.sub(r"[^a-zA-Z0-9]+", "", task_id.lower())[:5].ljust(5, "x")
+    return f"{fallback}-{date_part}-"
+
+
+def _asset_paths_for_task(task: dict[str, Any]) -> AssetPaths:
+    return AssetPaths(user_id=task["userId"], task_id=task["taskId"], file_prefix=task.get("filePrefix", ""))
 
 
 def _origin(event: dict[str, Any]) -> str | None:
@@ -151,7 +196,7 @@ def _capture_frame_sync(
         }
 
     s3 = boto3.client("s3")
-    paths = AssetPaths(user_id=task["userId"], task_id=task["taskId"])
+    paths = _asset_paths_for_task(task)
 
     with tempfile.TemporaryDirectory() as td:
         td_path = Path(td)
@@ -173,6 +218,7 @@ def _capture_frame_sync(
         "frameId": frame_id,
         "frameIndex": frame_index,
         "timecode": timecode,
+        "createdAt": now_iso(),
         "captureKey": key,
         "variants": [],
         "selectedVariantId": None,
@@ -265,12 +311,19 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
 
     if method == "POST" and path == "/tasks":
         req = _json_model(TaskCreateRequest, event)
+        existing_tasks = store.list_tasks(user_id)
+        existing_names = {str(item.get("name", "")).lower() for item in existing_tasks}
         task_id = new_id("task")
+        normalized_name = _normalize_task_name(req.name)
+        unique_name = _unique_task_name(normalized_name, existing_names)
+        existing_prefixes = {str(item.get("filePrefix", "")) for item in existing_tasks if item.get("filePrefix")}
+        file_prefix = _build_file_prefix(unique_name, task_id, existing_prefixes)
         now = now_iso()
         task = {
             "taskId": task_id,
             "userId": user_id,
-            "name": req.name,
+            "name": unique_name,
+            "filePrefix": file_prefix,
             "createdAt": now,
             "updatedAt": now,
             "status": "created",
@@ -348,7 +401,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             if not req.contentType.startswith("video/"):
                 return error_response(400, "Invalid content type", origin=origin)
 
-            key = AssetPaths(user_id, task_id).original_video(req.filename)
+            key = _asset_paths_for_task(task).original_video(req.filename)
             upload_url = asset_store.presign_put(key, expires=900, content_type=req.contentType)
             task["video"]["original"] = {
                 "s3Key": key,
@@ -637,7 +690,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             req = _json_model(PatchInitRequest, event)
 
             variant_id = new_id("patch")
-            paths = AssetPaths(user_id, task_id)
+            paths = _asset_paths_for_task(task)
             patch_key = paths.frame_patch(frame_id, variant_id)
             frame = task["frames"][frame_id]
             capture_bytes = asset_store.read_bytes(frame["captureKey"])

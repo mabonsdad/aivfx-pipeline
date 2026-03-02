@@ -23,6 +23,7 @@ export type FrameRecord = {
   frameIndex: number;
   timecode: string;
   captureKey: string;
+  createdAt?: string;
   imageUrl?: string;
   variants: FrameVariant[];
   selectedVariantId?: string | null;
@@ -102,6 +103,8 @@ export type JobStatus = {
   type: string;
   status: "queued" | "running" | "complete" | "failed";
   progress: number;
+  createdAt?: string;
+  updatedAt?: string;
   logs?: Array<{ at: string; message: string }>;
   error?: string;
   resultRefs?: Record<string, unknown>;
