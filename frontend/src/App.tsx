@@ -133,12 +133,12 @@ export default function App() {
   const [newTaskUploadPercent, setNewTaskUploadPercent] = useState(0);
   const [pendingCreateJobId, setPendingCreateJobId] = useState<string | null>(null);
   const [prompt, setPrompt] = useState("");
-  const [model, setModel] = useState<"nano_banana" | "nano_banana_pro">("nano_banana");
+  const [model, setModel] = useState<"nano_banana" | "nano_banana_pro">("nano_banana_pro");
   const [patchPrompt, setPatchPrompt] = useState("");
   const [patchBrushSize, setPatchBrushSize] = useState(24);
   const [featherPx, setFeatherPx] = useState(24);
   const [maskHasPaint, setMaskHasPaint] = useState(false);
-  const [lumaModel, setLumaModel] = useState<"ray-2" | "ray-flash-2">("ray-2");
+  const [lumaModel, setLumaModel] = useState<"ray-2" | "ray-flash-2">("ray-flash-2");
   const [advancedMode, setAdvancedMode] = useState("flex_1");
   const [lumaPrompt, setLumaPrompt] = useState("");
   const [firstFrameVariantId, setFirstFrameVariantId] = useState("");
@@ -215,6 +215,8 @@ export default function App() {
     if (!activeEditFrame || !width || !height) return null;
     return { width, height };
   }, [activeEditFrame, task?.video?.editSource?.height, task?.video?.editSource?.width]);
+  const activeFrameWidth = activeFrameDimensions?.width ?? null;
+  const activeFrameHeight = activeFrameDimensions?.height ?? null;
 
   useEffect(() => {
     setFirstFrameId(null);
@@ -233,12 +235,13 @@ export default function App() {
   }, [queryClient, selectedTaskId, tab]);
 
   useEffect(() => {
-    if (!activeFrameDimensions) {
+    if (!activeFrameWidth || !activeFrameHeight) {
       setMaskHasPaint(false);
       patchDrawStateRef.current = null;
       return;
     }
-    const { width, height } = activeFrameDimensions;
+    const width = activeFrameWidth;
+    const height = activeFrameHeight;
     const maskCanvas = patchMaskCanvasRef.current ?? document.createElement("canvas");
     maskCanvas.width = width;
     maskCanvas.height = height;
@@ -257,7 +260,7 @@ export default function App() {
     }
     patchDrawStateRef.current = null;
     setMaskHasPaint(false);
-  }, [activeEditFrame?.frameId, activeFrameDimensions]);
+  }, [activeEditFrame?.frameId, activeFrameWidth, activeFrameHeight]);
 
   useEffect(() => {
     const status = pendingCreateJobQuery.data?.status;
@@ -394,6 +397,7 @@ export default function App() {
       if (!selectedTaskId) throw new Error("Select a task");
       if (!activeFrameDimensions) throw new Error("Frame dimensions unavailable");
       if (!maskHasPaint) throw new Error("Draw a mask before generating a patch variant");
+      const patchModel: "nano_banana" | "nano_banana_pro" = model === "nano_banana_pro" ? model : "nano_banana_pro";
       const patchRect = {
         x: 0,
         y: 0,
@@ -430,7 +434,7 @@ export default function App() {
       });
 
       return apiClient.patchSubmit(selectedTaskId, frameId, {
-        model,
+        model: patchModel,
         prompt: patchPrompt,
         patchKey: init.patchKey,
         maskKey: init.maskKey,
