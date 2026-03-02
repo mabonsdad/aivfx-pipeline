@@ -33,6 +33,7 @@ from src.models.schemas import (
     MergeRequest,
     PatchInitRequest,
     PatchSubmitRequest,
+    ReferenceUploadRequest,
     SegmentCreateRequest,
     SegmentGenerateRequest,
     SegmentPatchRequest,
@@ -259,6 +260,25 @@ def _audit_prompt(prompt: str) -> dict[str, Any]:
         "promptHash": prompt_hash(prompt),
         "promptLength": len(prompt),
     }
+
+
+def _validated_reference_keys(task: dict[str, Any], reference_keys: list[str] | None) -> list[str]:
+    if not reference_keys:
+        return []
+    if len(reference_keys) > 3:
+        raise ValueError("At most 3 reference images are supported")
+    allowed_prefix = f"{_asset_paths_for_task(task).task_prefix()}/frames/"
+    cleaned: list[str] = []
+    for key in reference_keys:
+        if not isinstance(key, str) or not key:
+            raise ValueError("Invalid reference image key")
+        if not key.startswith(allowed_prefix) or "/references/" not in key:
+            raise ValueError("Reference image key is outside task frame references")
+        if key not in cleaned:
+            cleaned.append(key)
+    if len(cleaned) > 3:
+        raise ValueError("At most 3 reference images are supported")
+    return cleaned
 
 
 def _segment_duration_seconds(task: dict[str, Any], segment: dict[str, Any]) -> float:
@@ -657,6 +677,27 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             store.save_task(task)
             return response(200, out, origin=origin)
 
+        if method == "POST" and len(parts) == 6 and parts[2] == "frames" and parts[4] == "references" and parts[5] == "uploads":
+            frame_id = parts[3]
+            if frame_id not in task.get("frames", {}):
+                return error_response(404, "Frame not found", origin=origin)
+            req = _json_model(ReferenceUploadRequest, event)
+            uploads: list[dict[str, str]] = []
+            paths = _asset_paths_for_task(task)
+            for file_req in req.files:
+                if not file_req.contentType.lower().startswith("image/"):
+                    return error_response(400, "Reference files must be images", origin=origin)
+                reference_id = new_id("ref")
+                key = paths.frame_reference(frame_id, reference_id, file_req.filename)
+                uploads.append(
+                    {
+                        "referenceId": reference_id,
+                        "key": key,
+                        "uploadUrl": asset_store.presign_put(key, expires=900, content_type=file_req.contentType),
+                    }
+                )
+            return response(200, {"uploads": uploads}, origin=origin)
+
         if method == "POST" and len(parts) == 6 and parts[2] == "frames" and parts[4] == "edits" and parts[5] == "full":
             frame_id = parts[3]
             if frame_id not in task.get("frames", {}):
@@ -665,6 +706,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             req = _json_model(FullEditRequest, event)
             try:
                 prompt = _sanitize_prompt(req.prompt)
+                reference_keys = _validated_reference_keys(task, req.referenceImageKeys)
             except ValueError as exc:
                 return error_response(400, str(exc), origin=origin)
             logger.info("Queueing full edit", extra={**_audit_prompt(prompt), "taskId": task_id, "frameId": frame_id})
@@ -679,6 +721,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                     "frameId": frame_id,
                     "model": req.model,
                     "prompt": prompt,
+                    "referenceImageKeys": reference_keys,
                 },
             )
             return response(202, {"jobId": job_id}, origin=origin)
@@ -726,6 +769,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             req = _json_model(PatchSubmitRequest, event)
             try:
                 prompt = _sanitize_prompt(req.prompt)
+                reference_keys = _validated_reference_keys(task, req.referenceImageKeys)
             except ValueError as exc:
                 return error_response(400, str(exc), origin=origin)
             logger.info("Queueing patch edit", extra={**_audit_prompt(prompt), "taskId": task_id, "frameId": frame_id})
@@ -745,6 +789,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                     "patchRect": req.patchRect.model_dump(),
                     "featherPx": req.featherPx,
                     "bleedPx": req.bleedPx,
+                    "referenceImageKeys": reference_keys,
                 },
             )
             return response(202, {"jobId": job_id}, origin=origin)

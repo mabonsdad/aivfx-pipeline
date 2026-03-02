@@ -52,6 +52,11 @@ class AssetPaths:
         short_var = re.sub(r"[^a-zA-Z0-9]+", "", variant_id)[-8:]
         return f"{self.task_prefix()}/frames/{frame_id}/masks/{self._filename(f'mask{short_var}', '.png')}"
 
+    def frame_reference(self, frame_id: str, reference_id: str, filename: str) -> str:
+        short_ref = re.sub(r"[^a-zA-Z0-9]+", "", reference_id)[-8:]
+        ext = Path(filename).suffix or ".png"
+        return f"{self.task_prefix()}/frames/{frame_id}/references/{self._filename(f'ref{short_ref}', ext)}"
+
     def segment_original(self, segment_id: str) -> str:
         short_seg = re.sub(r"[^a-zA-Z0-9]+", "", segment_id)[-8:]
         return f"{self.task_prefix()}/segments/{segment_id}/{self._filename(f'seg{short_seg}_orig', '.mp4')}"

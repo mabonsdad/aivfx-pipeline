@@ -40,6 +40,7 @@ def generate_image_edit(
     model: str,
     prompt: str,
     input_image_bytes: bytes,
+    reference_image_bytes: list[bytes] | None = None,
     mask_image_bytes: bytes | None = None,
     input_mime_type: str = "image/png",
 ) -> bytes:
@@ -49,8 +50,15 @@ def generate_image_edit(
         "x-goog-api-key": api_key,
         "content-type": "application/json",
     }
+    reference_image_bytes = reference_image_bytes or []
     parts: list[dict[str, Any]] = [
-        {"text": prompt},
+        {
+            "text": (
+                "Editing input structure: the first image is the source image to edit. "
+                "Any subsequent images before the final mask are reference images for style/content cues only. "
+                "If a mask image is provided, it is the final image input and defines editable pixels."
+            )
+        },
         {
             "inline_data": {
                 "mime_type": input_mime_type,
@@ -58,6 +66,16 @@ def generate_image_edit(
             }
         },
     ]
+    for index, ref_bytes in enumerate(reference_image_bytes, start=1):
+        parts.append({"text": f"Reference image {index}: use as guidance only."})
+        parts.append(
+            {
+                "inline_data": {
+                    "mime_type": "image/png",
+                    "data": base64.b64encode(ref_bytes).decode("utf-8"),
+                }
+            }
+        )
     if mask_image_bytes:
         parts.append(
             {
@@ -75,6 +93,7 @@ def generate_image_edit(
                 }
             }
         )
+    parts.append({"text": prompt})
 
     payload: dict[str, Any] = {
         "contents": [

@@ -275,6 +275,23 @@ def _normalize_full_variant(*, source_bytes: bytes, variant_bytes: bytes) -> byt
     return out.getvalue()
 
 
+def _normalize_for_gemini(image_bytes: bytes) -> bytes:
+    image = ImageOps.exif_transpose(Image.open(BytesIO(image_bytes))).convert("RGBA")
+    out = BytesIO()
+    image.save(out, format="PNG")
+    return out.getvalue()
+
+
+def _load_reference_images(asset_store: AssetStore, keys: list[str] | None) -> list[bytes]:
+    if not keys:
+        return []
+    normalized: list[bytes] = []
+    for key in keys[:3]:
+        payload = asset_store.read_bytes(key)
+        normalized.append(_normalize_for_gemini(payload))
+    return normalized
+
+
 def _handle_full_edit(
     *,
     job: dict[str, Any],
@@ -292,12 +309,14 @@ def _handle_full_edit(
 
     _job_progress(job, store, 10, "running", "Loading source frame")
     src_bytes = asset_store.read_bytes(capture_key)
+    ref_images = _load_reference_images(asset_store, payload.get("referenceImageKeys"))
     _job_progress(job, store, 30, "running", "Calling Gemini edit")
     out_bytes = generate_image_edit(
         api_key=gemini_key,
         model=payload["model"],
         prompt=payload["prompt"],
         input_image_bytes=src_bytes,
+        reference_image_bytes=ref_images,
     )
     normalized_bytes = _normalize_full_variant(source_bytes=src_bytes, variant_bytes=out_bytes)
 
@@ -313,6 +332,7 @@ def _handle_full_edit(
         "promptHash": prompt_hash(payload["prompt"]),
         "createdAt": now_iso(),
         "outputKey": output_key,
+        "referenceImageKeys": payload.get("referenceImageKeys", []),
     }
     frame.setdefault("variants", []).append(variant)
     if not frame.get("selectedVariantId"):
@@ -343,6 +363,7 @@ def _handle_patch_edit(
     capture_bytes = asset_store.read_bytes(frame["captureKey"])
     patch_bytes = asset_store.read_bytes(payload["patchKey"])
     mask_bytes = asset_store.read_bytes(payload["maskKey"]) if payload.get("maskKey") else None
+    ref_images = _load_reference_images(asset_store, payload.get("referenceImageKeys"))
 
     _job_progress(job, store, 30, "running", "Calling Gemini patch edit")
     edited_patch = generate_image_edit(
@@ -350,6 +371,7 @@ def _handle_patch_edit(
         model=payload["model"],
         prompt=payload["prompt"],
         input_image_bytes=patch_bytes,
+        reference_image_bytes=ref_images,
         mask_image_bytes=mask_bytes,
     )
 
@@ -378,6 +400,7 @@ def _handle_patch_edit(
         "promptHash": prompt_hash(payload["prompt"]),
         "createdAt": now_iso(),
         "outputKey": output_key,
+        "referenceImageKeys": payload.get("referenceImageKeys", []),
         "patchMeta": {
             "patchRect": payload["patchRect"],
             "featherPx": payload["featherPx"],
