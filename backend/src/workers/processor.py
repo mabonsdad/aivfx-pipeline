@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import hashlib
 import math
-import shutil
 import tempfile
 import time
 from fractions import Fraction
@@ -21,6 +20,8 @@ from src.core.ffmpeg import (
     ffprobe_video,
     generate_thumbnail_strip,
     merge_with_segment_replacement,
+    transcode_for_preview,
+    transcode_for_provider,
     transcode_to_cfr,
 )
 from src.core.ids import new_id, prompt_hash
@@ -28,8 +29,106 @@ from src.core.secrets import load_secret
 from src.core.store import S3JsonStore, now_iso
 from src.integrations.gemini import generate_image_edit
 from src.integrations.luma import create_modify_generation, get_generation
+from src.integrations.runway import (
+    create_ephemeral_upload,
+    create_video_to_video,
+    get_task as get_runway_task,
+    upload_to_ephemeral,
+)
 
 logger = Logger()
+
+FULL_VIDEO_MAX_BYTES = 100 * 1024 * 1024
+RUNWAY_VIDEO_MAX_BYTES = 64 * 1024 * 1024
+MAX_PROVIDER_IMAGE_BYTES = 10 * 1024 * 1024
+
+
+def _target_by_orientation(
+    width: int,
+    height: int,
+    *,
+    landscape: tuple[int, int],
+    portrait: tuple[int, int],
+) -> tuple[int, int]:
+    source_ratio = (width / height) if height else 1.0
+    landscape_ratio = landscape[0] / landscape[1]
+    portrait_ratio = portrait[0] / portrait[1]
+    landscape_delta = abs(math.log(source_ratio / landscape_ratio))
+    portrait_delta = abs(math.log(source_ratio / portrait_ratio))
+    return landscape if landscape_delta <= portrait_delta else portrait
+
+
+def _fit_image_to_canvas(image: Image.Image, target_w: int, target_h: int) -> Image.Image:
+    fitted = ImageOps.contain(image, (target_w, target_h), Image.Resampling.LANCZOS)
+    canvas = Image.new("RGB", (target_w, target_h), (0, 0, 0))
+    offset_x = max(0, (target_w - fitted.width) // 2)
+    offset_y = max(0, (target_h - fitted.height) // 2)
+    canvas.paste(fitted, (offset_x, offset_y))
+    return canvas
+
+
+def _encode_jpeg_with_limit(image: Image.Image, max_bytes: int) -> bytes:
+    candidate = image
+    for _ in range(3):
+        for quality in (95, 90, 84, 78, 72, 66, 60, 54, 48, 42):
+            output = BytesIO()
+            candidate.save(output, format="JPEG", quality=quality, optimize=True)
+            payload = output.getvalue()
+            if len(payload) <= max_bytes:
+                return payload
+        candidate = ImageOps.contain(
+            candidate,
+            (max(320, int(candidate.width * 0.9)), max(320, int(candidate.height * 0.9))),
+            Image.Resampling.LANCZOS,
+        )
+    output = BytesIO()
+    candidate.save(output, format="JPEG", quality=40, optimize=True)
+    return output.getvalue()
+
+
+def _prepare_first_frame_image_bytes(
+    frame_bytes: bytes,
+    *,
+    target_width: int,
+    target_height: int,
+    max_bytes: int,
+) -> bytes:
+    image = ImageOps.exif_transpose(Image.open(BytesIO(frame_bytes))).convert("RGB")
+    canvas = _fit_image_to_canvas(image, target_width, target_height)
+    payload = _encode_jpeg_with_limit(canvas, max_bytes)
+    if len(payload) > max_bytes:
+        raise RuntimeError(f"Unable to compress frame under {max_bytes} bytes")
+    return payload
+
+
+def _transcode_with_size_limit(
+    *,
+    input_path: str,
+    output_path: str,
+    fps: Fraction,
+    source_width: int,
+    source_height: int,
+    landscape_target: tuple[int, int],
+    portrait_target: tuple[int, int],
+    max_bytes: int,
+) -> tuple[int, int, int]:
+    last_size = 0
+    for crf in (20, 24, 28, 32, 36):
+        target_w, target_h = transcode_for_provider(
+            input_path,
+            output_path,
+            fps=fps,
+            source_width=source_width,
+            source_height=source_height,
+            landscape_target=landscape_target,
+            portrait_target=portrait_target,
+            crf=crf,
+        )
+        output_size = Path(output_path).stat().st_size
+        last_size = output_size
+        if output_size <= max_bytes:
+            return target_w, target_h, output_size
+    raise RuntimeError(f"Unable to compress provider input under {max_bytes} bytes (last size={last_size} bytes)")
 
 
 def _asset_paths(task: dict[str, Any]) -> AssetPaths:
@@ -108,6 +207,7 @@ def _handle_ingest(
         td_path = Path(td)
         original_path = td_path / "original.mp4"
         edit_path = td_path / "edit.mp4"
+        preview_path = td_path / "preview.mp4"
 
         _download_s3(s3, settings.assets_bucket, original_key, original_path)
         with open(original_path, "rb") as src_file:
@@ -117,17 +217,41 @@ def _handle_ingest(
             task["video"]["original"]["sha256"] = sha.hexdigest()
 
         probe = ffprobe_video(str(original_path))
-        fps = Fraction(probe["fps_num"], probe["fps_den"])
-        if probe["is_vfr_input"]:
-            _job_progress(job, store, 15, "running", "Converting VFR to CFR mezzanine")
-            transcode_to_cfr(str(original_path), str(edit_path), fps if fps.numerator else Fraction(30, 1))
-            edit_probe = ffprobe_video(str(edit_path))
-        else:
-            shutil.copy2(original_path, edit_path)
-            edit_probe = probe
+        fps = Fraction(probe["fps_num"], probe["fps_den"]) if probe["fps_den"] else Fraction(30, 1)
+        if fps.numerator <= 0 or fps.denominator <= 0:
+            fps = Fraction(30, 1)
+        target_width, target_height = _target_by_orientation(
+            probe["width"],
+            probe["height"],
+            landscape=(1920, 1080),
+            portrait=(1080, 1920),
+        )
+        _job_progress(job, store, 15, "running", "Normalizing edit source to CFR 1080 canvas")
+        transcode_to_cfr(
+            str(original_path),
+            str(edit_path),
+            fps,
+            target_width=target_width,
+            target_height=target_height,
+            crf=18,
+            preset="fast",
+            audio_bitrate="192k",
+        )
+        edit_probe = ffprobe_video(str(edit_path))
+
+        _job_progress(job, store, 32, "running", "Building lightweight preview proxy")
+        preview_w, preview_h = transcode_for_preview(
+            str(edit_path),
+            str(preview_path),
+            fps=Fraction(edit_probe["fps_num"], edit_probe["fps_den"]) if edit_probe["fps_den"] else Fraction(30, 1),
+            source_width=edit_probe["width"],
+            source_height=edit_probe["height"],
+        )
 
         edit_key = asset_paths.edit_source()
         _upload_s3(s3, settings.assets_bucket, edit_key, edit_path, "video/mp4")
+        preview_key = asset_paths.preview_source()
+        _upload_s3(s3, settings.assets_bucket, preview_key, preview_path, "video/mp4")
         _job_progress(job, store, 45, "running", "Generating timeline thumbnails")
 
         thumbs_dir = td_path / "thumbs"
@@ -152,6 +276,13 @@ def _handle_ingest(
         "isVfrInput": probe["is_vfr_input"],
         "width": edit_probe["width"],
         "height": edit_probe["height"],
+        "durationSec": edit_probe["duration_sec"],
+        "frameCount": edit_probe["frame_count"],
+    }
+    task["video"]["previewSource"] = {
+        "s3Key": preview_key,
+        "width": preview_w,
+        "height": preview_h,
         "durationSec": edit_probe["duration_sec"],
         "frameCount": edit_probe["frame_count"],
     }
@@ -200,6 +331,35 @@ def _wait_luma_complete(api_key: str, generation_id: str, *, timeout_sec: int = 
             raise RuntimeError(f"Luma generation failed: {payload}")
         if time.time() - start > timeout_sec:
             raise TimeoutError("Luma generation poll timeout")
+        time.sleep(6)
+
+
+def _parse_runway_output_url(payload: dict[str, Any]) -> str:
+    output = payload.get("output") or payload.get("outputUrls") or payload.get("artifactUrls")
+    if isinstance(output, list):
+        for item in output:
+            if isinstance(item, str) and item.startswith("http"):
+                return item
+            if isinstance(item, dict):
+                maybe = item.get("url") or item.get("uri")
+                if isinstance(maybe, str) and maybe.startswith("http"):
+                    return maybe
+    elif isinstance(output, str) and output.startswith("http"):
+        return output
+    raise RuntimeError(f"Runway completion payload missing output URL: {payload}")
+
+
+def _wait_runway_complete(api_key: str, task_id: str, *, timeout_sec: int = 1800) -> dict[str, Any]:
+    start = time.time()
+    while True:
+        payload = get_runway_task(api_key=api_key, task_id=task_id)
+        status = str(payload.get("status", "")).upper()
+        if status == "SUCCEEDED":
+            return payload
+        if status in {"FAILED", "CANCELLED"}:
+            raise RuntimeError(f"Runway generation failed: {payload}")
+        if time.time() - start > timeout_sec:
+            raise TimeoutError("Runway generation poll timeout")
         time.sleep(6)
 
 
@@ -453,31 +613,133 @@ def _handle_segment_generate(
         if variant:
             first_frame_key = variant["outputKey"]
 
-    media_url = asset_store.presign_get(segment_key, expires=3600)
-    first_frame_url = asset_store.presign_get(first_frame_key, expires=3600)
+    model_name = payload["lumaModel"]
+    fps_info = task["video"]["editSource"]["fps"]
+    fps = Fraction(int(fps_info["num"]), int(fps_info["den"]))
+    src_width = int(task["video"]["editSource"]["width"])
+    src_height = int(task["video"]["editSource"]["height"])
+
+    media_key_for_provider: str | None = None
+    first_frame_input_key: str | None = None
+    with tempfile.TemporaryDirectory() as td:
+        td_path = Path(td)
+        local_segment_source = td_path / "segment_full.mp4"
+        _download_s3(s3, settings.assets_bucket, segment_key, local_segment_source)
+
+        if model_name == "runway-aleph":
+            _job_progress(job, store, 20, "running", "Preparing Runway Aleph input clip")
+            local_provider_segment = td_path / "segment_runway.mp4"
+            _transcode_with_size_limit(
+                input_path=str(local_segment_source),
+                output_path=str(local_provider_segment),
+                fps=fps,
+                source_width=src_width,
+                source_height=src_height,
+                landscape_target=(1280, 720),
+                portrait_target=(720, 1280),
+                max_bytes=RUNWAY_VIDEO_MAX_BYTES,
+            )
+            media_key_for_provider = paths.segment_provider_input(segment_id, gen_id, "runway")
+            _upload_s3(s3, settings.assets_bucket, media_key_for_provider, local_provider_segment, "video/mp4")
+        else:
+            source_size = local_segment_source.stat().st_size
+            if source_size > FULL_VIDEO_MAX_BYTES:
+                _job_progress(job, store, 20, "running", "Optimizing segment clip to provider size limits")
+                local_provider_segment = td_path / "segment_luma.mp4"
+                _transcode_with_size_limit(
+                    input_path=str(local_segment_source),
+                    output_path=str(local_provider_segment),
+                    fps=fps,
+                    source_width=src_width,
+                    source_height=src_height,
+                    landscape_target=(1920, 1080),
+                    portrait_target=(1080, 1920),
+                    max_bytes=FULL_VIDEO_MAX_BYTES,
+                )
+                media_key_for_provider = paths.segment_provider_input(segment_id, gen_id, "luma")
+                _upload_s3(s3, settings.assets_bucket, media_key_for_provider, local_provider_segment, "video/mp4")
+            else:
+                media_key_for_provider = segment_key
+
+        frame_bytes = asset_store.read_bytes(first_frame_key)
+        first_target_w, first_target_h = _target_by_orientation(
+            src_width,
+            src_height,
+            landscape=(1280, 720) if model_name == "runway-aleph" else (1920, 1080),
+            portrait=(720, 1280) if model_name == "runway-aleph" else (1080, 1920),
+        )
+        prepared_first_frame = _prepare_first_frame_image_bytes(
+            frame_bytes,
+            target_width=first_target_w,
+            target_height=first_target_h,
+            max_bytes=MAX_PROVIDER_IMAGE_BYTES,
+        )
+        local_first_frame = td_path / "first_frame.jpg"
+        local_first_frame.write_bytes(prepared_first_frame)
+        first_frame_input_key = paths.segment_provider_first_frame(
+            segment_id,
+            gen_id,
+            "runway" if model_name == "runway-aleph" else "luma",
+        )
+        _upload_s3(s3, settings.assets_bucket, first_frame_input_key, local_first_frame, "image/jpeg")
+
+    media_url = asset_store.presign_get(media_key_for_provider, expires=3600)
+    first_frame_url = asset_store.presign_get(first_frame_input_key, expires=3600)
 
     secrets = load_secret(settings.secrets_arn)
-    luma_key = secrets["LUMA_API_KEY"]
 
-    _job_progress(job, store, 20, "running", "Creating Luma modify generation")
-    created = create_modify_generation(
-        api_key=luma_key,
-        media_url=media_url,
-        first_frame_url=first_frame_url,
-        mode=payload["mode"],
-        model=payload["lumaModel"],
-        prompt=payload.get("prompt"),
-    )
-    generation_id = created.get("id") or created.get("generation_id")
-    if not generation_id:
-        raise RuntimeError(f"Unexpected Luma create response: {created}")
-
-    _job_progress(job, store, 45, "running", "Polling Luma generation")
-    result = _wait_luma_complete(luma_key, generation_id)
-    out_url = _parse_luma_output_url(result)
+    if model_name == "runway-aleph":
+        runway_key = secrets["RUNWAY_API_KEY"]
+        with tempfile.TemporaryDirectory() as runway_td:
+            runway_input = Path(runway_td) / "runway_input.mp4"
+            _download_s3(s3, settings.assets_bucket, media_key_for_provider, runway_input)
+            upload_created = create_ephemeral_upload(api_key=runway_key, filename=runway_input.name)
+            upload_url = upload_created.get("uploadUrl")
+            upload_fields = upload_created.get("fields")
+            runway_uri = upload_created.get("url") or upload_created.get("runwayUri")
+            if not isinstance(upload_url, str) or not isinstance(upload_fields, dict) or not isinstance(runway_uri, str):
+                raise RuntimeError(f"Unexpected Runway upload response: {upload_created}")
+            upload_to_ephemeral(
+                upload_url=upload_url,
+                fields=upload_fields,
+                file_path=runway_input,
+                content_type="video/mp4",
+            )
+        _job_progress(job, store, 35, "running", "Creating Runway Aleph generation")
+        created = create_video_to_video(
+            api_key=runway_key,
+            video_uri=runway_uri,
+            prompt_text=payload.get("prompt"),
+            first_frame_uri=first_frame_url,
+        )
+        generation_id = created.get("id")
+        if not generation_id:
+            raise RuntimeError(f"Unexpected Runway create response: {created}")
+        _job_progress(job, store, 55, "running", "Polling Runway generation")
+        result = _wait_runway_complete(runway_key, generation_id)
+        out_url = _parse_runway_output_url(result)
+        provider_name = "runway"
+    else:
+        luma_key = secrets["LUMA_API_KEY"]
+        _job_progress(job, store, 35, "running", "Creating Luma modify generation")
+        created = create_modify_generation(
+            api_key=luma_key,
+            media_url=media_url,
+            first_frame_url=first_frame_url,
+            mode=payload["mode"],
+            model=model_name,
+            prompt=payload.get("prompt"),
+        )
+        generation_id = created.get("id") or created.get("generation_id")
+        if not generation_id:
+            raise RuntimeError(f"Unexpected Luma create response: {created}")
+        _job_progress(job, store, 55, "running", "Polling Luma generation")
+        result = _wait_luma_complete(luma_key, generation_id)
+        out_url = _parse_luma_output_url(result)
+        provider_name = "luma"
 
     out_key = paths.segment_generated(segment_id, gen_id)
-    _job_progress(job, store, 75, "running", "Downloading Luma output to S3")
+    _job_progress(job, store, 75, "running", "Downloading generation output to S3")
     asset_store.download_url_to_s3(out_url, out_key)
 
     gen_meta = task.setdefault("segmentGenerations", {}).setdefault(gen_id, {})
@@ -486,13 +748,16 @@ def _handle_segment_generate(
             "genId": gen_id,
             "segmentId": segment_id,
             "luma": {
-                "model": payload["lumaModel"],
+                "provider": provider_name,
+                "model": model_name,
                 "mode": payload["mode"],
                 "prompt": payload.get("prompt"),
                 "lumaGenerationId": generation_id,
             },
             "status": "complete",
             "outputKey": out_key,
+            "inputMediaKey": media_key_for_provider,
+            "inputFirstFrameKey": first_frame_input_key,
             "createdAt": gen_meta.get("createdAt") or now_iso(),
         }
     )

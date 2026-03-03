@@ -127,7 +127,8 @@ Required at runtime:
 ```json
 {
   "GEMINI_API_KEY": "...",
-  "LUMA_API_KEY": "..."
+  "LUMA_API_KEY": "...",
+  "RUNWAY_API_KEY": "..."
 }
 ```
 

@@ -32,6 +32,9 @@ class AssetPaths:
     def edit_source(self) -> str:
         return f"{self.task_prefix()}/edit_source/{self._filename('editsource', '.mp4')}"
 
+    def preview_source(self) -> str:
+        return f"{self.task_prefix()}/preview/{self._filename('preview', '.mp4')}"
+
     def thumbs_prefix(self) -> str:
         return f"{self.task_prefix()}/thumbs"
 
@@ -64,6 +67,16 @@ class AssetPaths:
     def segment_generated(self, segment_id: str, generation_id: str) -> str:
         short_gen = re.sub(r"[^a-zA-Z0-9]+", "", generation_id)[-8:]
         return f"{self.task_prefix()}/segments/{segment_id}/generated/{self._filename(f'output{short_gen}', '.mp4')}"
+
+    def segment_provider_input(self, segment_id: str, generation_id: str, provider: str) -> str:
+        short_gen = re.sub(r"[^a-zA-Z0-9]+", "", generation_id)[-8:]
+        safe_provider = re.sub(r"[^a-zA-Z0-9]+", "", provider.lower())[:12] or "provider"
+        return f"{self.task_prefix()}/segments/{segment_id}/inputs/{self._filename(f'{safe_provider}{short_gen}_input', '.mp4')}"
+
+    def segment_provider_first_frame(self, segment_id: str, generation_id: str, provider: str) -> str:
+        short_gen = re.sub(r"[^a-zA-Z0-9]+", "", generation_id)[-8:]
+        safe_provider = re.sub(r"[^a-zA-Z0-9]+", "", provider.lower())[:12] or "provider"
+        return f"{self.task_prefix()}/segments/{segment_id}/inputs/{self._filename(f'{safe_provider}{short_gen}_first', '.jpg')}"
 
     def export_output(self, export_id: str) -> str:
         short_export = re.sub(r"[^a-zA-Z0-9]+", "", export_id)[-8:]

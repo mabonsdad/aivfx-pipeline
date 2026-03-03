@@ -71,7 +71,7 @@ class ReferenceUploadRequest(BaseModel):
 
 
 class SegmentGenerateRequest(BaseModel):
-    lumaModel: Literal["ray-2", "ray-flash-2"] = "ray-2"
+    lumaModel: Literal["ray-2", "ray-flash-2", "runway-aleph"] = "ray-2"
     mode: Literal[
         "adhere_1",
         "adhere_2",
@@ -82,6 +82,7 @@ class SegmentGenerateRequest(BaseModel):
         "reimagine_1",
         "reimagine_2",
         "reimagine_3",
+        "aleph_default",
     ]
     prompt: str | None = Field(default=None)
     firstFrameVariantId: str | None = None

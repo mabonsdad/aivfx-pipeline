@@ -44,7 +44,7 @@ from src.models.schemas import (
 logger = Logger()
 tracer = Tracer()
 settings = load_settings()
-LUMA_MODEL_MAX_SECONDS: dict[str, int] = {
+VIDEO_MODEL_MAX_SECONDS: dict[str, int] = {
     "ray-2": 10,
     "ray-flash-2": 15,
 }
@@ -390,6 +390,10 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
         if decorated.get("video", {}).get("editSource", {}).get("s3Key"):
             decorated["video"]["editSource"]["downloadUrl"] = asset_store.presign_get(
                 decorated["video"]["editSource"]["s3Key"], expires=PRESIGNED_GET_TTL_SECONDS
+            )
+        if decorated.get("video", {}).get("previewSource", {}).get("s3Key"):
+            decorated["video"]["previewSource"]["downloadUrl"] = asset_store.presign_get(
+                decorated["video"]["previewSource"]["s3Key"], expires=PRESIGNED_GET_TTL_SECONDS
             )
         for _, frame in decorated.get("frames", {}).items():
             frame["imageUrl"] = asset_store.presign_get(frame["captureKey"], expires=PRESIGNED_GET_TTL_SECONDS)
@@ -814,7 +818,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 return error_response(404, "Segment not found", origin=origin)
 
             req = _json_model(SegmentGenerateRequest, event)
-            max_seconds = LUMA_MODEL_MAX_SECONDS.get(req.lumaModel)
+            max_seconds = VIDEO_MODEL_MAX_SECONDS.get(req.lumaModel)
             segment_seconds = _segment_duration_seconds(task, segment)
             if max_seconds is not None and segment_seconds > float(max_seconds) + 1e-6:
                 return error_response(
@@ -834,6 +838,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 "genId": gen_id,
                 "segmentId": segment_id,
                 "luma": {
+                    "provider": "runway" if req.lumaModel == "runway-aleph" else "luma",
                     "model": req.lumaModel,
                     "mode": req.mode,
                     "prompt": prompt,

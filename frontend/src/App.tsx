@@ -100,8 +100,10 @@ function fpsValue(task: TaskDetail | undefined): number {
   return fps.num / fps.den;
 }
 
-function lumaModelMaxDurationSeconds(model: "ray-2" | "ray-flash-2"): number {
-  return model === "ray-2" ? 10 : 15;
+function lumaModelMaxDurationSeconds(model: "ray-2" | "ray-flash-2" | "runway-aleph"): number {
+  if (model === "ray-2") return 10;
+  if (model === "ray-flash-2") return 15;
+  return 60;
 }
 
 function FrameSelectCard({
@@ -204,7 +206,7 @@ export default function App() {
   const [patchBrushSize, setPatchBrushSize] = useState(24);
   const [featherPx, setFeatherPx] = useState(24);
   const [maskHasPaint, setMaskHasPaint] = useState(false);
-  const [lumaModel, setLumaModel] = useState<"ray-2" | "ray-flash-2">("ray-flash-2");
+  const [lumaModel, setLumaModel] = useState<"ray-2" | "ray-flash-2" | "runway-aleph">("ray-flash-2");
   const [advancedMode, setAdvancedMode] = useState("flex_1");
   const [lumaPrompt, setLumaPrompt] = useState("");
   const [firstFrameVariantId, setFirstFrameVariantId] = useState("");
@@ -582,7 +584,7 @@ export default function App() {
       if (!selectedTaskId || !selectedSegmentId) throw new Error("Select a segment");
       return apiClient.generateSegment(selectedTaskId, selectedSegmentId, {
         lumaModel,
-        mode: advancedMode,
+        mode: lumaModel === "runway-aleph" ? "aleph_default" : advancedMode,
         prompt: lumaPrompt.trim() || undefined,
         firstFrameVariantId: firstFrameVariantId || undefined,
       });
@@ -682,6 +684,7 @@ export default function App() {
     [task?.exports],
   );
   const lumaHardLimitSeconds = lumaModelMaxDurationSeconds(lumaModel);
+  const hasHardDurationLimit = lumaModel === "ray-2" || lumaModel === "ray-flash-2";
   const lumaHardLimitFrames = Math.round(lumaHardLimitSeconds * fpsValue(task));
   const timelineDelta = useMemo(() => {
     const fps = fpsValue(task);
@@ -692,8 +695,8 @@ export default function App() {
     }
     const frames = Math.abs(anchorB - anchorA);
     const seconds = frames / fps;
-    return { frames, seconds, overLimit: seconds > lumaHardLimitSeconds };
-  }, [currentFrameIndex, firstFrame, lastFrame, lumaHardLimitSeconds, task]);
+    return { frames, seconds, overLimit: hasHardDurationLimit && seconds > lumaHardLimitSeconds };
+  }, [currentFrameIndex, firstFrame, hasHardDurationLimit, lastFrame, lumaHardLimitSeconds, task]);
 
   const selectedRange = useMemo(() => {
     if (!firstFrame || !lastFrame) return null;
@@ -708,14 +711,14 @@ export default function App() {
       endFrameExclusive: end + 1,
       durationFrames,
       durationSec,
-      overLimit: durationSec > lumaHardLimitSeconds,
+      overLimit: hasHardDurationLimit && durationSec > lumaHardLimitSeconds,
     };
-  }, [firstFrame, lastFrame, lumaHardLimitSeconds, task]);
+  }, [firstFrame, hasHardDurationLimit, lastFrame, lumaHardLimitSeconds, task]);
 
   const selectedSegmentOverLimit = useMemo(() => {
-    if (!selectedSegment) return false;
+    if (!selectedSegment || !hasHardDurationLimit) return false;
     return selectedSegment.durationSec > lumaHardLimitSeconds + 1e-6;
-  }, [lumaHardLimitSeconds, selectedSegment]);
+  }, [hasHardDurationLimit, lumaHardLimitSeconds, selectedSegment]);
 
   const uploadAssets = useMemo<LibraryAsset[]>(() => {
     const assets: LibraryAsset[] = [];
@@ -825,6 +828,7 @@ export default function App() {
     if (!task?.video?.editSource?.downloadUrl || !segmentWindow) return null;
     return `${task.video.editSource.downloadUrl}#t=${segmentWindow.startSec},${segmentWindow.endSec}`;
   }, [segmentWindow, task?.video?.editSource?.downloadUrl]);
+  const timelinePlaybackUrl = task?.video?.previewSource?.downloadUrl ?? task?.video?.editSource?.downloadUrl ?? "";
 
   useEffect(() => {
     setSelectedGenIds((previous) => {
@@ -1212,12 +1216,12 @@ export default function App() {
             {tab === "timeline" && (
               <div className="space-y-4">
                 <h3 className="text-lg font-semibold">Timeline & Frame Range Selection</h3>
-                {task?.video?.editSource?.downloadUrl ? (
+                {timelinePlaybackUrl ? (
                   <div className="mx-auto w-fit max-w-full">
                     <video
                       ref={timelineVideoRef}
                       className="max-h-[360px] max-w-full rounded-lg border border-ink/10"
-                      src={task.video.editSource.downloadUrl}
+                      src={timelinePlaybackUrl}
                       controls
                       onTimeUpdate={(e) => {
                         const totalFrames = frameCount(task);
@@ -1262,7 +1266,9 @@ export default function App() {
                       {timelineDelta.seconds.toFixed(2)}s
                     </p>
                     <p className="mt-1 text-[10px] text-ink/50">
-                      limit {lumaHardLimitFrames}f / {lumaHardLimitSeconds}s
+                      {hasHardDurationLimit
+                        ? `limit ${lumaHardLimitFrames}f / ${lumaHardLimitSeconds}s`
+                        : "Runway input constrained by 64MB"}
                     </p>
                   </div>
 
@@ -1577,7 +1583,7 @@ export default function App() {
 
             {tab === "generate" && (
               <div className="space-y-4">
-                <h3 className="text-lg font-semibold">Segment Generate (Luma)</h3>
+                <h3 className="text-lg font-semibold">Segment Generate</h3>
                 <div className="grid gap-3 md:grid-cols-2">
                   <select
                     value={selectedSegmentId ?? ""}
@@ -1593,29 +1599,36 @@ export default function App() {
                   </select>
                   <select
                     value={lumaModel}
-                    onChange={(e) => setLumaModel(e.target.value as "ray-2" | "ray-flash-2")}
+                    onChange={(e) => setLumaModel(e.target.value as "ray-2" | "ray-flash-2" | "runway-aleph")}
                     className="rounded-md border border-ink/20 px-3 py-2"
                   >
                     <option value="ray-2">ray-2</option>
                     <option value="ray-flash-2">ray-flash-2</option>
+                    <option value="runway-aleph">runway-aleph</option>
                   </select>
-                  <select value={advancedMode} onChange={(e) => setAdvancedMode(e.target.value)} className="rounded-md border border-ink/20 px-3 py-2">
-                    {[
-                      "adhere_1",
-                      "adhere_2",
-                      "adhere_3",
-                      "flex_1",
-                      "flex_2",
-                      "flex_3",
-                      "reimagine_1",
-                      "reimagine_2",
-                      "reimagine_3",
-                    ].map((mode) => (
-                      <option key={mode} value={mode}>
-                        mode: {mode}
-                      </option>
-                    ))}
-                  </select>
+                  {lumaModel === "runway-aleph" ? (
+                    <div className="rounded-md border border-ink/20 bg-bg px-3 py-2 text-xs text-ink/70">
+                      Runway Aleph uses prompt + first frame guidance (no Luma mode selector).
+                    </div>
+                  ) : (
+                    <select value={advancedMode} onChange={(e) => setAdvancedMode(e.target.value)} className="rounded-md border border-ink/20 px-3 py-2">
+                      {[
+                        "adhere_1",
+                        "adhere_2",
+                        "adhere_3",
+                        "flex_1",
+                        "flex_2",
+                        "flex_3",
+                        "reimagine_1",
+                        "reimagine_2",
+                        "reimagine_3",
+                      ].map((mode) => (
+                        <option key={mode} value={mode}>
+                          mode: {mode}
+                        </option>
+                      ))}
+                    </select>
+                  )}
                 </div>
 
                 <textarea

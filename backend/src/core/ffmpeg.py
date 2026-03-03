@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import math
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,23 @@ FFPROBE_BIN = os.getenv("FFPROBE_BIN", "/opt/bin/ffprobe")
 
 class FFmpegError(RuntimeError):
     pass
+
+
+def _target_for_orientation(source_width: int, source_height: int, *, landscape: tuple[int, int], portrait: tuple[int, int]) -> tuple[int, int]:
+    source_ratio = (source_width / source_height) if source_height else 1.0
+    landscape_ratio = landscape[0] / landscape[1]
+    portrait_ratio = portrait[0] / portrait[1]
+    # Pick whichever target AR is closest to the source AR, then pad to fit.
+    landscape_delta = abs(math.log(source_ratio / landscape_ratio))
+    portrait_delta = abs(math.log(source_ratio / portrait_ratio))
+    return landscape if landscape_delta <= portrait_delta else portrait
+
+
+def _scale_pad_filter(target_width: int, target_height: int) -> str:
+    return (
+        f"scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,"
+        f"pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2:color=black"
+    )
 
 
 def _run(command: list[str]) -> None:
@@ -60,28 +78,45 @@ def ffprobe_video(input_path: str) -> dict[str, Any]:
     }
 
 
-def transcode_to_cfr(input_path: str, output_path: str, fps: Fraction) -> None:
+def transcode_to_cfr(
+    input_path: str,
+    output_path: str,
+    fps: Fraction,
+    *,
+    target_width: int | None = None,
+    target_height: int | None = None,
+    crf: int = 18,
+    preset: str = "fast",
+    audio_bitrate: str = "192k",
+) -> None:
+    fps_num = fps.numerator if fps.numerator > 0 else 30
+    fps_den = fps.denominator if fps.denominator > 0 else 1
+    vf_parts = [f"fps={fps_num}/{fps_den}"]
+    if target_width and target_height:
+        vf_parts.append(_scale_pad_filter(target_width, target_height))
+    vf_parts.append("setsar=1")
+
     cmd = [
         FFMPEG_BIN,
         "-y",
         "-i",
         input_path,
         "-vf",
-        f"fps={fps.numerator}/{fps.denominator}",
+        ",".join(vf_parts),
         "-vsync",
         "cfr",
         "-c:v",
         "libx264",
         "-preset",
-        "fast",
+        preset,
         "-crf",
-        "18",
+        str(crf),
         "-pix_fmt",
         "yuv420p",
         "-c:a",
         "aac",
         "-b:a",
-        "192k",
+        audio_bitrate,
         output_path,
     ]
     _run(cmd)
@@ -111,10 +146,19 @@ def extract_segment_by_frames(
     end_frame_exclusive: int,
     fps_num: int,
     fps_den: int,
+    target_width: int | None = None,
+    target_height: int | None = None,
+    crf: int = 18,
+    preset: str = "medium",
+    audio_bitrate: str = "192k",
 ) -> None:
     fps = Fraction(fps_num, fps_den)
     start_sec = Fraction(start_frame, 1) / fps
     duration_sec = Fraction(max(0, end_frame_exclusive - start_frame), 1) / fps
+    vf_parts: list[str] = []
+    if target_width and target_height:
+        vf_parts.append(_scale_pad_filter(target_width, target_height))
+    vf_parts.append("setsar=1")
     cmd = [
         FFMPEG_BIN,
         "-y",
@@ -124,21 +168,80 @@ def extract_segment_by_frames(
         input_path,
         "-t",
         f"{float(duration_sec):.6f}",
+        "-vf",
+        ",".join(vf_parts),
         "-c:v",
         "libx264",
         "-preset",
-        "medium",
+        preset,
         "-crf",
-        "18",
+        str(crf),
         "-pix_fmt",
         "yuv420p",
         "-c:a",
         "aac",
         "-b:a",
-        "192k",
+        audio_bitrate,
         output_path,
     ]
     _run(cmd)
+
+
+def transcode_for_preview(
+    input_path: str,
+    output_path: str,
+    *,
+    fps: Fraction,
+    source_width: int,
+    source_height: int,
+) -> tuple[int, int]:
+    target_w, target_h = _target_for_orientation(
+        source_width,
+        source_height,
+        landscape=(960, 540),
+        portrait=(540, 960),
+    )
+    transcode_to_cfr(
+        input_path,
+        output_path,
+        fps,
+        target_width=target_w,
+        target_height=target_h,
+        crf=30,
+        preset="veryfast",
+        audio_bitrate="96k",
+    )
+    return target_w, target_h
+
+
+def transcode_for_provider(
+    input_path: str,
+    output_path: str,
+    *,
+    fps: Fraction,
+    source_width: int,
+    source_height: int,
+    landscape_target: tuple[int, int],
+    portrait_target: tuple[int, int],
+    crf: int = 22,
+) -> tuple[int, int]:
+    target_w, target_h = _target_for_orientation(
+        source_width,
+        source_height,
+        landscape=landscape_target,
+        portrait=portrait_target,
+    )
+    transcode_to_cfr(
+        input_path,
+        output_path,
+        fps,
+        target_width=target_w,
+        target_height=target_h,
+        crf=crf,
+        preset="medium",
+        audio_bitrate="128k",
+    )
+    return target_w, target_h
 
 
 def generate_thumbnail_strip(input_path: str, output_dir: str, fps: int = 1, width: int = 320) -> list[dict[str, Any]]:

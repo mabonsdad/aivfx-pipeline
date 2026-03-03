@@ -47,7 +47,8 @@ export type SegmentGeneration = {
   genId: string;
   segmentId: string;
   luma: {
-    model: "ray-2" | "ray-flash-2";
+    provider?: "luma" | "runway";
+    model: "ray-2" | "ray-flash-2" | "runway-aleph";
     mode: string;
     prompt?: string;
     lumaGenerationId?: string | null;
@@ -88,6 +89,14 @@ export type TaskDetail = {
       width: number;
       height: number;
       isVfrInput: boolean;
+      downloadUrl?: string;
+    };
+    previewSource?: {
+      s3Key: string;
+      frameCount: number;
+      durationSec: number;
+      width: number;
+      height: number;
       downloadUrl?: string;
     };
   };
