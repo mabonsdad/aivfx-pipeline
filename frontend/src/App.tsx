@@ -123,7 +123,7 @@ function FrameSelectCard({
       <p className="mb-2 text-sm font-semibold">{title}</p>
       {frame?.imageUrl ? (
         <div className="relative">
-          <img src={frame.imageUrl} alt={`${title} preview`} className="h-28 w-full rounded-md object-cover" />
+          <img src={frame.imageUrl} alt={`${title} preview`} className="max-h-28 w-full rounded-md bg-bg object-contain" />
           <button
             onClick={onClear}
             className="absolute right-2 top-2 rounded bg-black/70 p-1 text-white"
@@ -849,6 +849,37 @@ export default function App() {
     }
   }, [selectedPreviewGenId, selectedSegmentGenerations]);
 
+  useEffect(() => {
+    const selectedId = selectedPreviewGeneration?.genId;
+    if (!selectedId) return;
+    setSelectedGenIds((previous) => {
+      const selectedGeneration = task?.segmentGenerations?.[selectedId];
+      const targetSegmentId = selectedGeneration?.segmentId;
+      const filtered = previous.filter((genId) => {
+        if (genId === selectedId) return false;
+        if (!targetSegmentId) return true;
+        const existing = task?.segmentGenerations?.[genId];
+        return existing?.segmentId !== targetSegmentId;
+      });
+      return [selectedId, ...filtered];
+    });
+  }, [selectedPreviewGeneration?.genId, task?.segmentGenerations]);
+
+  function selectSegmentGeneration(genId: string) {
+    setSelectedPreviewGenId(genId);
+    setSelectedGenIds((previous) => {
+      const selectedGeneration = task?.segmentGenerations?.[genId];
+      const targetSegmentId = selectedGeneration?.segmentId;
+      const filtered = previous.filter((existingGenId) => {
+        if (existingGenId === genId) return false;
+        if (!targetSegmentId) return true;
+        const existing = task?.segmentGenerations?.[existingGenId];
+        return existing?.segmentId !== targetSegmentId;
+      });
+      return [genId, ...filtered];
+    });
+  }
+
   function syncOriginalToGenerated(generatedVideo: HTMLVideoElement) {
     const originalVideo = compareOriginalRef.current;
     if (!originalVideo || !segmentWindow) return;
@@ -1371,7 +1402,7 @@ export default function App() {
                         <div className="space-y-2">
                           {activeReferenceImages.map((reference) => (
                             <div key={reference.referenceId} className="relative">
-                              <img src={reference.previewUrl} alt={reference.filename} className="h-16 w-full rounded object-cover" />
+                              <img src={reference.previewUrl} alt={reference.filename} className="max-h-16 w-full rounded bg-bg object-contain" />
                               <button
                                 type="button"
                                 className="absolute right-1 top-1 rounded bg-black/70 px-1 text-xs text-white"
@@ -1468,8 +1499,15 @@ export default function App() {
                   )}
                   <div className="grid grid-cols-2 gap-2">
                     {activeEditVariants.map((variant) => (
-                      <div key={variant.variantId} className="rounded border border-ink/10 p-2">
-                        {variant.imageUrl ? <img src={variant.imageUrl} className="mb-2 h-28 w-full object-contain" /> : null}
+                      <div
+                        key={variant.variantId}
+                        className={`rounded border p-2 ${
+                          activeEditFrame?.selectedVariantId === variant.variantId
+                            ? "border-teal-500 bg-teal-50"
+                            : "border-ink/10"
+                        }`}
+                      >
+                        {variant.imageUrl ? <img src={variant.imageUrl} className="mb-2 max-h-28 w-full rounded bg-bg object-contain" /> : null}
                         <p className="text-xs text-ink/70">{variant.type} / {variant.model}</p>
                         <button
                           className="mt-1 rounded bg-ink px-2 py-1 text-xs text-white"
@@ -1479,7 +1517,7 @@ export default function App() {
                             selectVariantMutation.mutate({ frameId: activeEditFrame.frameId, variantId: variant.variantId });
                           }}
                         >
-                          {activeEditFrame?.selectedVariantId === variant.variantId ? "Selected" : "Select"}
+                          {activeEditFrame?.selectedVariantId === variant.variantId ? "Using this" : "Use this"}
                         </button>
                       </div>
                     ))}
@@ -1736,32 +1774,31 @@ export default function App() {
                   )}
                   <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
                     {selectedSegmentGenerations.map((gen, index) => (
-                      <div key={gen.genId} className={`rounded border p-2 ${index === 0 ? "border-accent/40 bg-accent/5" : "border-ink/10"}`}>
+                      <div
+                        key={gen.genId}
+                        className={`rounded border p-2 ${
+                          gen.status === "failed"
+                            ? "border-orange-400 bg-orange-50"
+                            : selectedPreviewGeneration?.genId === gen.genId
+                              ? "border-teal-500 bg-teal-50"
+                              : "border-ink/10"
+                        }`}
+                      >
                         <div className="mb-1 flex items-center justify-between text-xs">
                           <span className={index === 0 ? "font-semibold" : ""}>{describeGeneration(gen)}</span>
                           <span className="uppercase text-ink/60">{gen.status}</span>
                         </div>
                         <p className="mb-1 text-[11px] text-ink/50">{gen.genId}</p>
-                        {gen.downloadUrl ? <video src={gen.downloadUrl} controls className="mb-2 h-28 w-full object-contain" /> : null}
-                        <div className="flex items-center justify-between gap-2">
+                        {gen.downloadUrl ? <video src={gen.downloadUrl} controls className="mb-2 max-h-28 w-full rounded bg-bg object-contain" /> : null}
+                        <div className="flex items-center gap-2">
                           <button
                             className="rounded bg-ink px-2 py-1 text-xs text-white"
-                            onClick={() => setSelectedPreviewGenId(gen.genId)}
+                            disabled={!gen.downloadUrl}
+                            onClick={() => selectSegmentGeneration(gen.genId)}
                           >
-                            {selectedPreviewGeneration?.genId === gen.genId ? "Selected" : "Compare"}
+                            {selectedPreviewGeneration?.genId === gen.genId ? "Using this" : "Use this"}
                           </button>
-                          <label className="text-xs text-ink/70">
-                            <input
-                              type="checkbox"
-                              checked={selectedGenIds.includes(gen.genId)}
-                              onChange={(e) => {
-                                setSelectedGenIds((prev) =>
-                                  e.target.checked ? Array.from(new Set([...prev, gen.genId])) : prev.filter((id) => id !== gen.genId),
-                                );
-                              }}
-                            />{" "}
-                            Merge
-                          </label>
+                          {gen.status === "failed" ? <span className="text-xs text-orange-700">Error</span> : null}
                         </div>
                       </div>
                     ))}
@@ -1799,15 +1836,17 @@ export default function App() {
                     <p className="text-sm text-ink/60">No generations selected yet.</p>
                   ) : (
                     <div className="space-y-2">
-                      {selectedMergeGenerations.map((generation, index) => (
+                      {selectedMergeGenerations.map((generation) => (
                         <div
                           key={generation.genId}
                           className={`flex items-center justify-between gap-3 rounded border p-2 ${
-                            index === 0 ? "border-accent/40 bg-accent/5" : "border-ink/10"
+                            generation.status === "failed"
+                              ? "border-orange-400 bg-orange-50"
+                              : "border-teal-500 bg-teal-50"
                           }`}
                         >
                           <div>
-                            <p className={`text-sm ${index === 0 ? "font-semibold" : "font-medium"}`}>{describeGeneration(generation)}</p>
+                            <p className="text-sm font-semibold">{describeGeneration(generation)}</p>
                             <p className="text-xs text-ink/50">{generation.genId}</p>
                           </div>
                           <button
@@ -1872,7 +1911,7 @@ export default function App() {
                             index === 0 ? "border-accent/40 bg-accent/5" : "border-ink/10"
                           }`}
                         >
-                          <video src={item.previewUrl} className="h-20 w-full rounded object-cover" muted />
+                          <video src={item.previewUrl} className="max-h-20 w-full rounded bg-bg object-contain" muted />
                           <div>
                             <p className={`text-sm ${index === 0 ? "font-semibold" : "font-medium"}`}>{item.title}</p>
                             <p className="text-xs text-ink/60">{item.subtitle}</p>
@@ -1913,7 +1952,7 @@ export default function App() {
                             index === 0 ? "border-accent/40 bg-accent/5" : "border-ink/10"
                           }`}
                         >
-                          <img src={item.previewUrl} className="h-20 w-full rounded object-cover" />
+                          <img src={item.previewUrl} className="max-h-20 w-full rounded bg-bg object-contain" />
                           <div>
                             <p className={`text-sm ${index === 0 ? "font-semibold" : "font-medium"}`}>{item.title}</p>
                             <p className="text-xs text-ink/60">{item.subtitle}</p>
@@ -1954,7 +1993,7 @@ export default function App() {
                             index === 0 ? "border-accent/40 bg-accent/5" : "border-ink/10"
                           }`}
                         >
-                          <video src={item.previewUrl} className="h-20 w-full rounded object-cover" muted />
+                          <video src={item.previewUrl} className="max-h-20 w-full rounded bg-bg object-contain" muted />
                           <div>
                             <p className={`text-sm ${index === 0 ? "font-semibold" : "font-medium"}`}>{item.title}</p>
                             <p className="text-xs text-ink/60">{item.subtitle}</p>
@@ -1989,13 +2028,16 @@ export default function App() {
             <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide">Jobs</h3>
             <div className="space-y-2 text-sm">
               {sortedJobs.length === 0 && <p className="text-ink/60">No jobs yet.</p>}
-              {sortedJobs.slice(0, jobsVisible).map((job, index) => {
+              {sortedJobs.slice(0, jobsVisible).map((job) => {
                 return (
-                  <div key={job.jobId} className={`rounded border p-2 ${index === 0 ? "border-accent/40 bg-accent/5" : "border-ink/10"}`}>
+                  <div
+                    key={job.jobId}
+                    className={`rounded border p-2 ${job.status === "failed" ? "border-orange-400 bg-orange-50" : "border-ink/10"}`}
+                  >
                     <p className="font-medium">
                       {job.jobId} <span className="text-ink/60">({job.type})</span>
                     </p>
-                    <p className={`text-xs uppercase ${index === 0 ? "font-semibold" : ""}`}>{job.status} - {job.progress}%</p>
+                    <p className="text-xs uppercase">{job.status} - {job.progress}%</p>
                     {job.error ? <p className="text-xs text-red-600">{job.error}</p> : null}
                   </div>
                 );
