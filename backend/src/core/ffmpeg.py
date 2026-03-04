@@ -55,6 +55,7 @@ def ffprobe_video(input_path: str) -> dict[str, Any]:
         raise FFmpegError(proc.stderr)
     payload = json.loads(proc.stdout)
     video_stream = next((s for s in payload.get("streams", []) if s.get("codec_type") == "video"), None)
+    audio_stream = next((s for s in payload.get("streams", []) if s.get("codec_type") == "audio"), None)
     if not video_stream:
         raise FFmpegError("No video stream found")
 
@@ -75,7 +76,28 @@ def ffprobe_video(input_path: str) -> dict[str, Any]:
         "frame_count": int(nb_frames) if nb_frames else int(duration * float(fps or Fraction(30, 1))),
         "is_vfr_input": is_vfr,
         "codec": video_stream.get("codec_name"),
+        "has_audio": audio_stream is not None,
     }
+
+
+def _format_seconds(value: float) -> str:
+    return f"{max(0.0, float(value)):.6f}"
+
+
+def _atempo_chain(ratio: float) -> str:
+    clamped = max(0.05, min(20.0, float(ratio)))
+    factors: list[float] = []
+    while clamped < 0.5:
+        factors.append(0.5)
+        clamped /= 0.5
+    while clamped > 2.0:
+        factors.append(2.0)
+        clamped /= 2.0
+    factors.append(clamped)
+    filtered = [f for f in factors if abs(f - 1.0) > 1e-6]
+    if not filtered:
+        return "anull"
+    return ",".join(f"atempo={f:.6f}" for f in filtered)
 
 
 def transcode_to_cfr(
@@ -280,51 +302,133 @@ def merge_with_segment_replacement(
     output_height: int,
     temporal_feather_frames: int,
 ) -> list[str]:
+    epsilon = 1e-4
     fps = Fraction(fps_num, fps_den)
     start_sec = float(Fraction(start_frame, 1) / fps)
     end_sec = float(Fraction(end_frame_exclusive, 1) / fps)
-    duration_sec = max(0.0, end_sec - start_sec)
+    original_segment_duration_sec = max(0.0, end_sec - start_sec)
     fps_str = f"{fps_num}/{fps_den}"
+    orig_probe = ffprobe_video(edit_source_path)
+    generated_probe = ffprobe_video(segment_path)
+    original_total_duration_sec = max(end_sec, float(orig_probe.get("duration_sec") or 0.0))
+    generated_duration_sec = max(
+        float(Fraction(1, max(1, fps_num))),
+        float(generated_probe.get("duration_sec") or original_segment_duration_sec),
+    )
 
-    filter_complex = [
-        # Normalize both streams up front so blend/concat operates on identical
-        # geometry, cadence, sample aspect ratio, and pixel format.
-        f"[0:v]fps={fps_str},scale={output_width}:{output_height}:flags=lanczos,setsar=1,format=yuv420p[vorigsrc]",
-        f"[1:v]fps={fps_str},scale={output_width}:{output_height}:flags=lanczos,setsar=1,format=yuv420p[vgensrc]",
-    ]
+    norm_original = f"fps={fps_str},scale={output_width}:{output_height}:flags=lanczos,setsar=1,format=yuv420p"
+    norm_generated = f"fps={fps_str},scale={output_width}:{output_height}:flags=lanczos,setsar=1,format=yuv420p"
+    filter_complex: list[str] = []
+    video_parts: list[str] = []
 
     if temporal_feather_frames > 0:
-        filter_complex.extend(
-            [
-                "[vorigsrc]split=3[vorigpre][vorigpost][vorigsegsrc]",
-                f"[vorigpre]trim=0:{start_sec},setpts=PTS-STARTPTS[vpre]",
-                f"[vorigpost]trim={end_sec},setpts=PTS-STARTPTS[vpost]",
-                f"[vgensrc]trim=0:{duration_sec},setpts=PTS-STARTPTS[vgen]",
-            ]
-        )
         feather_sec = float(Fraction(temporal_feather_frames, 1) / fps)
-        filter_complex.append(
-            "[vorigsegsrc]trim={s}:{e},setpts=PTS-STARTPTS[vorigseg]".format(s=start_sec, e=end_sec)
-        )
-        filter_complex.append(
-            (
-                "[vorigseg][vgen]blend=all_expr='if(lte(T,{feather}),A*(1-T/{feather})+B*(T/{feather}),"
-                "if(gte(T,{mid}),A*((T-{mid})/{feather})+B*(1-(T-{mid})/{feather}),B))'[vblend]"
-            ).format(feather=feather_sec, mid=max(0, duration_sec - feather_sec))
-        )
-        concat_src = "[vpre][vblend][vpost]concat=n=3:v=1:a=0[vout]"
-    else:
-        filter_complex.extend(
-            [
-                "[vorigsrc]split=2[vorigpre][vorigpost]",
-                f"[vorigpre]trim=0:{start_sec},setpts=PTS-STARTPTS[vpre]",
-                f"[vorigpost]trim={end_sec},setpts=PTS-STARTPTS[vpost]",
-                f"[vgensrc]trim=0:{duration_sec},setpts=PTS-STARTPTS[vgen]",
-            ]
-        )
-        concat_src = "[vpre][vgen][vpost]concat=n=3:v=1:a=0[vout]"
+        blend_in_sec = min(feather_sec, original_segment_duration_sec, generated_duration_sec)
+        blend_out_sec = min(feather_sec, generated_duration_sec, max(0.0, original_total_duration_sec - end_sec))
 
-    filter_complex.append(concat_src)
+        if start_sec > epsilon:
+            filter_complex.append(
+                f"[0:v]trim=0:{_format_seconds(start_sec)},{norm_original},setpts=PTS-STARTPTS[vpre]"
+            )
+            video_parts.append("vpre")
+
+        if blend_in_sec > epsilon:
+            filter_complex.append(
+                f"[0:v]trim={_format_seconds(start_sec)}:{_format_seconds(start_sec + blend_in_sec)},{norm_original},setpts=PTS-STARTPTS[vorig_in]"
+            )
+            filter_complex.append(
+                f"[1:v]trim=0:{_format_seconds(blend_in_sec)},{norm_generated},setpts=PTS-STARTPTS[vgen_in]"
+            )
+            filter_complex.append(
+                "[vorig_in][vgen_in]blend=all_expr='if(lte(T,{d}),A*(1-T/{d})+B*(T/{d}),B)'[vblend_in]".format(
+                    d=_format_seconds(blend_in_sec)
+                )
+            )
+            video_parts.append("vblend_in")
+
+        middle_start_sec = blend_in_sec
+        middle_end_sec = max(middle_start_sec, generated_duration_sec - blend_out_sec)
+        if middle_end_sec - middle_start_sec > epsilon:
+            filter_complex.append(
+                f"[1:v]trim={_format_seconds(middle_start_sec)}:{_format_seconds(middle_end_sec)},{norm_generated},setpts=PTS-STARTPTS[vgen_mid]"
+            )
+            video_parts.append("vgen_mid")
+
+        if blend_out_sec > epsilon:
+            filter_complex.append(
+                f"[1:v]trim={_format_seconds(generated_duration_sec - blend_out_sec)}:{_format_seconds(generated_duration_sec)},{norm_generated},setpts=PTS-STARTPTS[vgen_out]"
+            )
+            filter_complex.append(
+                f"[0:v]trim={_format_seconds(end_sec)}:{_format_seconds(end_sec + blend_out_sec)},{norm_original},setpts=PTS-STARTPTS[vpost_in]"
+            )
+            filter_complex.append(
+                "[vgen_out][vpost_in]blend=all_expr='if(lte(T,{d}),A*(1-T/{d})+B*(T/{d}),B)'[vblend_out]".format(
+                    d=_format_seconds(blend_out_sec)
+                )
+            )
+            video_parts.append("vblend_out")
+
+        post_tail_start_sec = end_sec + blend_out_sec
+    else:
+        if start_sec > epsilon:
+            filter_complex.append(
+                f"[0:v]trim=0:{_format_seconds(start_sec)},{norm_original},setpts=PTS-STARTPTS[vpre]"
+            )
+            video_parts.append("vpre")
+        filter_complex.append(
+            f"[1:v]trim=0:{_format_seconds(generated_duration_sec)},{norm_generated},setpts=PTS-STARTPTS[vgen]"
+        )
+        video_parts.append("vgen")
+        post_tail_start_sec = end_sec
+
+    if original_total_duration_sec - post_tail_start_sec > epsilon:
+        filter_complex.append(
+            f"[0:v]trim={_format_seconds(post_tail_start_sec)},{norm_original},setpts=PTS-STARTPTS[vpost]"
+        )
+        video_parts.append("vpost")
+
+    if not video_parts:
+        filter_complex.append(
+            f"[1:v]trim=0:{_format_seconds(generated_duration_sec)},{norm_generated},setpts=PTS-STARTPTS[vout]"
+        )
+    elif len(video_parts) == 1:
+        filter_complex.append(f"[{video_parts[0]}]setpts=PTS-STARTPTS[vout]")
+    else:
+        filter_complex.append("".join(f"[{label}]" for label in video_parts) + f"concat=n={len(video_parts)}:v=1:a=0[vout]")
+
+    has_audio = bool(orig_probe.get("has_audio"))
+    if has_audio:
+        audio_parts: list[str] = []
+        if start_sec > epsilon:
+            filter_complex.append(f"[0:a]atrim=0:{_format_seconds(start_sec)},asetpts=PTS-STARTPTS[apre]")
+            audio_parts.append("apre")
+
+        segment_audio_end_sec = min(end_sec, original_total_duration_sec)
+        if segment_audio_end_sec - start_sec > epsilon:
+            filter_complex.append(
+                f"[0:a]atrim={_format_seconds(start_sec)}:{_format_seconds(segment_audio_end_sec)},asetpts=PTS-STARTPTS[aseg]"
+            )
+            if generated_duration_sec > epsilon and original_segment_duration_sec > epsilon:
+                tempo_ratio = original_segment_duration_sec / generated_duration_sec
+                filter_complex.append(f"[aseg]{_atempo_chain(tempo_ratio)}[aseg_adj]")
+            else:
+                filter_complex.append("[aseg]anull[aseg_adj]")
+            audio_parts.append("aseg_adj")
+        else:
+            filter_complex.append(
+                f"anullsrc=r=48000:cl=stereo,atrim=0:{_format_seconds(generated_duration_sec)}[aseg_adj]"
+            )
+            audio_parts.append("aseg_adj")
+
+        if original_total_duration_sec - end_sec > epsilon:
+            filter_complex.append(f"[0:a]atrim={_format_seconds(end_sec)},asetpts=PTS-STARTPTS[apost]")
+            audio_parts.append("apost")
+
+        if len(audio_parts) == 1:
+            filter_complex.append(f"[{audio_parts[0]}]anull[aout]")
+        else:
+            filter_complex.append("".join(f"[{label}]" for label in audio_parts) + f"concat=n={len(audio_parts)}:v=0:a=1[aout]")
+
     cmd = [
         FFMPEG_BIN,
         "-y",
@@ -336,8 +440,6 @@ def merge_with_segment_replacement(
         ";".join(filter_complex),
         "-map",
         "[vout]",
-        "-map",
-        "0:a?",
         "-c:v",
         "libx264",
         "-pix_fmt",
@@ -354,12 +456,18 @@ def merge_with_segment_replacement(
         "18",
         "-preset",
         "medium",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "192k",
-        "-shortest",
-        output_path,
     ]
+    if has_audio:
+        cmd.extend(
+            [
+                "-map",
+                "[aout]",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+            ]
+        )
+    cmd.append(output_path)
     _run(cmd)
     return cmd

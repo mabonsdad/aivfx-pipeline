@@ -100,9 +100,10 @@ function fpsValue(task: TaskDetail | undefined): number {
   return fps.num / fps.den;
 }
 
-function lumaModelMaxDurationSeconds(model: "ray-2" | "ray-flash-2" | "runway-aleph"): number {
+function lumaModelMaxDurationSeconds(model: "ray-2" | "ray-flash-2" | "runway-aleph" | "kling-2.6"): number {
   if (model === "ray-2") return 10;
   if (model === "ray-flash-2") return 15;
+  if (model === "kling-2.6") return 10;
   return 60;
 }
 
@@ -206,7 +207,7 @@ export default function App() {
   const [patchBrushSize, setPatchBrushSize] = useState(24);
   const [featherPx, setFeatherPx] = useState(24);
   const [maskHasPaint, setMaskHasPaint] = useState(false);
-  const [lumaModel, setLumaModel] = useState<"ray-2" | "ray-flash-2" | "runway-aleph">("ray-flash-2");
+  const [lumaModel, setLumaModel] = useState<"ray-2" | "ray-flash-2" | "runway-aleph" | "kling-2.6">("ray-flash-2");
   const [advancedMode, setAdvancedMode] = useState("flex_1");
   const [lumaPrompt, setLumaPrompt] = useState("");
   const [firstFrameVariantId, setFirstFrameVariantId] = useState("");
@@ -584,7 +585,7 @@ export default function App() {
       if (!selectedTaskId || !selectedSegmentId) throw new Error("Select a segment");
       return apiClient.generateSegment(selectedTaskId, selectedSegmentId, {
         lumaModel,
-        mode: lumaModel === "runway-aleph" ? "aleph_default" : advancedMode,
+        mode: lumaModel === "runway-aleph" ? "aleph_default" : lumaModel === "kling-2.6" ? "kling_start_end" : advancedMode,
         prompt: lumaPrompt.trim() || undefined,
         firstFrameVariantId: firstFrameVariantId || undefined,
       });
@@ -684,7 +685,7 @@ export default function App() {
     [task?.exports],
   );
   const lumaHardLimitSeconds = lumaModelMaxDurationSeconds(lumaModel);
-  const hasHardDurationLimit = lumaModel === "ray-2" || lumaModel === "ray-flash-2";
+  const hasHardDurationLimit = lumaModel === "ray-2" || lumaModel === "ray-flash-2" || lumaModel === "kling-2.6";
   const lumaHardLimitFrames = Math.round(lumaHardLimitSeconds * fpsValue(task));
   const timelineDelta = useMemo(() => {
     const fps = fpsValue(task);
@@ -1599,16 +1600,21 @@ export default function App() {
                   </select>
                   <select
                     value={lumaModel}
-                    onChange={(e) => setLumaModel(e.target.value as "ray-2" | "ray-flash-2" | "runway-aleph")}
+                    onChange={(e) => setLumaModel(e.target.value as "ray-2" | "ray-flash-2" | "runway-aleph" | "kling-2.6")}
                     className="rounded-md border border-ink/20 px-3 py-2"
                   >
                     <option value="ray-2">ray-2</option>
                     <option value="ray-flash-2">ray-flash-2</option>
                     <option value="runway-aleph">runway-aleph</option>
+                    <option value="kling-2.6">kling-2.6 (start/end frames)</option>
                   </select>
                   {lumaModel === "runway-aleph" ? (
                     <div className="rounded-md border border-ink/20 bg-bg px-3 py-2 text-xs text-ink/70">
                       Runway Aleph uses prompt + first frame guidance (no Luma mode selector).
+                    </div>
+                  ) : lumaModel === "kling-2.6" ? (
+                    <div className="rounded-md border border-ink/20 bg-bg px-3 py-2 text-xs text-ink/70">
+                      Kling 2.6 uses start and end frames + duration. It automatically uses selected first/last frame edits when available.
                     </div>
                   ) : (
                     <select value={advancedMode} onChange={(e) => setAdvancedMode(e.target.value)} className="rounded-md border border-ink/20 px-3 py-2">
@@ -1634,7 +1640,7 @@ export default function App() {
                 <textarea
                   value={lumaPrompt}
                   onChange={(e) => setLumaPrompt(e.target.value)}
-                  placeholder="Optional Luma prompt"
+                  placeholder="Optional generation prompt"
                   className="h-20 w-full rounded-md border border-ink/20 p-2"
                 />
 

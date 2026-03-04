@@ -78,6 +78,11 @@ class AssetPaths:
         safe_provider = re.sub(r"[^a-zA-Z0-9]+", "", provider.lower())[:12] or "provider"
         return f"{self.task_prefix()}/segments/{segment_id}/inputs/{self._filename(f'{safe_provider}{short_gen}_first', '.jpg')}"
 
+    def segment_provider_last_frame(self, segment_id: str, generation_id: str, provider: str) -> str:
+        short_gen = re.sub(r"[^a-zA-Z0-9]+", "", generation_id)[-8:]
+        safe_provider = re.sub(r"[^a-zA-Z0-9]+", "", provider.lower())[:12] or "provider"
+        return f"{self.task_prefix()}/segments/{segment_id}/inputs/{self._filename(f'{safe_provider}{short_gen}_last', '.jpg')}"
+
     def export_output(self, export_id: str) -> str:
         short_export = re.sub(r"[^a-zA-Z0-9]+", "", export_id)[-8:]
         return f"{self.task_prefix()}/exports/{self._filename(f'output{short_export}', '.mp4')}"

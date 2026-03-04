@@ -128,7 +128,8 @@ Required at runtime:
 {
   "GEMINI_API_KEY": "...",
   "LUMA_API_KEY": "...",
-  "RUNWAY_API_KEY": "..."
+  "RUNWAY_API_KEY": "...",
+  "KLING_API_KEY": "..."
 }
 ```
 
@@ -149,6 +150,7 @@ Required:
 - Freehand brush masking is not implemented yet (rect + optional uploaded mask is implemented).
 - Frame-strip endpoint currently extracts thumbnails synchronously for short ranges (<= 6s).
 - Multi-segment merge is supported sequentially, but UX currently exposes a simple selection UI.
+- Kling 2.6 start/end-frame generation currently maps requested segment duration to nearest supported duration (5s or 10s).
 - Prompt text is stored in segment-generation metadata for reproducibility; logs contain only prompt hashes/length.
 
 ## Demo seed video instructions

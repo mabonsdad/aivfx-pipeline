@@ -28,6 +28,11 @@ from src.core.ids import new_id, prompt_hash
 from src.core.secrets import load_secret
 from src.core.store import S3JsonStore, now_iso
 from src.integrations.gemini import generate_image_edit
+from src.integrations.kling import (
+    create_start_end_generation as create_kling_start_end_generation,
+    get_queue_response as get_kling_queue_response,
+    get_queue_status as get_kling_queue_status,
+)
 from src.integrations.luma import create_modify_generation, get_generation
 from src.integrations.runway import (
     create_ephemeral_upload,
@@ -41,6 +46,7 @@ logger = Logger()
 FULL_VIDEO_MAX_BYTES = 100 * 1024 * 1024
 RUNWAY_VIDEO_MAX_BYTES = 64 * 1024 * 1024
 MAX_PROVIDER_IMAGE_BYTES = 10 * 1024 * 1024
+KLING_SUPPORTED_DURATIONS = (5, 10)
 
 
 def _target_by_orientation(
@@ -56,6 +62,10 @@ def _target_by_orientation(
     landscape_delta = abs(math.log(source_ratio / landscape_ratio))
     portrait_delta = abs(math.log(source_ratio / portrait_ratio))
     return landscape if landscape_delta <= portrait_delta else portrait
+
+
+def _nearest_supported_kling_duration(duration_sec: float) -> int:
+    return min(KLING_SUPPORTED_DURATIONS, key=lambda value: abs(duration_sec - float(value)))
 
 
 def _fit_image_to_canvas(image: Image.Image, target_w: int, target_h: int) -> Image.Image:
@@ -363,6 +373,57 @@ def _wait_runway_complete(api_key: str, task_id: str, *, timeout_sec: int = 1800
         time.sleep(6)
 
 
+def _parse_kling_output_url(payload: dict[str, Any]) -> str:
+    candidates: list[Any] = [
+        payload.get("video", {}).get("url"),
+        payload.get("video_url"),
+        payload.get("url"),
+        payload.get("result", {}).get("video", {}).get("url") if isinstance(payload.get("result"), dict) else None,
+        payload.get("result", {}).get("video_url") if isinstance(payload.get("result"), dict) else None,
+    ]
+    outputs = payload.get("outputs")
+    if isinstance(outputs, list):
+        candidates.extend(outputs)
+    videos = payload.get("videos")
+    if isinstance(videos, list):
+        candidates.extend(videos)
+    for item in candidates:
+        if isinstance(item, str) and item.startswith("http"):
+            return item
+        if isinstance(item, dict):
+            maybe = item.get("url") or item.get("video_url")
+            if isinstance(maybe, str) and maybe.startswith("http"):
+                return maybe
+    raise RuntimeError(f"Kling completion payload missing output URL: {payload}")
+
+
+def _wait_kling_complete(
+    api_key: str,
+    *,
+    status_url: str,
+    response_url: str | None,
+    timeout_sec: int = 1800,
+) -> dict[str, Any]:
+    start = time.time()
+    current_response_url = response_url
+    while True:
+        payload = get_kling_queue_status(api_key=api_key, status_url=status_url)
+        status = str(payload.get("status", "")).upper()
+        if status in {"COMPLETED", "SUCCEEDED", "SUCCESS"}:
+            response_payload = payload.get("response")
+            if isinstance(response_payload, dict):
+                return response_payload
+            current_response_url = payload.get("response_url") or payload.get("result_url") or current_response_url
+            if isinstance(current_response_url, str) and current_response_url:
+                return get_kling_queue_response(api_key=api_key, response_url=current_response_url)
+            return payload
+        if status in {"FAILED", "ERROR", "CANCELLED"}:
+            raise RuntimeError(f"Kling generation failed: {payload}")
+        if time.time() - start > timeout_sec:
+            raise TimeoutError("Kling generation poll timeout")
+        time.sleep(6)
+
+
 def _alpha_mask_for_rect(size: tuple[int, int], rect: dict[str, int], feather_px: int, bleed_px: int) -> Image.Image:
     mask = Image.new("L", size, 0)
     x = max(0, rect["x"] - bleed_px)
@@ -592,28 +653,40 @@ def _handle_segment_generate(
     segment_id = payload["segmentId"]
     gen_id = payload["genId"]
     segment = next(s for s in task["segments"] if s["segmentId"] == segment_id)
+    segment_duration_sec = float(segment.get("durationSec") or 0)
 
     paths = _asset_paths(task)
     s3 = boto3.client("s3")
-    segment_key = _ensure_segment_clip(
-        s3=s3,
-        asset_store=asset_store,
-        asset_paths=paths,
-        task=task,
-        segment=segment,
-        assets_bucket=settings.assets_bucket,
-    )
+    model_name = payload["lumaModel"]
+    segment_key: str | None = None
+    if model_name != "kling-2.6":
+        segment_key = _ensure_segment_clip(
+            s3=s3,
+            asset_store=asset_store,
+            asset_paths=paths,
+            task=task,
+            segment=segment,
+            assets_bucket=settings.assets_bucket,
+        )
 
-    frame_id = segment["startFrameId"]
-    frame = task["frames"][frame_id]
-    first_frame_key = frame["captureKey"]
-    variant_id = payload.get("firstFrameVariantId") or frame.get("selectedVariantId")
+    start_frame_id = segment["startFrameId"]
+    start_frame = task["frames"][start_frame_id]
+    first_frame_key = start_frame["captureKey"]
+    variant_id = payload.get("firstFrameVariantId") or start_frame.get("selectedVariantId")
     if variant_id:
-        variant = next((v for v in frame.get("variants", []) if v["variantId"] == variant_id), None)
+        variant = next((v for v in start_frame.get("variants", []) if v["variantId"] == variant_id), None)
         if variant:
             first_frame_key = variant["outputKey"]
 
-    model_name = payload["lumaModel"]
+    end_frame_id = segment["endFrameId"]
+    end_frame = task["frames"][end_frame_id]
+    last_frame_key = end_frame["captureKey"]
+    end_variant_id = end_frame.get("selectedVariantId")
+    if end_variant_id:
+        end_variant = next((v for v in end_frame.get("variants", []) if v["variantId"] == end_variant_id), None)
+        if end_variant:
+            last_frame_key = end_variant["outputKey"]
+
     fps_info = task["video"]["editSource"]["fps"]
     fps = Fraction(int(fps_info["num"]), int(fps_info["den"]))
     src_width = int(task["video"]["editSource"]["width"])
@@ -621,45 +694,47 @@ def _handle_segment_generate(
 
     media_key_for_provider: str | None = None
     first_frame_input_key: str | None = None
+    last_frame_input_key: str | None = None
     with tempfile.TemporaryDirectory() as td:
         td_path = Path(td)
-        local_segment_source = td_path / "segment_full.mp4"
-        _download_s3(s3, settings.assets_bucket, segment_key, local_segment_source)
+        if segment_key:
+            local_segment_source = td_path / "segment_full.mp4"
+            _download_s3(s3, settings.assets_bucket, segment_key, local_segment_source)
 
-        if model_name == "runway-aleph":
-            _job_progress(job, store, 20, "running", "Preparing Runway Aleph input clip")
-            local_provider_segment = td_path / "segment_runway.mp4"
-            _transcode_with_size_limit(
-                input_path=str(local_segment_source),
-                output_path=str(local_provider_segment),
-                fps=fps,
-                source_width=src_width,
-                source_height=src_height,
-                landscape_target=(1280, 720),
-                portrait_target=(720, 1280),
-                max_bytes=RUNWAY_VIDEO_MAX_BYTES,
-            )
-            media_key_for_provider = paths.segment_provider_input(segment_id, gen_id, "runway")
-            _upload_s3(s3, settings.assets_bucket, media_key_for_provider, local_provider_segment, "video/mp4")
-        else:
-            source_size = local_segment_source.stat().st_size
-            if source_size > FULL_VIDEO_MAX_BYTES:
-                _job_progress(job, store, 20, "running", "Optimizing segment clip to provider size limits")
-                local_provider_segment = td_path / "segment_luma.mp4"
+            if model_name == "runway-aleph":
+                _job_progress(job, store, 20, "running", "Preparing Runway Aleph input clip")
+                local_provider_segment = td_path / "segment_runway.mp4"
                 _transcode_with_size_limit(
                     input_path=str(local_segment_source),
                     output_path=str(local_provider_segment),
                     fps=fps,
                     source_width=src_width,
                     source_height=src_height,
-                    landscape_target=(1920, 1080),
-                    portrait_target=(1080, 1920),
-                    max_bytes=FULL_VIDEO_MAX_BYTES,
+                    landscape_target=(1280, 720),
+                    portrait_target=(720, 1280),
+                    max_bytes=RUNWAY_VIDEO_MAX_BYTES,
                 )
-                media_key_for_provider = paths.segment_provider_input(segment_id, gen_id, "luma")
+                media_key_for_provider = paths.segment_provider_input(segment_id, gen_id, "runway")
                 _upload_s3(s3, settings.assets_bucket, media_key_for_provider, local_provider_segment, "video/mp4")
             else:
-                media_key_for_provider = segment_key
+                source_size = local_segment_source.stat().st_size
+                if source_size > FULL_VIDEO_MAX_BYTES:
+                    _job_progress(job, store, 20, "running", "Optimizing segment clip to provider size limits")
+                    local_provider_segment = td_path / "segment_luma.mp4"
+                    _transcode_with_size_limit(
+                        input_path=str(local_segment_source),
+                        output_path=str(local_provider_segment),
+                        fps=fps,
+                        source_width=src_width,
+                        source_height=src_height,
+                        landscape_target=(1920, 1080),
+                        portrait_target=(1080, 1920),
+                        max_bytes=FULL_VIDEO_MAX_BYTES,
+                    )
+                    media_key_for_provider = paths.segment_provider_input(segment_id, gen_id, "luma")
+                    _upload_s3(s3, settings.assets_bucket, media_key_for_provider, local_provider_segment, "video/mp4")
+                else:
+                    media_key_for_provider = segment_key
 
         frame_bytes = asset_store.read_bytes(first_frame_key)
         first_target_w, first_target_h = _target_by_orientation(
@@ -679,12 +754,26 @@ def _handle_segment_generate(
         first_frame_input_key = paths.segment_provider_first_frame(
             segment_id,
             gen_id,
-            "runway" if model_name == "runway-aleph" else "luma",
+            "runway" if model_name == "runway-aleph" else ("kling" if model_name == "kling-2.6" else "luma"),
         )
         _upload_s3(s3, settings.assets_bucket, first_frame_input_key, local_first_frame, "image/jpeg")
 
-    media_url = asset_store.presign_get(media_key_for_provider, expires=3600)
+        if model_name == "kling-2.6":
+            last_frame_bytes = asset_store.read_bytes(last_frame_key)
+            prepared_last_frame = _prepare_first_frame_image_bytes(
+                last_frame_bytes,
+                target_width=first_target_w,
+                target_height=first_target_h,
+                max_bytes=MAX_PROVIDER_IMAGE_BYTES,
+            )
+            local_last_frame = td_path / "last_frame.jpg"
+            local_last_frame.write_bytes(prepared_last_frame)
+            last_frame_input_key = paths.segment_provider_last_frame(segment_id, gen_id, "kling")
+            _upload_s3(s3, settings.assets_bucket, last_frame_input_key, local_last_frame, "image/jpeg")
+
+    media_url = asset_store.presign_get(media_key_for_provider, expires=3600) if media_key_for_provider else None
     first_frame_url = asset_store.presign_get(first_frame_input_key, expires=3600)
+    last_frame_url = asset_store.presign_get(last_frame_input_key, expires=3600) if last_frame_input_key else None
 
     secrets = load_secret(settings.secrets_arn)
 
@@ -719,8 +808,34 @@ def _handle_segment_generate(
         result = _wait_runway_complete(runway_key, generation_id)
         out_url = _parse_runway_output_url(result)
         provider_name = "runway"
+    elif model_name == "kling-2.6":
+        kling_key = secrets["KLING_API_KEY"]
+        kling_duration = _nearest_supported_kling_duration(segment_duration_sec)
+        _job_progress(job, store, 35, "running", "Creating Kling 2.6 start/end-frame generation")
+        created = create_kling_start_end_generation(
+            api_key=kling_key,
+            start_image_url=first_frame_url,
+            end_image_url=last_frame_url or first_frame_url,
+            duration_seconds=kling_duration,
+            prompt=payload.get("prompt"),
+        )
+        generation_id = created.get("request_id") or created.get("requestId") or created.get("id")
+        status_url = created.get("status_url") or created.get("statusUrl")
+        response_url = created.get("response_url") or created.get("responseUrl")
+        if not isinstance(generation_id, str) or not isinstance(status_url, str):
+            raise RuntimeError(f"Unexpected Kling create response: {created}")
+        _job_progress(job, store, 55, "running", "Polling Kling generation")
+        result = _wait_kling_complete(
+            kling_key,
+            status_url=status_url,
+            response_url=response_url if isinstance(response_url, str) else None,
+        )
+        out_url = _parse_kling_output_url(result)
+        provider_name = "kling"
     else:
         luma_key = secrets["LUMA_API_KEY"]
+        if not media_url:
+            raise RuntimeError("Luma generation requires a prepared segment media URL")
         _job_progress(job, store, 35, "running", "Creating Luma modify generation")
         created = create_modify_generation(
             api_key=luma_key,
@@ -758,6 +873,9 @@ def _handle_segment_generate(
             "outputKey": out_key,
             "inputMediaKey": media_key_for_provider,
             "inputFirstFrameKey": first_frame_input_key,
+            "inputLastFrameKey": last_frame_input_key,
+            "requestedDurationSec": round(segment_duration_sec, 3),
+            "providerDurationSec": _nearest_supported_kling_duration(segment_duration_sec) if model_name == "kling-2.6" else None,
             "createdAt": gen_meta.get("createdAt") or now_iso(),
         }
     )

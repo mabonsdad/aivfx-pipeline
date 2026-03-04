@@ -47,8 +47,8 @@ export type SegmentGeneration = {
   genId: string;
   segmentId: string;
   luma: {
-    provider?: "luma" | "runway";
-    model: "ray-2" | "ray-flash-2" | "runway-aleph";
+    provider?: "luma" | "runway" | "kling";
+    model: "ray-2" | "ray-flash-2" | "runway-aleph" | "kling-2.6";
     mode: string;
     prompt?: string;
     lumaGenerationId?: string | null;
