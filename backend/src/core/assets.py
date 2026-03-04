@@ -73,15 +73,15 @@ class AssetPaths:
         safe_provider = re.sub(r"[^a-zA-Z0-9]+", "", provider.lower())[:12] or "provider"
         return f"{self.task_prefix()}/segments/{segment_id}/inputs/{self._filename(f'{safe_provider}{short_gen}_input', '.mp4')}"
 
-    def segment_provider_first_frame(self, segment_id: str, generation_id: str, provider: str) -> str:
+    def segment_provider_first_frame(self, segment_id: str, generation_id: str, provider: str, ext: str = ".jpg") -> str:
         short_gen = re.sub(r"[^a-zA-Z0-9]+", "", generation_id)[-8:]
         safe_provider = re.sub(r"[^a-zA-Z0-9]+", "", provider.lower())[:12] or "provider"
-        return f"{self.task_prefix()}/segments/{segment_id}/inputs/{self._filename(f'{safe_provider}{short_gen}_first', '.jpg')}"
+        return f"{self.task_prefix()}/segments/{segment_id}/inputs/{self._filename(f'{safe_provider}{short_gen}_first', ext)}"
 
-    def segment_provider_last_frame(self, segment_id: str, generation_id: str, provider: str) -> str:
+    def segment_provider_last_frame(self, segment_id: str, generation_id: str, provider: str, ext: str = ".jpg") -> str:
         short_gen = re.sub(r"[^a-zA-Z0-9]+", "", generation_id)[-8:]
         safe_provider = re.sub(r"[^a-zA-Z0-9]+", "", provider.lower())[:12] or "provider"
-        return f"{self.task_prefix()}/segments/{segment_id}/inputs/{self._filename(f'{safe_provider}{short_gen}_last', '.jpg')}"
+        return f"{self.task_prefix()}/segments/{segment_id}/inputs/{self._filename(f'{safe_provider}{short_gen}_last', ext)}"
 
     def export_output(self, export_id: str) -> str:
         short_export = re.sub(r"[^a-zA-Z0-9]+", "", export_id)[-8:]

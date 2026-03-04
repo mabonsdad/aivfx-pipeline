@@ -62,7 +62,8 @@ def generate_image_edit(
             {
                 "text": (
                     "Use the next image as an edit mask. White areas should be edited, "
-                    "black areas should remain unchanged, and gray areas should blend."
+                    "black areas must remain unchanged, and gray areas should blend. "
+                    "Preserve geometry, color, and texture outside masked regions."
                 )
             }
         )

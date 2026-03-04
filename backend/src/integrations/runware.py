@@ -57,7 +57,8 @@ def _prepare_runware_canvas(
         mask.save(mask_buf, format="PNG")
         return seed_buf.getvalue(), mask_buf.getvalue(), target_w, target_h, (left, top, right, bottom)
 
-    scale = min(target_w / float(source_w), target_h / float(source_h))
+    # Never upscale source content; pad instead to preserve detail.
+    scale = min(1.0, target_w / float(source_w), target_h / float(source_h))
     scaled_w = max(1, int(round(source_w * scale)))
     scaled_h = max(1, int(round(source_h * scale)))
 

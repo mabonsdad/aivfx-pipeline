@@ -97,19 +97,33 @@ def _encode_jpeg_with_limit(image: Image.Image, max_bytes: int) -> bytes:
     return output.getvalue()
 
 
-def _prepare_first_frame_image_bytes(
+def _encode_png_with_limit(image: Image.Image, max_bytes: int) -> bytes | None:
+    for optimize in (True, False):
+        output = BytesIO()
+        image.save(output, format="PNG", optimize=optimize, compress_level=9)
+        payload = output.getvalue()
+        if len(payload) <= max_bytes:
+            return payload
+    return None
+
+
+def _prepare_first_frame_image_payload(
     frame_bytes: bytes,
     *,
     target_width: int,
     target_height: int,
     max_bytes: int,
-) -> bytes:
+) -> tuple[bytes, str, str]:
     image = ImageOps.exif_transpose(Image.open(BytesIO(frame_bytes))).convert("RGB")
     canvas = _fit_image_to_canvas(image, target_width, target_height)
+    png_payload = _encode_png_with_limit(canvas, max_bytes)
+    if png_payload is not None:
+        return png_payload, "image/png", ".png"
+
     payload = _encode_jpeg_with_limit(canvas, max_bytes)
     if len(payload) > max_bytes:
         raise RuntimeError(f"Unable to compress frame under {max_bytes} bytes")
-    return payload
+    return payload, "image/jpeg", ".jpg"
 
 
 def _transcode_with_size_limit(
@@ -231,28 +245,34 @@ def _handle_ingest(
         fps = Fraction(probe["fps_num"], probe["fps_den"]) if probe["fps_den"] else Fraction(30, 1)
         if fps.numerator <= 0 or fps.denominator <= 0:
             fps = Fraction(30, 1)
-        target_width, target_height = _target_by_orientation(
-            probe["width"],
-            probe["height"],
-            landscape=(1920, 1080),
-            portrait=(1080, 1920),
-        )
-        _job_progress(job, store, 15, "running", "Normalizing edit source to CFR 1080 canvas")
-        transcode_to_cfr(
-            str(original_path),
-            str(edit_path),
-            fps,
-            target_width=target_width,
-            target_height=target_height,
-            crf=18,
-            preset="fast",
-            audio_bitrate="192k",
-        )
-        edit_probe = ffprobe_video(str(edit_path))
+        if probe.get("is_vfr_input"):
+            target_width, target_height = _target_by_orientation(
+                probe["width"],
+                probe["height"],
+                landscape=(1920, 1080),
+                portrait=(1080, 1920),
+            )
+            _job_progress(job, store, 15, "running", "Input is VFR: normalizing edit source to CFR")
+            transcode_to_cfr(
+                str(original_path),
+                str(edit_path),
+                fps,
+                target_width=target_width,
+                target_height=target_height,
+                crf=16,
+                preset="medium",
+                audio_bitrate="192k",
+            )
+            edit_source_path = edit_path
+            edit_probe = ffprobe_video(str(edit_source_path))
+        else:
+            _job_progress(job, store, 15, "running", "Input already CFR: preserving source as edit source")
+            edit_source_path = original_path
+            edit_probe = probe
 
         _job_progress(job, store, 32, "running", "Building lightweight preview proxy")
         preview_w, preview_h = transcode_for_preview(
-            str(edit_path),
+            str(edit_source_path),
             str(preview_path),
             fps=Fraction(edit_probe["fps_num"], edit_probe["fps_den"]) if edit_probe["fps_den"] else Fraction(30, 1),
             source_width=edit_probe["width"],
@@ -260,13 +280,13 @@ def _handle_ingest(
         )
 
         edit_key = asset_paths.edit_source()
-        _upload_s3(s3, settings.assets_bucket, edit_key, edit_path, "video/mp4")
+        _upload_s3(s3, settings.assets_bucket, edit_key, edit_source_path, "video/mp4")
         preview_key = asset_paths.preview_source()
         _upload_s3(s3, settings.assets_bucket, preview_key, preview_path, "video/mp4")
         _job_progress(job, store, 45, "running", "Generating timeline thumbnails")
 
         thumbs_dir = td_path / "thumbs"
-        thumbs = generate_thumbnail_strip(str(edit_path), str(thumbs_dir), fps=1, width=320)
+        thumbs = generate_thumbnail_strip(str(edit_source_path), str(thumbs_dir), fps=1, width=320)
         thumb_manifest: list[dict[str, Any]] = []
         for item in thumbs:
             source = thumbs_dir / item["filename"]
@@ -458,6 +478,11 @@ def _grow_or_shrink_mask(mask: Image.Image, grow_px: int) -> Image.Image:
     return mask.filter(ImageFilter.MinFilter(kernel_size))
 
 
+def _binarize_mask(mask: Image.Image, threshold: int = 24) -> Image.Image:
+    gray = mask.convert("L")
+    return gray.point(lambda value: 255 if value >= threshold else 0)
+
+
 def _edge_refine_mask(
     *,
     mask: Image.Image,
@@ -467,7 +492,7 @@ def _edge_refine_mask(
     radius_px: int,
     grow_px: int,
 ) -> Image.Image:
-    refined = _grow_or_shrink_mask(mask.convert("L"), grow_px)
+    refined = _grow_or_shrink_mask(_binarize_mask(mask), grow_px)
     if not enabled or strength <= 0:
         return refined
 
@@ -528,12 +553,19 @@ def _normalize_full_variant(*, source_bytes: bytes, variant_bytes: bytes) -> byt
     source = ImageOps.exif_transpose(Image.open(BytesIO(source_bytes))).convert("RGBA")
     variant = ImageOps.exif_transpose(Image.open(BytesIO(variant_bytes))).convert("RGBA")
     if variant.size != source.size:
-        variant = ImageOps.fit(
-            variant,
-            source.size,
-            method=Image.Resampling.LANCZOS,
-            centering=(0.5, 0.5),
-        )
+        source_ratio = source.width / max(1, source.height)
+        variant_ratio = variant.width / max(1, variant.height)
+        ratio_delta = abs(math.log(max(1e-6, variant_ratio / source_ratio)))
+        if ratio_delta < 0.02:
+            variant = variant.resize(source.size, Image.Resampling.LANCZOS)
+        else:
+            fitted = ImageOps.contain(variant, source.size, Image.Resampling.LANCZOS)
+            # Preserve untouched edge detail from the source when model output AR differs.
+            aligned = source.copy()
+            offset_x = max(0, (source.width - fitted.width) // 2)
+            offset_y = max(0, (source.height - fitted.height) // 2)
+            aligned.paste(fitted, (offset_x, offset_y))
+            variant = aligned
     out = BytesIO()
     variant.save(out, format="PNG")
     return out.getvalue()
@@ -836,6 +868,8 @@ def _handle_segment_generate(
     media_key_for_provider: str | None = None
     first_frame_input_key: str | None = None
     last_frame_input_key: str | None = None
+    first_frame_content_type: str | None = None
+    last_frame_content_type: str | None = None
     provider_media_width: int | None = None
     provider_media_height: int | None = None
     with tempfile.TemporaryDirectory() as td:
@@ -892,33 +926,34 @@ def _handle_segment_generate(
             landscape=(1280, 768) if model_name == "runway-gen4.5" else ((1280, 720) if model_name == "runway-aleph" else (1920, 1080)),
             portrait=(768, 1280) if model_name == "runway-gen4.5" else ((720, 1280) if model_name == "runway-aleph" else (1080, 1920)),
         )
-        prepared_first_frame = _prepare_first_frame_image_bytes(
+        prepared_first_frame, first_frame_content_type, first_frame_ext = _prepare_first_frame_image_payload(
             frame_bytes,
             target_width=first_target_w,
             target_height=first_target_h,
             max_bytes=MAX_PROVIDER_IMAGE_BYTES,
         )
-        local_first_frame = td_path / "first_frame.jpg"
+        local_first_frame = td_path / f"first_frame{first_frame_ext}"
         local_first_frame.write_bytes(prepared_first_frame)
         first_frame_input_key = paths.segment_provider_first_frame(
             segment_id,
             gen_id,
             "runway" if model_name in {"runway-aleph", "runway-gen4.5"} else ("kling" if model_name == "kling-2.6" else "luma"),
+            ext=first_frame_ext,
         )
-        _upload_s3(s3, settings.assets_bucket, first_frame_input_key, local_first_frame, "image/jpeg")
+        _upload_s3(s3, settings.assets_bucket, first_frame_input_key, local_first_frame, first_frame_content_type)
 
         if model_name == "kling-2.6":
             last_frame_bytes = asset_store.read_bytes(last_frame_key)
-            prepared_last_frame = _prepare_first_frame_image_bytes(
+            prepared_last_frame, last_frame_content_type, last_frame_ext = _prepare_first_frame_image_payload(
                 last_frame_bytes,
                 target_width=first_target_w,
                 target_height=first_target_h,
                 max_bytes=MAX_PROVIDER_IMAGE_BYTES,
             )
-            local_last_frame = td_path / "last_frame.jpg"
+            local_last_frame = td_path / f"last_frame{last_frame_ext}"
             local_last_frame.write_bytes(prepared_last_frame)
-            last_frame_input_key = paths.segment_provider_last_frame(segment_id, gen_id, "kling")
-            _upload_s3(s3, settings.assets_bucket, last_frame_input_key, local_last_frame, "image/jpeg")
+            last_frame_input_key = paths.segment_provider_last_frame(segment_id, gen_id, "kling", ext=last_frame_ext)
+            _upload_s3(s3, settings.assets_bucket, last_frame_input_key, local_last_frame, last_frame_content_type)
 
     media_url = asset_store.presign_get(media_key_for_provider, expires=3600) if media_key_for_provider else None
     first_frame_url = asset_store.presign_get(first_frame_input_key, expires=3600)
@@ -1065,6 +1100,8 @@ def _handle_segment_generate(
                 "model": used_provider_model or model_name,
                 "mode": payload["mode"],
                 "firstFrameResolution": {"width": first_target_w, "height": first_target_h},
+                "firstFrameContentType": first_frame_content_type,
+                "lastFrameContentType": last_frame_content_type,
                 "mediaResolution": (
                     {"width": provider_media_width, "height": provider_media_height}
                     if provider_media_width and provider_media_height

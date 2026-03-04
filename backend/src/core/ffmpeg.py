@@ -107,8 +107,8 @@ def transcode_to_cfr(
     *,
     target_width: int | None = None,
     target_height: int | None = None,
-    crf: int = 18,
-    preset: str = "fast",
+    crf: int = 16,
+    preset: str = "medium",
     audio_bitrate: str = "192k",
 ) -> None:
     fps_num = fps.numerator if fps.numerator > 0 else 30
@@ -170,8 +170,8 @@ def extract_segment_by_frames(
     fps_den: int,
     target_width: int | None = None,
     target_height: int | None = None,
-    crf: int = 18,
-    preset: str = "medium",
+    crf: int = 16,
+    preset: str = "slow",
     audio_bitrate: str = "192k",
 ) -> None:
     fps = Fraction(fps_num, fps_den)
@@ -453,9 +453,9 @@ def merge_with_segment_replacement(
         "-color_trc",
         "bt709",
         "-crf",
-        "18",
+        "16",
         "-preset",
-        "medium",
+        "slow",
     ]
     if has_audio:
         cmd.extend(
