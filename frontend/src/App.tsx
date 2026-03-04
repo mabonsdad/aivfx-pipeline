@@ -125,9 +125,21 @@ function FrameSelectCard({
               <path d="M9 3h6l1 2h4v2H4V5h4l1-2Zm1 6h2v9h-2V9Zm4 0h2v9h-2V9ZM7 9h2v9H7V9Z" />
             </svg>
           </button>
-          <p className="mt-2 text-xs text-ink/70">
-            frame {frame.frameIndex} ({frame.timecode})
-          </p>
+          <div className="mt-2 flex items-center justify-between gap-2">
+            <p className="text-xs text-ink/70">
+              frame {frame.frameIndex} ({frame.timecode})
+            </p>
+            <a
+              href={frame.imageUrl}
+              target="_blank"
+              rel="noreferrer"
+              download
+              className="rounded border border-ink/20 bg-white px-2 py-1 text-xs"
+              title="Download full quality frame"
+            >
+              Download
+            </a>
+          </div>
         </div>
       ) : (
         <button onClick={onSelect} className="w-full rounded-md border border-ink/20 bg-bg px-3 py-4 text-left">
@@ -1483,6 +1495,18 @@ export default function App() {
                         >
                           {activeEditFrame?.selectedVariantId === variant.variantId ? "Using this" : "Use this"}
                         </button>
+                        {variant.imageUrl ? (
+                          <a
+                            href={variant.imageUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            download
+                            className="mt-1 rounded border border-ink/20 bg-white px-2 py-1 text-xs"
+                            title="Download full quality image"
+                          >
+                            Download
+                          </a>
+                        ) : null}
                       </div>
                     ))}
                   </div>
@@ -1828,6 +1852,18 @@ export default function App() {
                           >
                             {selectedPreviewGeneration?.genId === gen.genId ? "Using this" : "Use this"}
                           </button>
+                          {gen.downloadUrl ? (
+                            <a
+                              href={gen.downloadUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              download
+                              className="rounded border border-ink/20 bg-white px-2 py-1 text-xs"
+                              title="Download full quality video"
+                            >
+                              Download
+                            </a>
+                          ) : null}
                           {gen.status === "failed" ? <span className="text-xs text-orange-700">Error</span> : null}
                         </div>
                       </div>
