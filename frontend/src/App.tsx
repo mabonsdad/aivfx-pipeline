@@ -357,6 +357,10 @@ export default function App() {
     first: null,
     last: null,
   });
+  const [compareVariantIds, setCompareVariantIds] = useState<{ first: string | null; last: string | null }>({
+    first: null,
+    last: null,
+  });
   const [selectedGenIds, setSelectedGenIds] = useState<string[]>([]);
   const [selectedPreviewGenId, setSelectedPreviewGenId] = useState<string>("");
   const [temporalFeatherFrames, setTemporalFeatherFrames] = useState(0);
@@ -460,6 +464,7 @@ export default function App() {
     [activeEditFrame?.variants],
   );
   const activeEditSourceVariantId = editSourceVariantIds[editFrameTab];
+  const activeCompareVariantId = compareVariantIds[editFrameTab];
   const activeSelectedVariant = useMemo(
     () =>
       activeEditSourceVariantId
@@ -467,7 +472,15 @@ export default function App() {
         : null,
     [activeEditSourceVariantId, activeEditVariants],
   );
+  const activeCompareVariant = useMemo(
+    () =>
+      activeCompareVariantId
+        ? activeEditVariants.find((variant) => variant.variantId === activeCompareVariantId) ?? null
+        : null,
+    [activeCompareVariantId, activeEditVariants],
+  );
   const activeEditSourceImageUrl = activeSelectedVariant?.imageUrl ?? activeEditFrame?.imageUrl ?? null;
+  const activeCompareImageUrl = activeCompareVariant?.imageUrl ?? activeEditFrame?.imageUrl ?? null;
   const activeEditCandidates = useMemo<EditFrameCandidate[]>(() => {
     if (!activeEditFrame?.imageUrl) return [];
     const candidates: EditFrameCandidate[] = [
@@ -477,7 +490,7 @@ export default function App() {
         imageUrl: activeEditFrame.imageUrl,
         label: "Original frame",
         createdAt: activeEditFrame.createdAt,
-        isSelected: !activeEditSourceVariantId,
+        isSelected: !activeCompareVariantId,
       },
     ];
     for (const variant of activeEditVariants) {
@@ -490,11 +503,11 @@ export default function App() {
         createdAt: variant.createdAt,
         variantId: variant.variantId,
         variant,
-        isSelected: activeEditSourceVariantId === variant.variantId,
+        isSelected: activeCompareVariantId === variant.variantId,
       });
     }
     return candidates;
-  }, [activeEditFrame, activeEditSourceVariantId, activeEditVariants]);
+  }, [activeCompareVariantId, activeEditFrame, activeEditVariants]);
   const activeFrameDimensions = useMemo(() => {
     const width = task?.video?.editSource?.width;
     const height = task?.video?.editSource?.height;
@@ -542,7 +555,9 @@ export default function App() {
   useEffect(() => {
     setFirstFrameId(null);
     setLastFrameId(null);
+    setFirstFrameVariantId("");
     setEditSourceVariantIds({ first: null, last: null });
+    setCompareVariantIds({ first: null, last: null });
     setPatchReferenceImages((previous) => {
       for (const item of [previous.first, previous.last]) {
         if (item?.previewUrl) {
@@ -555,6 +570,22 @@ export default function App() {
 
   useEffect(() => {
     setEditSourceVariantIds((previous) => {
+      let changed = false;
+      const next = { ...previous };
+      if (previous.first && !editFirstFrame?.variants.some((variant) => variant.variantId === previous.first)) {
+        next.first = null;
+        changed = true;
+      }
+      if (previous.last && !editLastFrame?.variants.some((variant) => variant.variantId === previous.last)) {
+        next.last = null;
+        changed = true;
+      }
+      return changed ? next : previous;
+    });
+  }, [editFirstFrame?.frameId, editFirstFrame?.variants, editLastFrame?.frameId, editLastFrame?.variants]);
+
+  useEffect(() => {
+    setCompareVariantIds((previous) => {
       let changed = false;
       const next = { ...previous };
       if (previous.first && !editFirstFrame?.variants.some((variant) => variant.variantId === previous.first)) {
@@ -968,6 +999,13 @@ export default function App() {
         : [],
     [selectedSegment, task],
   );
+  useEffect(() => {
+    if (!firstFrameVariantId) return;
+    const stillExists = selectedStartFrameVariants.some((variant) => variant.variantId === firstFrameVariantId);
+    if (!stillExists) {
+      setFirstFrameVariantId("");
+    }
+  }, [firstFrameVariantId, selectedStartFrameVariants]);
   const mergeGenerationOptions = useMemo(() => [...segmentGenerations], [segmentGenerations]);
   const selectedMergeGenerations = useMemo(
     () =>
@@ -1471,15 +1509,20 @@ export default function App() {
     setTab("report");
   }
 
-  function selectEditCandidate(frameId: string, tabKey: "first" | "last", candidate: EditFrameCandidate) {
+  function selectCompareCandidate(frameId: string, tabKey: "first" | "last", candidate: EditFrameCandidate) {
     const sourceVariantId = candidate.kind === "variant" ? candidate.variantId ?? null : null;
-    setEditSourceVariantIds((previous) => ({ ...previous, [tabKey]: sourceVariantId }));
+    setCompareVariantIds((previous) => ({ ...previous, [tabKey]: sourceVariantId }));
     const targetVariantId = candidate.kind === "original" ? "original" : candidate.variantId;
     if (!targetVariantId) return;
     selectVariantMutation.mutate({ frameId, variantId: targetVariantId });
     if (tabKey === "first") {
       setFirstFrameVariantId(sourceVariantId ?? "");
     }
+  }
+
+  function setEditSourceCandidate(tabKey: "first" | "last", candidate: EditFrameCandidate) {
+    const sourceVariantId = candidate.kind === "variant" ? candidate.variantId ?? null : null;
+    setEditSourceVariantIds((previous) => ({ ...previous, [tabKey]: sourceVariantId }));
   }
 
   async function handleDeleteAsset(item: LibraryAsset) {
@@ -1496,7 +1539,9 @@ export default function App() {
     const result = await captureMutation.mutateAsync({ frameIndex: currentFrameIndex });
     setSelectedFrameId(result.frameId);
     setEditSourceVariantIds((previous) => ({ ...previous, [boundary]: null }));
+    setCompareVariantIds((previous) => ({ ...previous, [boundary]: null }));
     if (boundary === "first") {
+      setFirstFrameVariantId("");
       setFirstFrameId(result.frameId);
     } else {
       setLastFrameId(result.frameId);
@@ -2043,15 +2088,15 @@ export default function App() {
                         className="h-full w-full"
                         itemOne={
                           <ReactCompareSliderImage
-                            src={activeEditFrame.imageUrl}
-                            alt="Original"
+                            src={activeEditSourceImageUrl ?? activeEditFrame.imageUrl}
+                            alt="Edit source"
                             style={{ height: "100%", width: "100%", objectFit: "contain", objectPosition: "center" }}
                           />
                         }
                         itemTwo={
                           <ReactCompareSliderImage
-                            src={activeEditSourceImageUrl ?? activeEditFrame.imageUrl}
-                            alt="Variant"
+                            src={activeCompareImageUrl ?? activeEditFrame.imageUrl}
+                            alt="Selected variant"
                             style={{ height: "100%", width: "100%", objectFit: "contain", objectPosition: "center" }}
                           />
                         }
@@ -2074,9 +2119,10 @@ export default function App() {
                           type="button"
                           className="block w-full"
                           onClick={() => {
-                            setImagePreviewModal({ url: candidate.imageUrl, label: candidate.label });
+                            if (!activeEditFrame) return;
+                            selectCompareCandidate(activeEditFrame.frameId, editFrameTab, candidate);
                           }}
-                          title="Preview image"
+                          title="Select for comparison and generation"
                         >
                           <img src={candidate.imageUrl} className="mb-2 w-full rounded bg-bg object-contain" />
                         </button>
@@ -2099,8 +2145,7 @@ export default function App() {
                             className="rounded border border-ink/20 bg-white p-2 text-xs"
                             title="Use for editing"
                             onClick={() => {
-                              if (!activeEditFrame) return;
-                              selectEditCandidate(activeEditFrame.frameId, editFrameTab, candidate);
+                              setEditSourceCandidate(editFrameTab, candidate);
                             }}
                           >
                             <svg viewBox="0 0 24 24" className="h-5 w-5" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2">
