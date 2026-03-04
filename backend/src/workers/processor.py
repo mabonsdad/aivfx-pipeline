@@ -505,6 +505,7 @@ def _handle_full_edit(
     frame = task["frames"][frame_id]
     capture_key = frame["captureKey"]
     secrets = load_secret(settings.secrets_arn)
+    gemini_key = secrets["GEMINI_API_KEY"]
 
     _job_progress(job, store, 10, "running", "Loading source frame")
     src_bytes = asset_store.read_bytes(capture_key)
