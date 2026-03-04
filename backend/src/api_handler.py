@@ -33,6 +33,7 @@ from src.models.schemas import (
     MergeRequest,
     PatchInitRequest,
     PatchSubmitRequest,
+    ReferenceUploadRequest,
     SegmentCreateRequest,
     SegmentGenerateRequest,
     SegmentPatchRequest,
@@ -265,6 +266,17 @@ def _audit_prompt(prompt: str) -> dict[str, Any]:
 def _segment_duration_seconds(task: dict[str, Any], segment: dict[str, Any]) -> float:
     fps = _fps(task)
     return (segment["endFrameExclusive"] - segment["startFrame"]) / float(fps)
+
+
+def _validated_reference_key(task: dict[str, Any], reference_key: str | None) -> str | None:
+    if not reference_key:
+        return None
+    if not isinstance(reference_key, str):
+        raise ValueError("Invalid reference image key")
+    allowed_prefix = f"{_asset_paths_for_task(task).task_prefix()}/frames/"
+    if not reference_key.startswith(allowed_prefix) or "/references/" not in reference_key:
+        raise ValueError("Reference image key is outside task frame references")
+    return reference_key
 
 
 def _route(event: dict[str, Any]) -> dict[str, Any]:
@@ -662,6 +674,27 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             store.save_task(task)
             return response(200, out, origin=origin)
 
+        if method == "POST" and len(parts) == 6 and parts[2] == "frames" and parts[4] == "references" and parts[5] == "uploads":
+            frame_id = parts[3]
+            if frame_id not in task.get("frames", {}):
+                return error_response(404, "Frame not found", origin=origin)
+            req = _json_model(ReferenceUploadRequest, event)
+            uploads: list[dict[str, str]] = []
+            paths = _asset_paths_for_task(task)
+            for file_req in req.files:
+                if not file_req.contentType.lower().startswith("image/"):
+                    return error_response(400, "Reference files must be images", origin=origin)
+                reference_id = new_id("ref")
+                key = paths.frame_reference(frame_id, reference_id, file_req.filename)
+                uploads.append(
+                    {
+                        "referenceId": reference_id,
+                        "key": key,
+                        "uploadUrl": asset_store.presign_put(key, expires=900, content_type=file_req.contentType),
+                    }
+                )
+            return response(200, {"uploads": uploads}, origin=origin)
+
         if method == "POST" and len(parts) == 6 and parts[2] == "frames" and parts[4] == "edits" and parts[5] == "full":
             frame_id = parts[3]
             if frame_id not in task.get("frames", {}):
@@ -731,8 +764,11 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             req = _json_model(PatchSubmitRequest, event)
             try:
                 prompt = _sanitize_prompt(req.prompt)
+                reference_key = _validated_reference_key(task, req.referenceImageKey)
             except ValueError as exc:
                 return error_response(400, str(exc), origin=origin)
+            if req.model == "runware_ace_pp" and not reference_key:
+                return error_response(400, "Runware ACE++ requires one reference image", origin=origin)
             logger.info("Queueing patch edit", extra={**_audit_prompt(prompt), "taskId": task_id, "frameId": frame_id})
 
             job_id = _queue_job(
@@ -750,6 +786,8 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                     "patchRect": req.patchRect.model_dump(),
                     "featherPx": req.featherPx,
                     "bleedPx": req.bleedPx,
+                    "referenceImageKey": reference_key,
+                    "runwareRepaintingScale": req.runwareRepaintingScale,
                 },
             )
             return response(202, {"jobId": job_id}, origin=origin)

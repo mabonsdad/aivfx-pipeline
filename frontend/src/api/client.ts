@@ -51,6 +51,18 @@ export const apiClient = {
       method: "POST",
       body: JSON.stringify({ frameIndex }),
     }),
+  createReferenceUploads: (
+    taskId: string,
+    frameId: string,
+    payload: { files: Array<{ filename: string; contentType: string }> },
+  ) =>
+    api<{ uploads: Array<{ referenceId: string; key: string; uploadUrl: string }> }>(
+      `/tasks/${taskId}/frames/${frameId}/references/uploads`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+    ),
   fullEdit: (
     taskId: string,
     frameId: string,
@@ -76,13 +88,15 @@ export const apiClient = {
     taskId: string,
     frameId: string,
     payload: {
-      model: "nano_banana" | "nano_banana_pro";
+      model: "nano_banana_pro" | "runware_flux_fill" | "runware_ace_pp";
       prompt: string;
       patchKey: string;
       maskKey?: string;
       patchRect: { x: number; y: number; width: number; height: number };
       featherPx: number;
       bleedPx: number;
+      referenceImageKey?: string;
+      runwareRepaintingScale?: number;
     },
   ) => api<{ jobId: string }>(`/tasks/${taskId}/frames/${frameId}/edits/patch/submit`, { method: "POST", body: JSON.stringify(payload) }),
   selectVariant: (taskId: string, frameId: string, variantId: string) =>

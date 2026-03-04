@@ -28,6 +28,15 @@ type LibraryAsset = {
     | { assetType: "export"; exportId: string };
 };
 
+type PatchEngine = "nano_banana_pro" | "runware_flux_fill" | "runware_ace_pp";
+
+type PatchReferenceImage = {
+  file: File;
+  previewUrl: string;
+  uploadedKey?: string;
+  frameId?: string;
+};
+
 function normalizeTaskNameInput(value: string): string {
   return value
     .trim()
@@ -186,6 +195,12 @@ export default function App() {
   const [prompt, setPrompt] = useState("");
   const [model, setModel] = useState<"nano_banana" | "nano_banana_pro">("nano_banana_pro");
   const [patchPrompt, setPatchPrompt] = useState("");
+  const [patchEngine, setPatchEngine] = useState<PatchEngine>("nano_banana_pro");
+  const [runwareRepaintingScale, setRunwareRepaintingScale] = useState(0.7);
+  const [patchReferenceImages, setPatchReferenceImages] = useState<{ first: PatchReferenceImage | null; last: PatchReferenceImage | null }>({
+    first: null,
+    last: null,
+  });
   const [patchBrushSize, setPatchBrushSize] = useState(24);
   const [featherPx, setFeatherPx] = useState(24);
   const [maskHasPaint, setMaskHasPaint] = useState(false);
@@ -291,11 +306,30 @@ export default function App() {
   }, [activeEditFrame, task?.video?.editSource?.height, task?.video?.editSource?.width]);
   const activeFrameWidth = activeFrameDimensions?.width ?? null;
   const activeFrameHeight = activeFrameDimensions?.height ?? null;
+  const activePatchReference = patchReferenceImages[editFrameTab];
 
   useEffect(() => {
     setFirstFrameId(null);
     setLastFrameId(null);
+    setPatchReferenceImages((previous) => {
+      for (const item of [previous.first, previous.last]) {
+        if (item?.previewUrl) {
+          URL.revokeObjectURL(item.previewUrl);
+        }
+      }
+      return { first: null, last: null };
+    });
   }, [selectedTaskId]);
+
+  useEffect(() => {
+    return () => {
+      for (const item of [patchReferenceImages.first, patchReferenceImages.last]) {
+        if (item?.previewUrl) {
+          URL.revokeObjectURL(item.previewUrl);
+        }
+      }
+    };
+  }, [patchReferenceImages.first, patchReferenceImages.last]);
 
   useEffect(() => {
     if (firstFrameId && !task?.frames[firstFrameId]) setFirstFrameId(null);
@@ -482,7 +516,6 @@ export default function App() {
       if (!selectedTaskId) throw new Error("Select a task");
       if (!activeFrameDimensions) throw new Error("Frame dimensions unavailable");
       if (!maskHasPaint) throw new Error("Draw a mask before generating a patch variant");
-      const patchModel: "nano_banana" | "nano_banana_pro" = model === "nano_banana_pro" ? model : "nano_banana_pro";
       const patchRect = {
         x: 0,
         y: 0,
@@ -518,14 +551,56 @@ export default function App() {
         body: maskBlob,
       });
 
+      let referenceImageKey: string | undefined;
+      if (patchEngine === "runware_ace_pp") {
+        const reference = activePatchReference;
+        if (!reference?.file) {
+          throw new Error("Runware ACE++ requires one reference image");
+        }
+        if (reference.uploadedKey && reference.frameId === frameId) {
+          referenceImageKey = reference.uploadedKey;
+        } else {
+          const uploadResp = await apiClient.createReferenceUploads(selectedTaskId, frameId, {
+            files: [{ filename: reference.file.name, contentType: reference.file.type || "image/png" }],
+          });
+          const upload = uploadResp.uploads[0];
+          if (!upload) {
+            throw new Error("Reference upload URL missing");
+          }
+          const uploadResult = await fetch(upload.uploadUrl, {
+            method: "PUT",
+            headers: { "content-type": reference.file.type || "image/png" },
+            body: reference.file,
+          });
+          if (!uploadResult.ok) {
+            throw new Error(`Reference upload failed (${uploadResult.status})`);
+          }
+          referenceImageKey = upload.key;
+          setPatchReferenceImages((previous) => {
+            const existing = previous[editFrameTab];
+            if (!existing) return previous;
+            return {
+              ...previous,
+              [editFrameTab]: {
+                ...existing,
+                uploadedKey: upload.key,
+                frameId,
+              },
+            };
+          });
+        }
+      }
+
       return apiClient.patchSubmit(selectedTaskId, frameId, {
-        model: patchModel,
+        model: patchEngine,
         prompt: patchPrompt,
         patchKey: init.patchKey,
         maskKey: init.maskKey,
         patchRect,
         featherPx,
         bleedPx: 0,
+        referenceImageKey,
+        runwareRepaintingScale: patchEngine === "runware_ace_pp" ? runwareRepaintingScale : undefined,
       });
     },
     onSuccess: (result) => setJobIds((prev) => Array.from(new Set([...prev, result.jobId]))),
@@ -934,6 +1009,34 @@ export default function App() {
     }
     patchDrawStateRef.current = null;
     setMaskHasPaint(false);
+  }
+
+  function setPatchReferenceForTab(tabKey: "first" | "last", file: File) {
+    setPatchReferenceImages((previous) => {
+      const existing = previous[tabKey];
+      if (existing?.previewUrl) {
+        URL.revokeObjectURL(existing.previewUrl);
+      }
+      return {
+        ...previous,
+        [tabKey]: {
+          file,
+          previewUrl: URL.createObjectURL(file),
+          uploadedKey: undefined,
+          frameId: undefined,
+        },
+      };
+    });
+  }
+
+  function clearPatchReferenceForTab(tabKey: "first" | "last") {
+    setPatchReferenceImages((previous) => {
+      const existing = previous[tabKey];
+      if (existing?.previewUrl) {
+        URL.revokeObjectURL(existing.previewUrl);
+      }
+      return { ...previous, [tabKey]: null };
+    });
   }
 
   function onPatchMaskPointerDown(event: PointerEvent<HTMLCanvasElement>) {
@@ -1414,6 +1517,18 @@ export default function App() {
                         </div>
                         <div className="grid gap-2 md:grid-cols-3">
                           <label className="text-xs text-ink/70">
+                            Patch engine
+                            <select
+                              value={patchEngine}
+                              onChange={(e) => setPatchEngine(e.target.value as PatchEngine)}
+                              className="mt-1 block w-full rounded border border-ink/20 px-2 py-1 text-sm"
+                            >
+                              <option value="nano_banana_pro">Google Nano Banana Pro</option>
+                              <option value="runware_flux_fill">Runware FLUX Fill</option>
+                              <option value="runware_ace_pp">Runware ACE++ + FLUX Fill</option>
+                            </select>
+                          </label>
+                          <label className="text-xs text-ink/70">
                             Brush size
                             <select
                               value={patchBrushSize}
@@ -1451,6 +1566,57 @@ export default function App() {
                             </button>
                           </div>
                         </div>
+                        {patchEngine === "runware_ace_pp" ? (
+                          <div className="space-y-2 rounded border border-ink/10 bg-white p-2">
+                            <p className="text-xs text-ink/70">
+                              ACE++ local editing needs one reference image plus your painted mask.
+                            </p>
+                            <input
+                              type="file"
+                              accept="image/*"
+                              onChange={(e) => {
+                                const file = e.target.files?.[0];
+                                if (!file) return;
+                                setPatchReferenceForTab(editFrameTab, file);
+                              }}
+                              className="text-xs"
+                            />
+                            {activePatchReference?.previewUrl ? (
+                              <div className="flex items-start gap-2">
+                                <img
+                                  src={activePatchReference.previewUrl}
+                                  alt="Runware ACE++ reference"
+                                  className="max-h-20 rounded border border-ink/10 bg-bg object-contain"
+                                />
+                                <div className="space-y-1">
+                                  <p className="text-xs text-ink/60">{activePatchReference.file.name}</p>
+                                  <button
+                                    type="button"
+                                    className="rounded border border-ink/20 px-2 py-1 text-xs"
+                                    onClick={() => clearPatchReferenceForTab(editFrameTab)}
+                                  >
+                                    Remove reference
+                                  </button>
+                                </div>
+                              </div>
+                            ) : (
+                              <p className="text-xs text-ink/60">No ACE++ reference image selected.</p>
+                            )}
+                            <label className="text-xs text-ink/70">
+                              Repainting scale
+                              <input
+                                type="range"
+                                min={0}
+                                max={1}
+                                step={0.05}
+                                value={runwareRepaintingScale}
+                                onChange={(e) => setRunwareRepaintingScale(Number(e.target.value))}
+                                className="mt-1 block w-full"
+                              />
+                              <span className="mt-1 block text-[11px] text-ink/60">{runwareRepaintingScale.toFixed(2)}</span>
+                            </label>
+                          </div>
+                        ) : null}
                       </div>
                     ) : (
                       <p className="text-sm text-ink/60">Select a frame above to enable mask painting.</p>
@@ -1463,12 +1629,21 @@ export default function App() {
                     />
                     <button
                       className="rounded-md bg-accent2 px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-50"
-                      disabled={!activeEditFrame || patchEditMutation.isPending || !patchPrompt.trim() || !maskHasPaint}
+                      disabled={
+                        !activeEditFrame ||
+                        patchEditMutation.isPending ||
+                        !patchPrompt.trim() ||
+                        !maskHasPaint ||
+                        (patchEngine === "runware_ace_pp" && !activePatchReference?.file)
+                      }
                       onClick={() => activeEditFrame && patchEditMutation.mutate(activeEditFrame.frameId)}
                     >
                       Generate Patch Variant
                     </button>
                     {!maskHasPaint ? <p className="text-xs text-ink/60">Draw a mask before generating a patch variant.</p> : null}
+                    {patchEngine === "runware_ace_pp" && !activePatchReference?.file ? (
+                      <p className="text-xs text-ink/60">Select one reference image to use ACE++ local editing.</p>
+                    ) : null}
                     {patchEditMutation.error ? <p className="text-xs text-red-600">{patchEditMutation.error.message}</p> : null}
                   </div>
                 </details>

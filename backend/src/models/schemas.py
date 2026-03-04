@@ -50,13 +50,24 @@ class PatchInitRequest(BaseModel):
 
 
 class PatchSubmitRequest(BaseModel):
-    model: Literal["nano_banana", "nano_banana_pro"]
+    model: Literal["nano_banana_pro", "runware_flux_fill", "runware_ace_pp"]
     prompt: str = Field(min_length=1)
     patchKey: str
     maskKey: str | None = None
     patchRect: PatchRect
     featherPx: int = Field(ge=0, le=200)
     bleedPx: int = Field(ge=0, le=300, default=32)
+    referenceImageKey: str | None = None
+    runwareRepaintingScale: float = Field(ge=0, le=1, default=0.7)
+
+
+class ReferenceUploadItem(BaseModel):
+    filename: str = Field(min_length=1, max_length=255)
+    contentType: str = Field(min_length=1, max_length=120)
+
+
+class ReferenceUploadRequest(BaseModel):
+    files: list[ReferenceUploadItem] = Field(min_length=1, max_length=1)
 
 
 class SegmentGenerateRequest(BaseModel):
@@ -98,7 +109,7 @@ class AssetDeleteRequest(BaseModel):
 class TaskFrameVariant(BaseModel):
     variantId: str
     type: Literal["full", "patch"]
-    model: Literal["nano_banana", "nano_banana_pro"]
+    model: Literal["nano_banana", "nano_banana_pro", "runware_flux_fill", "runware_ace_pp"]
     promptHash: str
     createdAt: datetime
     outputKey: str

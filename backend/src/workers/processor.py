@@ -34,6 +34,7 @@ from src.integrations.kling import (
     get_queue_status as get_kling_queue_status,
 )
 from src.integrations.luma import create_modify_generation, get_generation
+from src.integrations.runware import patch_edit_aceplusplus, patch_edit_flux_fill
 from src.integrations.runway import (
     create_ephemeral_upload,
     create_video_to_video,
@@ -509,7 +510,6 @@ def _handle_full_edit(
     frame = task["frames"][frame_id]
     capture_key = frame["captureKey"]
     secrets = load_secret(settings.secrets_arn)
-    gemini_key = secrets["GEMINI_API_KEY"]
 
     _job_progress(job, store, 10, "running", "Loading source frame")
     src_bytes = asset_store.read_bytes(capture_key)
@@ -565,14 +565,57 @@ def _handle_patch_edit(
     patch_bytes = asset_store.read_bytes(payload["patchKey"])
     mask_bytes = asset_store.read_bytes(payload["maskKey"]) if payload.get("maskKey") else None
 
-    _job_progress(job, store, 30, "running", "Calling Gemini patch edit")
-    edited_patch = generate_image_edit(
-        api_key=gemini_key,
-        model=payload["model"],
-        prompt=payload["prompt"],
-        input_image_bytes=patch_bytes,
-        mask_image_bytes=mask_bytes,
-    )
+    model_name = payload["model"]
+    if model_name in {"runware_flux_fill", "runware_ace_pp"}:
+        runware_key = secrets["RUNWARE_API_KEY"]
+        patch_image = ImageOps.exif_transpose(Image.open(BytesIO(patch_bytes))).convert("RGBA")
+        if mask_bytes:
+            mask_image = ImageOps.exif_transpose(Image.open(BytesIO(mask_bytes))).convert("L")
+            if mask_image.size != patch_image.size:
+                mask_image = mask_image.resize(patch_image.size, Image.Resampling.BILINEAR)
+        else:
+            mask_image = Image.new("L", patch_image.size, 255)
+
+        patch_io = BytesIO()
+        patch_image.save(patch_io, format="PNG")
+        mask_io = BytesIO()
+        mask_image.save(mask_io, format="PNG")
+
+        _job_progress(job, store, 30, "running", "Calling Runware patch edit")
+        if model_name == "runware_ace_pp":
+            reference_key = payload.get("referenceImageKey")
+            if not reference_key:
+                raise RuntimeError("Runware ACE++ reference image is required")
+            reference_bytes = asset_store.read_bytes(reference_key)
+            edited_patch = patch_edit_aceplusplus(
+                api_key=runware_key,
+                prompt=payload["prompt"],
+                seed_image_bytes=patch_io.getvalue(),
+                mask_image_bytes=mask_io.getvalue(),
+                reference_image_bytes=reference_bytes,
+                width=patch_image.width,
+                height=patch_image.height,
+                repainting_scale=float(payload.get("runwareRepaintingScale", 0.7)),
+            )
+        else:
+            edited_patch = patch_edit_flux_fill(
+                api_key=runware_key,
+                prompt=payload["prompt"],
+                seed_image_bytes=patch_io.getvalue(),
+                mask_image_bytes=mask_io.getvalue(),
+                width=patch_image.width,
+                height=patch_image.height,
+            )
+    else:
+        gemini_key = secrets["GEMINI_API_KEY"]
+        _job_progress(job, store, 30, "running", "Calling Gemini patch edit")
+        edited_patch = generate_image_edit(
+            api_key=gemini_key,
+            model="nano_banana_pro",
+            prompt=payload["prompt"],
+            input_image_bytes=patch_bytes,
+            mask_image_bytes=mask_bytes,
+        )
 
     variant_id = new_id("var")
     paths = _asset_paths(task)
