@@ -819,8 +819,8 @@ def _handle_segment_generate(
         first_target_w, first_target_h = _target_by_orientation(
             src_width,
             src_height,
-            landscape=(1280, 720) if model_name in {"runway-aleph", "runway-gen4.5"} else (1920, 1080),
-            portrait=(720, 1280) if model_name in {"runway-aleph", "runway-gen4.5"} else (1080, 1920),
+            landscape=(1280, 768) if model_name == "runway-gen4.5" else ((1280, 720) if model_name == "runway-aleph" else (1920, 1080)),
+            portrait=(768, 1280) if model_name == "runway-gen4.5" else ((720, 1280) if model_name == "runway-aleph" else (1080, 1920)),
         )
         prepared_first_frame = _prepare_first_frame_image_bytes(
             frame_bytes,
@@ -892,7 +892,7 @@ def _handle_segment_generate(
         provider_name = "runway"
     elif model_name == "runway-gen4.5":
         runway_key = secrets["RUNWAY_API_KEY"]
-        runway_duration = max(2, min(10, int(round(segment_duration_sec))))
+        runway_duration = 5 if segment_duration_sec <= 7.5 else 10
         provider_duration_sec = float(runway_duration)
         _job_progress(job, store, 35, "running", "Creating Runway Gen-4.5 image-to-video generation")
         created = create_image_to_video(
