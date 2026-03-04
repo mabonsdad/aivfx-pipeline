@@ -129,10 +129,13 @@ Required at runtime:
   "GEMINI_API_KEY": "...",
   "LUMA_API_KEY": "...",
   "RUNWAY_API_KEY": "...",
-  "KLING_API_KEY": "...",
-  "RUNWARE_API_KEY": "..."
+  "RUNWARE_API_KEY": "...",
+  "KLING_API_KEY": "..."
 }
 ```
+
+`RUNWARE_API_KEY` is required for current Kling 2.6 generation via Runware.
+`KLING_API_KEY` is only used as a legacy fallback.
 
 ### Frontend env vars
 

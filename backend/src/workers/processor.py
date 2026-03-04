@@ -30,8 +30,7 @@ from src.core.store import S3JsonStore, now_iso
 from src.integrations.gemini import generate_image_edit
 from src.integrations.kling import (
     create_start_end_generation as create_kling_start_end_generation,
-    get_queue_response as get_kling_queue_response,
-    get_queue_status as get_kling_queue_status,
+    get_generation_response as get_kling_generation_response,
 )
 from src.integrations.luma import create_modify_generation, get_generation
 from src.integrations.runware import patch_edit_aceplusplus, patch_edit_flux_fill
@@ -376,11 +375,15 @@ def _wait_runway_complete(api_key: str, task_id: str, *, timeout_sec: int = 1800
 
 def _parse_kling_output_url(payload: dict[str, Any]) -> str:
     candidates: list[Any] = [
+        payload.get("videoURL"),
         payload.get("video", {}).get("url"),
+        payload.get("video", {}).get("videoURL"),
         payload.get("video_url"),
         payload.get("url"),
         payload.get("result", {}).get("video", {}).get("url") if isinstance(payload.get("result"), dict) else None,
+        payload.get("result", {}).get("video", {}).get("videoURL") if isinstance(payload.get("result"), dict) else None,
         payload.get("result", {}).get("video_url") if isinstance(payload.get("result"), dict) else None,
+        payload.get("result", {}).get("videoURL") if isinstance(payload.get("result"), dict) else None,
     ]
     outputs = payload.get("outputs")
     if isinstance(outputs, list):
@@ -392,7 +395,7 @@ def _parse_kling_output_url(payload: dict[str, Any]) -> str:
         if isinstance(item, str) and item.startswith("http"):
             return item
         if isinstance(item, dict):
-            maybe = item.get("url") or item.get("video_url")
+            maybe = item.get("url") or item.get("video_url") or item.get("videoURL")
             if isinstance(maybe, str) and maybe.startswith("http"):
                 return maybe
     raise RuntimeError(f"Kling completion payload missing output URL: {payload}")
@@ -401,22 +404,14 @@ def _parse_kling_output_url(payload: dict[str, Any]) -> str:
 def _wait_kling_complete(
     api_key: str,
     *,
-    status_url: str,
-    response_url: str | None,
+    task_uuid: str,
     timeout_sec: int = 1800,
 ) -> dict[str, Any]:
     start = time.time()
-    current_response_url = response_url
     while True:
-        payload = get_kling_queue_status(api_key=api_key, status_url=status_url)
+        payload = get_kling_generation_response(api_key=api_key, task_uuid=task_uuid)
         status = str(payload.get("status", "")).upper()
         if status in {"COMPLETED", "SUCCEEDED", "SUCCESS"}:
-            response_payload = payload.get("response")
-            if isinstance(response_payload, dict):
-                return response_payload
-            current_response_url = payload.get("response_url") or payload.get("result_url") or current_response_url
-            if isinstance(current_response_url, str) and current_response_url:
-                return get_kling_queue_response(api_key=api_key, response_url=current_response_url)
             return payload
         if status in {"FAILED", "ERROR", "CANCELLED"}:
             raise RuntimeError(f"Kling generation failed: {payload}")
@@ -829,7 +824,9 @@ def _handle_segment_generate(
         out_url = _parse_runway_output_url(result)
         provider_name = "runway"
     elif model_name == "kling-2.6":
-        kling_key = secrets["KLING_API_KEY"]
+        kling_key = secrets.get("RUNWARE_API_KEY") or secrets.get("KLING_API_KEY")
+        if not kling_key:
+            raise RuntimeError("Kling generation requires RUNWARE_API_KEY (or legacy KLING_API_KEY)")
         kling_duration = _nearest_supported_kling_duration(segment_duration_sec)
         _job_progress(job, store, 35, "running", "Creating Kling 2.6 start/end-frame generation")
         created = create_kling_start_end_generation(
@@ -838,17 +835,16 @@ def _handle_segment_generate(
             end_image_url=last_frame_url or first_frame_url,
             duration_seconds=kling_duration,
             prompt=payload.get("prompt"),
+            width=first_target_w,
+            height=first_target_h,
         )
-        generation_id = created.get("request_id") or created.get("requestId") or created.get("id")
-        status_url = created.get("status_url") or created.get("statusUrl")
-        response_url = created.get("response_url") or created.get("responseUrl")
-        if not isinstance(generation_id, str) or not isinstance(status_url, str):
+        generation_id = created.get("taskUUID")
+        if not isinstance(generation_id, str):
             raise RuntimeError(f"Unexpected Kling create response: {created}")
         _job_progress(job, store, 55, "running", "Polling Kling generation")
         result = _wait_kling_complete(
             kling_key,
-            status_url=status_url,
-            response_url=response_url if isinstance(response_url, str) else None,
+            task_uuid=generation_id,
         )
         out_url = _parse_kling_output_url(result)
         provider_name = "kling"
