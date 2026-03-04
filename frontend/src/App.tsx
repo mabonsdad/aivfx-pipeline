@@ -176,6 +176,99 @@ function FrameSelectCard({
   );
 }
 
+function VideoThumbnail({
+  videoUrl,
+  label,
+  onClick,
+  disabled,
+}: {
+  videoUrl?: string;
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+}) {
+  const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setThumbnailUrl(null);
+    if (!videoUrl) return;
+
+    const video = document.createElement("video");
+    video.crossOrigin = "anonymous";
+    video.preload = "metadata";
+    video.muted = true;
+    video.playsInline = true;
+    video.src = videoUrl;
+
+    const capture = () => {
+      if (cancelled) return;
+      if (!video.videoWidth || !video.videoHeight) return;
+      const canvas = document.createElement("canvas");
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      try {
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        setThumbnailUrl(canvas.toDataURL("image/jpeg", 0.86));
+      } catch {
+        setThumbnailUrl(null);
+      }
+    };
+
+    const handleLoadedData = () => {
+      if (!Number.isFinite(video.duration) || video.duration <= 0) {
+        capture();
+        return;
+      }
+      const previewTime = Math.min(1, Math.max(0, video.duration / 3));
+      if (previewTime <= 0) {
+        capture();
+        return;
+      }
+      video.currentTime = previewTime;
+    };
+
+    const handleSeeked = () => capture();
+    const handleError = () => {
+      if (!cancelled) setThumbnailUrl(null);
+    };
+
+    video.addEventListener("loadeddata", handleLoadedData);
+    video.addEventListener("seeked", handleSeeked);
+    video.addEventListener("error", handleError);
+    video.load();
+
+    return () => {
+      cancelled = true;
+      video.removeEventListener("loadeddata", handleLoadedData);
+      video.removeEventListener("seeked", handleSeeked);
+      video.removeEventListener("error", handleError);
+      video.pause();
+      video.src = "";
+    };
+  }, [videoUrl]);
+
+  return (
+    <button
+      type="button"
+      className="block w-full disabled:cursor-not-allowed disabled:opacity-60"
+      onClick={onClick}
+      disabled={disabled}
+      title={disabled ? "Video unavailable" : `Use ${label}`}
+    >
+      {thumbnailUrl ? (
+        <img src={thumbnailUrl} alt={label} className="aspect-video w-full rounded-md bg-bg object-contain" />
+      ) : (
+        <div className="flex aspect-video w-full items-center justify-center rounded-md border border-dashed border-ink/20 bg-bg text-xs text-ink/60">
+          Video thumbnail unavailable
+        </div>
+      )}
+    </button>
+  );
+}
+
 function uploadFileWithProgress(
   uploadUrl: string,
   file: File,
@@ -254,6 +347,7 @@ export default function App() {
   const [selectedPreviewGenId, setSelectedPreviewGenId] = useState<string>("");
   const [temporalFeatherFrames, setTemporalFeatherFrames] = useState(0);
   const [imagePreviewModal, setImagePreviewModal] = useState<{ url: string; label: string } | null>(null);
+  const [videoPreviewModal, setVideoPreviewModal] = useState<{ url: string; label: string } | null>(null);
   const [jobIds, setJobIds] = useState<string[]>([]);
   const [firstFrameId, setFirstFrameId] = useState<string | null>(null);
   const [lastFrameId, setLastFrameId] = useState<string | null>(null);
@@ -2290,19 +2384,35 @@ export default function App() {
                               : "border-ink/10"
                         }`}
                       >
-                        <div className="mb-1 flex items-center justify-between text-xs">
-                          <span className={index === 0 ? "font-semibold" : ""}>{describeGeneration(gen)}</span>
-                          <span className="uppercase text-ink/60">{gen.status}</span>
+                        <div className="mb-2 flex items-center justify-between text-xs">
+                          <span className={`uppercase text-ink/60 ${index === 0 ? "font-semibold" : ""}`}>{gen.status}</span>
+                          <span className="text-[11px] text-ink/50">{truncateIdentifier(gen.genId, 14)}</span>
                         </div>
-                        <p className="mb-1 text-[11px] text-ink/50">{gen.genId}</p>
-                        {gen.downloadUrl ? <video src={gen.downloadUrl} controls className="mb-2 max-h-28 w-full rounded bg-bg object-contain" /> : null}
-                        <div className="flex items-center gap-2">
+                        <VideoThumbnail
+                          videoUrl={gen.downloadUrl ?? undefined}
+                          label={describeGeneration(gen)}
+                          disabled={!gen.downloadUrl}
+                          onClick={() => selectSegmentGeneration(gen.genId)}
+                        />
+                        <p className="mt-2 text-xs font-medium text-ink/80">
+                          {gen.luma.model} / {gen.luma.mode}
+                        </p>
+                        <p className="text-[11px] text-ink/60">{formatCompactTimestamp(gen.createdAt)}</p>
+                        <div className="mt-2 flex items-center gap-2">
                           <button
-                            className="rounded bg-ink px-2 py-1 text-xs text-white"
+                            type="button"
+                            className="rounded border border-ink/20 bg-white p-2 text-xs disabled:cursor-not-allowed disabled:opacity-60"
                             disabled={!gen.downloadUrl}
-                            onClick={() => selectSegmentGeneration(gen.genId)}
+                            title="Preview"
+                            onClick={() => {
+                              if (!gen.downloadUrl) return;
+                              setVideoPreviewModal({ url: gen.downloadUrl, label: describeGeneration(gen) });
+                            }}
                           >
-                            {selectedPreviewGeneration?.genId === gen.genId ? "Using this" : "Use this"}
+                            <svg viewBox="0 0 24 24" className="h-5 w-5" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2">
+                              <path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6Z" />
+                              <circle cx="12" cy="12" r="3" />
+                            </svg>
                           </button>
                           {gen.downloadUrl ? (
                             <a
@@ -2310,13 +2420,42 @@ export default function App() {
                               target="_blank"
                               rel="noreferrer"
                               download
-                              className="rounded border border-ink/20 bg-white px-2 py-1 text-xs"
+                              className="rounded border border-ink/20 bg-white p-2 text-xs"
                               title="Download full quality video"
                             >
-                              Download
+                              <svg viewBox="0 0 24 24" className="h-5 w-5" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2">
+                                <path d="M12 3v12" />
+                                <path d="m7 10 5 5 5-5" />
+                                <path d="M4 21h16" />
+                              </svg>
                             </a>
                           ) : null}
-                          {gen.status === "failed" ? <span className="text-xs text-orange-700">Error</span> : null}
+                          <button
+                            type="button"
+                            className="rounded border border-red-200 bg-white p-2 text-xs text-red-700"
+                            title="Delete generated video"
+                            disabled={!task?.taskId}
+                            onClick={() =>
+                              handleDeleteAsset({
+                                id: `generation:${task?.taskId ?? ""}:${gen.genId}`,
+                                taskId: task?.taskId ?? "",
+                                title: describeGeneration(gen),
+                                subtitle: `${gen.luma.model}/${gen.luma.mode}`,
+                                createdAt: gen.createdAt,
+                                previewUrl: gen.downloadUrl ?? "",
+                                downloadUrl: gen.downloadUrl ?? "",
+                                mediaType: "video",
+                                deletePayload: { assetType: "segment_generation", genId: gen.genId },
+                              })
+                            }
+                          >
+                            <svg viewBox="0 0 24 24" className="h-5 w-5" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2">
+                              <path d="M3 6h18" />
+                              <path d="M8 6V4h8v2" />
+                              <path d="m6 6 1 14h10l1-14" />
+                              <path d="M10 11v6M14 11v6" />
+                            </svg>
+                          </button>
                         </div>
                       </div>
                     ))}
@@ -2586,6 +2725,30 @@ export default function App() {
               alt={imagePreviewModal.label}
               className="h-full w-full object-contain"
               onClick={() => setImagePreviewModal(null)}
+            />
+          </div>
+        </div>
+      ) : null}
+      {videoPreviewModal ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4"
+          onClick={() => setVideoPreviewModal(null)}
+        >
+          <div
+            className="relative w-[90vw] max-w-6xl rounded-lg border border-ink/20 bg-black p-3"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <button
+              className="absolute right-2 top-2 rounded bg-black/70 px-3 py-1 text-sm text-white"
+              onClick={() => setVideoPreviewModal(null)}
+            >
+              x
+            </button>
+            <video
+              src={videoPreviewModal.url}
+              controls
+              autoPlay
+              className="h-[80vh] w-full rounded object-contain"
             />
           </div>
         </div>
