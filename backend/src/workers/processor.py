@@ -503,12 +503,12 @@ def _handle_full_edit(
     payload = job["payload"]
     frame_id = payload["frameId"]
     frame = task["frames"][frame_id]
-    capture_key = frame["captureKey"]
+    source_key = payload.get("sourceKey") or frame["captureKey"]
     secrets = load_secret(settings.secrets_arn)
     gemini_key = secrets["GEMINI_API_KEY"]
 
     _job_progress(job, store, 10, "running", "Loading source frame")
-    src_bytes = asset_store.read_bytes(capture_key)
+    src_bytes = asset_store.read_bytes(source_key)
     src_image = ImageOps.exif_transpose(Image.open(BytesIO(src_bytes))).convert("RGBA")
     _job_progress(job, store, 30, "running", "Calling Gemini edit")
     out_bytes = generate_image_edit(
@@ -535,6 +535,8 @@ def _handle_full_edit(
         "generationSettings": {
             "provider": "gemini",
             "workflow": "full",
+            "sourceKey": source_key,
+            "sourceVariantId": payload.get("sourceVariantId"),
             "inputResolution": {"width": src_image.width, "height": src_image.height},
             "outputResolution": {"width": normalized_image.width, "height": normalized_image.height},
         },
@@ -565,10 +567,12 @@ def _handle_patch_edit(
     secrets = load_secret(settings.secrets_arn)
     gemini_key = secrets["GEMINI_API_KEY"]
 
-    capture_bytes = asset_store.read_bytes(frame["captureKey"])
+    source_key = payload.get("sourceKey") or frame["captureKey"]
+    source_variant_id = payload.get("sourceVariantId")
+    source_bytes = asset_store.read_bytes(source_key)
     patch_bytes = asset_store.read_bytes(payload["patchKey"])
     mask_bytes = asset_store.read_bytes(payload["maskKey"]) if payload.get("maskKey") else None
-    capture_image = ImageOps.exif_transpose(Image.open(BytesIO(capture_bytes))).convert("RGBA")
+    source_image = ImageOps.exif_transpose(Image.open(BytesIO(source_bytes))).convert("RGBA")
     patch_source_image = ImageOps.exif_transpose(Image.open(BytesIO(patch_bytes))).convert("RGBA")
     provider_name = "gemini"
 
@@ -632,7 +636,7 @@ def _handle_patch_edit(
 
     _job_progress(job, store, 70, "running", "Compositing patch output")
     composited = _composite_patch(
-        base_bytes=capture_bytes,
+        base_bytes=source_bytes,
         patch_bytes=edited_patch,
         rect=payload["patchRect"],
         bleed_px=payload["bleedPx"],
@@ -647,9 +651,11 @@ def _handle_patch_edit(
     generation_settings: dict[str, Any] = {
         "provider": provider_name,
         "workflow": "patch",
+        "sourceKey": source_key,
+        "sourceVariantId": source_variant_id,
         "inputResolution": {"width": patch_source_image.width, "height": patch_source_image.height},
         "outputResolution": {"width": composited_image.width, "height": composited_image.height},
-        "compositedResolution": {"width": capture_image.width, "height": capture_image.height},
+        "compositedResolution": {"width": source_image.width, "height": source_image.height},
         "featherPx": int(payload["featherPx"]),
         "bleedPx": int(payload["bleedPx"]),
         "hasMask": bool(payload.get("maskKey")),

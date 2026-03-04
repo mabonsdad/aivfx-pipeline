@@ -51,6 +51,17 @@ type ReportGenerationRow = {
   generatedVideoUrl: string | null;
 };
 
+type EditFrameCandidate = {
+  id: string;
+  kind: "original" | "variant";
+  imageUrl: string;
+  label: string;
+  createdAt?: string;
+  variantId?: string;
+  variant?: FrameVariant;
+  isSelected: boolean;
+};
+
 function normalizeTaskNameInput(value: string): string {
   return value
     .trim()
@@ -238,6 +249,7 @@ export default function App() {
   const [selectedGenIds, setSelectedGenIds] = useState<string[]>([]);
   const [selectedPreviewGenId, setSelectedPreviewGenId] = useState<string>("");
   const [temporalFeatherFrames, setTemporalFeatherFrames] = useState(0);
+  const [imagePreviewModal, setImagePreviewModal] = useState<{ url: string; label: string } | null>(null);
   const [jobIds, setJobIds] = useState<string[]>([]);
   const [firstFrameId, setFirstFrameId] = useState<string | null>(null);
   const [lastFrameId, setLastFrameId] = useState<string | null>(null);
@@ -335,6 +347,41 @@ export default function App() {
       ),
     [activeEditFrame?.variants],
   );
+  const activeSelectedVariant = useMemo(
+    () =>
+      activeEditFrame?.selectedVariantId
+        ? activeEditVariants.find((variant) => variant.variantId === activeEditFrame.selectedVariantId) ?? null
+        : null,
+    [activeEditFrame?.selectedVariantId, activeEditVariants],
+  );
+  const activeEditSourceImageUrl = activeSelectedVariant?.imageUrl ?? activeEditFrame?.imageUrl ?? null;
+  const activeEditCandidates = useMemo<EditFrameCandidate[]>(() => {
+    if (!activeEditFrame?.imageUrl) return [];
+    const candidates: EditFrameCandidate[] = [
+      {
+        id: `${activeEditFrame.frameId}:original`,
+        kind: "original",
+        imageUrl: activeEditFrame.imageUrl,
+        label: "Original frame",
+        createdAt: activeEditFrame.createdAt,
+        isSelected: !activeEditFrame.selectedVariantId,
+      },
+    ];
+    for (const variant of activeEditVariants) {
+      if (!variant.imageUrl) continue;
+      candidates.push({
+        id: variant.variantId,
+        kind: "variant",
+        imageUrl: variant.imageUrl,
+        label: `${variant.model} / ${variant.type}`,
+        createdAt: variant.createdAt,
+        variantId: variant.variantId,
+        variant,
+        isSelected: activeEditFrame.selectedVariantId === variant.variantId,
+      });
+    }
+    return candidates;
+  }, [activeEditFrame, activeEditVariants]);
   const activeFrameDimensions = useMemo(() => {
     const width = task?.video?.editSource?.width;
     const height = task?.video?.editSource?.height;
@@ -1208,6 +1255,12 @@ export default function App() {
     setTab("report");
   }
 
+  function selectEditCandidate(frameId: string, candidate: EditFrameCandidate) {
+    const targetVariantId = candidate.kind === "original" ? "original" : candidate.variantId;
+    if (!targetVariantId) return;
+    selectVariantMutation.mutate({ frameId, variantId: targetVariantId });
+  }
+
   async function handleDeleteAsset(item: LibraryAsset) {
     const ok = window.confirm(`Delete this asset?\n\n${item.title}`);
     if (!ok) return;
@@ -1775,11 +1828,7 @@ export default function App() {
                         }
                         itemTwo={
                           <ReactCompareSliderImage
-                            src={
-                              activeEditVariants.find((v) => v.variantId === activeEditFrame.selectedVariantId)?.imageUrl ??
-                              activeEditVariants[0]?.imageUrl ??
-                              activeEditFrame.imageUrl
-                            }
+                            src={activeEditSourceImageUrl ?? activeEditFrame.imageUrl}
                             alt="Variant"
                             style={{ height: "100%", width: "100%", objectFit: "contain", objectPosition: "center" }}
                           />
@@ -1791,40 +1840,94 @@ export default function App() {
                       Select a frame in the Timeline tab to start comparing edits.
                     </div>
                   )}
-                  <div className="grid grid-cols-2 gap-2">
-                    {activeEditVariants.map((variant) => (
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                    {activeEditCandidates.map((candidate) => (
                       <div
-                        key={variant.variantId}
+                        key={candidate.id}
                         className={`rounded border p-2 ${
-                          activeEditFrame?.selectedVariantId === variant.variantId
-                            ? "border-teal-500 bg-teal-50"
-                            : "border-ink/10"
+                          candidate.isSelected ? "border-teal-500 bg-teal-50" : "border-ink/10"
                         }`}
                       >
-                        {variant.imageUrl ? <img src={variant.imageUrl} className="mb-2 max-h-28 w-full rounded bg-bg object-contain" /> : null}
-                        <p className="text-xs text-ink/70">{variant.type} / {variant.model}</p>
                         <button
-                          className="mt-1 rounded bg-ink px-2 py-1 text-xs text-white"
-                          disabled={!activeEditFrame}
+                          type="button"
+                          className="block w-full"
                           onClick={() => {
                             if (!activeEditFrame) return;
-                            selectVariantMutation.mutate({ frameId: activeEditFrame.frameId, variantId: variant.variantId });
+                            selectEditCandidate(activeEditFrame.frameId, candidate);
+                            if (editFrameTab === "first") {
+                              setFirstFrameVariantId(candidate.kind === "variant" ? candidate.variantId ?? "" : "");
+                            }
                           }}
+                          title={candidate.isSelected ? "Currently in use" : "Use this image"}
                         >
-                          {activeEditFrame?.selectedVariantId === variant.variantId ? "Using this" : "Use this"}
+                          <img src={candidate.imageUrl} className="mb-2 w-full rounded bg-bg object-contain" />
                         </button>
-                        {variant.imageUrl ? (
+                        <p className="text-xs font-medium text-ink/80">{candidate.label}</p>
+                        <p className="text-[11px] text-ink/60">{formatCompactTimestamp(candidate.createdAt)}</p>
+                        <div className="mt-2 flex items-center gap-2">
+                          <button
+                            type="button"
+                            className="rounded border border-ink/20 bg-white p-1.5 text-xs"
+                            title="Preview"
+                            onClick={() => setImagePreviewModal({ url: candidate.imageUrl, label: candidate.label })}
+                          >
+                            <svg viewBox="0 0 24 24" className="h-4 w-4" aria-hidden="true">
+                              <path fill="currentColor" d="M12 5c5.5 0 9.5 4.3 10.8 6.1a1.5 1.5 0 0 1 0 1.8C21.5 14.7 17.5 19 12 19S2.5 14.7 1.2 12.9a1.5 1.5 0 0 1 0-1.8C2.5 9.3 6.5 5 12 5Zm0 2C8 7 4.8 10 3.3 12 4.8 14 8 17 12 17s7.2-3 8.7-5C19.2 10 16 7 12 7Zm0 2.5a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5Z" />
+                            </svg>
+                          </button>
+                          <button
+                            type="button"
+                            className="rounded border border-ink/20 bg-white p-1.5 text-xs"
+                            title="Use for editing"
+                            onClick={() => {
+                              if (!activeEditFrame) return;
+                              selectEditCandidate(activeEditFrame.frameId, candidate);
+                              if (editFrameTab === "first") {
+                                setFirstFrameVariantId(candidate.kind === "variant" ? candidate.variantId ?? "" : "");
+                              }
+                            }}
+                          >
+                            <svg viewBox="0 0 24 24" className="h-4 w-4" aria-hidden="true">
+                              <path fill="currentColor" d="m4 15.8 9.9-9.9 4.2 4.2-9.9 9.9H4v-4.2Zm14.7-8.9a1 1 0 0 0 0-1.4l-1.2-1.2a1 1 0 0 0-1.4 0l-1 1 2.6 2.6 1-1Z" />
+                            </svg>
+                          </button>
                           <a
-                            href={variant.imageUrl}
+                            href={candidate.imageUrl}
                             target="_blank"
                             rel="noreferrer"
                             download
-                            className="mt-1 rounded border border-ink/20 bg-white px-2 py-1 text-xs"
+                            className="rounded border border-ink/20 bg-white p-1.5 text-xs"
                             title="Download full quality image"
                           >
-                            Download
+                            <svg viewBox="0 0 24 24" className="h-4 w-4" aria-hidden="true">
+                              <path fill="currentColor" d="M12 3a1 1 0 0 1 1 1v8.6l2.3-2.3 1.4 1.4-4.7 4.7-4.7-4.7 1.4-1.4 2.3 2.3V4a1 1 0 0 1 1-1Zm-7 13h14v4a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1v-4Z" />
+                            </svg>
                           </a>
-                        ) : null}
+                          <button
+                            type="button"
+                            className="rounded border border-red-200 bg-white p-1.5 text-xs text-red-700 disabled:cursor-not-allowed disabled:opacity-50"
+                            title={candidate.kind === "original" ? "Original frame cannot be deleted" : "Delete variant"}
+                            disabled={candidate.kind === "original" || !activeEditFrame || !candidate.variantId}
+                            onClick={() => {
+                              if (!activeEditFrame || !candidate.variantId) return;
+                              handleDeleteAsset({
+                                id: `variant:${activeEditFrame.frameId}:${candidate.variantId}`,
+                                taskId: selectedTaskId ?? "",
+                                title: candidate.label,
+                                subtitle: "",
+                                createdAt: candidate.createdAt ?? new Date().toISOString(),
+                                previewUrl: candidate.imageUrl,
+                                downloadUrl: candidate.imageUrl,
+                                mediaType: "image",
+                                deletePayload: { assetType: "frame_variant", frameId: activeEditFrame.frameId, variantId: candidate.variantId },
+                              });
+                            }}
+                          >
+                            <svg viewBox="0 0 24 24" className="h-4 w-4" aria-hidden="true">
+                              <path fill="currentColor" d="M9 3h6l1 2h4v2H4V5h4l1-2Zm1 6h2v9h-2V9Zm4 0h2v9h-2V9ZM7 9h2v9H7V9Z" />
+                            </svg>
+                          </button>
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -1840,7 +1943,7 @@ export default function App() {
                         </p>
                         <div className="relative inline-block max-w-full overflow-hidden rounded-md border border-ink/20 bg-bg">
                           <img
-                            src={activeEditFrame.imageUrl}
+                            src={activeEditSourceImageUrl ?? activeEditFrame.imageUrl}
                             alt="Patch mask base frame"
                             className="block max-h-[420px] max-w-full select-none"
                             draggable={false}
@@ -2435,6 +2538,27 @@ export default function App() {
           </div>
         </section>
       </div>
+      {imagePreviewModal ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4"
+          onClick={() => setImagePreviewModal(null)}
+        >
+          <div className="relative flex h-[90vh] w-[90vw] items-center justify-center">
+            <button
+              className="absolute right-2 top-2 rounded bg-black/70 px-3 py-1 text-sm text-white"
+              onClick={() => setImagePreviewModal(null)}
+            >
+              x
+            </button>
+            <img
+              src={imagePreviewModal.url}
+              alt={imagePreviewModal.label}
+              className="h-full w-full object-contain"
+              onClick={() => setImagePreviewModal(null)}
+            />
+          </div>
+        </div>
+      ) : null}
       {isNewTaskModalOpen ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
           <div className="w-full max-w-xl rounded-2xl border border-ink/10 bg-card p-5 shadow-xl">

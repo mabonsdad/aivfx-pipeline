@@ -279,6 +279,15 @@ def _validated_reference_key(task: dict[str, Any], reference_key: str | None) ->
     return reference_key
 
 
+def _resolve_frame_source(frame: dict[str, Any]) -> tuple[str, str | None]:
+    selected_variant_id = frame.get("selectedVariantId")
+    if selected_variant_id:
+        variant = next((item for item in frame.get("variants", []) if item.get("variantId") == selected_variant_id), None)
+        if variant and variant.get("outputKey"):
+            return str(variant["outputKey"]), str(selected_variant_id)
+    return str(frame["captureKey"]), None
+
+
 def _route(event: dict[str, Any]) -> dict[str, Any]:
     method, path = _method_path(event)
     origin = _origin(event)
@@ -726,6 +735,8 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 return error_response(404, "Frame not found", origin=origin)
 
             req = _json_model(FullEditRequest, event)
+            frame = task["frames"][frame_id]
+            source_key, source_variant_id = _resolve_frame_source(frame)
             try:
                 prompt = _sanitize_prompt(req.prompt)
             except ValueError as exc:
@@ -742,6 +753,8 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                     "frameId": frame_id,
                     "model": req.model,
                     "prompt": prompt,
+                    "sourceKey": source_key,
+                    "sourceVariantId": source_variant_id,
                 },
             )
             return response(202, {"jobId": job_id}, origin=origin)
@@ -756,9 +769,10 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             paths = _asset_paths_for_task(task)
             patch_key = paths.frame_patch(frame_id, variant_id)
             frame = task["frames"][frame_id]
-            capture_bytes = asset_store.read_bytes(frame["captureKey"])
+            source_key, _ = _resolve_frame_source(frame)
+            source_bytes = asset_store.read_bytes(source_key)
 
-            source = Image.open(BytesIO(capture_bytes)).convert("RGBA")
+            source = Image.open(BytesIO(source_bytes)).convert("RGBA")
             bleed = req.bleedPx
             x0 = max(0, req.patchRect.x - bleed)
             y0 = max(0, req.patchRect.y - bleed)
@@ -787,6 +801,8 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             if frame_id not in task.get("frames", {}):
                 return error_response(404, "Frame not found", origin=origin)
             req = _json_model(PatchSubmitRequest, event)
+            frame = task["frames"][frame_id]
+            source_key, source_variant_id = _resolve_frame_source(frame)
             try:
                 prompt = _sanitize_prompt(req.prompt)
                 reference_key = _validated_reference_key(task, req.referenceImageKey)
@@ -813,6 +829,8 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                     "bleedPx": req.bleedPx,
                     "referenceImageKey": reference_key,
                     "runwareRepaintingScale": req.runwareRepaintingScale,
+                    "sourceKey": source_key,
+                    "sourceVariantId": source_variant_id,
                 },
             )
             return response(202, {"jobId": job_id}, origin=origin)
@@ -823,6 +841,10 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             frame = task.get("frames", {}).get(frame_id)
             if not frame:
                 return error_response(404, "Frame not found", origin=origin)
+            if variant_id == "original":
+                frame["selectedVariantId"] = None
+                store.save_task(task)
+                return response(200, {"ok": True}, origin=origin)
             variant_exists = any(v["variantId"] == variant_id for v in frame.get("variants", []))
             if not variant_exists:
                 return error_response(404, "Variant not found", origin=origin)
