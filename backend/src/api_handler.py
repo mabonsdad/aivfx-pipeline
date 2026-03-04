@@ -279,12 +279,12 @@ def _validated_reference_key(task: dict[str, Any], reference_key: str | None) ->
     return reference_key
 
 
-def _resolve_frame_source(frame: dict[str, Any]) -> tuple[str, str | None]:
-    selected_variant_id = frame.get("selectedVariantId")
-    if selected_variant_id:
-        variant = next((item for item in frame.get("variants", []) if item.get("variantId") == selected_variant_id), None)
-        if variant and variant.get("outputKey"):
-            return str(variant["outputKey"]), str(selected_variant_id)
+def _resolve_frame_source(frame: dict[str, Any], preferred_variant_id: str | None) -> tuple[str, str | None]:
+    if preferred_variant_id and preferred_variant_id != "original":
+        variant = next((item for item in frame.get("variants", []) if item.get("variantId") == preferred_variant_id), None)
+        if not variant or not variant.get("outputKey"):
+            raise ValueError("Source variant not found")
+        return str(variant["outputKey"]), str(preferred_variant_id)
     return str(frame["captureKey"]), None
 
 
@@ -736,7 +736,10 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
 
             req = _json_model(FullEditRequest, event)
             frame = task["frames"][frame_id]
-            source_key, source_variant_id = _resolve_frame_source(frame)
+            try:
+                source_key, source_variant_id = _resolve_frame_source(frame, req.sourceVariantId)
+            except ValueError as exc:
+                return error_response(400, str(exc), origin=origin)
             try:
                 prompt = _sanitize_prompt(req.prompt)
             except ValueError as exc:
@@ -769,7 +772,10 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             paths = _asset_paths_for_task(task)
             patch_key = paths.frame_patch(frame_id, variant_id)
             frame = task["frames"][frame_id]
-            source_key, _ = _resolve_frame_source(frame)
+            try:
+                source_key, _ = _resolve_frame_source(frame, req.sourceVariantId)
+            except ValueError as exc:
+                return error_response(400, str(exc), origin=origin)
             source_bytes = asset_store.read_bytes(source_key)
 
             source = Image.open(BytesIO(source_bytes)).convert("RGBA")
@@ -802,7 +808,10 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 return error_response(404, "Frame not found", origin=origin)
             req = _json_model(PatchSubmitRequest, event)
             frame = task["frames"][frame_id]
-            source_key, source_variant_id = _resolve_frame_source(frame)
+            try:
+                source_key, source_variant_id = _resolve_frame_source(frame, req.sourceVariantId)
+            except ValueError as exc:
+                return error_response(400, str(exc), origin=origin)
             try:
                 prompt = _sanitize_prompt(req.prompt)
                 reference_key = _validated_reference_key(task, req.referenceImageKey)

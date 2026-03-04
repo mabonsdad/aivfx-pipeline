@@ -33,6 +33,7 @@ class FrameCaptureRequest(BaseModel):
 class FullEditRequest(BaseModel):
     model: Literal["nano_banana", "nano_banana_pro"]
     prompt: str = Field(min_length=1)
+    sourceVariantId: str | None = None
 
 
 class PatchRect(BaseModel):
@@ -47,6 +48,7 @@ class PatchInitRequest(BaseModel):
     featherPx: int = Field(ge=0, le=200)
     bleedPx: int = Field(ge=0, le=300, default=32)
     hasMask: bool = False
+    sourceVariantId: str | None = None
 
 
 class PatchSubmitRequest(BaseModel):
@@ -59,6 +61,7 @@ class PatchSubmitRequest(BaseModel):
     bleedPx: int = Field(ge=0, le=300, default=32)
     referenceImageKey: str | None = None
     runwareRepaintingScale: float = Field(ge=0, le=1, default=0.7)
+    sourceVariantId: str | None = None
 
 
 class ReferenceUploadItem(BaseModel):

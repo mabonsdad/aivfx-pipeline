@@ -66,7 +66,7 @@ export const apiClient = {
   fullEdit: (
     taskId: string,
     frameId: string,
-    payload: { model: "nano_banana" | "nano_banana_pro"; prompt: string },
+    payload: { model: "nano_banana" | "nano_banana_pro"; prompt: string; sourceVariantId?: string },
   ) =>
     api<{ jobId: string }>(`/tasks/${taskId}/frames/${frameId}/edits/full`, {
       method: "POST",
@@ -75,7 +75,13 @@ export const apiClient = {
   patchInit: (
     taskId: string,
     frameId: string,
-    payload: { patchRect: { x: number; y: number; width: number; height: number }; featherPx: number; bleedPx: number; hasMask: boolean },
+    payload: {
+      patchRect: { x: number; y: number; width: number; height: number };
+      featherPx: number;
+      bleedPx: number;
+      hasMask: boolean;
+      sourceVariantId?: string;
+    },
   ) =>
     api<{ patchUploadUrl: string; patchKey: string; maskUploadUrl?: string; maskKey?: string; previewUrl?: string }>(
       `/tasks/${taskId}/frames/${frameId}/edits/patch/init`,
@@ -97,6 +103,7 @@ export const apiClient = {
       bleedPx: number;
       referenceImageKey?: string;
       runwareRepaintingScale?: number;
+      sourceVariantId?: string;
     },
   ) => api<{ jobId: string }>(`/tasks/${taskId}/frames/${frameId}/edits/patch/submit`, { method: "POST", body: JSON.stringify(payload) }),
   selectVariant: (taskId: string, frameId: string, variantId: string) =>

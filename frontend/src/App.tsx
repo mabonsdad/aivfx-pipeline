@@ -246,6 +246,10 @@ export default function App() {
   const [advancedMode, setAdvancedMode] = useState("flex_1");
   const [lumaPrompt, setLumaPrompt] = useState("");
   const [firstFrameVariantId, setFirstFrameVariantId] = useState("");
+  const [editSourceVariantIds, setEditSourceVariantIds] = useState<{ first: string | null; last: string | null }>({
+    first: null,
+    last: null,
+  });
   const [selectedGenIds, setSelectedGenIds] = useState<string[]>([]);
   const [selectedPreviewGenId, setSelectedPreviewGenId] = useState<string>("");
   const [temporalFeatherFrames, setTemporalFeatherFrames] = useState(0);
@@ -347,12 +351,13 @@ export default function App() {
       ),
     [activeEditFrame?.variants],
   );
+  const activeEditSourceVariantId = editSourceVariantIds[editFrameTab];
   const activeSelectedVariant = useMemo(
     () =>
-      activeEditFrame?.selectedVariantId
-        ? activeEditVariants.find((variant) => variant.variantId === activeEditFrame.selectedVariantId) ?? null
+      activeEditSourceVariantId
+        ? activeEditVariants.find((variant) => variant.variantId === activeEditSourceVariantId) ?? null
         : null,
-    [activeEditFrame?.selectedVariantId, activeEditVariants],
+    [activeEditSourceVariantId, activeEditVariants],
   );
   const activeEditSourceImageUrl = activeSelectedVariant?.imageUrl ?? activeEditFrame?.imageUrl ?? null;
   const activeEditCandidates = useMemo<EditFrameCandidate[]>(() => {
@@ -364,7 +369,7 @@ export default function App() {
         imageUrl: activeEditFrame.imageUrl,
         label: "Original frame",
         createdAt: activeEditFrame.createdAt,
-        isSelected: !activeEditFrame.selectedVariantId,
+        isSelected: !activeEditSourceVariantId,
       },
     ];
     for (const variant of activeEditVariants) {
@@ -377,11 +382,11 @@ export default function App() {
         createdAt: variant.createdAt,
         variantId: variant.variantId,
         variant,
-        isSelected: activeEditFrame.selectedVariantId === variant.variantId,
+        isSelected: activeEditSourceVariantId === variant.variantId,
       });
     }
     return candidates;
-  }, [activeEditFrame, activeEditVariants]);
+  }, [activeEditFrame, activeEditSourceVariantId, activeEditVariants]);
   const activeFrameDimensions = useMemo(() => {
     const width = task?.video?.editSource?.width;
     const height = task?.video?.editSource?.height;
@@ -429,6 +434,7 @@ export default function App() {
   useEffect(() => {
     setFirstFrameId(null);
     setLastFrameId(null);
+    setEditSourceVariantIds({ first: null, last: null });
     setPatchReferenceImages((previous) => {
       for (const item of [previous.first, previous.last]) {
         if (item?.previewUrl) {
@@ -438,6 +444,22 @@ export default function App() {
       return { first: null, last: null };
     });
   }, [selectedTaskId]);
+
+  useEffect(() => {
+    setEditSourceVariantIds((previous) => {
+      let changed = false;
+      const next = { ...previous };
+      if (previous.first && !editFirstFrame?.variants.some((variant) => variant.variantId === previous.first)) {
+        next.first = null;
+        changed = true;
+      }
+      if (previous.last && !editLastFrame?.variants.some((variant) => variant.variantId === previous.last)) {
+        next.last = null;
+        changed = true;
+      }
+      return changed ? next : previous;
+    });
+  }, [editFirstFrame?.frameId, editFirstFrame?.variants, editLastFrame?.frameId, editLastFrame?.variants]);
 
   useEffect(() => {
     return () => {
@@ -624,6 +646,7 @@ export default function App() {
       return apiClient.fullEdit(selectedTaskId, frameId, {
         model,
         prompt,
+        sourceVariantId: activeEditSourceVariantId ?? "original",
       });
     },
     onSuccess: (result) => setJobIds((prev) => Array.from(new Set([...prev, result.jobId]))),
@@ -645,6 +668,7 @@ export default function App() {
         featherPx,
         bleedPx: 0,
         hasMask: true,
+        sourceVariantId: activeEditSourceVariantId ?? "original",
       });
       if (!init.maskUploadUrl || !init.maskKey) {
         throw new Error("Mask upload URL missing");
@@ -719,6 +743,7 @@ export default function App() {
         bleedPx: 0,
         referenceImageKey,
         runwareRepaintingScale: patchEngine === "runware_ace_pp" ? runwareRepaintingScale : undefined,
+        sourceVariantId: activeEditSourceVariantId ?? "original",
       });
     },
     onSuccess: (result) => setJobIds((prev) => Array.from(new Set([...prev, result.jobId]))),
@@ -1255,10 +1280,15 @@ export default function App() {
     setTab("report");
   }
 
-  function selectEditCandidate(frameId: string, candidate: EditFrameCandidate) {
+  function selectEditCandidate(frameId: string, tabKey: "first" | "last", candidate: EditFrameCandidate) {
+    const sourceVariantId = candidate.kind === "variant" ? candidate.variantId ?? null : null;
+    setEditSourceVariantIds((previous) => ({ ...previous, [tabKey]: sourceVariantId }));
     const targetVariantId = candidate.kind === "original" ? "original" : candidate.variantId;
     if (!targetVariantId) return;
     selectVariantMutation.mutate({ frameId, variantId: targetVariantId });
+    if (tabKey === "first") {
+      setFirstFrameVariantId(sourceVariantId ?? "");
+    }
   }
 
   async function handleDeleteAsset(item: LibraryAsset) {
@@ -1274,6 +1304,7 @@ export default function App() {
   async function captureCurrentFrameFor(boundary: "first" | "last") {
     const result = await captureMutation.mutateAsync({ frameIndex: currentFrameIndex });
     setSelectedFrameId(result.frameId);
+    setEditSourceVariantIds((previous) => ({ ...previous, [boundary]: null }));
     if (boundary === "first") {
       setFirstFrameId(result.frameId);
     } else {
@@ -1852,13 +1883,9 @@ export default function App() {
                           type="button"
                           className="block w-full"
                           onClick={() => {
-                            if (!activeEditFrame) return;
-                            selectEditCandidate(activeEditFrame.frameId, candidate);
-                            if (editFrameTab === "first") {
-                              setFirstFrameVariantId(candidate.kind === "variant" ? candidate.variantId ?? "" : "");
-                            }
+                            setImagePreviewModal({ url: candidate.imageUrl, label: candidate.label });
                           }}
-                          title={candidate.isSelected ? "Currently in use" : "Use this image"}
+                          title="Preview image"
                         >
                           <img src={candidate.imageUrl} className="mb-2 w-full rounded bg-bg object-contain" />
                         </button>
@@ -1867,28 +1894,27 @@ export default function App() {
                         <div className="mt-2 flex items-center gap-2">
                           <button
                             type="button"
-                            className="rounded border border-ink/20 bg-white p-1.5 text-xs"
+                            className="rounded border border-ink/20 bg-white p-2 text-xs"
                             title="Preview"
                             onClick={() => setImagePreviewModal({ url: candidate.imageUrl, label: candidate.label })}
                           >
-                            <svg viewBox="0 0 24 24" className="h-4 w-4" aria-hidden="true">
-                              <path fill="currentColor" d="M12 5c5.5 0 9.5 4.3 10.8 6.1a1.5 1.5 0 0 1 0 1.8C21.5 14.7 17.5 19 12 19S2.5 14.7 1.2 12.9a1.5 1.5 0 0 1 0-1.8C2.5 9.3 6.5 5 12 5Zm0 2C8 7 4.8 10 3.3 12 4.8 14 8 17 12 17s7.2-3 8.7-5C19.2 10 16 7 12 7Zm0 2.5a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5Z" />
+                            <svg viewBox="0 0 24 24" className="h-5 w-5" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2">
+                              <path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6Z" />
+                              <circle cx="12" cy="12" r="3" />
                             </svg>
                           </button>
                           <button
                             type="button"
-                            className="rounded border border-ink/20 bg-white p-1.5 text-xs"
+                            className="rounded border border-ink/20 bg-white p-2 text-xs"
                             title="Use for editing"
                             onClick={() => {
                               if (!activeEditFrame) return;
-                              selectEditCandidate(activeEditFrame.frameId, candidate);
-                              if (editFrameTab === "first") {
-                                setFirstFrameVariantId(candidate.kind === "variant" ? candidate.variantId ?? "" : "");
-                              }
+                              selectEditCandidate(activeEditFrame.frameId, editFrameTab, candidate);
                             }}
                           >
-                            <svg viewBox="0 0 24 24" className="h-4 w-4" aria-hidden="true">
-                              <path fill="currentColor" d="m4 15.8 9.9-9.9 4.2 4.2-9.9 9.9H4v-4.2Zm14.7-8.9a1 1 0 0 0 0-1.4l-1.2-1.2a1 1 0 0 0-1.4 0l-1 1 2.6 2.6 1-1Z" />
+                            <svg viewBox="0 0 24 24" className="h-5 w-5" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2">
+                              <path d="M12 20h9" />
+                              <path d="m16.5 3.5 4 4L8 20H4v-4L16.5 3.5Z" />
                             </svg>
                           </button>
                           <a
@@ -1896,16 +1922,18 @@ export default function App() {
                             target="_blank"
                             rel="noreferrer"
                             download
-                            className="rounded border border-ink/20 bg-white p-1.5 text-xs"
+                            className="rounded border border-ink/20 bg-white p-2 text-xs"
                             title="Download full quality image"
                           >
-                            <svg viewBox="0 0 24 24" className="h-4 w-4" aria-hidden="true">
-                              <path fill="currentColor" d="M12 3a1 1 0 0 1 1 1v8.6l2.3-2.3 1.4 1.4-4.7 4.7-4.7-4.7 1.4-1.4 2.3 2.3V4a1 1 0 0 1 1-1Zm-7 13h14v4a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1v-4Z" />
+                            <svg viewBox="0 0 24 24" className="h-5 w-5" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2">
+                              <path d="M12 3v12" />
+                              <path d="m7 10 5 5 5-5" />
+                              <path d="M4 21h16" />
                             </svg>
                           </a>
                           <button
                             type="button"
-                            className="rounded border border-red-200 bg-white p-1.5 text-xs text-red-700 disabled:cursor-not-allowed disabled:opacity-50"
+                            className="rounded border border-red-200 bg-white p-2 text-xs text-red-700 disabled:cursor-not-allowed disabled:opacity-50"
                             title={candidate.kind === "original" ? "Original frame cannot be deleted" : "Delete variant"}
                             disabled={candidate.kind === "original" || !activeEditFrame || !candidate.variantId}
                             onClick={() => {
@@ -1923,8 +1951,11 @@ export default function App() {
                               });
                             }}
                           >
-                            <svg viewBox="0 0 24 24" className="h-4 w-4" aria-hidden="true">
-                              <path fill="currentColor" d="M9 3h6l1 2h4v2H4V5h4l1-2Zm1 6h2v9h-2V9Zm4 0h2v9h-2V9ZM7 9h2v9H7V9Z" />
+                            <svg viewBox="0 0 24 24" className="h-5 w-5" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2">
+                              <path d="M3 6h18" />
+                              <path d="M8 6V4h8v2" />
+                              <path d="m6 6 1 14h10l1-14" />
+                              <path d="M10 11v6M14 11v6" />
                             </svg>
                           </button>
                         </div>
