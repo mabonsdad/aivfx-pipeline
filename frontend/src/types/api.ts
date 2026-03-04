@@ -70,7 +70,7 @@ export type SegmentGeneration = {
   segmentId: string;
   luma: {
     provider?: "luma" | "runway" | "kling";
-    model: "ray-2" | "ray-flash-2" | "runway-aleph" | "kling-2.6";
+    model: "ray-2" | "ray-flash-2" | "runway-aleph" | "runway-gen4.5" | "kling-2.6";
     mode: string;
     prompt?: string;
     lumaGenerationId?: string | null;

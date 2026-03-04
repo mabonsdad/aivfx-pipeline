@@ -111,7 +111,12 @@ export const apiClient = {
   generateSegment: (
     taskId: string,
     segmentId: string,
-    payload: { lumaModel: "ray-2" | "ray-flash-2" | "runway-aleph" | "kling-2.6"; mode: string; prompt?: string; firstFrameVariantId?: string },
+    payload: {
+      lumaModel: "ray-2" | "ray-flash-2" | "runway-aleph" | "runway-gen4.5" | "kling-2.6";
+      mode: string;
+      prompt?: string;
+      firstFrameVariantId?: string;
+    },
   ) => api<{ jobId: string }>(`/tasks/${taskId}/segments/${segmentId}/generate`, { method: "POST", body: JSON.stringify(payload) }),
   merge: (taskId: string, payload: { selectedSegmentGenerationIds: string[]; temporalFeatherFrames: number }) =>
     api<{ jobId: string }>(`/tasks/${taskId}/merge`, { method: "POST", body: JSON.stringify(payload) }),

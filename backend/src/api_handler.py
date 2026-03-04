@@ -47,6 +47,7 @@ settings = load_settings()
 VIDEO_MODEL_MAX_SECONDS: dict[str, int] = {
     "ray-2": 10,
     "ray-flash-2": 15,
+    "runway-gen4.5": 10,
     "kling-2.6": 10,
 }
 PRESIGNED_GET_TTL_SECONDS = 3600
@@ -890,7 +891,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 "luma": {
                     "provider": (
                         "runway"
-                        if req.lumaModel == "runway-aleph"
+                        if req.lumaModel in {"runway-aleph", "runway-gen4.5"}
                         else ("kling" if req.lumaModel == "kling-2.6" else "luma")
                     ),
                     "model": req.lumaModel,

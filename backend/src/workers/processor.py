@@ -35,8 +35,8 @@ from src.integrations.kling import (
 from src.integrations.luma import create_modify_generation, get_generation
 from src.integrations.runware import patch_edit_aceplusplus, patch_edit_flux_fill
 from src.integrations.runway import (
-    create_character_performance,
     create_ephemeral_upload,
+    create_image_to_video,
     create_video_to_video,
     get_task as get_runway_task,
     upload_to_ephemeral,
@@ -726,7 +726,7 @@ def _handle_segment_generate(
     s3 = boto3.client("s3")
     model_name = payload["lumaModel"]
     segment_key: str | None = None
-    if model_name != "kling-2.6":
+    if model_name in {"ray-2", "ray-flash-2", "runway-aleph"}:
         segment_key = _ensure_segment_clip(
             s3=s3,
             asset_store=asset_store,
@@ -819,8 +819,8 @@ def _handle_segment_generate(
         first_target_w, first_target_h = _target_by_orientation(
             src_width,
             src_height,
-            landscape=(1280, 720) if model_name == "runway-aleph" else (1920, 1080),
-            portrait=(720, 1280) if model_name == "runway-aleph" else (1080, 1920),
+            landscape=(1280, 720) if model_name in {"runway-aleph", "runway-gen4.5"} else (1920, 1080),
+            portrait=(720, 1280) if model_name in {"runway-aleph", "runway-gen4.5"} else (1080, 1920),
         )
         prepared_first_frame = _prepare_first_frame_image_bytes(
             frame_bytes,
@@ -833,7 +833,7 @@ def _handle_segment_generate(
         first_frame_input_key = paths.segment_provider_first_frame(
             segment_id,
             gen_id,
-            "runway" if model_name == "runway-aleph" else ("kling" if model_name == "kling-2.6" else "luma"),
+            "runway" if model_name in {"runway-aleph", "runway-gen4.5"} else ("kling" if model_name == "kling-2.6" else "luma"),
         )
         _upload_s3(s3, settings.assets_bucket, first_frame_input_key, local_first_frame, "image/jpeg")
 
@@ -857,6 +857,7 @@ def _handle_segment_generate(
     secrets = load_secret(settings.secrets_arn)
 
     used_provider_model: str | None = None
+    provider_duration_sec: float | None = None
     if model_name == "runway-aleph":
         runway_key = secrets["RUNWAY_API_KEY"]
         with tempfile.TemporaryDirectory() as runway_td:
@@ -874,30 +875,14 @@ def _handle_segment_generate(
                 file_path=runway_input,
                 content_type="video/mp4",
             )
-        _job_progress(job, store, 35, "running", "Creating Runway Act Two generation")
-        try:
-            created = create_character_performance(
-                api_key=runway_key,
-                reference_video_uri=runway_uri,
-                character_image_uri=first_frame_url,
-            )
-            used_provider_model = "act_two"
-        except Exception as exc:
-            # Fallback preserves prior behavior for clips that fail Act Two validation.
-            _job_progress(
-                job,
-                store,
-                42,
-                "running",
-                f"Runway Act Two unavailable, falling back to Aleph video-to-video: {type(exc).__name__}",
-            )
-            created = create_video_to_video(
-                api_key=runway_key,
-                video_uri=runway_uri,
-                prompt_text=payload.get("prompt"),
-                first_frame_uri=first_frame_url,
-            )
-            used_provider_model = "gen4_aleph"
+        _job_progress(job, store, 35, "running", "Creating Runway Aleph generation")
+        created = create_video_to_video(
+            api_key=runway_key,
+            video_uri=runway_uri,
+            prompt_text=payload.get("prompt"),
+            first_frame_uri=first_frame_url,
+        )
+        used_provider_model = "gen4_aleph"
         generation_id = created.get("id")
         if not generation_id:
             raise RuntimeError(f"Unexpected Runway create response: {created}")
@@ -905,11 +890,33 @@ def _handle_segment_generate(
         result = _wait_runway_complete(runway_key, generation_id)
         out_url = _parse_runway_output_url(result)
         provider_name = "runway"
+    elif model_name == "runway-gen4.5":
+        runway_key = secrets["RUNWAY_API_KEY"]
+        runway_duration = max(2, min(10, int(round(segment_duration_sec))))
+        provider_duration_sec = float(runway_duration)
+        _job_progress(job, store, 35, "running", "Creating Runway Gen-4.5 image-to-video generation")
+        created = create_image_to_video(
+            api_key=runway_key,
+            prompt_image_uri=first_frame_url,
+            prompt_text=payload.get("prompt") or "Generate motion that preserves the first frame composition.",
+            ratio=f"{first_target_w}:{first_target_h}",
+            duration=runway_duration,
+            model="gen4.5",
+        )
+        generation_id = created.get("id")
+        if not generation_id:
+            raise RuntimeError(f"Unexpected Runway create response: {created}")
+        _job_progress(job, store, 55, "running", "Polling Runway generation")
+        result = _wait_runway_complete(runway_key, generation_id)
+        out_url = _parse_runway_output_url(result)
+        provider_name = "runway"
+        used_provider_model = "gen4.5"
     elif model_name == "kling-2.6":
         kling_key = secrets.get("RUNWARE_API_KEY") or secrets.get("KLING_API_KEY")
         if not kling_key:
             raise RuntimeError("Kling generation requires RUNWARE_API_KEY (or legacy KLING_API_KEY)")
         kling_duration = _nearest_supported_kling_duration(segment_duration_sec)
+        provider_duration_sec = float(kling_duration)
         _job_progress(job, store, 35, "running", "Creating Kling 2.6 start/end-frame generation")
         created = create_kling_start_end_generation(
             api_key=kling_key,
@@ -981,7 +988,7 @@ def _handle_segment_generate(
             "sourceLastFrameVariantId": source_last_variant_id,
             "sourceLastFrameResolvedKey": last_frame_key,
             "requestedDurationSec": round(segment_duration_sec, 3),
-            "providerDurationSec": _nearest_supported_kling_duration(segment_duration_sec) if model_name == "kling-2.6" else None,
+            "providerDurationSec": provider_duration_sec,
             "generationSettings": {
                 "provider": provider_name,
                 "requestedModel": model_name,
@@ -994,7 +1001,7 @@ def _handle_segment_generate(
                     else None
                 ),
                 "requestedDurationSec": round(segment_duration_sec, 3),
-                "providerDurationSec": _nearest_supported_kling_duration(segment_duration_sec) if model_name == "kling-2.6" else None,
+                "providerDurationSec": provider_duration_sec,
             },
             "createdAt": gen_meta.get("createdAt") or now_iso(),
         }
