@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import boto3
-from PIL import Image, ImageFilter, ImageOps
+from PIL import Image, ImageChops, ImageFilter, ImageOps
 from aws_lambda_powertools import Logger
 
 from src.core.assets import AssetPaths, AssetStore
@@ -448,6 +448,38 @@ def _alpha_mask_for_rect(size: tuple[int, int], rect: dict[str, int], feather_px
     return mask
 
 
+def _grow_or_shrink_mask(mask: Image.Image, grow_px: int) -> Image.Image:
+    distance = int(grow_px)
+    if distance == 0:
+        return mask
+    kernel_size = max(3, (abs(distance) * 2) + 1)
+    if distance > 0:
+        return mask.filter(ImageFilter.MaxFilter(kernel_size))
+    return mask.filter(ImageFilter.MinFilter(kernel_size))
+
+
+def _edge_refine_mask(
+    *,
+    mask: Image.Image,
+    source: Image.Image,
+    enabled: bool,
+    strength: float,
+    radius_px: int,
+    grow_px: int,
+) -> Image.Image:
+    refined = _grow_or_shrink_mask(mask.convert("L"), grow_px)
+    if not enabled or strength <= 0:
+        return refined
+
+    edge_source = source.convert("L").filter(ImageFilter.FIND_EDGES)
+    if radius_px > 0:
+        edge_source = edge_source.filter(ImageFilter.GaussianBlur(radius=max(0.5, radius_px / 2)))
+    edge_source = ImageOps.autocontrast(edge_source)
+    clamped_strength = max(0.0, min(1.0, float(strength)))
+    attenuation = edge_source.point(lambda value: max(0, min(255, int(255 - (value * clamped_strength)))))
+    return ImageChops.multiply(refined, attenuation)
+
+
 def _composite_patch(
     *,
     base_bytes: bytes,
@@ -589,7 +621,12 @@ def _handle_patch_edit(
     mask_bytes = asset_store.read_bytes(payload["maskKey"]) if payload.get("maskKey") else None
     source_image = ImageOps.exif_transpose(Image.open(BytesIO(source_bytes))).convert("RGBA")
     patch_source_image = ImageOps.exif_transpose(Image.open(BytesIO(patch_bytes))).convert("RGBA")
+    edge_refine_enabled = bool(payload.get("edgeAwareRefine", False))
+    edge_refine_strength = float(payload.get("edgeAwareStrength", 0.45))
+    edge_refine_radius_px = int(payload.get("edgeAwareRadiusPx", 6))
+    mask_grow_px = int(payload.get("maskGrowPx", 0))
     provider_name = "gemini"
+    refined_mask_bytes: bytes | None = None
 
     model_name = payload["model"]
     if model_name in {"runware_flux_fill", "runware_ace_pp"}:
@@ -602,11 +639,22 @@ def _handle_patch_edit(
                 mask_image = mask_image.resize(patch_image.size, Image.Resampling.BILINEAR)
         else:
             mask_image = Image.new("L", patch_image.size, 255)
+        if mask_image.size != patch_image.size:
+            mask_image = mask_image.resize(patch_image.size, Image.Resampling.BILINEAR)
+        refined_mask_image = _edge_refine_mask(
+            mask=mask_image,
+            source=patch_image,
+            enabled=edge_refine_enabled,
+            strength=edge_refine_strength,
+            radius_px=edge_refine_radius_px,
+            grow_px=mask_grow_px,
+        )
 
         patch_io = BytesIO()
         patch_image.save(patch_io, format="PNG")
         mask_io = BytesIO()
-        mask_image.save(mask_io, format="PNG")
+        refined_mask_image.save(mask_io, format="PNG")
+        refined_mask_bytes = mask_io.getvalue()
 
         _job_progress(job, store, 30, "running", "Calling Runware patch edit")
         if model_name == "runware_ace_pp":
@@ -618,7 +666,7 @@ def _handle_patch_edit(
                 api_key=runware_key,
                 prompt=payload["prompt"],
                 seed_image_bytes=patch_io.getvalue(),
-                mask_image_bytes=mask_io.getvalue(),
+                mask_image_bytes=refined_mask_bytes,
                 reference_image_bytes=reference_bytes,
                 width=patch_image.width,
                 height=patch_image.height,
@@ -629,19 +677,33 @@ def _handle_patch_edit(
                 api_key=runware_key,
                 prompt=payload["prompt"],
                 seed_image_bytes=patch_io.getvalue(),
-                mask_image_bytes=mask_io.getvalue(),
+                mask_image_bytes=refined_mask_bytes,
                 width=patch_image.width,
                 height=patch_image.height,
             )
     else:
-        gemini_key = secrets["GEMINI_API_KEY"]
+        if mask_bytes:
+            mask_image = ImageOps.exif_transpose(Image.open(BytesIO(mask_bytes))).convert("L")
+            if mask_image.size != patch_source_image.size:
+                mask_image = mask_image.resize(patch_source_image.size, Image.Resampling.BILINEAR)
+            refined_mask_image = _edge_refine_mask(
+                mask=mask_image,
+                source=patch_source_image,
+                enabled=edge_refine_enabled,
+                strength=edge_refine_strength,
+                radius_px=edge_refine_radius_px,
+                grow_px=mask_grow_px,
+            )
+            refined_mask_io = BytesIO()
+            refined_mask_image.save(refined_mask_io, format="PNG")
+            refined_mask_bytes = refined_mask_io.getvalue()
         _job_progress(job, store, 30, "running", "Calling Gemini patch edit")
         edited_patch = generate_image_edit(
             api_key=gemini_key,
             model="nano_banana_pro",
             prompt=payload["prompt"],
             input_image_bytes=patch_bytes,
-            mask_image_bytes=mask_bytes,
+            mask_image_bytes=refined_mask_bytes,
         )
 
     variant_id = new_id("var")
@@ -656,7 +718,7 @@ def _handle_patch_edit(
         rect=payload["patchRect"],
         bleed_px=payload["bleedPx"],
         feather_px=payload["featherPx"],
-        mask_bytes=mask_bytes,
+        mask_bytes=refined_mask_bytes,
     )
     composited_image = ImageOps.exif_transpose(Image.open(BytesIO(composited))).convert("RGBA")
 
@@ -674,6 +736,10 @@ def _handle_patch_edit(
         "featherPx": int(payload["featherPx"]),
         "bleedPx": int(payload["bleedPx"]),
         "hasMask": bool(payload.get("maskKey")),
+        "edgeAwareRefine": edge_refine_enabled,
+        "edgeAwareStrength": edge_refine_strength,
+        "edgeAwareRadiusPx": edge_refine_radius_px,
+        "maskGrowPx": mask_grow_px,
     }
     if model_name == "runware_ace_pp":
         generation_settings["runwareRepaintingScale"] = float(payload.get("runwareRepaintingScale", 0.7))
@@ -695,6 +761,10 @@ def _handle_patch_edit(
             "maskKey": payload.get("maskKey"),
             "patchOnlyKey": patch_only_key,
             "referenceImageKey": payload.get("referenceImageKey"),
+            "edgeAwareRefine": edge_refine_enabled,
+            "edgeAwareStrength": edge_refine_strength,
+            "edgeAwareRadiusPx": edge_refine_radius_px,
+            "maskGrowPx": mask_grow_px,
         },
     }
     frame.setdefault("variants", []).append(variant)

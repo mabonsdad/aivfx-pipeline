@@ -29,6 +29,12 @@ type LibraryAsset = {
 };
 
 type PatchEngine = "nano_banana_pro" | "runware_flux_fill" | "runware_ace_pp";
+type PatchToolMode = "brush_add" | "brush_erase" | "lasso_add" | "lasso_erase";
+
+type MaskPoint = {
+  x: number;
+  y: number;
+};
 
 type PatchReferenceImage = {
   file: File;
@@ -333,8 +339,13 @@ export default function App() {
     first: null,
     last: null,
   });
+  const [patchToolMode, setPatchToolMode] = useState<PatchToolMode>("brush_add");
   const [patchBrushSize, setPatchBrushSize] = useState(24);
   const [featherPx, setFeatherPx] = useState(24);
+  const [edgeAwareRefine, setEdgeAwareRefine] = useState(true);
+  const [edgeAwareStrength, setEdgeAwareStrength] = useState(0.45);
+  const [edgeAwareRadiusPx, setEdgeAwareRadiusPx] = useState(6);
+  const [maskGrowPx, setMaskGrowPx] = useState(0);
   const [maskHasPaint, setMaskHasPaint] = useState(false);
   const [lumaModel, setLumaModel] = useState<"ray-2" | "ray-flash-2" | "runway-aleph" | "runway-gen4.5" | "kling-2.6">(
     "ray-flash-2",
@@ -361,7 +372,7 @@ export default function App() {
   const syncLockRef = useRef(false);
   const patchOverlayCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const patchMaskCanvasRef = useRef<HTMLCanvasElement | null>(null);
-  const patchDrawStateRef = useRef<{ drawing: boolean; x: number; y: number } | null>(null);
+  const patchDrawStateRef = useRef<{ tool: PatchToolMode; points: MaskPoint[]; last: MaskPoint | null } | null>(null);
 
   useEffect(() => {
     currentUser().then((user) => setIsAuthed(!!user));
@@ -608,11 +619,10 @@ export default function App() {
     if (overlay) {
       overlay.width = width;
       overlay.height = height;
-      const overlayCtx = overlay.getContext("2d");
-      overlayCtx?.clearRect(0, 0, width, height);
     }
     patchDrawStateRef.current = null;
     setMaskHasPaint(false);
+    renderPatchOverlay();
   }, [activeEditFrame?.frameId, activeFrameWidth, activeFrameHeight]);
 
   useEffect(() => {
@@ -753,7 +763,9 @@ export default function App() {
     mutationFn: async (frameId: string) => {
       if (!selectedTaskId) throw new Error("Select a task");
       if (!activeFrameDimensions) throw new Error("Frame dimensions unavailable");
-      if (!maskHasPaint) throw new Error("Draw a mask before generating a patch variant");
+      const hasMaskPaint = maskContainsPaint();
+      setMaskHasPaint(hasMaskPaint);
+      if (!hasMaskPaint) throw new Error("Draw a mask before generating a patch variant");
       const patchRect = {
         x: 0,
         y: 0,
@@ -840,6 +852,10 @@ export default function App() {
         bleedPx: 0,
         referenceImageKey,
         runwareRepaintingScale: patchEngine === "runware_ace_pp" ? runwareRepaintingScale : undefined,
+        edgeAwareRefine,
+        edgeAwareStrength,
+        edgeAwareRadiusPx,
+        maskGrowPx,
         sourceVariantId: activeEditSourceVariantId ?? "original",
       });
     },
@@ -1201,49 +1217,103 @@ export default function App() {
     };
   }
 
-  function paintMaskStroke(x: number, y: number, prev: { x: number; y: number } | null) {
+  function patchToolUsesLasso(tool: PatchToolMode): boolean {
+    return tool === "lasso_add" || tool === "lasso_erase";
+  }
+
+  function patchToolModeToMaskMode(tool: PatchToolMode): "add" | "erase" {
+    return tool === "brush_erase" || tool === "lasso_erase" ? "erase" : "add";
+  }
+
+  function renderPatchOverlay(previewPolygon: MaskPoint[] = []) {
     const maskCanvas = patchMaskCanvasRef.current;
     const overlayCanvas = patchOverlayCanvasRef.current;
     if (!maskCanvas || !overlayCanvas) return;
-
-    const maskCtx = maskCanvas.getContext("2d");
     const overlayCtx = overlayCanvas.getContext("2d");
-    if (!maskCtx || !overlayCtx) return;
+    if (!overlayCtx) return;
 
-    maskCtx.strokeStyle = "white";
-    maskCtx.fillStyle = "white";
+    overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+    overlayCtx.fillStyle = "rgba(94, 176, 173, 0.72)";
+    overlayCtx.fillRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+    overlayCtx.globalCompositeOperation = "destination-in";
+    overlayCtx.drawImage(maskCanvas, 0, 0, overlayCanvas.width, overlayCanvas.height);
+    overlayCtx.globalCompositeOperation = "source-over";
+
+    if (previewPolygon.length >= 2) {
+      overlayCtx.save();
+      overlayCtx.strokeStyle = "rgba(20, 96, 94, 0.95)";
+      overlayCtx.fillStyle = "rgba(20, 96, 94, 0.18)";
+      overlayCtx.lineWidth = 2;
+      overlayCtx.setLineDash([8, 6]);
+      overlayCtx.beginPath();
+      overlayCtx.moveTo(previewPolygon[0].x, previewPolygon[0].y);
+      for (const point of previewPolygon.slice(1)) {
+        overlayCtx.lineTo(point.x, point.y);
+      }
+      overlayCtx.closePath();
+      overlayCtx.stroke();
+      overlayCtx.fill();
+      overlayCtx.restore();
+    }
+  }
+
+  function maskContainsPaint(): boolean {
+    const maskCanvas = patchMaskCanvasRef.current;
+    if (!maskCanvas) return false;
+    const maskCtx = maskCanvas.getContext("2d");
+    if (!maskCtx) return false;
+    const data = maskCtx.getImageData(0, 0, maskCanvas.width, maskCanvas.height).data;
+    for (let index = 0; index < data.length; index += 4) {
+      if (data[index] > 5) return true;
+    }
+    return false;
+  }
+
+  function paintMaskStroke(x: number, y: number, prev: MaskPoint | null, mode: "add" | "erase") {
+    const maskCanvas = patchMaskCanvasRef.current;
+    if (!maskCanvas) return;
+    const maskCtx = maskCanvas.getContext("2d");
+    if (!maskCtx) return;
+
+    const color = mode === "add" ? "white" : "black";
+    maskCtx.strokeStyle = color;
+    maskCtx.fillStyle = color;
     maskCtx.lineCap = "round";
     maskCtx.lineJoin = "round";
     maskCtx.lineWidth = patchBrushSize;
-
-    overlayCtx.strokeStyle = "rgba(94, 176, 173, 0.85)";
-    overlayCtx.fillStyle = "rgba(94, 176, 173, 0.85)";
-    overlayCtx.lineCap = "round";
-    overlayCtx.lineJoin = "round";
-    overlayCtx.lineWidth = patchBrushSize;
 
     if (!prev) {
       maskCtx.beginPath();
       maskCtx.arc(x, y, patchBrushSize / 2, 0, Math.PI * 2);
       maskCtx.fill();
-      overlayCtx.beginPath();
-      overlayCtx.arc(x, y, patchBrushSize / 2, 0, Math.PI * 2);
-      overlayCtx.fill();
     } else {
       maskCtx.beginPath();
       maskCtx.moveTo(prev.x, prev.y);
       maskCtx.lineTo(x, y);
       maskCtx.stroke();
-      overlayCtx.beginPath();
-      overlayCtx.moveTo(prev.x, prev.y);
-      overlayCtx.lineTo(x, y);
-      overlayCtx.stroke();
     }
+    renderPatchOverlay();
+  }
+
+  function fillMaskPolygon(points: MaskPoint[], mode: "add" | "erase") {
+    if (points.length < 3) return;
+    const maskCanvas = patchMaskCanvasRef.current;
+    if (!maskCanvas) return;
+    const maskCtx = maskCanvas.getContext("2d");
+    if (!maskCtx) return;
+    maskCtx.fillStyle = mode === "add" ? "white" : "black";
+    maskCtx.beginPath();
+    maskCtx.moveTo(points[0].x, points[0].y);
+    for (const point of points.slice(1)) {
+      maskCtx.lineTo(point.x, point.y);
+    }
+    maskCtx.closePath();
+    maskCtx.fill();
+    renderPatchOverlay();
   }
 
   function clearPatchMask() {
     const maskCanvas = patchMaskCanvasRef.current;
-    const overlayCanvas = patchOverlayCanvasRef.current;
     if (maskCanvas) {
       const maskCtx = maskCanvas.getContext("2d");
       if (maskCtx) {
@@ -1251,10 +1321,7 @@ export default function App() {
         maskCtx.fillRect(0, 0, maskCanvas.width, maskCanvas.height);
       }
     }
-    if (overlayCanvas) {
-      const overlayCtx = overlayCanvas.getContext("2d");
-      overlayCtx?.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
-    }
+    renderPatchOverlay();
     patchDrawStateRef.current = null;
     setMaskHasPaint(false);
   }
@@ -1292,21 +1359,34 @@ export default function App() {
     if (!canvas) return;
     const coords = mapPointerToMaskCoordinates(event, canvas);
     if (!coords) return;
-    patchDrawStateRef.current = { drawing: true, x: coords.x, y: coords.y };
+    patchDrawStateRef.current = { tool: patchToolMode, points: [coords], last: coords };
     canvas.setPointerCapture(event.pointerId);
-    paintMaskStroke(coords.x, coords.y, null);
-    setMaskHasPaint(true);
+    if (!patchToolUsesLasso(patchToolMode)) {
+      paintMaskStroke(coords.x, coords.y, null, patchToolModeToMaskMode(patchToolMode));
+      setMaskHasPaint(maskContainsPaint());
+    } else {
+      renderPatchOverlay([coords]);
+    }
   }
 
   function onPatchMaskPointerMove(event: PointerEvent<HTMLCanvasElement>) {
     const canvas = patchOverlayCanvasRef.current;
     const state = patchDrawStateRef.current;
-    if (!canvas || !state?.drawing) return;
+    if (!canvas || !state) return;
     const coords = mapPointerToMaskCoordinates(event, canvas);
     if (!coords) return;
-    paintMaskStroke(coords.x, coords.y, { x: state.x, y: state.y });
-    patchDrawStateRef.current = { drawing: true, x: coords.x, y: coords.y };
-    setMaskHasPaint(true);
+    if (patchToolUsesLasso(state.tool)) {
+      const previousPoint = state.points[state.points.length - 1];
+      if (!previousPoint || Math.hypot(previousPoint.x - coords.x, previousPoint.y - coords.y) >= 2) {
+        const updatedPoints = [...state.points, coords];
+        patchDrawStateRef.current = { ...state, points: updatedPoints, last: coords };
+        renderPatchOverlay(updatedPoints);
+      }
+      return;
+    }
+    paintMaskStroke(coords.x, coords.y, state.last, patchToolModeToMaskMode(state.tool));
+    patchDrawStateRef.current = { ...state, points: [...state.points, coords], last: coords };
+    setMaskHasPaint(maskContainsPaint());
   }
 
   function onPatchMaskPointerUp(event: PointerEvent<HTMLCanvasElement>) {
@@ -1315,7 +1395,13 @@ export default function App() {
     if (canvas.hasPointerCapture(event.pointerId)) {
       canvas.releasePointerCapture(event.pointerId);
     }
+    const state = patchDrawStateRef.current;
+    if (state && patchToolUsesLasso(state.tool)) {
+      fillMaskPolygon(state.points, patchToolModeToMaskMode(state.tool));
+      setMaskHasPaint(maskContainsPaint());
+    }
     patchDrawStateRef.current = null;
+    renderPatchOverlay();
   }
 
   function formatAssetDate(iso: string) {
@@ -2075,7 +2161,8 @@ export default function App() {
                     {activeEditFrame?.imageUrl && activeFrameDimensions ? (
                       <div className="space-y-2">
                         <p className="text-xs text-ink/70">
-                          Paint over areas to edit. Painted regions become the mask sent with the frame.
+                          Paint or lasso the exact area to change. Add mode paints edit regions, erase mode removes them.
+                          Keep masks tight to the target, then use feather and edge refine to avoid seams.
                         </p>
                         <div className="relative inline-block max-w-full overflow-hidden rounded-md border border-ink/20 bg-bg">
                           <img
@@ -2096,7 +2183,7 @@ export default function App() {
                             onPointerCancel={onPatchMaskPointerUp}
                           />
                         </div>
-                        <div className="grid gap-2 md:grid-cols-3">
+                        <div className="grid gap-2 md:grid-cols-2 lg:grid-cols-4">
                           <label className="text-xs text-ink/70">
                             Patch engine
                             <select
@@ -2107,6 +2194,19 @@ export default function App() {
                               <option value="nano_banana_pro">Google Nano Banana Pro</option>
                               <option value="runware_flux_fill">Runware FLUX Fill</option>
                               <option value="runware_ace_pp">Runware ACE++ + FLUX Fill</option>
+                            </select>
+                          </label>
+                          <label className="text-xs text-ink/70">
+                            Tool
+                            <select
+                              value={patchToolMode}
+                              onChange={(e) => setPatchToolMode(e.target.value as PatchToolMode)}
+                              className="mt-1 block w-full rounded border border-ink/20 px-2 py-1 text-sm"
+                            >
+                              <option value="brush_add">Brush (add)</option>
+                              <option value="brush_erase">Brush (erase)</option>
+                              <option value="lasso_add">Lasso (add)</option>
+                              <option value="lasso_erase">Lasso (erase)</option>
                             </select>
                           </label>
                           <label className="text-xs text-ink/70">
@@ -2137,7 +2237,7 @@ export default function App() {
                               ))}
                             </select>
                           </label>
-                          <div className="flex items-end">
+                          <div className="flex items-end lg:col-span-4">
                             <button
                               type="button"
                               className="w-full rounded border border-ink/20 bg-white px-3 py-2 text-sm"
@@ -2146,6 +2246,64 @@ export default function App() {
                               Clear mask
                             </button>
                           </div>
+                        </div>
+                        <div className="rounded border border-ink/10 bg-white p-2">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <label className="flex items-center gap-2 text-xs text-ink/70">
+                              <input
+                                type="checkbox"
+                                checked={edgeAwareRefine}
+                                onChange={(event) => setEdgeAwareRefine(event.target.checked)}
+                              />
+                              Edge-aware matte refinement
+                            </label>
+                            <p className="text-[11px] text-ink/60">Helps reduce halos on detailed edges like hair, fabric and props.</p>
+                          </div>
+                          {edgeAwareRefine ? (
+                            <div className="mt-2 grid gap-2 md:grid-cols-3">
+                              <label className="text-xs text-ink/70">
+                                Refine strength
+                                <input
+                                  type="range"
+                                  min={0}
+                                  max={1}
+                                  step={0.05}
+                                  value={edgeAwareStrength}
+                                  onChange={(event) => setEdgeAwareStrength(Number(event.target.value))}
+                                  className="mt-1 block w-full"
+                                />
+                                <span className="mt-1 block text-[11px] text-ink/60">{edgeAwareStrength.toFixed(2)}</span>
+                              </label>
+                              <label className="text-xs text-ink/70">
+                                Edge radius
+                                <select
+                                  value={edgeAwareRadiusPx}
+                                  onChange={(event) => setEdgeAwareRadiusPx(Number(event.target.value))}
+                                  className="mt-1 block w-full rounded border border-ink/20 px-2 py-1 text-sm"
+                                >
+                                  {[0, 2, 4, 6, 8, 10, 12, 16, 20, 24].map((value) => (
+                                    <option key={value} value={value}>
+                                      {value}px
+                                    </option>
+                                  ))}
+                                </select>
+                              </label>
+                              <label className="text-xs text-ink/70">
+                                Mask grow/shrink
+                                <select
+                                  value={maskGrowPx}
+                                  onChange={(event) => setMaskGrowPx(Number(event.target.value))}
+                                  className="mt-1 block w-full rounded border border-ink/20 px-2 py-1 text-sm"
+                                >
+                                  {[-24, -16, -12, -8, -4, 0, 4, 8, 12, 16, 24].map((value) => (
+                                    <option key={value} value={value}>
+                                      {value > 0 ? `+${value}px` : `${value}px`}
+                                    </option>
+                                  ))}
+                                </select>
+                              </label>
+                            </div>
+                          ) : null}
                         </div>
                         {patchEngine === "runware_ace_pp" ? (
                           <div className="space-y-2 rounded border border-ink/10 bg-white p-2">

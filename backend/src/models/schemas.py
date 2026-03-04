@@ -61,6 +61,10 @@ class PatchSubmitRequest(BaseModel):
     bleedPx: int = Field(ge=0, le=300, default=32)
     referenceImageKey: str | None = None
     runwareRepaintingScale: float = Field(ge=0, le=1, default=0.7)
+    edgeAwareRefine: bool = False
+    edgeAwareStrength: float = Field(ge=0, le=1, default=0.45)
+    edgeAwareRadiusPx: int = Field(ge=0, le=24, default=6)
+    maskGrowPx: int = Field(ge=-64, le=64, default=0)
     sourceVariantId: str | None = None
 
 

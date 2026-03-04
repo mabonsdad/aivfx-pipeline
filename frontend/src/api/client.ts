@@ -103,6 +103,10 @@ export const apiClient = {
       bleedPx: number;
       referenceImageKey?: string;
       runwareRepaintingScale?: number;
+      edgeAwareRefine?: boolean;
+      edgeAwareStrength?: number;
+      edgeAwareRadiusPx?: number;
+      maskGrowPx?: number;
       sourceVariantId?: string;
     },
   ) => api<{ jobId: string }>(`/tasks/${taskId}/frames/${frameId}/edits/patch/submit`, { method: "POST", body: JSON.stringify(payload) }),
