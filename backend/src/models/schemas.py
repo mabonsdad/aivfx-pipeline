@@ -33,7 +33,6 @@ class FrameCaptureRequest(BaseModel):
 class FullEditRequest(BaseModel):
     model: Literal["nano_banana", "nano_banana_pro"]
     prompt: str = Field(min_length=1)
-    referenceImageKeys: list[str] = Field(default_factory=list, max_length=3)
 
 
 class PatchRect(BaseModel):
@@ -58,16 +57,6 @@ class PatchSubmitRequest(BaseModel):
     patchRect: PatchRect
     featherPx: int = Field(ge=0, le=200)
     bleedPx: int = Field(ge=0, le=300, default=32)
-    referenceImageKeys: list[str] = Field(default_factory=list, max_length=3)
-
-
-class ReferenceUploadItem(BaseModel):
-    filename: str = Field(min_length=1, max_length=255)
-    contentType: str = Field(min_length=1, max_length=120)
-
-
-class ReferenceUploadRequest(BaseModel):
-    files: list[ReferenceUploadItem] = Field(min_length=1, max_length=3)
 
 
 class SegmentGenerateRequest(BaseModel):

@@ -15,7 +15,6 @@ export type FrameVariant = {
   createdAt: string;
   outputKey: string;
   imageUrl?: string;
-  referenceImageKeys?: string[];
   patchMeta?: Record<string, unknown>;
 };
 

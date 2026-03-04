@@ -28,24 +28,6 @@ type LibraryAsset = {
     | { assetType: "export"; exportId: string };
 };
 
-type ReferenceImage = {
-  referenceId: string;
-  key: string;
-  filename: string;
-  previewUrl: string;
-};
-
-type ReferenceImageState = {
-  first: ReferenceImage[];
-  last: ReferenceImage[];
-};
-
-function revokeReferencePreviews(images: ReferenceImageState): void {
-  for (const item of [...images.first, ...images.last]) {
-    URL.revokeObjectURL(item.previewUrl);
-  }
-}
-
 function normalizeTaskNameInput(value: string): string {
   return value
     .trim()
@@ -218,11 +200,6 @@ export default function App() {
   const [firstFrameId, setFirstFrameId] = useState<string | null>(null);
   const [lastFrameId, setLastFrameId] = useState<string | null>(null);
   const [editFrameTab, setEditFrameTab] = useState<"first" | "last">("first");
-  const [isReferenceModalOpen, setIsReferenceModalOpen] = useState(false);
-  const [referenceModalFiles, setReferenceModalFiles] = useState<File[]>([]);
-  const [referenceUploadPending, setReferenceUploadPending] = useState(false);
-  const [referenceUploadError, setReferenceUploadError] = useState<string | null>(null);
-  const [referenceImagesByTab, setReferenceImagesByTab] = useState<ReferenceImageState>({ first: [], last: [] });
   const timelineVideoRef = useRef<HTMLVideoElement | null>(null);
   const compareOriginalRef = useRef<HTMLVideoElement | null>(null);
   const compareVariantRef = useRef<HTMLVideoElement | null>(null);
@@ -230,7 +207,6 @@ export default function App() {
   const patchOverlayCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const patchMaskCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const patchDrawStateRef = useRef<{ drawing: boolean; x: number; y: number } | null>(null);
-  const referenceImagesRef = useRef<ReferenceImageState>({ first: [], last: [] });
 
   useEffect(() => {
     currentUser().then((user) => setIsAuthed(!!user));
@@ -315,24 +291,11 @@ export default function App() {
   }, [activeEditFrame, task?.video?.editSource?.height, task?.video?.editSource?.width]);
   const activeFrameWidth = activeFrameDimensions?.width ?? null;
   const activeFrameHeight = activeFrameDimensions?.height ?? null;
-  const activeReferenceImages = referenceImagesByTab[editFrameTab];
 
   useEffect(() => {
     setFirstFrameId(null);
     setLastFrameId(null);
-    revokeReferencePreviews(referenceImagesRef.current);
-    setReferenceImagesByTab({ first: [], last: [] });
   }, [selectedTaskId]);
-
-  useEffect(() => {
-    referenceImagesRef.current = referenceImagesByTab;
-  }, [referenceImagesByTab]);
-
-  useEffect(() => {
-    return () => {
-      revokeReferencePreviews(referenceImagesRef.current);
-    };
-  }, []);
 
   useEffect(() => {
     if (firstFrameId && !task?.frames[firstFrameId]) setFirstFrameId(null);
@@ -509,7 +472,6 @@ export default function App() {
       return apiClient.fullEdit(selectedTaskId, frameId, {
         model,
         prompt,
-        referenceImageKeys: activeReferenceImages.map((image) => image.key),
       });
     },
     onSuccess: (result) => setJobIds((prev) => Array.from(new Set([...prev, result.jobId]))),
@@ -564,7 +526,6 @@ export default function App() {
         patchRect,
         featherPx,
         bleedPx: 0,
-        referenceImageKeys: activeReferenceImages.map((image) => image.key),
       });
     },
     onSuccess: (result) => setJobIds((prev) => Array.from(new Set([...prev, result.jobId]))),
@@ -1012,66 +973,6 @@ export default function App() {
     return asDate.toLocaleString();
   }
 
-  function removeReferenceImage(tabKey: "first" | "last", referenceId: string) {
-    setReferenceImagesByTab((previous) => {
-      const target = previous[tabKey];
-      const removed = target.find((item) => item.referenceId === referenceId);
-      if (removed) {
-        URL.revokeObjectURL(removed.previewUrl);
-      }
-      return {
-        ...previous,
-        [tabKey]: target.filter((item) => item.referenceId !== referenceId),
-      };
-    });
-  }
-
-  async function uploadReferenceImagesFromModal() {
-    if (!selectedTaskId) throw new Error("Select a task");
-    if (!activeEditFrame) throw new Error("Select a frame first");
-    const tabKey = editFrameTab;
-    const currentCount = referenceImagesByTab[tabKey].length;
-    const remainingSlots = Math.max(0, 3 - currentCount);
-    if (remainingSlots === 0) throw new Error("You can upload up to 3 reference images");
-    const filesToUpload = referenceModalFiles
-      .filter((file) => file.type.startsWith("image/"))
-      .slice(0, remainingSlots);
-    if (filesToUpload.length === 0) throw new Error("Select at least one image file");
-
-    const response = await apiClient.createReferenceUploads(selectedTaskId, activeEditFrame.frameId, {
-      files: filesToUpload.map((file) => ({ filename: file.name, contentType: file.type || "image/png" })),
-    });
-    if (response.uploads.length !== filesToUpload.length) {
-      throw new Error("Reference upload request did not return all files");
-    }
-
-    await Promise.all(
-      response.uploads.map(async (upload, index) => {
-        const file = filesToUpload[index];
-        const uploadResponse = await fetch(upload.uploadUrl, {
-          method: "PUT",
-          headers: { "content-type": file.type || "image/png" },
-          body: file,
-        });
-        if (!uploadResponse.ok) {
-          throw new Error(`Reference upload failed (${uploadResponse.status})`);
-        }
-      }),
-    );
-
-    const uploadedReferences: ReferenceImage[] = response.uploads.map((upload, index) => ({
-      referenceId: upload.referenceId,
-      key: upload.key,
-      filename: filesToUpload[index].name,
-      previewUrl: URL.createObjectURL(filesToUpload[index]),
-    }));
-
-    setReferenceImagesByTab((previous) => ({
-      ...previous,
-      [tabKey]: [...previous[tabKey], ...uploadedReferences].slice(0, 3),
-    }));
-  }
-
   function describeSegment(segment: SegmentRecord): string {
     const endFrameInclusive = Math.max(segment.endFrameExclusive - 1, segment.startFrame);
     return `f${segment.startFrame}-f${endFrameInclusive} · ${segment.durationSec.toFixed(2)}s · ${segment.startTimecode}→${segment.endTimecode}`;
@@ -1390,70 +1291,30 @@ export default function App() {
                       Select frames in the Timeline tab first, then return here to edit.
                     </div>
                   ) : null}
-                  <div className="grid gap-3 md:grid-cols-[220px_1fr]">
-                    <div className="rounded-md border border-ink/10 bg-bg p-2">
-                      <div className="mb-2 flex items-center justify-between">
-                        <p className="text-xs font-medium text-ink/80">Reference images</p>
-                        <p className="text-xs text-ink/60">{activeReferenceImages.length}/3</p>
-                      </div>
-                      {activeReferenceImages.length === 0 ? (
-                        <p className="text-xs text-ink/60">No references uploaded.</p>
-                      ) : (
-                        <div className="space-y-2">
-                          {activeReferenceImages.map((reference) => (
-                            <div key={reference.referenceId} className="relative">
-                              <img src={reference.previewUrl} alt={reference.filename} className="max-h-16 w-full rounded bg-bg object-contain" />
-                              <button
-                                type="button"
-                                className="absolute right-1 top-1 rounded bg-black/70 px-1 text-xs text-white"
-                                onClick={() => removeReferenceImage(editFrameTab, reference.referenceId)}
-                                title="Remove reference image"
-                                aria-label="Remove reference image"
-                              >
-                                🗑
-                              </button>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                    <div className="space-y-3">
-                      <textarea
-                        value={prompt}
-                        onChange={(e) => setPrompt(e.target.value)}
-                        placeholder="Describe the edit"
-                        className="h-24 w-full rounded-md border border-ink/20 p-2"
-                      />
+                  <div className="space-y-3">
+                    <textarea
+                      value={prompt}
+                      onChange={(e) => setPrompt(e.target.value)}
+                      placeholder="Describe the edit"
+                      className="h-24 w-full rounded-md border border-ink/20 p-2"
+                    />
 
-                      <div className="flex flex-wrap items-center gap-2">
-                        <select
-                          value={model}
-                          onChange={(e) => setModel(e.target.value as "nano_banana" | "nano_banana_pro")}
-                          className="rounded-md border border-ink/20 px-2 py-2"
-                        >
-                          <option value="nano_banana">std</option>
-                          <option value="nano_banana_pro">pro</option>
-                        </select>
-                        <button
-                          type="button"
-                          className="rounded-md border border-ink/20 bg-white px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50"
-                          disabled={!activeEditFrame || activeReferenceImages.length >= 3}
-                          onClick={() => {
-                            setReferenceUploadError(null);
-                            setReferenceModalFiles([]);
-                            setIsReferenceModalOpen(true);
-                          }}
-                        >
-                          Upload ref.
-                        </button>
-                        <button
-                          className="rounded-md bg-accent px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-50"
-                          disabled={!activeEditFrame || fullEditMutation.isPending || !prompt.trim()}
-                          onClick={() => activeEditFrame && fullEditMutation.mutate(activeEditFrame.frameId)}
-                        >
-                          Edit
-                        </button>
-                      </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <select
+                        value={model}
+                        onChange={(e) => setModel(e.target.value as "nano_banana" | "nano_banana_pro")}
+                        className="rounded-md border border-ink/20 px-2 py-2"
+                      >
+                        <option value="nano_banana">std</option>
+                        <option value="nano_banana_pro">pro</option>
+                      </select>
+                      <button
+                        className="rounded-md bg-accent px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-50"
+                        disabled={!activeEditFrame || fullEditMutation.isPending || !prompt.trim()}
+                        onClick={() => activeEditFrame && fullEditMutation.mutate(activeEditFrame.frameId)}
+                      >
+                        Edit
+                      </button>
                     </div>
                   </div>
                 </div>
@@ -1527,12 +1388,6 @@ export default function App() {
                 <details className="rounded-lg border border-ink/10 p-3">
                   <summary className="cursor-pointer text-sm font-medium">Advanced (Patch Tools)</summary>
                   <div className="mt-3 space-y-3">
-                    {activeReferenceImages.length > 0 ? (
-                      <p className="text-xs text-ink/60">
-                        Patch edits will also include {activeReferenceImages.length} reference image
-                        {activeReferenceImages.length > 1 ? "s" : ""}.
-                      </p>
-                    ) : null}
                     {activeEditFrame?.imageUrl && activeFrameDimensions ? (
                       <div className="space-y-2">
                         <p className="text-xs text-ink/70">
@@ -2051,74 +1906,6 @@ export default function App() {
           </div>
         </section>
       </div>
-      {isReferenceModalOpen ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="w-full max-w-lg rounded-2xl border border-ink/10 bg-card p-5 shadow-xl">
-            <div className="mb-3 flex items-center justify-between">
-              <h3 className="text-lg font-semibold">Upload Reference Images</h3>
-              <button
-                className="text-sm text-ink/60 underline disabled:cursor-not-allowed disabled:opacity-50"
-                onClick={() => {
-                  if (referenceUploadPending) return;
-                  setIsReferenceModalOpen(false);
-                  setReferenceModalFiles([]);
-                  setReferenceUploadError(null);
-                }}
-                disabled={referenceUploadPending}
-              >
-                Close
-              </button>
-            </div>
-            <div className="space-y-3">
-              <p className="text-sm text-ink/70">
-                Upload up to 3 references to guide style/content. The selected frame remains the image being edited.
-              </p>
-              <input
-                type="file"
-                accept="image/*"
-                multiple
-                onChange={(e) => {
-                  const files = Array.from(e.target.files ?? [])
-                    .filter((file) => file.type.startsWith("image/"))
-                    .slice(0, 3);
-                  setReferenceModalFiles(files);
-                }}
-                disabled={referenceUploadPending || !activeEditFrame || activeReferenceImages.length >= 3}
-              />
-              <p className="text-xs text-ink/60">
-                Selected: {referenceModalFiles.length} file(s). Existing references for this frame tab: {activeReferenceImages.length}/3.
-              </p>
-              {referenceModalFiles.length > 0 ? (
-                <div className="max-h-40 space-y-1 overflow-auto rounded border border-ink/10 bg-bg p-2 text-xs">
-                  {referenceModalFiles.map((file) => (
-                    <p key={`${file.name}-${file.size}-${file.lastModified}`}>{file.name}</p>
-                  ))}
-                </div>
-              ) : null}
-              {referenceUploadError ? <p className="text-sm text-red-600">{referenceUploadError}</p> : null}
-              <button
-                className="w-full rounded-md bg-accent px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-50"
-                disabled={referenceUploadPending || !activeEditFrame || activeReferenceImages.length >= 3 || referenceModalFiles.length === 0}
-                onClick={async () => {
-                  try {
-                    setReferenceUploadPending(true);
-                    setReferenceUploadError(null);
-                    await uploadReferenceImagesFromModal();
-                    setReferenceModalFiles([]);
-                    setIsReferenceModalOpen(false);
-                  } catch (error) {
-                    setReferenceUploadError(error instanceof Error ? error.message : "Reference upload failed");
-                  } finally {
-                    setReferenceUploadPending(false);
-                  }
-                }}
-              >
-                {referenceUploadPending ? "Uploading..." : "Upload selected"}
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
       {isNewTaskModalOpen ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
           <div className="w-full max-w-xl rounded-2xl border border-ink/10 bg-card p-5 shadow-xl">
