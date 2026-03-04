@@ -940,6 +940,15 @@ export default function App() {
     },
   });
 
+  const runQcMutation = useMutation({
+    mutationFn: async (taskId: string) => apiClient.runQc(taskId),
+    onSuccess: async (result, taskId) => {
+      setJobIds((previous) => Array.from(new Set([...previous, result.jobId])));
+      await queryClient.invalidateQueries({ queryKey: ["task", taskId] });
+      await queryClient.invalidateQueries({ queryKey: ["task", "report", taskId] });
+    },
+  });
+
   const jobQueries = useQueries({
     queries: jobIds.map((jobId) => ({
       queryKey: ["job", jobId],
@@ -1472,6 +1481,11 @@ export default function App() {
     return `${resolution.width}x${resolution.height}`;
   }
 
+  function formatPct(value: unknown, digits = 2): string {
+    if (typeof value !== "number" || Number.isNaN(value)) return "n/a";
+    return `${value.toFixed(digits)}%`;
+  }
+
   function describeFrame(frame: FrameRecord | null): string {
     if (!frame) return "Not available";
     return `frame ${frame.frameIndex} · ${frame.timecode}`;
@@ -1623,6 +1637,8 @@ export default function App() {
   if (tab === "report") {
     const reportPlaybackUrl = reportTask?.video?.editSource?.downloadUrl ?? reportTask?.video?.original?.downloadUrl ?? null;
     const segmentRows = [...(reportTask?.segments ?? [])].sort((a, b) => a.startFrame - b.startFrame);
+    const latestQcJob =
+      sortedJobs.find((job) => job.type === "qc_analysis" && (!reportTaskId || job.taskId === reportTaskId)) ?? null;
     return (
       <main className="min-h-screen bg-bg text-ink">
         <div className="mx-auto w-full max-w-[1700px] space-y-4 p-4 md:p-6">
@@ -1634,6 +1650,16 @@ export default function App() {
               {reportTask ? <p className="text-sm text-ink/60">Updated {formatAssetDate(reportTask.updatedAt)}</p> : null}
             </div>
             <div className="flex items-center gap-3">
+              <button
+                className="rounded border border-ink/20 bg-white px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={!reportTaskId || runQcMutation.isPending}
+                onClick={() => {
+                  if (!reportTaskId) return;
+                  runQcMutation.mutate(reportTaskId);
+                }}
+              >
+                {runQcMutation.isPending ? "Starting QC..." : "Run QC Analysis"}
+              </button>
               <button
                 className="rounded border border-ink/20 bg-white px-3 py-2 text-sm"
                 onClick={() => {
@@ -1648,9 +1674,15 @@ export default function App() {
               </button>
             </div>
           </div>
+          {latestQcJob ? (
+            <p className="text-xs text-ink/70">
+              Latest QC job {truncateIdentifier(latestQcJob.jobId, 12)}: {latestQcJob.status} ({latestQcJob.progress}%)
+            </p>
+          ) : null}
 
           {reportTaskQuery.isPending ? <p className="text-sm text-ink/60">Loading report...</p> : null}
           {reportTaskQuery.error ? <p className="text-sm text-red-600">{(reportTaskQuery.error as Error).message}</p> : null}
+          {runQcMutation.error ? <p className="text-sm text-red-600">{runQcMutation.error.message}</p> : null}
 
           {reportTask ? (
             <>
@@ -1752,6 +1784,98 @@ export default function App() {
                               )}
                               <p className="mt-2 text-xs text-ink/70">{describeVideoGenerationSettings(row.generation)}</p>
                               <p className="text-[11px] text-ink/50">{truncateIdentifier(row.generation.genId, 16)} · {formatCompactTimestamp(row.generation.createdAt)}</p>
+                              {row.generation.qc?.status === "complete" ? (
+                                <div className="mt-2 space-y-1 rounded border border-ink/10 bg-bg p-2 text-[11px] text-ink/70">
+                                  <p className="font-medium text-ink/80">QC metrics</p>
+                                  <p>
+                                    Frame change:{" "}
+                                    {formatPct(
+                                      (row.generation.qc.frame?.metrics as Record<string, unknown> | undefined)?.changedPctTotal,
+                                    )}{" "}
+                                    · outside leak:{" "}
+                                    {formatPct(
+                                      (row.generation.qc.frame?.metrics as Record<string, unknown> | undefined)?.outsideLeakagePct,
+                                    )}
+                                  </p>
+                                  <p>
+                                    Video change mean:{" "}
+                                    {formatPct(
+                                      (row.generation.qc.video?.aggregates as Record<string, unknown> | undefined)?.changedPctTotalMean,
+                                    )}{" "}
+                                    · outside mean:{" "}
+                                    {formatPct(
+                                      (row.generation.qc.video?.aggregates as Record<string, unknown> | undefined)?.outsideLeakagePctMean,
+                                    )}
+                                  </p>
+                                  <p>
+                                    SSIM:{" "}
+                                    {typeof (row.generation.qc.video?.aggregates as Record<string, unknown> | undefined)?.ssimMean === "number"
+                                      ? ((row.generation.qc.video?.aggregates as Record<string, unknown>).ssimMean as number).toFixed(4)
+                                      : "n/a"}{" "}
+                                    · PSNR:{" "}
+                                    {typeof (row.generation.qc.video?.aggregates as Record<string, unknown> | undefined)?.psnrMean === "number"
+                                      ? `${((row.generation.qc.video?.aggregates as Record<string, unknown>).psnrMean as number).toFixed(2)} dB`
+                                      : "n/a"}
+                                  </p>
+                                  <p>
+                                    VMAF mean:{" "}
+                                    {typeof (((row.generation.qc.video?.aggregates as Record<string, unknown> | undefined)?.vmaf as Record<
+                                      string,
+                                      unknown
+                                    > | null)?.mean) === "number"
+                                      ? ((((row.generation.qc.video?.aggregates as Record<string, unknown>).vmaf as Record<string, unknown>).mean as number)).toFixed(2)
+                                      : "n/a"}
+                                  </p>
+                                  <div className="flex flex-wrap gap-2">
+                                    {(row.generation.qc.video?.artifacts?.diffVideoUrl as string | undefined) ? (
+                                      <a
+                                        href={row.generation.qc?.video?.artifacts?.diffVideoUrl as string}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        className="underline"
+                                      >
+                                        Diff video map
+                                      </a>
+                                    ) : null}
+                                    {(row.generation.qc.video?.artifacts?.timelineCsvUrl as string | undefined) ? (
+                                      <a
+                                        href={row.generation.qc?.video?.artifacts?.timelineCsvUrl as string}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        className="underline"
+                                      >
+                                        Timeline CSV
+                                      </a>
+                                    ) : null}
+                                    {(row.generation.qc.video?.artifacts?.reportJsonUrl as string | undefined) ? (
+                                      <a
+                                        href={row.generation.qc?.video?.artifacts?.reportJsonUrl as string}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        className="underline"
+                                      >
+                                        QC JSON
+                                      </a>
+                                    ) : null}
+                                  </div>
+                                  {(row.generation.qc.video?.selectedFrames?.length ?? 0) > 0 ? (
+                                    <div className="grid grid-cols-3 gap-1">
+                                      {row.generation.qc.video?.selectedFrames?.slice(0, 3).map((frame) =>
+                                        frame.overlayUrl ? (
+                                          <img
+                                            key={`${row.generation.genId}-qc-${frame.index}`}
+                                            src={frame.overlayUrl}
+                                            alt={`QC overlay ${frame.index}`}
+                                            className="w-full rounded border border-ink/10 object-contain"
+                                          />
+                                        ) : null,
+                                      )}
+                                    </div>
+                                  ) : null}
+                                </div>
+                              ) : row.generation.qc?.status === "failed" ? (
+                                <p className="mt-2 text-xs text-red-600">QC failed: {row.generation.qc.error ?? "unknown error"}</p>
+                              ) : null}
                             </td>
                           </tr>
                         ))}
@@ -1811,6 +1935,30 @@ export default function App() {
                                 <div className="rounded border border-dashed border-ink/20 p-6 text-sm text-ink/50">No generated video</div>
                               )}
                               <p className="mt-2 text-xs text-ink/70">{describeVideoGenerationSettings(row.generation)}</p>
+                              {row.generation.qc?.status === "complete" ? (
+                                <div className="mt-2 space-y-1 rounded border border-ink/10 bg-bg p-2 text-[11px] text-ink/70">
+                                  <p>
+                                    Video change mean:{" "}
+                                    {formatPct(
+                                      (row.generation.qc.video?.aggregates as Record<string, unknown> | undefined)?.changedPctTotalMean,
+                                    )}{" "}
+                                    · outside mean:{" "}
+                                    {formatPct(
+                                      (row.generation.qc.video?.aggregates as Record<string, unknown> | undefined)?.outsideLeakagePctMean,
+                                    )}
+                                  </p>
+                                  {(row.generation.qc.video?.artifacts?.diffVideoUrl as string | undefined) ? (
+                                    <a
+                                      href={row.generation.qc?.video?.artifacts?.diffVideoUrl as string}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="underline"
+                                    >
+                                      Diff video map
+                                    </a>
+                                  ) : null}
+                                </div>
+                              ) : null}
                             </td>
                           </tr>
                         ))}

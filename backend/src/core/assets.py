@@ -87,6 +87,14 @@ class AssetPaths:
         short_export = re.sub(r"[^a-zA-Z0-9]+", "", export_id)[-8:]
         return f"{self.task_prefix()}/exports/{self._filename(f'output{short_export}', '.mp4')}"
 
+    def qc_prefix(self, segment_id: str, generation_id: str) -> str:
+        return f"{self.task_prefix()}/segments/{segment_id}/qc/{generation_id}"
+
+    def qc_artifact(self, segment_id: str, generation_id: str, stem: str, ext: str) -> str:
+        safe_stem = re.sub(r"[^a-zA-Z0-9_-]+", "", stem)[:80] or "artifact"
+        safe_ext = ext if ext.startswith(".") else f".{ext}"
+        return f"{self.qc_prefix(segment_id, generation_id)}/{self._filename(safe_stem, safe_ext)}"
+
 
 class AssetStore:
     def __init__(self, assets_bucket: str, aws_region: str):

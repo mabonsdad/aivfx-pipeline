@@ -31,6 +31,7 @@ from src.models.schemas import (
     FrameCaptureRequest,
     FullEditRequest,
     MergeRequest,
+    QcRunRequest,
     PatchInitRequest,
     PatchSubmitRequest,
     ReferenceUploadRequest,
@@ -264,6 +265,21 @@ def _audit_prompt(prompt: str) -> dict[str, Any]:
     }
 
 
+def _decorate_embedded_s3_keys(obj: Any, asset_store: AssetStore) -> None:
+    if isinstance(obj, dict):
+        for key, value in list(obj.items()):
+            if isinstance(value, (dict, list)):
+                _decorate_embedded_s3_keys(value, asset_store)
+            if key.endswith("Key") and isinstance(value, str) and value:
+                try:
+                    obj[f"{key[:-3]}Url"] = asset_store.presign_get(value, expires=PRESIGNED_GET_TTL_SECONDS)
+                except Exception:
+                    logger.warning("Failed to presign embedded key", extra={"key": value})
+    elif isinstance(obj, list):
+        for item in obj:
+            _decorate_embedded_s3_keys(item, asset_store)
+
+
 def _segment_duration_seconds(task: dict[str, Any], segment: dict[str, Any]) -> float:
     fps = _fps(task)
     return (segment["endFrameExclusive"] - segment["startFrame"]) / float(fps)
@@ -430,6 +446,8 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 generation["sourceLastFrameCaptureUrl"] = asset_store.presign_get(
                     generation["sourceLastFrameCaptureKey"], expires=PRESIGNED_GET_TTL_SECONDS
                 )
+            if generation.get("qc"):
+                _decorate_embedded_s3_keys(generation["qc"], asset_store)
         for export in decorated.get("exports", []):
             export["downloadUrl"] = asset_store.presign_get(export["outputKey"], expires=PRESIGNED_GET_TTL_SECONDS)
         return response(200, decorated, origin=origin)
@@ -925,6 +943,35 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 },
             )
             return response(202, {"jobId": job_id}, origin=origin)
+
+        if method == "POST" and len(parts) == 4 and parts[2] == "qc" and parts[3] == "run":
+            req = _json_model(QcRunRequest, event)
+            requested_ids = req.generationIds or []
+            existing_generations = task.get("segmentGenerations", {})
+            if requested_ids:
+                generation_ids = [gen_id for gen_id in requested_ids if gen_id in existing_generations]
+                if not generation_ids:
+                    return error_response(400, "No valid generation IDs provided", origin=origin)
+            else:
+                generation_ids = [
+                    gen_id
+                    for gen_id, generation in existing_generations.items()
+                    if generation.get("status") == "complete"
+                    and generation.get("outputKey")
+                    and generation.get("sourceFirstFrameVariantId")
+                ]
+            if not generation_ids:
+                return error_response(400, "No completed generations with edited frames available for QC", origin=origin)
+
+            job_id = _queue_job(
+                store=store,
+                queue=queue,
+                user_id=user_id,
+                task_id=task_id,
+                job_type="qc_analysis",
+                payload={"generationIds": generation_ids},
+            )
+            return response(202, {"jobId": job_id, "generationCount": len(generation_ids)}, origin=origin)
 
         if method == "POST" and len(parts) == 3 and parts[2] == "merge":
             req = _json_model(MergeRequest, event)

@@ -105,6 +105,49 @@ export type SegmentGeneration = {
     providerDurationSec?: number | null;
     [key: string]: unknown;
   };
+  qc?: {
+    status: "running" | "complete" | "failed" | "skipped";
+    updatedAt?: string;
+    analyzedAt?: string;
+    error?: string;
+    reason?: string;
+    frame?: {
+      metrics?: Record<string, number | string | null>;
+      artifacts?: {
+        heatmapKey?: string;
+        heatmapUrl?: string;
+        overlayKey?: string;
+        overlayUrl?: string;
+        binaryChangeKey?: string;
+        binaryChangeUrl?: string;
+        [key: string]: unknown;
+      };
+    };
+    video?: {
+      aggregates?: Record<string, number | string | boolean | null | Record<string, number | null>>;
+      selectedFrames?: Array<{
+        index: number;
+        timeSec: number;
+        changedPctTotal?: number;
+        outsideLeakagePct?: number | null;
+        heatmapKey?: string;
+        heatmapUrl?: string;
+        overlayKey?: string;
+        overlayUrl?: string;
+        binaryChangeKey?: string;
+        binaryChangeUrl?: string;
+      }>;
+      artifacts?: {
+        diffVideoKey?: string;
+        diffVideoUrl?: string;
+        timelineCsvKey?: string;
+        timelineCsvUrl?: string;
+        reportJsonKey?: string;
+        reportJsonUrl?: string;
+        [key: string]: unknown;
+      };
+    };
+  };
 };
 
 export type ExportRecord = {

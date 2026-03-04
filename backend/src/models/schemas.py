@@ -102,6 +102,10 @@ class MergeRequest(BaseModel):
     temporalFeatherFrames: int = Field(ge=0, le=30, default=0)
 
 
+class QcRunRequest(BaseModel):
+    generationIds: list[str] | None = Field(default=None, max_length=20)
+
+
 class VariantSelectRequest(BaseModel):
     ok: bool = True
 

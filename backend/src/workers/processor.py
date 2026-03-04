@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import hashlib
 import math
+import re
+import subprocess
 import tempfile
 import time
 from fractions import Fraction
@@ -11,11 +13,12 @@ from pathlib import Path
 from typing import Any
 
 import boto3
-from PIL import Image, ImageChops, ImageFilter, ImageOps
+from PIL import Image, ImageChops, ImageFilter, ImageOps, ImageStat
 from aws_lambda_powertools import Logger
 
 from src.core.assets import AssetPaths, AssetStore
 from src.core.ffmpeg import (
+    FFMPEG_BIN,
     extract_segment_by_frames,
     ffprobe_video,
     generate_thumbnail_strip,
@@ -48,6 +51,11 @@ FULL_VIDEO_MAX_BYTES = 100 * 1024 * 1024
 RUNWAY_VIDEO_MAX_BYTES = 64 * 1024 * 1024
 MAX_PROVIDER_IMAGE_BYTES = 10 * 1024 * 1024
 KLING_SUPPORTED_DURATIONS = (5, 10)
+QC_SAMPLE_FPS = 3
+QC_ANALYSIS_MAX_FRAMES = 90
+QC_DIFF_THRESHOLD = 32
+QC_OUTSIDE_LEAK_BUDGET_PCT = 0.50
+QC_BOUNDARY_RING_PX = 8
 
 
 def _target_by_orientation(
@@ -1195,6 +1203,658 @@ def _handle_merge(
     return job
 
 
+def _run_command(command: list[str]) -> str:
+    proc = subprocess.run(command, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"Command failed: {' '.join(command)}\n{proc.stderr}")
+    return proc.stdout + proc.stderr
+
+
+def _count_binary_pixels(mask_image: Image.Image) -> int:
+    binary = mask_image.convert("L").point(lambda value: 255 if value >= 128 else 0)
+    histogram = binary.histogram()
+    return int(histogram[255]) if len(histogram) >= 256 else 0
+
+
+def _threshold_change_mask(diff_gray: Image.Image, threshold: int) -> Image.Image:
+    binary = diff_gray.convert("L").point(lambda value: 255 if value >= threshold else 0)
+    binary = binary.filter(ImageFilter.MinFilter(3)).filter(ImageFilter.MaxFilter(3))
+    binary = binary.filter(ImageFilter.MaxFilter(5)).filter(ImageFilter.MinFilter(5))
+    return binary.point(lambda value: 255 if value >= 128 else 0)
+
+
+def _load_optional_mask(mask_bytes: bytes | None, size: tuple[int, int]) -> Image.Image | None:
+    if not mask_bytes:
+        return None
+    mask = ImageOps.exif_transpose(Image.open(BytesIO(mask_bytes))).convert("L")
+    if mask.size != size:
+        mask = mask.resize(size, Image.Resampling.BILINEAR)
+    return mask.point(lambda value: 255 if value >= 127 else 0)
+
+
+def _analyze_image_pair(
+    original_image: Image.Image,
+    edited_image: Image.Image,
+    *,
+    mask_image: Image.Image | None,
+    threshold: int,
+    boundary_ring_px: int,
+) -> tuple[dict[str, Any], Image.Image, Image.Image, Image.Image | None]:
+    original_rgb = original_image.convert("RGB")
+    edited_rgb = edited_image.convert("RGB")
+    if edited_rgb.size != original_rgb.size:
+        edited_rgb = ImageOps.contain(edited_rgb, original_rgb.size, Image.Resampling.LANCZOS)
+        aligned = Image.new("RGB", original_rgb.size, (0, 0, 0))
+        offset_x = (original_rgb.width - edited_rgb.width) // 2
+        offset_y = (original_rgb.height - edited_rgb.height) // 2
+        aligned.paste(edited_rgb, (offset_x, offset_y))
+        edited_rgb = aligned
+
+    diff_gray = ImageChops.difference(original_rgb, edited_rgb).convert("L")
+    binary_change = _threshold_change_mask(diff_gray, threshold)
+    total_pixels = max(1, diff_gray.width * diff_gray.height)
+    changed_total = _count_binary_pixels(binary_change)
+    mean_diff_total = float(ImageStat.Stat(diff_gray).mean[0]) / 255.0
+
+    diff_histogram = diff_gray.histogram()
+    mse_sum = 0.0
+    for value, count in enumerate(diff_histogram[:256]):
+        mse_sum += (float(value) ** 2) * float(count)
+    mse = mse_sum / (total_pixels * (255.0 ** 2))
+    psnr = 99.0 if mse <= 1e-12 else 20.0 * math.log10(1.0 / math.sqrt(mse))
+
+    metrics: dict[str, Any] = {
+        "changedPctTotal": round((changed_total * 100.0) / total_pixels, 4),
+        "meanDiffTotal": round(mean_diff_total, 6),
+        "mse": round(mse, 8),
+        "psnr": round(psnr, 4),
+        "pixelCount": total_pixels,
+        "changedPixelCount": changed_total,
+        "threshold": threshold,
+    }
+
+    mask_bin = mask_image.point(lambda value: 255 if value >= 127 else 0) if mask_image else None
+    if mask_bin is not None:
+        inverse_mask = ImageChops.invert(mask_bin)
+        inside_pixels = max(1, _count_binary_pixels(mask_bin))
+        outside_pixels = max(1, _count_binary_pixels(inverse_mask))
+
+        inside_change = _count_binary_pixels(ImageChops.multiply(binary_change, mask_bin))
+        outside_change = _count_binary_pixels(ImageChops.multiply(binary_change, inverse_mask))
+
+        inside_sum = float(ImageStat.Stat(ImageChops.multiply(diff_gray, mask_bin)).sum[0])
+        outside_sum = float(ImageStat.Stat(ImageChops.multiply(diff_gray, inverse_mask)).sum[0])
+        inside_mean = inside_sum / (inside_pixels * 255.0)
+        outside_mean = outside_sum / (outside_pixels * 255.0)
+
+        ring_kernel = max(3, (boundary_ring_px * 2) + 1)
+        dilated_mask = mask_bin.filter(ImageFilter.MaxFilter(ring_kernel))
+        boundary_ring = ImageChops.subtract(dilated_mask, mask_bin).point(lambda value: 255 if value >= 128 else 0)
+        boundary_pixels = max(1, _count_binary_pixels(boundary_ring))
+        boundary_changed = _count_binary_pixels(ImageChops.multiply(binary_change, boundary_ring))
+
+        metrics.update(
+            {
+                "changedPctInsideMask": round((inside_change * 100.0) / inside_pixels, 4),
+                "changedPctOutsideMask": round((outside_change * 100.0) / outside_pixels, 4),
+                "meanDiffInsideMask": round(inside_mean, 6),
+                "meanDiffOutsideMask": round(outside_mean, 6),
+                "insideMaskPixelCount": inside_pixels,
+                "outsideMaskPixelCount": outside_pixels,
+                "outsideLeakagePixelCount": outside_change,
+                "outsideLeakagePct": round((outside_change * 100.0) / outside_pixels, 4),
+                "boundaryRingPx": boundary_ring_px,
+                "boundaryRingPixelCount": boundary_pixels,
+                "boundarySpillPct": round((boundary_changed * 100.0) / boundary_pixels, 4),
+            }
+        )
+
+    return metrics, diff_gray, binary_change, mask_bin
+
+
+def _create_overlay_artifacts(
+    *,
+    edited_image: Image.Image,
+    diff_gray: Image.Image,
+    binary_change: Image.Image,
+    mask_bin: Image.Image | None,
+) -> tuple[bytes, bytes, bytes]:
+    heatmap = ImageOps.colorize(diff_gray.convert("L"), black="#000000", mid="#ff9900", white="#ff0000")
+    overlay_base = edited_image.convert("RGBA")
+    heat_rgba = heatmap.convert("RGBA")
+    heat_rgba.putalpha(120)
+    overlay_base.alpha_composite(heat_rgba)
+
+    if mask_bin is not None:
+        edge = ImageChops.subtract(
+            mask_bin.filter(ImageFilter.MaxFilter(5)),
+            mask_bin.filter(ImageFilter.MinFilter(5)),
+        ).point(lambda value: 255 if value >= 128 else 0)
+        edge_tint = Image.new("RGBA", overlay_base.size, (0, 255, 190, 170))
+        edge_layer = Image.new("RGBA", overlay_base.size, (0, 0, 0, 0))
+        edge_layer.paste(edge_tint, (0, 0), edge)
+        overlay_base = Image.alpha_composite(overlay_base, edge_layer)
+
+    heat_bytes = BytesIO()
+    heatmap.save(heat_bytes, format="PNG")
+    overlay_bytes = BytesIO()
+    overlay_base.save(overlay_bytes, format="PNG")
+    binary_bytes = BytesIO()
+    binary_change.convert("L").save(binary_bytes, format="PNG")
+    return heat_bytes.getvalue(), overlay_bytes.getvalue(), binary_bytes.getvalue()
+
+
+def _parse_metric_log(log_path: Path, pattern: re.Pattern[str], group_name: str) -> list[float]:
+    values: list[float] = []
+    if not log_path.exists():
+        return values
+    for line in log_path.read_text().splitlines():
+        match = pattern.search(line)
+        if not match:
+            continue
+        try:
+            values.append(float(match.group(group_name)))
+        except ValueError:
+            continue
+    return values
+
+
+def _run_optional_vmaf(orig_path: Path, edited_path: Path, output_json: Path) -> dict[str, Any] | None:
+    command = [
+        FFMPEG_BIN,
+        "-y",
+        "-i",
+        str(orig_path),
+        "-i",
+        str(edited_path),
+        "-lavfi",
+        f"libvmaf=log_fmt=json:log_path={output_json}",
+        "-shortest",
+        "-f",
+        "null",
+        "-",
+    ]
+    try:
+        _run_command(command)
+    except Exception as exc:
+        logger.warning("VMAF unavailable or failed", extra={"error": str(exc)})
+        return None
+
+    if not output_json.exists():
+        return None
+    try:
+        payload = json.loads(output_json.read_text())
+    except Exception:
+        return None
+    frames = payload.get("frames", [])
+    frame_values = [
+        float(frame.get("metrics", {}).get("vmaf"))
+        for frame in frames
+        if isinstance(frame, dict) and frame.get("metrics", {}).get("vmaf") is not None
+    ]
+    pooled = payload.get("pooled_metrics", {}).get("vmaf", {})
+    mean_value = pooled.get("mean")
+    if mean_value is None and frame_values:
+        mean_value = sum(frame_values) / len(frame_values)
+    return {
+        "mean": round(float(mean_value), 4) if mean_value is not None else None,
+        "min": round(min(frame_values), 4) if frame_values else None,
+        "max": round(max(frame_values), 4) if frame_values else None,
+        "frameCount": len(frame_values),
+    }
+
+
+def _extract_sampled_frames(video_path: Path, output_dir: Path, *, sample_fps: int, duration_sec: float) -> list[Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    frame_pattern = output_dir / "frame_%05d.png"
+    command = [
+        FFMPEG_BIN,
+        "-y",
+        "-i",
+        str(video_path),
+        "-t",
+        f"{max(0.1, duration_sec):.6f}",
+        "-vf",
+        f"fps={sample_fps}",
+        "-frames:v",
+        str(QC_ANALYSIS_MAX_FRAMES),
+        str(frame_pattern),
+    ]
+    _run_command(command)
+    return sorted(output_dir.glob("frame_*.png"))
+
+
+def _handle_qc_analysis(
+    *,
+    job: dict[str, Any],
+    store: S3JsonStore,
+    asset_store: AssetStore,
+    task: dict[str, Any],
+    settings: Any,
+) -> dict[str, Any]:
+    generation_ids = list(dict.fromkeys(job.get("payload", {}).get("generationIds") or []))
+    if not generation_ids:
+        generation_ids = [
+            gen_id
+            for gen_id, generation in task.get("segmentGenerations", {}).items()
+            if generation.get("status") == "complete"
+            and generation.get("outputKey")
+            and generation.get("sourceFirstFrameVariantId")
+        ]
+
+    if not generation_ids:
+        _job_progress(job, store, 100, "complete", "No eligible generations found for QC")
+        job["resultRefs"] = {"analyzedGenerationIds": [], "failedGenerationIds": []}
+        store.save_job(job)
+        return job
+
+    fps_info = task["video"]["editSource"]["fps"]
+    target_fps = Fraction(int(fps_info["num"]), int(fps_info["den"]))
+    source_width = int(task["video"]["editSource"]["width"])
+    source_height = int(task["video"]["editSource"]["height"])
+    analysis_width, analysis_height = _target_by_orientation(
+        source_width,
+        source_height,
+        landscape=(960, 540),
+        portrait=(540, 960),
+    )
+
+    s3 = boto3.client("s3")
+    paths = _asset_paths(task)
+    analyzed_ids: list[str] = []
+    failed_ids: list[str] = []
+
+    for index, gen_id in enumerate(generation_ids):
+        generation = task.get("segmentGenerations", {}).get(gen_id)
+        if not generation:
+            failed_ids.append(gen_id)
+            continue
+        if generation.get("status") != "complete" or not generation.get("outputKey"):
+            generation["qc"] = {
+                "status": "skipped",
+                "reason": "Generation is not complete",
+                "updatedAt": now_iso(),
+            }
+            failed_ids.append(gen_id)
+            continue
+
+        segment_id = generation.get("segmentId")
+        segment = next((item for item in task.get("segments", []) if item.get("segmentId") == segment_id), None)
+        if not segment:
+            generation["qc"] = {
+                "status": "failed",
+                "error": f"Segment missing for generation {gen_id}",
+                "updatedAt": now_iso(),
+            }
+            failed_ids.append(gen_id)
+            continue
+
+        start_frame = task.get("frames", {}).get(segment["startFrameId"])
+        if not start_frame:
+            generation["qc"] = {
+                "status": "failed",
+                "error": "Start frame metadata missing",
+                "updatedAt": now_iso(),
+            }
+            failed_ids.append(gen_id)
+            continue
+
+        source_variant_id = generation.get("sourceFirstFrameVariantId")
+        source_variant = (
+            next((item for item in start_frame.get("variants", []) if item.get("variantId") == source_variant_id), None)
+            if source_variant_id
+            else None
+        )
+        if not source_variant or not source_variant.get("outputKey"):
+            generation["qc"] = {
+                "status": "skipped",
+                "reason": "No edited frame variant attached to generation",
+                "updatedAt": now_iso(),
+            }
+            failed_ids.append(gen_id)
+            continue
+
+        generation["qc"] = {"status": "running", "updatedAt": now_iso()}
+        store.save_task(task)
+
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                td_path = Path(td)
+
+                original_frame_bytes = asset_store.read_bytes(start_frame["captureKey"])
+                edited_frame_bytes = asset_store.read_bytes(source_variant["outputKey"])
+                mask_key = source_variant.get("patchMeta", {}).get("maskKey") if isinstance(source_variant.get("patchMeta"), dict) else None
+                mask_bytes = asset_store.read_bytes(mask_key) if isinstance(mask_key, str) else None
+
+                original_frame_image = ImageOps.exif_transpose(Image.open(BytesIO(original_frame_bytes))).convert("RGB")
+                edited_frame_image = ImageOps.exif_transpose(Image.open(BytesIO(edited_frame_bytes))).convert("RGB")
+                frame_mask = _load_optional_mask(mask_bytes, original_frame_image.size)
+                frame_metrics, frame_diff, frame_binary, frame_mask_bin = _analyze_image_pair(
+                    original_frame_image,
+                    edited_frame_image,
+                    mask_image=frame_mask,
+                    threshold=QC_DIFF_THRESHOLD,
+                    boundary_ring_px=QC_BOUNDARY_RING_PX,
+                )
+                frame_heatmap_bytes, frame_overlay_bytes, frame_binary_bytes = _create_overlay_artifacts(
+                    edited_image=edited_frame_image,
+                    diff_gray=frame_diff,
+                    binary_change=frame_binary,
+                    mask_bin=frame_mask_bin,
+                )
+                frame_heatmap_key = paths.qc_artifact(segment["segmentId"], gen_id, "frame_heatmap", ".png")
+                frame_overlay_key = paths.qc_artifact(segment["segmentId"], gen_id, "frame_overlay", ".png")
+                frame_binary_key = paths.qc_artifact(segment["segmentId"], gen_id, "frame_binary", ".png")
+                asset_store.put_bytes(frame_heatmap_key, frame_heatmap_bytes, content_type="image/png")
+                asset_store.put_bytes(frame_overlay_key, frame_overlay_bytes, content_type="image/png")
+                asset_store.put_bytes(frame_binary_key, frame_binary_bytes, content_type="image/png")
+
+                original_segment_key = _ensure_segment_clip(
+                    s3=s3,
+                    asset_store=asset_store,
+                    asset_paths=paths,
+                    task=task,
+                    segment=segment,
+                    assets_bucket=settings.assets_bucket,
+                )
+                original_segment_path = td_path / "segment_original.mp4"
+                generated_segment_path = td_path / "segment_generated.mp4"
+                original_standard_path = td_path / "segment_original_qc.mp4"
+                generated_standard_path = td_path / "segment_generated_qc.mp4"
+                _download_s3(s3, settings.assets_bucket, original_segment_key, original_segment_path)
+                _download_s3(s3, settings.assets_bucket, generation["outputKey"], generated_segment_path)
+
+                transcode_to_cfr(
+                    str(original_segment_path),
+                    str(original_standard_path),
+                    target_fps,
+                    target_width=analysis_width,
+                    target_height=analysis_height,
+                    crf=20,
+                    preset="veryfast",
+                    audio_bitrate="96k",
+                )
+                transcode_to_cfr(
+                    str(generated_segment_path),
+                    str(generated_standard_path),
+                    target_fps,
+                    target_width=analysis_width,
+                    target_height=analysis_height,
+                    crf=20,
+                    preset="veryfast",
+                    audio_bitrate="96k",
+                )
+                original_probe = ffprobe_video(str(original_standard_path))
+                generated_probe = ffprobe_video(str(generated_standard_path))
+                common_duration_sec = max(
+                    0.1,
+                    min(float(original_probe.get("duration_sec") or 0.0), float(generated_probe.get("duration_sec") or 0.0)),
+                )
+
+                original_frames = _extract_sampled_frames(
+                    original_standard_path,
+                    td_path / "orig_frames",
+                    sample_fps=QC_SAMPLE_FPS,
+                    duration_sec=common_duration_sec,
+                )
+                generated_frames = _extract_sampled_frames(
+                    generated_standard_path,
+                    td_path / "gen_frames",
+                    sample_fps=QC_SAMPLE_FPS,
+                    duration_sec=common_duration_sec,
+                )
+                paired_count = min(len(original_frames), len(generated_frames))
+                if paired_count == 0:
+                    raise RuntimeError("No sampled frames available for QC analysis")
+
+                video_mask = _load_optional_mask(mask_bytes, (analysis_width, analysis_height))
+                per_frame_rows: list[dict[str, Any]] = []
+                for frame_idx in range(paired_count):
+                    orig_image = Image.open(original_frames[frame_idx]).convert("RGB")
+                    gen_image = Image.open(generated_frames[frame_idx]).convert("RGB")
+                    row_metrics, row_diff, row_binary, _ = _analyze_image_pair(
+                        orig_image,
+                        gen_image,
+                        mask_image=video_mask,
+                        threshold=QC_DIFF_THRESHOLD,
+                        boundary_ring_px=QC_BOUNDARY_RING_PX,
+                    )
+                    per_frame_rows.append(
+                        {
+                            "index": frame_idx,
+                            "timeSec": round(frame_idx / float(QC_SAMPLE_FPS), 4),
+                            **row_metrics,
+                            "_diff": row_diff,
+                            "_binary": row_binary,
+                            "_edited": gen_image,
+                        }
+                    )
+
+                changed_total_values = [float(item.get("changedPctTotal") or 0.0) for item in per_frame_rows]
+                outside_values = [float(item.get("outsideLeakagePct") or 0.0) for item in per_frame_rows if item.get("outsideLeakagePct") is not None]
+                mean_diff_values = [float(item.get("meanDiffTotal") or 0.0) for item in per_frame_rows]
+
+                ssim_log = td_path / "ssim.log"
+                psnr_log = td_path / "psnr.log"
+                _run_command(
+                    [
+                        FFMPEG_BIN,
+                        "-y",
+                        "-t",
+                        f"{common_duration_sec:.6f}",
+                        "-i",
+                        str(original_standard_path),
+                        "-t",
+                        f"{common_duration_sec:.6f}",
+                        "-i",
+                        str(generated_standard_path),
+                        "-lavfi",
+                        f"ssim=stats_file={ssim_log}",
+                        "-shortest",
+                        "-f",
+                        "null",
+                        "-",
+                    ]
+                )
+                _run_command(
+                    [
+                        FFMPEG_BIN,
+                        "-y",
+                        "-t",
+                        f"{common_duration_sec:.6f}",
+                        "-i",
+                        str(original_standard_path),
+                        "-t",
+                        f"{common_duration_sec:.6f}",
+                        "-i",
+                        str(generated_standard_path),
+                        "-lavfi",
+                        f"psnr=stats_file={psnr_log}",
+                        "-shortest",
+                        "-f",
+                        "null",
+                        "-",
+                    ]
+                )
+                ssim_values = _parse_metric_log(ssim_log, re.compile(r"All:(?P<value>[0-9.]+)"), "value")
+                psnr_values = _parse_metric_log(psnr_log, re.compile(r"psnr_avg:(?P<value>[0-9.]+)"), "value")
+                vmaf_metrics = _run_optional_vmaf(original_standard_path, generated_standard_path, td_path / "vmaf.json")
+
+                rank_key = (
+                    (lambda row: float(row.get("outsideLeakagePct") or 0.0))
+                    if video_mask is not None
+                    else (lambda row: float(row.get("changedPctTotal") or 0.0))
+                )
+                ranked_rows = sorted(per_frame_rows, key=rank_key, reverse=True)
+                selected_rows = ranked_rows[:5]
+                if per_frame_rows:
+                    selected_rows.append(per_frame_rows[len(per_frame_rows) // 2])
+                dedup_selected = {int(row["index"]): row for row in selected_rows}
+
+                selected_frame_artifacts: list[dict[str, Any]] = []
+                for frame_idx in sorted(dedup_selected):
+                    row = dedup_selected[frame_idx]
+                    heatmap_bytes, overlay_bytes, binary_bytes = _create_overlay_artifacts(
+                        edited_image=row["_edited"],
+                        diff_gray=row["_diff"],
+                        binary_change=row["_binary"],
+                        mask_bin=video_mask,
+                    )
+                    heatmap_key = paths.qc_artifact(segment["segmentId"], gen_id, f"video_frame_{frame_idx:03d}_heatmap", ".png")
+                    overlay_key = paths.qc_artifact(segment["segmentId"], gen_id, f"video_frame_{frame_idx:03d}_overlay", ".png")
+                    binary_key = paths.qc_artifact(segment["segmentId"], gen_id, f"video_frame_{frame_idx:03d}_binary", ".png")
+                    asset_store.put_bytes(heatmap_key, heatmap_bytes, content_type="image/png")
+                    asset_store.put_bytes(overlay_key, overlay_bytes, content_type="image/png")
+                    asset_store.put_bytes(binary_key, binary_bytes, content_type="image/png")
+                    selected_frame_artifacts.append(
+                        {
+                            "index": frame_idx,
+                            "timeSec": row["timeSec"],
+                            "changedPctTotal": row["changedPctTotal"],
+                            "outsideLeakagePct": row.get("outsideLeakagePct"),
+                            "heatmapKey": heatmap_key,
+                            "overlayKey": overlay_key,
+                            "binaryChangeKey": binary_key,
+                        }
+                    )
+
+                diff_video_path = td_path / "diff_map.mp4"
+                _run_command(
+                    [
+                        FFMPEG_BIN,
+                        "-y",
+                        "-i",
+                        str(original_standard_path),
+                        "-i",
+                        str(generated_standard_path),
+                        "-filter_complex",
+                        "[0:v][1:v]blend=all_mode=difference,eq=contrast=2.0:brightness=0.02:saturation=1.5[v]",
+                        "-map",
+                        "[v]",
+                        "-an",
+                        "-c:v",
+                        "libx264",
+                        "-preset",
+                        "veryfast",
+                        "-crf",
+                        "18",
+                        "-pix_fmt",
+                        "yuv420p",
+                        "-shortest",
+                        str(diff_video_path),
+                    ]
+                )
+                diff_video_key = paths.qc_artifact(segment["segmentId"], gen_id, "video_diff_map", ".mp4")
+                _upload_s3(s3, settings.assets_bucket, diff_video_key, diff_video_path, "video/mp4")
+
+                timeline_rows = []
+                for row in per_frame_rows:
+                    timeline_rows.append(
+                        {
+                            key: value
+                            for key, value in row.items()
+                            if not key.startswith("_")
+                        }
+                    )
+                timeline_csv = "index,timeSec,changedPctTotal,outsideLeakagePct,meanDiffTotal,psnr\n" + "\n".join(
+                    f"{item.get('index')},{item.get('timeSec')},{item.get('changedPctTotal')},{item.get('outsideLeakagePct')},{item.get('meanDiffTotal')},{item.get('psnr')}"
+                    for item in timeline_rows
+                )
+                timeline_csv_key = paths.qc_artifact(segment["segmentId"], gen_id, "timeline", ".csv")
+                report_json_key = paths.qc_artifact(segment["segmentId"], gen_id, "report", ".json")
+                asset_store.put_bytes(timeline_csv_key, timeline_csv.encode("utf-8"), content_type="text/csv")
+
+                video_aggregates = {
+                    "sampledFrameCount": paired_count,
+                    "sampleFps": QC_SAMPLE_FPS,
+                    "analysisResolution": {"width": analysis_width, "height": analysis_height},
+                    "durationSec": round(common_duration_sec, 4),
+                    "changedPctTotalMean": round(sum(changed_total_values) / max(1, len(changed_total_values)), 4),
+                    "changedPctTotalP95": round(
+                        sorted(changed_total_values)[max(0, math.ceil(len(changed_total_values) * 0.95) - 1)],
+                        4,
+                    ),
+                    "meanDiffTotalMean": round(sum(mean_diff_values) / max(1, len(mean_diff_values)), 6),
+                    "outsideLeakagePctMean": round(sum(outside_values) / len(outside_values), 4) if outside_values else None,
+                    "outsideLeakagePctP95": round(
+                        sorted(outside_values)[max(0, math.ceil(len(outside_values) * 0.95) - 1)],
+                        4,
+                    )
+                    if outside_values
+                    else None,
+                    "outsideLeakBudgetPct": QC_OUTSIDE_LEAK_BUDGET_PCT if outside_values else None,
+                    "outsideLeakPass": (sum(outside_values) / len(outside_values)) <= QC_OUTSIDE_LEAK_BUDGET_PCT if outside_values else None,
+                    "ssimMean": round(sum(ssim_values) / len(ssim_values), 6) if ssim_values else None,
+                    "ssimMin": round(min(ssim_values), 6) if ssim_values else None,
+                    "psnrMean": round(sum(psnr_values) / len(psnr_values), 4) if psnr_values else None,
+                    "psnrMin": round(min(psnr_values), 4) if psnr_values else None,
+                    "vmaf": vmaf_metrics,
+                }
+
+                qc_report_payload = {
+                    "generationId": gen_id,
+                    "segmentId": segment["segmentId"],
+                    "analyzedAt": now_iso(),
+                    "config": {
+                        "sampleFps": QC_SAMPLE_FPS,
+                        "analysisResolution": {"width": analysis_width, "height": analysis_height},
+                        "diffThreshold": QC_DIFF_THRESHOLD,
+                        "boundaryRingPx": QC_BOUNDARY_RING_PX,
+                    },
+                    "frame": {
+                        "metrics": frame_metrics,
+                        "artifacts": {
+                            "heatmapKey": frame_heatmap_key,
+                            "overlayKey": frame_overlay_key,
+                            "binaryChangeKey": frame_binary_key,
+                        },
+                    },
+                    "video": {
+                        "aggregates": video_aggregates,
+                        "selectedFrames": selected_frame_artifacts,
+                        "artifacts": {
+                            "diffVideoKey": diff_video_key,
+                            "timelineCsvKey": timeline_csv_key,
+                        },
+                    },
+                }
+                asset_store.put_bytes(report_json_key, json.dumps(qc_report_payload).encode("utf-8"), content_type="application/json")
+                qc_report_payload["video"]["artifacts"]["reportJsonKey"] = report_json_key
+                generation["qc"] = {
+                    "status": "complete",
+                    "updatedAt": now_iso(),
+                    **qc_report_payload,
+                }
+                analyzed_ids.append(gen_id)
+        except Exception as exc:
+            logger.exception("QC analysis failed for generation", extra={"genId": gen_id, "taskId": task["taskId"]})
+            generation["qc"] = {
+                "status": "failed",
+                "updatedAt": now_iso(),
+                "error": str(exc),
+            }
+            failed_ids.append(gen_id)
+
+        store.save_task(task)
+        progress = 10 + math.floor(85 * (index + 1) / max(1, len(generation_ids)))
+        _job_progress(job, store, progress, "running", f"QC analyzed {index + 1}/{len(generation_ids)} generations")
+
+    task.setdefault("history", []).append(
+        {
+            "at": now_iso(),
+            "event": "task.qc.complete",
+            "jobId": job["jobId"],
+            "analyzed": analyzed_ids,
+            "failed": failed_ids,
+        }
+    )
+    store.save_task(task)
+    _job_progress(job, store, 100, "complete", "QC analysis complete")
+    job["resultRefs"] = {"analyzedGenerationIds": analyzed_ids, "failedGenerationIds": failed_ids}
+    store.save_job(job)
+    return job
+
+
 def process_job_record(record: dict[str, Any], *, settings: Any) -> None:
     body = json.loads(record["body"])
     user_id = body["userId"]
@@ -1226,6 +1886,8 @@ def process_job_record(record: dict[str, Any], *, settings: Any) -> None:
             _handle_segment_generate(job=job, store=store, asset_store=asset_store, task=task, settings=settings)
         elif job["type"] == "merge_export":
             _handle_merge(job=job, store=store, asset_store=asset_store, task=task, settings=settings)
+        elif job["type"] == "qc_analysis":
+            _handle_qc_analysis(job=job, store=store, asset_store=asset_store, task=task, settings=settings)
         else:
             raise RuntimeError(f"Unsupported job type: {job['type']}")
     except Exception as exc:
