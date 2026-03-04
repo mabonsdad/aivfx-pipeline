@@ -2248,7 +2248,7 @@ export default function App() {
                   </select>
                   {lumaModel === "runway-aleph" ? (
                     <div className="rounded-md border border-ink/20 bg-bg px-3 py-2 text-xs text-ink/70">
-                      Runway Aleph uses prompt + first frame guidance (no Luma mode selector).
+                      Runway now uses Act Two (first-frame character + reference video motion) with Aleph fallback if Act Two input validation fails.
                     </div>
                   ) : lumaModel === "kling-2.6" ? (
                     <div className="rounded-md border border-ink/20 bg-bg px-3 py-2 text-xs text-ink/70">

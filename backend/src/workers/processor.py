@@ -35,6 +35,7 @@ from src.integrations.kling import (
 from src.integrations.luma import create_modify_generation, get_generation
 from src.integrations.runware import patch_edit_aceplusplus, patch_edit_flux_fill
 from src.integrations.runway import (
+    create_character_performance,
     create_ephemeral_upload,
     create_video_to_video,
     get_task as get_runway_task,
@@ -345,7 +346,7 @@ def _wait_luma_complete(api_key: str, generation_id: str, *, timeout_sec: int = 
 
 
 def _parse_runway_output_url(payload: dict[str, Any]) -> str:
-    output = payload.get("output") or payload.get("outputUrls") or payload.get("artifactUrls")
+    output = payload.get("output") or payload.get("outputUrls") or payload.get("artifactUrls") or payload.get("artifacts")
     if isinstance(output, list):
         for item in output:
             if isinstance(item, str) and item.startswith("http"):
@@ -354,8 +355,22 @@ def _parse_runway_output_url(payload: dict[str, Any]) -> str:
                 maybe = item.get("url") or item.get("uri")
                 if isinstance(maybe, str) and maybe.startswith("http"):
                     return maybe
+                for key in ("video", "asset", "artifact"):
+                    nested = item.get(key)
+                    if isinstance(nested, dict):
+                        maybe_nested = nested.get("url") or nested.get("uri")
+                        if isinstance(maybe_nested, str) and maybe_nested.startswith("http"):
+                            return maybe_nested
     elif isinstance(output, str) and output.startswith("http"):
         return output
+    direct_candidates = [
+        payload.get("videoUrl"),
+        payload.get("videoURL"),
+        payload.get("url"),
+    ]
+    for value in direct_candidates:
+        if isinstance(value, str) and value.startswith("http"):
+            return value
     raise RuntimeError(f"Runway completion payload missing output URL: {payload}")
 
 
@@ -841,6 +856,7 @@ def _handle_segment_generate(
 
     secrets = load_secret(settings.secrets_arn)
 
+    used_provider_model: str | None = None
     if model_name == "runway-aleph":
         runway_key = secrets["RUNWAY_API_KEY"]
         with tempfile.TemporaryDirectory() as runway_td:
@@ -858,13 +874,30 @@ def _handle_segment_generate(
                 file_path=runway_input,
                 content_type="video/mp4",
             )
-        _job_progress(job, store, 35, "running", "Creating Runway Aleph generation")
-        created = create_video_to_video(
-            api_key=runway_key,
-            video_uri=runway_uri,
-            prompt_text=payload.get("prompt"),
-            first_frame_uri=first_frame_url,
-        )
+        _job_progress(job, store, 35, "running", "Creating Runway Act Two generation")
+        try:
+            created = create_character_performance(
+                api_key=runway_key,
+                reference_video_uri=runway_uri,
+                character_image_uri=first_frame_url,
+            )
+            used_provider_model = "act_two"
+        except Exception as exc:
+            # Fallback preserves prior behavior for clips that fail Act Two validation.
+            _job_progress(
+                job,
+                store,
+                42,
+                "running",
+                f"Runway Act Two unavailable, falling back to Aleph video-to-video: {type(exc).__name__}",
+            )
+            created = create_video_to_video(
+                api_key=runway_key,
+                video_uri=runway_uri,
+                prompt_text=payload.get("prompt"),
+                first_frame_uri=first_frame_url,
+            )
+            used_provider_model = "gen4_aleph"
         generation_id = created.get("id")
         if not generation_id:
             raise RuntimeError(f"Unexpected Runway create response: {created}")
@@ -897,6 +930,7 @@ def _handle_segment_generate(
         )
         out_url = _parse_kling_output_url(result)
         provider_name = "kling"
+        used_provider_model = "kling-video@2.6-pro"
     else:
         luma_key = secrets["LUMA_API_KEY"]
         if not media_url:
@@ -917,6 +951,7 @@ def _handle_segment_generate(
         result = _wait_luma_complete(luma_key, generation_id)
         out_url = _parse_luma_output_url(result)
         provider_name = "luma"
+        used_provider_model = model_name
 
     out_key = paths.segment_generated(segment_id, gen_id)
     _job_progress(job, store, 75, "running", "Downloading generation output to S3")
@@ -949,7 +984,8 @@ def _handle_segment_generate(
             "providerDurationSec": _nearest_supported_kling_duration(segment_duration_sec) if model_name == "kling-2.6" else None,
             "generationSettings": {
                 "provider": provider_name,
-                "model": model_name,
+                "requestedModel": model_name,
+                "model": used_provider_model or model_name,
                 "mode": payload["mode"],
                 "firstFrameResolution": {"width": first_target_w, "height": first_target_h},
                 "mediaResolution": (
