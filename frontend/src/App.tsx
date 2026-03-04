@@ -5,9 +5,9 @@ import { ReactCompareSlider, ReactCompareSliderImage } from "react-compare-slide
 import { apiClient } from "./api/client";
 import { currentUser, login, logout } from "./lib/auth";
 import { useUiStore } from "./store/uiStore";
-import type { FrameVariant, SegmentGeneration, SegmentRecord, TaskDetail } from "./types/api";
+import type { FrameRecord, FrameVariant, SegmentGeneration, SegmentRecord, TaskDetail } from "./types/api";
 
-type TabId = "timeline" | "frames" | "generate" | "merge" | "assets";
+type TabId = "timeline" | "frames" | "generate" | "merge" | "assets" | "report";
 
 type NewTaskStage = "idle" | "creating" | "uploading" | "ingesting" | "error";
 
@@ -35,6 +35,20 @@ type PatchReferenceImage = {
   previewUrl: string;
   uploadedKey?: string;
   frameId?: string;
+};
+
+type ReportGenerationRow = {
+  generation: SegmentGeneration;
+  segment: SegmentRecord | null;
+  startFrame: FrameRecord | null;
+  endFrame: FrameRecord | null;
+  startVariant: FrameVariant | null;
+  endVariant: FrameVariant | null;
+  originalUrl: string | null;
+  maskUrl: string | null;
+  editedUrl: string | null;
+  endFrameUrl: string | null;
+  generatedVideoUrl: string | null;
 };
 
 function normalizeTaskNameInput(value: string): string {
@@ -193,6 +207,7 @@ export default function App() {
 
   const [isAuthed, setIsAuthed] = useState(false);
   const [tab, setTab] = useState<TabId>("timeline");
+  const [reportTaskId, setReportTaskId] = useState<string | null>(null);
   const [isNewTaskModalOpen, setIsNewTaskModalOpen] = useState(false);
   const [newTaskName, setNewTaskName] = useState("New VFX Task");
   const [newTaskFile, setNewTaskFile] = useState<File | null>(null);
@@ -268,6 +283,11 @@ export default function App() {
     enabled: isAuthed && !!selectedTaskId,
     refetchInterval: tab === "generate" ? 4 * 60 * 1000 : false,
   });
+  const reportTaskQuery = useQuery({
+    queryKey: ["task", "report", reportTaskId],
+    queryFn: async () => apiClient.getTask(reportTaskId as string),
+    enabled: isAuthed && tab === "report" && !!reportTaskId,
+  });
   const pendingCreateJobQuery = useQuery({
     queryKey: ["job", pendingCreateJobId],
     queryFn: () => apiClient.getJob(pendingCreateJobId as string),
@@ -287,6 +307,7 @@ export default function App() {
   });
 
   const task = taskQuery.data;
+  const reportTask = reportTaskQuery.data;
   const assetTasks = useMemo(
     () => assetTaskQueries.map((query) => query.data).filter((item): item is TaskDetail => Boolean(item)),
     [assetTaskQueries],
@@ -295,6 +316,10 @@ export default function App() {
   const segmentsById = useMemo(
     () => new Map((task?.segments ?? []).map((segment) => [segment.segmentId, segment])),
     [task?.segments],
+  );
+  const reportSegmentsById = useMemo(
+    () => new Map((reportTask?.segments ?? []).map((segment) => [segment.segmentId, segment])),
+    [reportTask?.segments],
   );
   const assetsLoading = tab === "assets" && assetTaskQueries.some((query) => query.isPending || query.isFetching) && assetTasks.length === 0;
   const selectedSegment = task?.segments.find((s) => s.segmentId === selectedSegmentId) ?? null;
@@ -319,6 +344,40 @@ export default function App() {
   const activeFrameWidth = activeFrameDimensions?.width ?? null;
   const activeFrameHeight = activeFrameDimensions?.height ?? null;
   const activePatchReference = patchReferenceImages[editFrameTab];
+  const reportRows = useMemo(() => {
+    if (!reportTask) {
+      return { standard: [] as ReportGenerationRow[], kling: [] as ReportGenerationRow[] };
+    }
+    const frameById = reportTask.frames ?? {};
+    const allRows: ReportGenerationRow[] = Object.values(reportTask.segmentGenerations ?? {}).map((generation) => {
+      const segment = reportSegmentsById.get(generation.segmentId) ?? null;
+      const startFrame = segment ? frameById[segment.startFrameId] ?? null : null;
+      const endFrame = segment ? frameById[segment.endFrameId] ?? null : null;
+      const startVariantId = generation.sourceFirstFrameVariantId ?? startFrame?.selectedVariantId ?? null;
+      const endVariantId = generation.sourceLastFrameVariantId ?? endFrame?.selectedVariantId ?? null;
+      const startVariant = startVariantId ? startFrame?.variants.find((variant) => variant.variantId === startVariantId) ?? null : null;
+      const endVariant = endVariantId ? endFrame?.variants.find((variant) => variant.variantId === endVariantId) ?? null : null;
+      return {
+        generation,
+        segment,
+        startFrame,
+        endFrame,
+        startVariant,
+        endVariant,
+        originalUrl: startFrame?.imageUrl ?? generation.sourceFirstFrameCaptureUrl ?? null,
+        maskUrl: (startVariant?.patchMeta?.maskUrl as string | undefined) ?? null,
+        editedUrl: startVariant?.imageUrl ?? generation.inputFirstFrameUrl ?? null,
+        endFrameUrl: endVariant?.imageUrl ?? generation.inputLastFrameUrl ?? endFrame?.imageUrl ?? null,
+        generatedVideoUrl: generation.downloadUrl ?? null,
+      };
+    });
+    const sortScore = (row: ReportGenerationRow) => (row.generatedVideoUrl ? 0 : 1);
+    allRows.sort((a, b) => sortScore(a) - sortScore(b) || safeTimestamp(b.generation.createdAt) - safeTimestamp(a.generation.createdAt));
+    return {
+      standard: allRows.filter((row) => row.generation.luma.model !== "kling-2.6"),
+      kling: allRows.filter((row) => row.generation.luma.model === "kling-2.6"),
+    };
+  }, [reportSegmentsById, reportTask]);
 
   useEffect(() => {
     setFirstFrameId(null);
@@ -1107,6 +1166,48 @@ export default function App() {
     return `${outputLabel} · ${variant.model}/${variant.type} · ${formatCompactTimestamp(variant.createdAt)} · ${truncateIdentifier(variant.variantId, 10)}`;
   }
 
+  function formatResolution(resolution: { width: number; height: number } | null | undefined): string {
+    if (!resolution) return "unknown";
+    return `${resolution.width}x${resolution.height}`;
+  }
+
+  function describeFrame(frame: FrameRecord | null): string {
+    if (!frame) return "Not available";
+    return `frame ${frame.frameIndex} · ${frame.timecode}`;
+  }
+
+  function describeImageEditSettings(variant: FrameVariant | null): string {
+    if (!variant) return "No edited frame selected";
+    const settings = variant.generationSettings;
+    const details = [
+      `${variant.model}/${variant.type}`,
+      settings?.provider ? `provider ${settings.provider}` : null,
+      settings?.inputResolution ? `input ${formatResolution(settings.inputResolution)}` : null,
+      settings?.outputResolution ? `output ${formatResolution(settings.outputResolution)}` : null,
+      typeof settings?.runwareRepaintingScale === "number" ? `inpainting scale ${settings.runwareRepaintingScale.toFixed(2)}` : null,
+      typeof settings?.featherPx === "number" ? `feather ${settings.featherPx}px` : null,
+    ].filter(Boolean);
+    return details.join(" · ");
+  }
+
+  function describeVideoGenerationSettings(generation: SegmentGeneration): string {
+    const settings = generation.generationSettings;
+    const details = [
+      `${generation.luma.model}/${generation.luma.mode}`,
+      settings?.mediaResolution ? `video ${formatResolution(settings.mediaResolution)}` : null,
+      settings?.firstFrameResolution ? `frame ${formatResolution(settings.firstFrameResolution)}` : null,
+      typeof settings?.requestedDurationSec === "number" ? `requested ${settings.requestedDurationSec.toFixed(2)}s` : null,
+      typeof settings?.providerDurationSec === "number" ? `provider ${settings.providerDurationSec.toFixed(2)}s` : null,
+    ].filter(Boolean);
+    return details.join(" · ");
+  }
+
+  function openTaskReport(taskId: string) {
+    setReportTaskId(taskId);
+    setSelectedTaskId(taskId);
+    setTab("report");
+  }
+
   async function handleDeleteAsset(item: LibraryAsset) {
     const ok = window.confirm(`Delete this asset?\n\n${item.title}`);
     if (!ok) return;
@@ -1199,6 +1300,212 @@ export default function App() {
     );
   }
 
+  if (tab === "report") {
+    const reportPlaybackUrl = reportTask?.video?.editSource?.downloadUrl ?? reportTask?.video?.original?.downloadUrl ?? null;
+    const segmentRows = [...(reportTask?.segments ?? [])].sort((a, b) => a.startFrame - b.startFrame);
+    return (
+      <main className="min-h-screen bg-bg text-ink">
+        <div className="mx-auto w-full max-w-[1700px] space-y-4 p-4 md:p-6">
+          <div className="flex items-center justify-between rounded-2xl border border-ink/10 bg-card p-4">
+            <div>
+              <h2 className="text-xl font-semibold">
+                Task Report: {reportTask?.name ?? reportTaskId ?? "Task"}
+              </h2>
+              {reportTask ? <p className="text-sm text-ink/60">Updated {formatAssetDate(reportTask.updatedAt)}</p> : null}
+            </div>
+            <div className="flex items-center gap-3">
+              <button
+                className="rounded border border-ink/20 bg-white px-3 py-2 text-sm"
+                onClick={() => {
+                  if (reportTaskId) setSelectedTaskId(reportTaskId);
+                  setTab("timeline");
+                }}
+              >
+                Back to Task
+              </button>
+              <button onClick={() => logout()} className="text-sm text-ink/60 underline">
+                Sign out
+              </button>
+            </div>
+          </div>
+
+          {reportTaskQuery.isPending ? <p className="text-sm text-ink/60">Loading report...</p> : null}
+          {reportTaskQuery.error ? <p className="text-sm text-red-600">{(reportTaskQuery.error as Error).message}</p> : null}
+
+          {reportTask ? (
+            <>
+              <section className="space-y-2 rounded-2xl border border-ink/10 bg-card p-4">
+                <h3 className="text-lg font-semibold">Original Video</h3>
+                {reportPlaybackUrl ? (
+                  <video src={reportPlaybackUrl} controls className="w-full rounded border border-ink/10 bg-bg object-contain" />
+                ) : (
+                  <p className="text-sm text-ink/60">Original video not available.</p>
+                )}
+              </section>
+
+              <section className="space-y-2 rounded-2xl border border-ink/10 bg-card p-4">
+                <h3 className="text-lg font-semibold">Segment Frame Timecode Summary</h3>
+                {segmentRows.length === 0 ? (
+                  <p className="text-sm text-ink/60">No segments yet.</p>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full table-auto text-sm">
+                      <thead>
+                        <tr className="border-b border-ink/10 text-left">
+                          <th className="px-2 py-2">Segment</th>
+                          <th className="px-2 py-2">Start</th>
+                          <th className="px-2 py-2">End</th>
+                          <th className="px-2 py-2">Duration</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {segmentRows.map((segment) => (
+                          <tr key={segment.segmentId} className="border-b border-ink/10 align-top">
+                            <td className="px-2 py-2 font-medium">{segment.segmentId}</td>
+                            <td className="px-2 py-2">
+                              frame {segment.startFrame} · {segment.startTimecode}
+                            </td>
+                            <td className="px-2 py-2">
+                              frame {Math.max(segment.endFrameExclusive - 1, segment.startFrame)} · {segment.endTimecode}
+                            </td>
+                            <td className="px-2 py-2">
+                              {segment.durationFrames}f / {segment.durationSec.toFixed(2)}s
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </section>
+
+              <section className="space-y-2 rounded-2xl border border-ink/10 bg-card p-4">
+                <h3 className="text-lg font-semibold">Generation Report (Standard Providers)</h3>
+                {reportRows.standard.length === 0 ? (
+                  <p className="text-sm text-ink/60">No standard video generations yet.</p>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full table-fixed">
+                      <thead>
+                        <tr className="border-b border-ink/10 text-left text-sm">
+                          <th className="w-1/4 px-2 py-2">Original</th>
+                          <th className="w-1/4 px-2 py-2">Mask</th>
+                          <th className="w-1/4 px-2 py-2">Edited</th>
+                          <th className="w-1/4 px-2 py-2">Generated Video</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {reportRows.standard.map((row) => (
+                          <tr key={row.generation.genId} className="border-b border-ink/10 align-top">
+                            <td className="px-2 py-3">
+                              {row.originalUrl ? (
+                                <img src={row.originalUrl} alt="Original frame" className="w-full rounded border border-ink/10 bg-bg object-contain" />
+                              ) : (
+                                <div className="rounded border border-dashed border-ink/20 p-6 text-sm text-ink/50">No frame</div>
+                              )}
+                              <p className="mt-2 text-xs text-ink/70">{describeFrame(row.startFrame)}</p>
+                              <p className="text-[11px] text-ink/50">{row.segment ? `${row.segment.segmentId} · ${describeSegment(row.segment)}` : row.generation.segmentId}</p>
+                            </td>
+                            <td className="px-2 py-3">
+                              {row.maskUrl ? (
+                                <img src={row.maskUrl} alt="Patch mask" className="w-full rounded border border-ink/10 bg-bg object-contain" />
+                              ) : (
+                                <div className="rounded border border-dashed border-ink/20 p-6 text-sm text-ink/50">No mask used</div>
+                              )}
+                              <p className="mt-2 text-xs text-ink/70">
+                                {row.startVariant?.patchMeta ? `feather ${(row.startVariant.patchMeta.featherPx as number | undefined) ?? 0}px` : "No patch mask metadata"}
+                              </p>
+                            </td>
+                            <td className="px-2 py-3">
+                              {row.editedUrl ? (
+                                <img src={row.editedUrl} alt="Edited frame" className="w-full rounded border border-ink/10 bg-bg object-contain" />
+                              ) : (
+                                <div className="rounded border border-dashed border-ink/20 p-6 text-sm text-ink/50">No edited frame</div>
+                              )}
+                              <p className="mt-2 text-xs text-ink/70">{describeImageEditSettings(row.startVariant)}</p>
+                            </td>
+                            <td className="px-2 py-3">
+                              {row.generatedVideoUrl ? (
+                                <video src={row.generatedVideoUrl} controls className="w-full rounded border border-ink/10 bg-bg object-contain" />
+                              ) : (
+                                <div className="rounded border border-dashed border-ink/20 p-6 text-sm text-ink/50">No generated video</div>
+                              )}
+                              <p className="mt-2 text-xs text-ink/70">{describeVideoGenerationSettings(row.generation)}</p>
+                              <p className="text-[11px] text-ink/50">{truncateIdentifier(row.generation.genId, 16)} · {formatCompactTimestamp(row.generation.createdAt)}</p>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </section>
+
+              <section className="space-y-2 rounded-2xl border border-ink/10 bg-card p-4">
+                <h3 className="text-lg font-semibold">Kling Start/End Report</h3>
+                {reportRows.kling.length === 0 ? (
+                  <p className="text-sm text-ink/60">No Kling generations yet.</p>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full table-fixed">
+                      <thead>
+                        <tr className="border-b border-ink/10 text-left text-sm">
+                          <th className="w-1/4 px-2 py-2">Original Start</th>
+                          <th className="w-1/4 px-2 py-2">Edited Start</th>
+                          <th className="w-1/4 px-2 py-2">End Frame</th>
+                          <th className="w-1/4 px-2 py-2">Generated Video</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {reportRows.kling.map((row) => (
+                          <tr key={row.generation.genId} className="border-b border-ink/10 align-top">
+                            <td className="px-2 py-3">
+                              {row.originalUrl ? (
+                                <img src={row.originalUrl} alt="Original start frame" className="w-full rounded border border-ink/10 bg-bg object-contain" />
+                              ) : (
+                                <div className="rounded border border-dashed border-ink/20 p-6 text-sm text-ink/50">No frame</div>
+                              )}
+                              <p className="mt-2 text-xs text-ink/70">{describeFrame(row.startFrame)}</p>
+                            </td>
+                            <td className="px-2 py-3">
+                              {row.editedUrl ? (
+                                <img src={row.editedUrl} alt="Edited start frame" className="w-full rounded border border-ink/10 bg-bg object-contain" />
+                              ) : (
+                                <div className="rounded border border-dashed border-ink/20 p-6 text-sm text-ink/50">No edited start frame</div>
+                              )}
+                              <p className="mt-2 text-xs text-ink/70">{describeImageEditSettings(row.startVariant)}</p>
+                            </td>
+                            <td className="px-2 py-3">
+                              {row.endFrameUrl ? (
+                                <img src={row.endFrameUrl} alt="End frame" className="w-full rounded border border-ink/10 bg-bg object-contain" />
+                              ) : (
+                                <div className="rounded border border-dashed border-ink/20 p-6 text-sm text-ink/50">No end frame</div>
+                              )}
+                              <p className="mt-2 text-xs text-ink/70">{describeFrame(row.endFrame)}</p>
+                              <p className="text-[11px] text-ink/50">{row.endVariant ? describeImageEditSettings(row.endVariant) : "Using original end frame"}</p>
+                            </td>
+                            <td className="px-2 py-3">
+                              {row.generatedVideoUrl ? (
+                                <video src={row.generatedVideoUrl} controls className="w-full rounded border border-ink/10 bg-bg object-contain" />
+                              ) : (
+                                <div className="rounded border border-dashed border-ink/20 p-6 text-sm text-ink/50">No generated video</div>
+                              )}
+                              <p className="mt-2 text-xs text-ink/70">{describeVideoGenerationSettings(row.generation)}</p>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </section>
+            </>
+          ) : null}
+        </div>
+      </main>
+    );
+  }
+
   return (
     <main className="min-h-screen bg-bg text-ink">
       <div className="mx-auto grid max-w-[1500px] grid-cols-12 gap-4 p-4 md:p-6">
@@ -1218,11 +1525,22 @@ export default function App() {
             {(tasksQuery.data ?? []).map((taskItem) => (
               <div
                 key={taskItem.taskId}
-                className={`w-full rounded-lg border px-3 py-2 text-left ${
+                className={`relative w-full rounded-lg border px-3 py-2 text-left ${
                   selectedTaskId === taskItem.taskId ? "border-accent bg-accent/10" : "border-ink/10 bg-white"
                 }`}
               >
-                <button className="w-full text-left" onClick={() => setSelectedTaskId(taskItem.taskId)}>
+                <button
+                  className="absolute right-2 top-2 inline-flex h-6 w-6 items-center justify-center rounded-full border border-ink/20 bg-white text-xs font-semibold text-ink/70"
+                  title="Open task report"
+                  aria-label={`Open report for ${taskItem.name}`}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    openTaskReport(taskItem.taskId);
+                  }}
+                >
+                  i
+                </button>
+                <button className="w-full pr-8 text-left" onClick={() => setSelectedTaskId(taskItem.taskId)}>
                   <p className="font-medium">{taskItem.name}</p>
                   <p
                     className={`text-xs uppercase tracking-wide ${

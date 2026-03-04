@@ -392,9 +392,34 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             frame["imageUrl"] = asset_store.presign_get(frame["captureKey"], expires=PRESIGNED_GET_TTL_SECONDS)
             for variant in frame.get("variants", []):
                 variant["imageUrl"] = asset_store.presign_get(variant["outputKey"], expires=PRESIGNED_GET_TTL_SECONDS)
+                patch_meta = variant.get("patchMeta")
+                if isinstance(patch_meta, dict):
+                    patch_only_key = patch_meta.get("patchOnlyKey")
+                    if patch_only_key:
+                        patch_meta["patchOnlyUrl"] = asset_store.presign_get(patch_only_key, expires=PRESIGNED_GET_TTL_SECONDS)
+                    mask_key = patch_meta.get("maskKey")
+                    if mask_key:
+                        patch_meta["maskUrl"] = asset_store.presign_get(mask_key, expires=PRESIGNED_GET_TTL_SECONDS)
+                    ref_key = patch_meta.get("referenceImageKey")
+                    if ref_key:
+                        patch_meta["referenceImageUrl"] = asset_store.presign_get(ref_key, expires=PRESIGNED_GET_TTL_SECONDS)
         for _, generation in decorated.get("segmentGenerations", {}).items():
             if generation.get("outputKey"):
                 generation["downloadUrl"] = asset_store.presign_get(generation["outputKey"], expires=PRESIGNED_GET_TTL_SECONDS)
+            if generation.get("inputMediaKey"):
+                generation["inputMediaUrl"] = asset_store.presign_get(generation["inputMediaKey"], expires=PRESIGNED_GET_TTL_SECONDS)
+            if generation.get("inputFirstFrameKey"):
+                generation["inputFirstFrameUrl"] = asset_store.presign_get(generation["inputFirstFrameKey"], expires=PRESIGNED_GET_TTL_SECONDS)
+            if generation.get("inputLastFrameKey"):
+                generation["inputLastFrameUrl"] = asset_store.presign_get(generation["inputLastFrameKey"], expires=PRESIGNED_GET_TTL_SECONDS)
+            if generation.get("sourceFirstFrameCaptureKey"):
+                generation["sourceFirstFrameCaptureUrl"] = asset_store.presign_get(
+                    generation["sourceFirstFrameCaptureKey"], expires=PRESIGNED_GET_TTL_SECONDS
+                )
+            if generation.get("sourceLastFrameCaptureKey"):
+                generation["sourceLastFrameCaptureUrl"] = asset_store.presign_get(
+                    generation["sourceLastFrameCaptureKey"], expires=PRESIGNED_GET_TTL_SECONDS
+                )
         for export in decorated.get("exports", []):
             export["downloadUrl"] = asset_store.presign_get(export["outputKey"], expires=PRESIGNED_GET_TTL_SECONDS)
         return response(200, decorated, origin=origin)

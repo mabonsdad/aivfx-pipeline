@@ -509,6 +509,7 @@ def _handle_full_edit(
 
     _job_progress(job, store, 10, "running", "Loading source frame")
     src_bytes = asset_store.read_bytes(capture_key)
+    src_image = ImageOps.exif_transpose(Image.open(BytesIO(src_bytes))).convert("RGBA")
     _job_progress(job, store, 30, "running", "Calling Gemini edit")
     out_bytes = generate_image_edit(
         api_key=gemini_key,
@@ -517,6 +518,7 @@ def _handle_full_edit(
         input_image_bytes=src_bytes,
     )
     normalized_bytes = _normalize_full_variant(source_bytes=src_bytes, variant_bytes=out_bytes)
+    normalized_image = ImageOps.exif_transpose(Image.open(BytesIO(normalized_bytes))).convert("RGBA")
 
     variant_id = new_id("var")
     paths = _asset_paths(task)
@@ -530,6 +532,12 @@ def _handle_full_edit(
         "promptHash": prompt_hash(payload["prompt"]),
         "createdAt": now_iso(),
         "outputKey": output_key,
+        "generationSettings": {
+            "provider": "gemini",
+            "workflow": "full",
+            "inputResolution": {"width": src_image.width, "height": src_image.height},
+            "outputResolution": {"width": normalized_image.width, "height": normalized_image.height},
+        },
     }
     frame.setdefault("variants", []).append(variant)
     if not frame.get("selectedVariantId"):
@@ -560,11 +568,15 @@ def _handle_patch_edit(
     capture_bytes = asset_store.read_bytes(frame["captureKey"])
     patch_bytes = asset_store.read_bytes(payload["patchKey"])
     mask_bytes = asset_store.read_bytes(payload["maskKey"]) if payload.get("maskKey") else None
+    capture_image = ImageOps.exif_transpose(Image.open(BytesIO(capture_bytes))).convert("RGBA")
+    patch_source_image = ImageOps.exif_transpose(Image.open(BytesIO(patch_bytes))).convert("RGBA")
+    provider_name = "gemini"
 
     model_name = payload["model"]
     if model_name in {"runware_flux_fill", "runware_ace_pp"}:
+        provider_name = "runware"
         runware_key = secrets["RUNWARE_API_KEY"]
-        patch_image = ImageOps.exif_transpose(Image.open(BytesIO(patch_bytes))).convert("RGBA")
+        patch_image = patch_source_image
         if mask_bytes:
             mask_image = ImageOps.exif_transpose(Image.open(BytesIO(mask_bytes))).convert("L")
             if mask_image.size != patch_image.size:
@@ -627,9 +639,25 @@ def _handle_patch_edit(
         feather_px=payload["featherPx"],
         mask_bytes=mask_bytes,
     )
+    composited_image = ImageOps.exif_transpose(Image.open(BytesIO(composited))).convert("RGBA")
 
     output_key = paths.frame_variant(frame_id, variant_id)
     asset_store.put_bytes(output_key, composited, content_type="image/png")
+
+    generation_settings: dict[str, Any] = {
+        "provider": provider_name,
+        "workflow": "patch",
+        "inputResolution": {"width": patch_source_image.width, "height": patch_source_image.height},
+        "outputResolution": {"width": composited_image.width, "height": composited_image.height},
+        "compositedResolution": {"width": capture_image.width, "height": capture_image.height},
+        "featherPx": int(payload["featherPx"]),
+        "bleedPx": int(payload["bleedPx"]),
+        "hasMask": bool(payload.get("maskKey")),
+    }
+    if model_name == "runware_ace_pp":
+        generation_settings["runwareRepaintingScale"] = float(payload.get("runwareRepaintingScale", 0.7))
+    if payload.get("referenceImageKey"):
+        generation_settings["referenceImageKey"] = payload["referenceImageKey"]
 
     variant = {
         "variantId": variant_id,
@@ -638,12 +666,14 @@ def _handle_patch_edit(
         "promptHash": prompt_hash(payload["prompt"]),
         "createdAt": now_iso(),
         "outputKey": output_key,
+        "generationSettings": generation_settings,
         "patchMeta": {
             "patchRect": payload["patchRect"],
             "featherPx": payload["featherPx"],
             "bleedPx": payload["bleedPx"],
             "maskKey": payload.get("maskKey"),
             "patchOnlyKey": patch_only_key,
+            "referenceImageKey": payload.get("referenceImageKey"),
         },
     }
     frame.setdefault("variants", []).append(variant)
@@ -689,19 +719,23 @@ def _handle_segment_generate(
     start_frame = task["frames"][start_frame_id]
     first_frame_key = start_frame["captureKey"]
     variant_id = payload.get("firstFrameVariantId") or start_frame.get("selectedVariantId")
+    source_first_variant_id: str | None = None
     if variant_id:
         variant = next((v for v in start_frame.get("variants", []) if v["variantId"] == variant_id), None)
         if variant:
             first_frame_key = variant["outputKey"]
+            source_first_variant_id = variant_id
 
     end_frame_id = segment["endFrameId"]
     end_frame = task["frames"][end_frame_id]
     last_frame_key = end_frame["captureKey"]
     end_variant_id = end_frame.get("selectedVariantId")
+    source_last_variant_id: str | None = None
     if end_variant_id:
         end_variant = next((v for v in end_frame.get("variants", []) if v["variantId"] == end_variant_id), None)
         if end_variant:
             last_frame_key = end_variant["outputKey"]
+            source_last_variant_id = end_variant_id
 
     fps_info = task["video"]["editSource"]["fps"]
     fps = Fraction(int(fps_info["num"]), int(fps_info["den"]))
@@ -711,6 +745,8 @@ def _handle_segment_generate(
     media_key_for_provider: str | None = None
     first_frame_input_key: str | None = None
     last_frame_input_key: str | None = None
+    provider_media_width: int | None = None
+    provider_media_height: int | None = None
     with tempfile.TemporaryDirectory() as td:
         td_path = Path(td)
         if segment_key:
@@ -720,7 +756,7 @@ def _handle_segment_generate(
             if model_name == "runway-aleph":
                 _job_progress(job, store, 20, "running", "Preparing Runway Aleph input clip")
                 local_provider_segment = td_path / "segment_runway.mp4"
-                _transcode_with_size_limit(
+                runway_w, runway_h, _ = _transcode_with_size_limit(
                     input_path=str(local_segment_source),
                     output_path=str(local_provider_segment),
                     fps=fps,
@@ -730,6 +766,8 @@ def _handle_segment_generate(
                     portrait_target=(720, 1280),
                     max_bytes=RUNWAY_VIDEO_MAX_BYTES,
                 )
+                provider_media_width = runway_w
+                provider_media_height = runway_h
                 media_key_for_provider = paths.segment_provider_input(segment_id, gen_id, "runway")
                 _upload_s3(s3, settings.assets_bucket, media_key_for_provider, local_provider_segment, "video/mp4")
             else:
@@ -737,7 +775,7 @@ def _handle_segment_generate(
                 if source_size > FULL_VIDEO_MAX_BYTES:
                     _job_progress(job, store, 20, "running", "Optimizing segment clip to provider size limits")
                     local_provider_segment = td_path / "segment_luma.mp4"
-                    _transcode_with_size_limit(
+                    luma_w, luma_h, _ = _transcode_with_size_limit(
                         input_path=str(local_segment_source),
                         output_path=str(local_provider_segment),
                         fps=fps,
@@ -747,10 +785,14 @@ def _handle_segment_generate(
                         portrait_target=(1080, 1920),
                         max_bytes=FULL_VIDEO_MAX_BYTES,
                     )
+                    provider_media_width = luma_w
+                    provider_media_height = luma_h
                     media_key_for_provider = paths.segment_provider_input(segment_id, gen_id, "luma")
                     _upload_s3(s3, settings.assets_bucket, media_key_for_provider, local_provider_segment, "video/mp4")
                 else:
                     media_key_for_provider = segment_key
+                    provider_media_width = src_width
+                    provider_media_height = src_height
 
         frame_bytes = asset_store.read_bytes(first_frame_key)
         first_target_w, first_target_h = _target_by_orientation(
@@ -891,8 +933,27 @@ def _handle_segment_generate(
             "inputMediaKey": media_key_for_provider,
             "inputFirstFrameKey": first_frame_input_key,
             "inputLastFrameKey": last_frame_input_key,
+            "sourceFirstFrameCaptureKey": start_frame.get("captureKey"),
+            "sourceFirstFrameVariantId": source_first_variant_id,
+            "sourceFirstFrameResolvedKey": first_frame_key,
+            "sourceLastFrameCaptureKey": end_frame.get("captureKey"),
+            "sourceLastFrameVariantId": source_last_variant_id,
+            "sourceLastFrameResolvedKey": last_frame_key,
             "requestedDurationSec": round(segment_duration_sec, 3),
             "providerDurationSec": _nearest_supported_kling_duration(segment_duration_sec) if model_name == "kling-2.6" else None,
+            "generationSettings": {
+                "provider": provider_name,
+                "model": model_name,
+                "mode": payload["mode"],
+                "firstFrameResolution": {"width": first_target_w, "height": first_target_h},
+                "mediaResolution": (
+                    {"width": provider_media_width, "height": provider_media_height}
+                    if provider_media_width and provider_media_height
+                    else None
+                ),
+                "requestedDurationSec": round(segment_duration_sec, 3),
+                "providerDurationSec": _nearest_supported_kling_duration(segment_duration_sec) if model_name == "kling-2.6" else None,
+            },
             "createdAt": gen_meta.get("createdAt") or now_iso(),
         }
     )

@@ -15,7 +15,30 @@ export type FrameVariant = {
   createdAt: string;
   outputKey: string;
   imageUrl?: string;
-  patchMeta?: Record<string, unknown>;
+  patchMeta?: {
+    patchRect?: { x: number; y: number; width: number; height: number };
+    featherPx?: number;
+    bleedPx?: number;
+    maskKey?: string;
+    maskUrl?: string;
+    patchOnlyKey?: string;
+    patchOnlyUrl?: string;
+    referenceImageKey?: string;
+    referenceImageUrl?: string;
+    [key: string]: unknown;
+  };
+  generationSettings?: {
+    provider?: string;
+    workflow?: string;
+    inputResolution?: { width: number; height: number };
+    outputResolution?: { width: number; height: number };
+    compositedResolution?: { width: number; height: number };
+    featherPx?: number;
+    bleedPx?: number;
+    hasMask?: boolean;
+    runwareRepaintingScale?: number;
+    [key: string]: unknown;
+  };
 };
 
 export type FrameRecord = {
@@ -56,6 +79,32 @@ export type SegmentGeneration = {
   outputKey?: string | null;
   createdAt: string;
   downloadUrl?: string;
+  inputMediaKey?: string | null;
+  inputMediaUrl?: string;
+  inputFirstFrameKey?: string | null;
+  inputFirstFrameUrl?: string;
+  inputLastFrameKey?: string | null;
+  inputLastFrameUrl?: string;
+  sourceFirstFrameCaptureKey?: string | null;
+  sourceFirstFrameCaptureUrl?: string;
+  sourceFirstFrameVariantId?: string | null;
+  sourceFirstFrameResolvedKey?: string | null;
+  sourceLastFrameCaptureKey?: string | null;
+  sourceLastFrameCaptureUrl?: string;
+  sourceLastFrameVariantId?: string | null;
+  sourceLastFrameResolvedKey?: string | null;
+  requestedDurationSec?: number;
+  providerDurationSec?: number | null;
+  generationSettings?: {
+    provider?: string;
+    model?: string;
+    mode?: string;
+    firstFrameResolution?: { width: number; height: number };
+    mediaResolution?: { width: number; height: number } | null;
+    requestedDurationSec?: number;
+    providerDurationSec?: number | null;
+    [key: string]: unknown;
+  };
 };
 
 export type ExportRecord = {
