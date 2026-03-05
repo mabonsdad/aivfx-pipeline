@@ -355,7 +355,6 @@ export default function App() {
   );
   const [advancedMode, setAdvancedMode] = useState("flex_1");
   const [lumaPrompt, setLumaPrompt] = useState("");
-  const [firstFrameVariantId, setFirstFrameVariantId] = useState("");
   const [editSourceVariantIds, setEditSourceVariantIds] = useState<{ first: string | null; last: string | null }>({
     first: null,
     last: null,
@@ -556,7 +555,6 @@ export default function App() {
   useEffect(() => {
     setFirstFrameId(null);
     setLastFrameId(null);
-    setFirstFrameVariantId("");
     setEditSourceVariantIds({ first: null, last: null });
     setCompareVariantIds({ first: null, last: null });
     setPatchReferenceImages((previous) => {
@@ -915,7 +913,7 @@ export default function App() {
               ? "kling_start_end"
               : advancedMode,
         prompt: lumaPrompt.trim() || undefined,
-        firstFrameVariantId: firstFrameVariantId || undefined,
+        firstFrameVariantId: compareVariantIds.first || undefined,
         lastFrameVariantId: compareVariantIds.last || undefined,
       });
     },
@@ -998,22 +996,6 @@ export default function App() {
         .sort((a, b) => safeTimestamp(b.createdAt) - safeTimestamp(a.createdAt)),
     [segmentGenerations, selectedSegmentId],
   );
-  const selectedStartFrameVariants = useMemo(
-    () =>
-      selectedSegment && task
-        ? [...(task.frames[selectedSegment.startFrameId]?.variants ?? [])].sort(
-            (a, b) => safeTimestamp(b.createdAt) - safeTimestamp(a.createdAt),
-          )
-        : [],
-    [selectedSegment, task],
-  );
-  useEffect(() => {
-    if (!firstFrameVariantId) return;
-    const stillExists = selectedStartFrameVariants.some((variant) => variant.variantId === firstFrameVariantId);
-    if (!stillExists) {
-      setFirstFrameVariantId("");
-    }
-  }, [firstFrameVariantId, selectedStartFrameVariants]);
   const mergeGenerationOptions = useMemo(() => [...segmentGenerations], [segmentGenerations]);
   const selectedMergeGenerations = useMemo(
     () =>
@@ -1473,11 +1455,6 @@ export default function App() {
     return `${outputLabel} · ${generation.luma.model}/${generation.luma.mode} · ${segmentText} · ${formatCompactTimestamp(generation.createdAt)}`;
   }
 
-  function describeStartFrameVariant(variant: FrameVariant): string {
-    const outputLabel = humanizeFilename(keyBasenameFromS3Key(variant.outputKey));
-    return `${outputLabel} · ${variant.model}/${variant.type} · ${formatCompactTimestamp(variant.createdAt)} · ${truncateIdentifier(variant.variantId, 10)}`;
-  }
-
   function formatResolution(resolution: { width: number; height: number } | null | undefined): string {
     if (!resolution) return "unknown";
     return `${resolution.width}x${resolution.height}`;
@@ -1572,9 +1549,6 @@ export default function App() {
     const targetVariantId = candidate.kind === "original" ? "original" : candidate.variantId;
     if (!targetVariantId) return;
     selectVariantMutation.mutate({ frameId, variantId: targetVariantId });
-    if (tabKey === "first") {
-      setFirstFrameVariantId(sourceVariantId ?? "");
-    }
   }
 
   function setEditSourceCandidate(tabKey: "first" | "last", candidate: EditFrameCandidate) {
@@ -1598,7 +1572,6 @@ export default function App() {
     setEditSourceVariantIds((previous) => ({ ...previous, [boundary]: null }));
     setCompareVariantIds((previous) => ({ ...previous, [boundary]: null }));
     if (boundary === "first") {
-      setFirstFrameVariantId("");
       setFirstFrameId(result.frameId);
     } else {
       setLastFrameId(result.frameId);
@@ -2578,18 +2551,9 @@ export default function App() {
               <div className="space-y-4">
                 <h3 className="text-lg font-semibold">Generate Video</h3>
                 <div className="grid gap-3 md:grid-cols-2">
-                  <select
-                    value={selectedSegmentId ?? ""}
-                    onChange={(e) => setSelectedSegmentId(e.target.value || null)}
-                    className="rounded-md border border-ink/20 px-3 py-2"
-                  >
-                    <option value="">Select segment</option>
-                    {orderedSegments.map((segment) => (
-                      <option key={segment.segmentId} value={segment.segmentId}>
-                        {segment.segmentId} · {describeSegment(segment)}
-                      </option>
-                    ))}
-                  </select>
+                  <div className="rounded-md border border-ink/20 bg-bg px-3 py-2 text-xs text-ink/70">
+                    Segment in use: {selectedSegment ? describeSegment(selectedSegment) : "No segment selected. Go to Pick Frame first."}
+                  </div>
                   <select
                     value={lumaModel}
                     onChange={(e) => setLumaModel(e.target.value as "ray-2" | "ray-flash-2" | "runway-gen4.5" | "kling-2.6")}
@@ -2635,21 +2599,9 @@ export default function App() {
                   placeholder="Optional generation prompt"
                   className="h-20 w-full rounded-md border border-ink/20 p-2"
                 />
-
-                {selectedSegment && task ? (
-                  <select
-                    value={firstFrameVariantId}
-                    onChange={(e) => setFirstFrameVariantId(e.target.value)}
-                    className="rounded-md border border-ink/20 px-3 py-2"
-                  >
-                    <option value="">Use selected/original frame</option>
-                    {selectedStartFrameVariants.map((variant) => (
-                      <option key={variant.variantId} value={variant.variantId}>
-                        {describeStartFrameVariant(variant)}
-                      </option>
-                    ))}
-                  </select>
-                ) : null}
+                <p className="text-xs text-ink/60">
+                  Start and end frame variants are taken automatically from your Edit Frame selections.
+                </p>
 
                 {selectedSegmentOverLimit ? (
                   <p className="text-xs text-red-600">
