@@ -78,7 +78,7 @@ class ReferenceUploadRequest(BaseModel):
 
 
 class SegmentGenerateRequest(BaseModel):
-    lumaModel: Literal["ray-2", "ray-flash-2", "runway-aleph", "runway-gen4.5", "kling-2.6"] = "ray-2"
+    lumaModel: Literal["ray-2", "ray-flash-2", "runway-gen4.5", "kling-2.6"] = "ray-2"
     mode: Literal[
         "adhere_1",
         "adhere_2",
@@ -89,12 +89,12 @@ class SegmentGenerateRequest(BaseModel):
         "reimagine_1",
         "reimagine_2",
         "reimagine_3",
-        "aleph_default",
         "runway_i2v",
         "kling_start_end",
     ]
     prompt: str | None = Field(default=None)
     firstFrameVariantId: str | None = None
+    lastFrameVariantId: str | None = None
 
 
 class MergeRequest(BaseModel):

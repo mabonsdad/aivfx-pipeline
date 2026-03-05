@@ -122,7 +122,7 @@ function fpsValue(task: TaskDetail | undefined): number {
   return fps.num / fps.den;
 }
 
-function lumaModelMaxDurationSeconds(model: "ray-2" | "ray-flash-2" | "runway-aleph" | "runway-gen4.5" | "kling-2.6"): number {
+function lumaModelMaxDurationSeconds(model: "ray-2" | "ray-flash-2" | "runway-gen4.5" | "kling-2.6"): number {
   if (model === "ray-2") return 10;
   if (model === "ray-flash-2") return 15;
   if (model === "runway-gen4.5") return 10;
@@ -350,7 +350,7 @@ export default function App() {
   const [edgeAwareRadiusPx, setEdgeAwareRadiusPx] = useState(6);
   const [maskGrowPx, setMaskGrowPx] = useState(0);
   const [maskHasPaint, setMaskHasPaint] = useState(false);
-  const [lumaModel, setLumaModel] = useState<"ray-2" | "ray-flash-2" | "runway-aleph" | "runway-gen4.5" | "kling-2.6">(
+  const [lumaModel, setLumaModel] = useState<"ray-2" | "ray-flash-2" | "runway-gen4.5" | "kling-2.6">(
     "ray-flash-2",
   );
   const [advancedMode, setAdvancedMode] = useState("flex_1");
@@ -909,15 +909,14 @@ export default function App() {
       return apiClient.generateSegment(selectedTaskId, selectedSegmentId, {
         lumaModel,
         mode:
-          lumaModel === "runway-aleph"
-            ? "aleph_default"
-            : lumaModel === "runway-gen4.5"
-              ? "runway_i2v"
-              : lumaModel === "kling-2.6"
-                ? "kling_start_end"
-                : advancedMode,
+          lumaModel === "runway-gen4.5"
+            ? "runway_i2v"
+            : lumaModel === "kling-2.6"
+              ? "kling_start_end"
+              : advancedMode,
         prompt: lumaPrompt.trim() || undefined,
         firstFrameVariantId: firstFrameVariantId || undefined,
+        lastFrameVariantId: compareVariantIds.last || undefined,
       });
     },
     onSuccess: (result) => {
@@ -2567,22 +2566,15 @@ export default function App() {
                   </select>
                   <select
                     value={lumaModel}
-                    onChange={(e) =>
-                      setLumaModel(e.target.value as "ray-2" | "ray-flash-2" | "runway-aleph" | "runway-gen4.5" | "kling-2.6")
-                    }
+                    onChange={(e) => setLumaModel(e.target.value as "ray-2" | "ray-flash-2" | "runway-gen4.5" | "kling-2.6")}
                     className="rounded-md border border-ink/20 px-3 py-2"
                   >
                     <option value="ray-2">ray-2</option>
                     <option value="ray-flash-2">ray-flash-2</option>
-                    <option value="runway-aleph">runway-aleph (video+reference)</option>
                     <option value="runway-gen4.5">runway-gen4.5 (first image)</option>
                     <option value="kling-2.6">kling-2.6 (start/end frames)</option>
                   </select>
-                  {lumaModel === "runway-aleph" ? (
-                    <div className="rounded-md border border-ink/20 bg-bg px-3 py-2 text-xs text-ink/70">
-                      Runway Aleph uses video-to-video with the frame as reference guidance (not strict first-frame lock).
-                    </div>
-                  ) : lumaModel === "runway-gen4.5" ? (
+                  {lumaModel === "runway-gen4.5" ? (
                     <div className="rounded-md border border-ink/20 bg-bg px-3 py-2 text-xs text-ink/70">
                       Runway Gen-4.5 image-to-video uses the selected first frame as the strict starting image. It does not use source-video motion.
                     </div>

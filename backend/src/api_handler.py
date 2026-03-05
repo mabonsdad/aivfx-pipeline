@@ -913,7 +913,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 "luma": {
                     "provider": (
                         "runway"
-                        if req.lumaModel in {"runway-aleph", "runway-gen4.5"}
+                        if req.lumaModel == "runway-gen4.5"
                         else ("kling" if req.lumaModel == "kling-2.6" else "luma")
                     ),
                     "model": req.lumaModel,
@@ -940,6 +940,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                     "mode": req.mode,
                     "prompt": prompt,
                     "firstFrameVariantId": req.firstFrameVariantId,
+                    "lastFrameVariantId": req.lastFrameVariantId,
                 },
             )
             return response(202, {"jobId": job_id}, origin=origin)

@@ -39,17 +39,13 @@ from src.integrations.luma import create_modify_generation, get_generation
 from src.integrations.openai_images import generate_image_edit as generate_openai_image_edit
 from src.integrations.runware import patch_edit_aceplusplus, patch_edit_flux_fill
 from src.integrations.runway import (
-    create_ephemeral_upload,
     create_image_to_video,
-    create_video_to_video,
     get_task as get_runway_task,
-    upload_to_ephemeral,
 )
 
 logger = Logger()
 
 FULL_VIDEO_MAX_BYTES = 100 * 1024 * 1024
-RUNWAY_VIDEO_MAX_BYTES = 64 * 1024 * 1024
 MAX_PROVIDER_IMAGE_BYTES = 10 * 1024 * 1024
 KLING_SUPPORTED_DURATIONS = (5, 10)
 QC_SAMPLE_FPS = 3
@@ -881,7 +877,7 @@ def _handle_segment_generate(
     s3 = boto3.client("s3")
     model_name = payload["lumaModel"]
     segment_key: str | None = None
-    if model_name in {"ray-2", "ray-flash-2", "runway-aleph"}:
+    if model_name in {"ray-2", "ray-flash-2"}:
         segment_key = _ensure_segment_clip(
             s3=s3,
             asset_store=asset_store,
@@ -905,7 +901,7 @@ def _handle_segment_generate(
     end_frame_id = segment["endFrameId"]
     end_frame = task["frames"][end_frame_id]
     last_frame_key = end_frame["captureKey"]
-    end_variant_id = end_frame.get("selectedVariantId")
+    end_variant_id = payload.get("lastFrameVariantId") or end_frame.get("selectedVariantId")
     source_last_variant_id: str | None = None
     if end_variant_id:
         end_variant = next((v for v in end_frame.get("variants", []) if v["variantId"] == end_variant_id), None)
@@ -930,54 +926,35 @@ def _handle_segment_generate(
         if segment_key:
             local_segment_source = td_path / "segment_full.mp4"
             _download_s3(s3, settings.assets_bucket, segment_key, local_segment_source)
-
-            if model_name == "runway-aleph":
-                _job_progress(job, store, 20, "running", "Preparing Runway Aleph input clip")
-                local_provider_segment = td_path / "segment_runway.mp4"
-                runway_w, runway_h, _ = _transcode_with_size_limit(
+            source_size = local_segment_source.stat().st_size
+            if source_size > FULL_VIDEO_MAX_BYTES:
+                _job_progress(job, store, 20, "running", "Optimizing segment clip to provider size limits")
+                local_provider_segment = td_path / "segment_luma.mp4"
+                luma_w, luma_h, _ = _transcode_with_size_limit(
                     input_path=str(local_segment_source),
                     output_path=str(local_provider_segment),
                     fps=fps,
                     source_width=src_width,
                     source_height=src_height,
-                    landscape_target=(1280, 720),
-                    portrait_target=(720, 1280),
-                    max_bytes=RUNWAY_VIDEO_MAX_BYTES,
+                    landscape_target=(1920, 1080),
+                    portrait_target=(1080, 1920),
+                    max_bytes=FULL_VIDEO_MAX_BYTES,
                 )
-                provider_media_width = runway_w
-                provider_media_height = runway_h
-                media_key_for_provider = paths.segment_provider_input(segment_id, gen_id, "runway")
+                provider_media_width = luma_w
+                provider_media_height = luma_h
+                media_key_for_provider = paths.segment_provider_input(segment_id, gen_id, "luma")
                 _upload_s3(s3, settings.assets_bucket, media_key_for_provider, local_provider_segment, "video/mp4")
             else:
-                source_size = local_segment_source.stat().st_size
-                if source_size > FULL_VIDEO_MAX_BYTES:
-                    _job_progress(job, store, 20, "running", "Optimizing segment clip to provider size limits")
-                    local_provider_segment = td_path / "segment_luma.mp4"
-                    luma_w, luma_h, _ = _transcode_with_size_limit(
-                        input_path=str(local_segment_source),
-                        output_path=str(local_provider_segment),
-                        fps=fps,
-                        source_width=src_width,
-                        source_height=src_height,
-                        landscape_target=(1920, 1080),
-                        portrait_target=(1080, 1920),
-                        max_bytes=FULL_VIDEO_MAX_BYTES,
-                    )
-                    provider_media_width = luma_w
-                    provider_media_height = luma_h
-                    media_key_for_provider = paths.segment_provider_input(segment_id, gen_id, "luma")
-                    _upload_s3(s3, settings.assets_bucket, media_key_for_provider, local_provider_segment, "video/mp4")
-                else:
-                    media_key_for_provider = segment_key
-                    provider_media_width = src_width
-                    provider_media_height = src_height
+                media_key_for_provider = segment_key
+                provider_media_width = src_width
+                provider_media_height = src_height
 
         frame_bytes = asset_store.read_bytes(first_frame_key)
         first_target_w, first_target_h = _target_by_orientation(
             src_width,
             src_height,
-            landscape=(1280, 768) if model_name == "runway-gen4.5" else ((1280, 720) if model_name == "runway-aleph" else (1920, 1080)),
-            portrait=(768, 1280) if model_name == "runway-gen4.5" else ((720, 1280) if model_name == "runway-aleph" else (1080, 1920)),
+            landscape=(1280, 720) if model_name == "runway-gen4.5" else (1920, 1080),
+            portrait=(720, 1280) if model_name == "runway-gen4.5" else (1080, 1920),
         )
         prepared_first_frame, first_frame_content_type, first_frame_ext = _prepare_first_frame_image_payload(
             frame_bytes,
@@ -990,7 +967,7 @@ def _handle_segment_generate(
         first_frame_input_key = paths.segment_provider_first_frame(
             segment_id,
             gen_id,
-            "runway" if model_name in {"runway-aleph", "runway-gen4.5"} else ("kling" if model_name == "kling-2.6" else "luma"),
+            "runway" if model_name == "runway-gen4.5" else ("kling" if model_name == "kling-2.6" else "luma"),
             ext=first_frame_ext,
         )
         _upload_s3(s3, settings.assets_bucket, first_frame_input_key, local_first_frame, first_frame_content_type)
@@ -1016,39 +993,7 @@ def _handle_segment_generate(
 
     used_provider_model: str | None = None
     provider_duration_sec: float | None = None
-    if model_name == "runway-aleph":
-        runway_key = secrets["RUNWAY_API_KEY"]
-        with tempfile.TemporaryDirectory() as runway_td:
-            runway_input = Path(runway_td) / "runway_input.mp4"
-            _download_s3(s3, settings.assets_bucket, media_key_for_provider, runway_input)
-            upload_created = create_ephemeral_upload(api_key=runway_key, filename=runway_input.name)
-            upload_url = upload_created.get("uploadUrl")
-            upload_fields = upload_created.get("fields")
-            runway_uri = upload_created.get("url") or upload_created.get("runwayUri")
-            if not isinstance(upload_url, str) or not isinstance(upload_fields, dict) or not isinstance(runway_uri, str):
-                raise RuntimeError(f"Unexpected Runway upload response: {upload_created}")
-            upload_to_ephemeral(
-                upload_url=upload_url,
-                fields=upload_fields,
-                file_path=runway_input,
-                content_type="video/mp4",
-            )
-        _job_progress(job, store, 35, "running", "Creating Runway Aleph generation")
-        created = create_video_to_video(
-            api_key=runway_key,
-            video_uri=runway_uri,
-            prompt_text=payload.get("prompt"),
-            first_frame_uri=first_frame_url,
-        )
-        used_provider_model = "gen4_aleph"
-        generation_id = created.get("id")
-        if not generation_id:
-            raise RuntimeError(f"Unexpected Runway create response: {created}")
-        _job_progress(job, store, 55, "running", "Polling Runway generation")
-        result = _wait_runway_complete(runway_key, generation_id)
-        out_url = _parse_runway_output_url(result)
-        provider_name = "runway"
-    elif model_name == "runway-gen4.5":
+    if model_name == "runway-gen4.5":
         runway_key = secrets["RUNWAY_API_KEY"]
         runway_duration = 5 if segment_duration_sec <= 7.5 else 10
         provider_duration_sec = float(runway_duration)

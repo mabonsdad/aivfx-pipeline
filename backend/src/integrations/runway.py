@@ -55,7 +55,7 @@ def create_image_to_video(
     payload: dict[str, Any] = {
         "model": model,
         "promptText": prompt_text,
-        "promptImage": [{"uri": prompt_image_uri, "position": "first"}],
+        "promptImage": prompt_image_uri,
         "ratio": ratio,
         "duration": int(duration),
     }
