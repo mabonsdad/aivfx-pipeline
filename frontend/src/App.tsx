@@ -174,9 +174,12 @@ function FrameSelectCard({
           </div>
         </div>
       ) : (
-        <button onClick={onSelect} className="w-full rounded-md border border-ink/20 bg-bg px-3 py-4 text-left">
-          <span className="block text-sm font-medium">Select</span>
-          <span className="text-xs text-ink/60">from current video frame</span>
+        <button
+          onClick={onSelect}
+          className="w-full rounded-md border border-accent bg-accent/10 px-3 py-4 text-left transition hover:bg-accent/20"
+        >
+          <span className="block text-sm font-semibold text-ink">Select Frames</span>
+          <span className="text-xs text-ink/70">at selected timeline position</span>
         </button>
       )}
     </div>
@@ -1564,11 +1567,11 @@ export default function App() {
     }
   }
   const tabs: Array<{ id: TabId; label: string }> = [
-    { id: "timeline", label: "Timeline" },
-    { id: "frames", label: "Frame Edit" },
-    { id: "generate", label: "Generate" },
-    { id: "merge", label: "Merge & Export" },
-    { id: "assets", label: "Asset Library" },
+    { id: "timeline", label: "Pick Frame" },
+    { id: "frames", label: "Edit Frame" },
+    { id: "generate", label: "Generate Video" },
+    { id: "merge", label: "Merge Video" },
+    { id: "assets", label: "Download Assets" },
   ];
 
   function openNewTaskModal() {
@@ -1991,21 +1994,23 @@ export default function App() {
 
         <section className="col-span-12 space-y-4 md:col-span-9">
           <div className="rounded-2xl border border-ink/10 bg-card p-4">
-            <div className="mb-4 flex flex-wrap gap-2">
-              {tabs.map(({ id, label }) => (
-                <button
-                  key={id}
-                  onClick={() => setTab(id)}
-                  className={`rounded-md px-3 py-2 text-sm ${tab === id ? "bg-ink text-white" : "bg-ink/10"}`}
-                >
-                  {label}
-                </button>
+            <div className="mb-4 flex flex-wrap items-center gap-2">
+              {tabs.map(({ id, label }, index) => (
+                <div key={id} className="flex items-center gap-2">
+                  <button
+                    onClick={() => setTab(id)}
+                    className={`rounded-md px-3 py-2 text-sm ${tab === id ? "bg-ink text-white" : "bg-ink/10"}`}
+                  >
+                    {label}
+                  </button>
+                  {index < tabs.length - 1 ? <span className="text-ink/50">→</span> : null}
+                </div>
               ))}
             </div>
 
             {tab === "timeline" && (
               <div className="space-y-4">
-                <h3 className="text-lg font-semibold">Timeline & Frame Range Selection</h3>
+                <h3 className="text-lg font-semibold">Pick Frame & Segment Selection</h3>
                 {timelinePlaybackUrl ? (
                   <div className="mx-auto w-fit max-w-full">
                     <video
@@ -2103,6 +2108,8 @@ export default function App() {
                       onClick={() => {
                         setSelectedSegmentId(seg.segmentId);
                         setCurrentFrameIndex(seg.startFrame);
+                        setFirstFrameId(seg.startFrameId);
+                        setLastFrameId(seg.endFrameId);
                       }}
                       className={`rounded-lg border p-3 text-left ${
                         seg.segmentId === selectedSegmentId ? "border-accent bg-accent/10" : "border-ink/10"
@@ -2120,7 +2127,7 @@ export default function App() {
 
             {tab === "frames" && (
               <div className="space-y-4">
-                <h3 className="text-lg font-semibold">Frame Capture & Edit</h3>
+                <h3 className="text-lg font-semibold">Edit Frame</h3>
 
                 <div className="flex gap-2">
                   <button
@@ -2162,9 +2169,9 @@ export default function App() {
                         onChange={(e) => setModel(e.target.value as "nano_banana" | "nano_banana_pro" | "chatgpt")}
                         className="rounded-md border border-ink/20 px-2 py-2"
                       >
-                        <option value="nano_banana">std</option>
-                        <option value="nano_banana_pro">pro</option>
-                        <option value="chatgpt">chatgpt</option>
+                        <option value="nano_banana_pro">Nano Banana Pro</option>
+                        <option value="nano_banana">Nano Banana Std</option>
+                        <option value="chatgpt">ChatGPT-image</option>
                       </select>
                       <button
                         className="rounded-md bg-accent px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-50"
@@ -2542,7 +2549,7 @@ export default function App() {
 
             {tab === "generate" && (
               <div className="space-y-4">
-                <h3 className="text-lg font-semibold">Segment Generate</h3>
+                <h3 className="text-lg font-semibold">Generate Video</h3>
                 <div className="grid gap-3 md:grid-cols-2">
                   <select
                     value={selectedSegmentId ?? ""}
@@ -2796,7 +2803,7 @@ export default function App() {
 
             {tab === "merge" && (
               <div className="space-y-4">
-                <h3 className="text-lg font-semibold">Merge & Export</h3>
+                <h3 className="text-lg font-semibold">Merge Video</h3>
                 <label className="block text-sm">Add generated segment (latest first)</label>
                 <select
                   value=""
@@ -2880,7 +2887,7 @@ export default function App() {
 
             {tab === "assets" && (
               <div className="space-y-6">
-                <h3 className="text-lg font-semibold">Asset Library</h3>
+                <h3 className="text-lg font-semibold">Download Assets</h3>
                 {assetsLoading ? <p className="text-sm text-ink/60">Loading assets...</p> : null}
                 <div className="space-y-3 rounded-lg border border-ink/10 p-3">
                   <p className="font-medium">Uploads</p>
