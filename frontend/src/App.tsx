@@ -1048,6 +1048,7 @@ export default function App() {
     if (!selectedSegment || !hasHardDurationLimit) return false;
     return selectedSegment.durationSec > lumaHardLimitSeconds + 1e-6;
   }, [hasHardDurationLimit, lumaHardLimitSeconds, selectedSegment]);
+  const generationHelp = useMemo(() => generationModelHelp(lumaModel, advancedMode), [advancedMode, lumaModel]);
 
   const uploadAssets = useMemo<LibraryAsset[]>(() => {
     const assets: LibraryAsset[] = [];
@@ -1498,6 +1499,37 @@ export default function App() {
       typeof settings?.providerDurationSec === "number" ? `provider ${settings.providerDurationSec.toFixed(2)}s` : null,
     ].filter(Boolean);
     return details.join(" · ");
+  }
+
+  function generationModelHelp(modelName: "ray-2" | "ray-flash-2" | "runway-gen4.5" | "kling-2.6", modeValue: string) {
+    if (modelName === "kling-2.6") {
+      return {
+        title: "Kling 2.6 Start/End",
+        lines: [
+          "Uses start frame + end frame + segment duration. It does not use the source segment video for motion.",
+          "Best prompt style: describe camera motion and action between start and end frames.",
+          "Keep prompts temporal and concrete, for example 'slow push in, subtle cloth movement, keep background stable'.",
+        ],
+      };
+    }
+    if (modelName === "runway-gen4.5") {
+      return {
+        title: "Runway Gen-4.5",
+        lines: [
+          "Uses only the selected first frame as the initial frame. It does not use source segment motion.",
+          "Best prompt style: describe the motion and evolution from frame one while preserving composition.",
+          "Avoid conflicting scene changes in one prompt; short and specific prompts usually hold frame identity better.",
+        ],
+      };
+    }
+    return {
+      title: modelName === "ray-flash-2" ? "Luma Ray Flash 2" : "Luma Ray 2",
+      lines: [
+        "Uses source segment video + selected first frame. The first frame anchors look/style while segment drives motion.",
+        "Mode dropdown (Luma only): adhere = closest to source, flex = moderate change, reimagine = strongest change.",
+        `Current mode: ${modeValue}. For stronger style shifts raise mode; for shot continuity lower mode and keep prompts concise.`,
+      ],
+    };
   }
 
   function openTaskReport(taskId: string) {
@@ -2550,58 +2582,65 @@ export default function App() {
             {tab === "generate" && (
               <div className="space-y-4">
                 <h3 className="text-lg font-semibold">Generate Video</h3>
-                <div className="grid gap-3 md:grid-cols-2">
-                  <div className="rounded-md border border-ink/20 bg-bg px-3 py-2 text-xs text-ink/70">
-                    Segment in use: {selectedSegment ? describeSegment(selectedSegment) : "No segment selected. Go to Pick Frame first."}
+                <div className="grid gap-3 lg:grid-cols-[1.65fr_1fr]">
+                  <div className="space-y-3">
+                    <div className="rounded-md border border-ink/20 bg-bg px-3 py-2 text-xs text-ink/70">
+                      Segment in use: {selectedSegment ? describeSegment(selectedSegment) : "No segment selected. Go to Pick Frame first."}
+                    </div>
+                    <div className="grid gap-3 md:grid-cols-2">
+                      <select
+                        value={lumaModel}
+                        onChange={(e) => setLumaModel(e.target.value as "ray-2" | "ray-flash-2" | "runway-gen4.5" | "kling-2.6")}
+                        className="rounded-md border border-ink/20 px-3 py-2"
+                      >
+                        <option value="ray-2">ray-2</option>
+                        <option value="ray-flash-2">ray-flash-2</option>
+                        <option value="runway-gen4.5">runway-gen4.5 (first image)</option>
+                        <option value="kling-2.6">kling-2.6 (start/end frames)</option>
+                      </select>
+                      {lumaModel === "ray-2" || lumaModel === "ray-flash-2" ? (
+                        <select value={advancedMode} onChange={(e) => setAdvancedMode(e.target.value)} className="rounded-md border border-ink/20 px-3 py-2">
+                          {[
+                            "adhere_1",
+                            "adhere_2",
+                            "adhere_3",
+                            "flex_1",
+                            "flex_2",
+                            "flex_3",
+                            "reimagine_1",
+                            "reimagine_2",
+                            "reimagine_3",
+                          ].map((mode) => (
+                            <option key={mode} value={mode}>
+                              mode: {mode}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <div className="rounded-md border border-ink/20 bg-bg px-3 py-2 text-xs text-ink/60">
+                          Mode dropdown is only used by Luma models.
+                        </div>
+                      )}
+                    </div>
+                    <textarea
+                      value={lumaPrompt}
+                      onChange={(e) => setLumaPrompt(e.target.value)}
+                      placeholder="Optional generation prompt"
+                      className="h-20 w-full rounded-md border border-ink/20 p-2"
+                    />
+                    <p className="text-xs text-ink/60">
+                      Start and end frame variants are taken automatically from your Edit Frame selections.
+                    </p>
                   </div>
-                  <select
-                    value={lumaModel}
-                    onChange={(e) => setLumaModel(e.target.value as "ray-2" | "ray-flash-2" | "runway-gen4.5" | "kling-2.6")}
-                    className="rounded-md border border-ink/20 px-3 py-2"
-                  >
-                    <option value="ray-2">ray-2</option>
-                    <option value="ray-flash-2">ray-flash-2</option>
-                    <option value="runway-gen4.5">runway-gen4.5 (first image)</option>
-                    <option value="kling-2.6">kling-2.6 (start/end frames)</option>
-                  </select>
-                  {lumaModel === "runway-gen4.5" ? (
-                    <div className="rounded-md border border-ink/20 bg-bg px-3 py-2 text-xs text-ink/70">
-                      Runway Gen-4.5 image-to-video uses the selected first frame as the strict starting image. It does not use source-video motion.
-                    </div>
-                  ) : lumaModel === "kling-2.6" ? (
-                    <div className="rounded-md border border-ink/20 bg-bg px-3 py-2 text-xs text-ink/70">
-                      Kling 2.6 uses start and end frames + duration. It automatically uses selected first/last frame edits when available.
-                    </div>
-                  ) : (
-                    <select value={advancedMode} onChange={(e) => setAdvancedMode(e.target.value)} className="rounded-md border border-ink/20 px-3 py-2">
-                      {[
-                        "adhere_1",
-                        "adhere_2",
-                        "adhere_3",
-                        "flex_1",
-                        "flex_2",
-                        "flex_3",
-                        "reimagine_1",
-                        "reimagine_2",
-                        "reimagine_3",
-                      ].map((mode) => (
-                        <option key={mode} value={mode}>
-                          mode: {mode}
-                        </option>
+                  <div className="rounded-lg border border-ink/15 bg-bg p-3">
+                    <p className="text-sm font-semibold">{generationHelp.title}</p>
+                    <div className="mt-2 space-y-2 text-xs text-ink/70">
+                      {generationHelp.lines.map((line) => (
+                        <p key={line}>{line}</p>
                       ))}
-                    </select>
-                  )}
+                    </div>
+                  </div>
                 </div>
-
-                <textarea
-                  value={lumaPrompt}
-                  onChange={(e) => setLumaPrompt(e.target.value)}
-                  placeholder="Optional generation prompt"
-                  className="h-20 w-full rounded-md border border-ink/20 p-2"
-                />
-                <p className="text-xs text-ink/60">
-                  Start and end frame variants are taken automatically from your Edit Frame selections.
-                </p>
 
                 {selectedSegmentOverLimit ? (
                   <p className="text-xs text-red-600">
