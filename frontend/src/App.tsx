@@ -996,7 +996,6 @@ export default function App() {
         .sort((a, b) => safeTimestamp(b.createdAt) - safeTimestamp(a.createdAt)),
     [segmentGenerations, selectedSegmentId],
   );
-  const mergeGenerationOptions = useMemo(() => [...segmentGenerations], [segmentGenerations]);
   const selectedMergeGenerations = useMemo(
     () =>
       selectedGenIds
@@ -1180,18 +1179,11 @@ export default function App() {
 
   useEffect(() => {
     const selectedId = selectedPreviewGeneration?.genId;
-    if (!selectedId) return;
-    setSelectedGenIds((previous) => {
-      const selectedGeneration = task?.segmentGenerations?.[selectedId];
-      const targetSegmentId = selectedGeneration?.segmentId;
-      const filtered = previous.filter((genId) => {
-        if (genId === selectedId) return false;
-        if (!targetSegmentId) return true;
-        const existing = task?.segmentGenerations?.[genId];
-        return existing?.segmentId !== targetSegmentId;
-      });
-      return [selectedId, ...filtered];
-    });
+    if (!selectedId) {
+      setSelectedGenIds([]);
+      return;
+    }
+    setSelectedGenIds([selectedId]);
   }, [selectedPreviewGeneration?.genId, task?.segmentGenerations]);
 
   function selectSegmentGeneration(genId: string) {
@@ -2815,69 +2807,57 @@ export default function App() {
             {tab === "merge" && (
               <div className="space-y-4">
                 <h3 className="text-lg font-semibold">Merge Video</h3>
-                <label className="block text-sm">Add generated segment (latest first)</label>
-                <select
-                  value=""
-                  onChange={(e) => {
-                    const genId = e.target.value;
-                    if (!genId) return;
-                    setSelectedGenIds((prev) => (prev.includes(genId) ? prev : [...prev, genId]));
-                  }}
-                  className="w-full rounded-md border border-ink/20 px-3 py-2"
-                >
-                  <option value="">Select generation</option>
-                  {mergeGenerationOptions.map((generation) => (
-                    <option key={generation.genId} value={generation.genId}>
-                      {describeGeneration(generation)}
-                    </option>
-                  ))}
-                </select>
-                <div className="space-y-2 rounded-lg border border-ink/10 p-3">
-                  <p className="text-sm font-medium">Selected generations ({selectedMergeGenerations.length})</p>
-                  {selectedMergeGenerations.length === 0 ? (
-                    <p className="text-sm text-ink/60">No generations selected yet.</p>
-                  ) : (
-                    <div className="space-y-2">
-                      {selectedMergeGenerations.map((generation) => (
+                <div className="grid gap-3 lg:grid-cols-[1.65fr_1fr]">
+                  <div className="space-y-3">
+                    <div className="space-y-2 rounded-lg border border-ink/10 p-3">
+                      <p className="text-sm font-medium">Generation in use</p>
+                      {selectedMergeGenerations.length === 0 ? (
+                        <p className="text-sm text-ink/60">No generation selected in Generate Video yet.</p>
+                      ) : (
                         <div
-                          key={generation.genId}
-                          className={`flex items-center justify-between gap-3 rounded border p-2 ${
-                            generation.status === "failed"
+                          className={`rounded border p-2 ${
+                            selectedMergeGenerations[0].status === "failed"
                               ? "border-orange-400 bg-orange-50"
                               : "border-teal-500 bg-teal-50"
                           }`}
                         >
-                          <div>
-                            <p className="text-sm font-semibold">{describeGeneration(generation)}</p>
-                            <p className="text-xs text-ink/50">{generation.genId}</p>
-                          </div>
-                          <button
-                            className="rounded border border-ink/20 bg-white px-2 py-1 text-xs"
-                            onClick={() => setSelectedGenIds((prev) => prev.filter((id) => id !== generation.genId))}
-                          >
-                            Remove
-                          </button>
+                          <p className="text-sm font-semibold">{describeGeneration(selectedMergeGenerations[0])}</p>
+                          <p className="text-xs text-ink/50">{selectedMergeGenerations[0].genId}</p>
                         </div>
-                      ))}
+                      )}
                     </div>
-                  )}
+                    <label className="block text-sm">Temporal feather frames (0-30)</label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={30}
+                      value={temporalFeatherFrames}
+                      onChange={(e) => setTemporalFeatherFrames(Number(e.target.value))}
+                      className="w-40 rounded-md border border-ink/20 px-3 py-2"
+                    />
+                    <button
+                      className="rounded-md bg-accent2 px-4 py-2 text-white"
+                      disabled={selectedMergeGenerations.length === 0}
+                      onClick={() => mergeMutation.mutate()}
+                    >
+                      Merge generation
+                    </button>
+                  </div>
+                  <div className="rounded-lg border border-ink/15 bg-bg p-3">
+                    <p className="text-sm font-semibold">Merge step guide</p>
+                    <div className="mt-2 space-y-2 text-xs text-ink/70">
+                      <p>
+                        The step takes the generated video (segment) you currently have selected on the Generate Video step, and re-inserts it back into the original video at the exact position it came from.
+                      </p>
+                      <p>
+                        Set Temporal Feathering to 0 for a hard cut or choose to cross fade based on the number of frames selected.
+                      </p>
+                      <p className="font-semibold uppercase tracking-wide text-orange-700">
+                        This is an experiment to highlight the challenges merging AI and real content!
+                      </p>
+                    </div>
+                  </div>
                 </div>
-                <label className="block text-sm">Temporal feather frames (0-30)</label>
-                <input
-                  type="number"
-                  min={0}
-                  max={30}
-                  value={temporalFeatherFrames}
-                  onChange={(e) => setTemporalFeatherFrames(Number(e.target.value))}
-                  className="w-40 rounded-md border border-ink/20 px-3 py-2"
-                />
-                <button
-                  className="rounded-md bg-accent2 px-4 py-2 text-white"
-                  disabled={selectedMergeGenerations.length === 0}
-                  onClick={() => mergeMutation.mutate()}
-                >
-                  Merge Selected Generations
-                </button>
                 <div className="space-y-2">
                   {sortedExports.map((exp) => (
                     <div key={exp.exportId} className="rounded border border-ink/10 p-3">
