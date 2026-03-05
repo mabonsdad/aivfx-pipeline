@@ -366,6 +366,7 @@ export default function App() {
   const [temporalFeatherFrames, setTemporalFeatherFrames] = useState(0);
   const [imagePreviewModal, setImagePreviewModal] = useState<{ url: string; label: string } | null>(null);
   const [videoPreviewModal, setVideoPreviewModal] = useState<{ url: string; label: string } | null>(null);
+  const [reportGraphModal, setReportGraphModal] = useState<{ url: string; label: string } | null>(null);
   const [jobIds, setJobIds] = useState<string[]>([]);
   const [firstFrameId, setFirstFrameId] = useState<string | null>(null);
   const [lastFrameId, setLastFrameId] = useState<string | null>(null);
@@ -519,7 +520,7 @@ export default function App() {
   const activePatchReference = patchReferenceImages[editFrameTab];
   const reportRows = useMemo(() => {
     if (!reportTask) {
-      return { standard: [] as ReportGenerationRow[], kling: [] as ReportGenerationRow[] };
+      return { rows: [] as ReportGenerationRow[] };
     }
     const frameById = reportTask.frames ?? {};
     const allRows: ReportGenerationRow[] = Object.values(reportTask.segmentGenerations ?? {}).map((generation) => {
@@ -546,10 +547,7 @@ export default function App() {
     });
     const sortScore = (row: ReportGenerationRow) => (row.generatedVideoUrl ? 0 : 1);
     allRows.sort((a, b) => sortScore(a) - sortScore(b) || safeTimestamp(b.generation.createdAt) - safeTimestamp(a.generation.createdAt));
-    return {
-      standard: allRows.filter((row) => row.generation.luma.model !== "kling-2.6"),
-      kling: allRows.filter((row) => row.generation.luma.model === "kling-2.6"),
-    };
+    return { rows: allRows };
   }, [reportSegmentsById, reportTask]);
 
   useEffect(() => {
@@ -1481,9 +1479,13 @@ export default function App() {
     return `${resolution.width}x${resolution.height}`;
   }
 
-  function formatPct(value: unknown, digits = 2): string {
-    if (typeof value !== "number" || Number.isNaN(value)) return "n/a";
-    return `${value.toFixed(digits)}%`;
+  function asNumber(value: unknown): number | null {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value === "string") {
+      const parsed = Number(value);
+      if (Number.isFinite(parsed)) return parsed;
+    }
+    return null;
   }
 
   function describeFrame(frame: FrameRecord | null): string {
@@ -1732,236 +1734,177 @@ export default function App() {
               </section>
 
               <section className="space-y-2 rounded-2xl border border-ink/10 bg-card p-4">
-                <h3 className="text-lg font-semibold">Generation Report (Standard Providers)</h3>
-                {reportRows.standard.length === 0 ? (
-                  <p className="text-sm text-ink/60">No standard video generations yet.</p>
+                <h3 className="text-lg font-semibold">Generation Report</h3>
+                {reportRows.rows.length === 0 ? (
+                  <p className="text-sm text-ink/60">No video generations yet.</p>
                 ) : (
                   <div className="overflow-x-auto">
-                    <table className="min-w-full table-fixed">
+                    <table className="table-fixed text-sm" style={{ minWidth: "120%" }}>
                       <thead>
                         <tr className="border-b border-ink/10 text-left text-sm">
-                          <th className="w-1/4 px-2 py-2">Original</th>
-                          <th className="w-1/4 px-2 py-2">Mask</th>
-                          <th className="w-1/4 px-2 py-2">Edited</th>
-                          <th className="w-1/4 px-2 py-2">Generated Video</th>
+                          <th className="w-1/5 px-2 py-2">Original Start Frame</th>
+                          <th className="w-1/5 px-2 py-2">Mask + Prompt</th>
+                          <th className="w-1/5 px-2 py-2">Edited Start Frame</th>
+                          <th className="w-1/5 px-2 py-2">End Frame</th>
+                          <th className="w-1/5 px-2 py-2">Generated Video</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {reportRows.standard.map((row) => (
-                          <tr key={row.generation.genId} className="border-b border-ink/10 align-top">
-                            <td className="px-2 py-3">
-                              {row.originalUrl ? (
-                                <img src={row.originalUrl} alt="Original frame" className="w-full rounded border border-ink/10 bg-bg object-contain" />
-                              ) : (
-                                <div className="rounded border border-dashed border-ink/20 p-6 text-sm text-ink/50">No frame</div>
-                              )}
-                              <p className="mt-2 text-xs text-ink/70">{describeFrame(row.startFrame)}</p>
-                              <p className="text-[11px] text-ink/50">{row.segment ? `${row.segment.segmentId} · ${describeSegment(row.segment)}` : row.generation.segmentId}</p>
-                            </td>
-                            <td className="px-2 py-3">
-                              {row.maskUrl ? (
-                                <img src={row.maskUrl} alt="Patch mask" className="w-full rounded border border-ink/10 bg-bg object-contain" />
-                              ) : (
-                                <div className="rounded border border-dashed border-ink/20 p-6 text-sm text-ink/50">No mask used</div>
-                              )}
-                              <p className="mt-2 text-xs text-ink/70">
-                                {row.startVariant?.patchMeta ? `feather ${(row.startVariant.patchMeta.featherPx as number | undefined) ?? 0}px` : "No patch mask metadata"}
-                              </p>
-                            </td>
-                            <td className="px-2 py-3">
-                              {row.editedUrl ? (
-                                <img src={row.editedUrl} alt="Edited frame" className="w-full rounded border border-ink/10 bg-bg object-contain" />
-                              ) : (
-                                <div className="rounded border border-dashed border-ink/20 p-6 text-sm text-ink/50">No edited frame</div>
-                              )}
-                              <p className="mt-2 text-xs text-ink/70">{describeImageEditSettings(row.startVariant)}</p>
-                            </td>
-                            <td className="px-2 py-3">
-                              {row.generatedVideoUrl ? (
-                                <video src={row.generatedVideoUrl} controls className="w-full rounded border border-ink/10 bg-bg object-contain" />
-                              ) : (
-                                <div className="rounded border border-dashed border-ink/20 p-6 text-sm text-ink/50">No generated video</div>
-                              )}
-                              <p className="mt-2 text-xs text-ink/70">{describeVideoGenerationSettings(row.generation)}</p>
-                              <p className="text-[11px] text-ink/50">{truncateIdentifier(row.generation.genId, 16)} · {formatCompactTimestamp(row.generation.createdAt)}</p>
-                              {row.generation.qc?.status === "complete" ? (
-                                <div className="mt-2 space-y-1 rounded border border-ink/10 bg-bg p-2 text-[11px] text-ink/70">
-                                  <p className="font-medium text-ink/80">QC metrics</p>
-                                  <p>
-                                    Frame change:{" "}
-                                    {formatPct(
-                                      (row.generation.qc.frame?.metrics as Record<string, unknown> | undefined)?.changedPctTotal,
-                                    )}{" "}
-                                    · outside leak:{" "}
-                                    {formatPct(
-                                      (row.generation.qc.frame?.metrics as Record<string, unknown> | undefined)?.outsideLeakagePct,
-                                    )}
-                                  </p>
-                                  <p>
-                                    Video change mean:{" "}
-                                    {formatPct(
-                                      (row.generation.qc.video?.aggregates as Record<string, unknown> | undefined)?.changedPctTotalMean,
-                                    )}{" "}
-                                    · outside mean:{" "}
-                                    {formatPct(
-                                      (row.generation.qc.video?.aggregates as Record<string, unknown> | undefined)?.outsideLeakagePctMean,
-                                    )}
-                                  </p>
-                                  <p>
-                                    SSIM:{" "}
-                                    {typeof (row.generation.qc.video?.aggregates as Record<string, unknown> | undefined)?.ssimMean === "number"
-                                      ? ((row.generation.qc.video?.aggregates as Record<string, unknown>).ssimMean as number).toFixed(4)
-                                      : "n/a"}{" "}
-                                    · PSNR:{" "}
-                                    {typeof (row.generation.qc.video?.aggregates as Record<string, unknown> | undefined)?.psnrMean === "number"
-                                      ? `${((row.generation.qc.video?.aggregates as Record<string, unknown>).psnrMean as number).toFixed(2)} dB`
-                                      : "n/a"}
-                                  </p>
-                                  <p>
-                                    VMAF mean:{" "}
-                                    {typeof (((row.generation.qc.video?.aggregates as Record<string, unknown> | undefined)?.vmaf as Record<
-                                      string,
-                                      unknown
-                                    > | null)?.mean) === "number"
-                                      ? ((((row.generation.qc.video?.aggregates as Record<string, unknown>).vmaf as Record<string, unknown>).mean as number)).toFixed(2)
-                                      : "n/a"}
-                                  </p>
-                                  <div className="flex flex-wrap gap-2">
-                                    {(row.generation.qc.video?.artifacts?.diffVideoUrl as string | undefined) ? (
-                                      <a
-                                        href={row.generation.qc?.video?.artifacts?.diffVideoUrl as string}
-                                        target="_blank"
-                                        rel="noreferrer"
-                                        className="underline"
-                                      >
-                                        Diff video map
-                                      </a>
-                                    ) : null}
-                                    {(row.generation.qc.video?.artifacts?.timelineCsvUrl as string | undefined) ? (
-                                      <a
-                                        href={row.generation.qc?.video?.artifacts?.timelineCsvUrl as string}
-                                        target="_blank"
-                                        rel="noreferrer"
-                                        className="underline"
-                                      >
-                                        Timeline CSV
-                                      </a>
-                                    ) : null}
-                                    {(row.generation.qc.video?.artifacts?.reportJsonUrl as string | undefined) ? (
-                                      <a
-                                        href={row.generation.qc?.video?.artifacts?.reportJsonUrl as string}
-                                        target="_blank"
-                                        rel="noreferrer"
-                                        className="underline"
-                                      >
-                                        QC JSON
-                                      </a>
-                                    ) : null}
-                                  </div>
-                                  {(row.generation.qc.video?.selectedFrames?.length ?? 0) > 0 ? (
-                                    <div className="grid grid-cols-3 gap-1">
-                                      {row.generation.qc.video?.selectedFrames?.slice(0, 3).map((frame) =>
-                                        frame.overlayUrl ? (
-                                          <img
-                                            key={`${row.generation.genId}-qc-${frame.index}`}
-                                            src={frame.overlayUrl}
-                                            alt={`QC overlay ${frame.index}`}
-                                            className="w-full rounded border border-ink/10 object-contain"
-                                          />
-                                        ) : null,
-                                      )}
-                                    </div>
-                                  ) : null}
-                                </div>
-                              ) : row.generation.qc?.status === "failed" ? (
-                                <p className="mt-2 text-xs text-red-600">QC failed: {row.generation.qc.error ?? "unknown error"}</p>
-                              ) : null}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-              </section>
+                        {reportRows.rows.flatMap((row) => {
+                          const frameMetrics = row.generation.qc?.frame?.metrics as Record<string, unknown> | undefined;
+                          const frameArtifacts = row.generation.qc?.frame?.artifacts;
+                          const videoAggregates = row.generation.qc?.video?.aggregates as Record<string, unknown> | undefined;
+                          const videoArtifacts = row.generation.qc?.video?.artifacts;
+                          const timelineGraphUrl = videoArtifacts?.timelineGraphUrl as string | undefined;
+                          const timelineCsvUrl = videoArtifacts?.timelineCsvUrl as string | undefined;
+                          const diffVideoUrl = videoArtifacts?.diffVideoUrl as string | undefined;
+                          const boundaryOverlayUrl =
+                            (frameArtifacts?.boundaryOverlayUrl as string | undefined) ??
+                            (frameArtifacts?.binaryChangeUrl as string | undefined);
+                          const heatmapOverlayUrl =
+                            (frameArtifacts?.overlayUrl as string | undefined) ?? (frameArtifacts?.heatmapUrl as string | undefined);
+                          const promptText = row.generation.luma.prompt?.trim() || "No prompt supplied";
+                          const hasMask = Boolean(row.maskUrl);
+                          const frameChangePct = asNumber(frameMetrics?.changedPctTotal);
+                          const frameOutsidePct = asNumber(frameMetrics?.outsideLeakagePct);
+                          const frameBoundaryPct = asNumber(frameMetrics?.boundarySpillPct);
+                          const videoChangeMean = asNumber(videoAggregates?.changedPctTotalMean);
+                          const videoOutsideMean = asNumber(videoAggregates?.outsideLeakagePctMean);
+                          const ssimMean = asNumber(videoAggregates?.ssimMean);
+                          const psnrMean = asNumber(videoAggregates?.psnrMean);
+                          const vmafMean = asNumber((videoAggregates?.vmaf as Record<string, unknown> | undefined)?.mean);
+                          const qcStatus = row.generation.qc?.status ?? "not_run";
+                          const durationText = row.segment ? `${row.segment.durationFrames}f / ${row.segment.durationSec.toFixed(2)}s` : "n/a";
 
-              <section className="space-y-2 rounded-2xl border border-ink/10 bg-card p-4">
-                <h3 className="text-lg font-semibold">Kling Start/End Report</h3>
-                {reportRows.kling.length === 0 ? (
-                  <p className="text-sm text-ink/60">No Kling generations yet.</p>
-                ) : (
-                  <div className="overflow-x-auto">
-                    <table className="min-w-full table-fixed">
-                      <thead>
-                        <tr className="border-b border-ink/10 text-left text-sm">
-                          <th className="w-1/4 px-2 py-2">Original Start</th>
-                          <th className="w-1/4 px-2 py-2">Edited Start</th>
-                          <th className="w-1/4 px-2 py-2">End Frame</th>
-                          <th className="w-1/4 px-2 py-2">Generated Video</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {reportRows.kling.map((row) => (
-                          <tr key={row.generation.genId} className="border-b border-ink/10 align-top">
-                            <td className="px-2 py-3">
-                              {row.originalUrl ? (
-                                <img src={row.originalUrl} alt="Original start frame" className="w-full rounded border border-ink/10 bg-bg object-contain" />
-                              ) : (
-                                <div className="rounded border border-dashed border-ink/20 p-6 text-sm text-ink/50">No frame</div>
-                              )}
-                              <p className="mt-2 text-xs text-ink/70">{describeFrame(row.startFrame)}</p>
-                            </td>
-                            <td className="px-2 py-3">
-                              {row.editedUrl ? (
-                                <img src={row.editedUrl} alt="Edited start frame" className="w-full rounded border border-ink/10 bg-bg object-contain" />
-                              ) : (
-                                <div className="rounded border border-dashed border-ink/20 p-6 text-sm text-ink/50">No edited start frame</div>
-                              )}
-                              <p className="mt-2 text-xs text-ink/70">{describeImageEditSettings(row.startVariant)}</p>
-                            </td>
-                            <td className="px-2 py-3">
-                              {row.endFrameUrl ? (
-                                <img src={row.endFrameUrl} alt="End frame" className="w-full rounded border border-ink/10 bg-bg object-contain" />
-                              ) : (
-                                <div className="rounded border border-dashed border-ink/20 p-6 text-sm text-ink/50">No end frame</div>
-                              )}
-                              <p className="mt-2 text-xs text-ink/70">{describeFrame(row.endFrame)}</p>
-                              <p className="text-[11px] text-ink/50">{row.endVariant ? describeImageEditSettings(row.endVariant) : "Using original end frame"}</p>
-                            </td>
-                            <td className="px-2 py-3">
-                              {row.generatedVideoUrl ? (
-                                <video src={row.generatedVideoUrl} controls className="w-full rounded border border-ink/10 bg-bg object-contain" />
-                              ) : (
-                                <div className="rounded border border-dashed border-ink/20 p-6 text-sm text-ink/50">No generated video</div>
-                              )}
-                              <p className="mt-2 text-xs text-ink/70">{describeVideoGenerationSettings(row.generation)}</p>
-                              {row.generation.qc?.status === "complete" ? (
-                                <div className="mt-2 space-y-1 rounded border border-ink/10 bg-bg p-2 text-[11px] text-ink/70">
-                                  <p>
-                                    Video change mean:{" "}
-                                    {formatPct(
-                                      (row.generation.qc.video?.aggregates as Record<string, unknown> | undefined)?.changedPctTotalMean,
-                                    )}{" "}
-                                    · outside mean:{" "}
-                                    {formatPct(
-                                      (row.generation.qc.video?.aggregates as Record<string, unknown> | undefined)?.outsideLeakagePctMean,
-                                    )}
+                          const baseRow = (
+                            <tr key={`${row.generation.genId}-base`} className="border-b border-ink/10 align-top">
+                              <td className="px-2 py-3">
+                                {row.originalUrl ? (
+                                  <img src={row.originalUrl} alt="Original frame" className="w-full rounded border border-ink/10 bg-bg object-contain" />
+                                ) : (
+                                  <div className="rounded border border-dashed border-ink/20 p-6 text-sm text-ink/50">No frame</div>
+                                )}
+                                <p className="mt-2 text-xs text-ink/70">{describeFrame(row.startFrame)}</p>
+                                <p className="text-[11px] text-ink/50">{row.segment ? `${row.segment.segmentId} · ${describeSegment(row.segment)}` : row.generation.segmentId}</p>
+                              </td>
+                              <td className="px-2 py-3">
+                                {hasMask ? (
+                                  <img src={row.maskUrl as string} alt="Patch mask" className="mx-auto w-3/4 rounded border border-ink/10 bg-bg object-contain" />
+                                ) : (
+                                  <div className="mx-auto w-3/4 rounded border border-dashed border-ink/20 p-3 text-center text-xs text-ink/50">No mask used</div>
+                                )}
+                                <p className={`mt-2 text-sm font-medium ${hasMask ? "text-ink/90" : "text-ink"}`}>{promptText}</p>
+                                <p className="mt-1 text-[11px] text-ink/60">
+                                  {row.startVariant?.patchMeta ? `patch feather ${(row.startVariant.patchMeta.featherPx as number | undefined) ?? 0}px` : "No patch metadata"}
+                                </p>
+                              </td>
+                              <td className="px-2 py-3">
+                                {row.editedUrl ? (
+                                  <img src={row.editedUrl} alt="Edited start frame" className="w-full rounded border border-ink/10 bg-bg object-contain" />
+                                ) : (
+                                  <div className="rounded border border-dashed border-ink/20 p-6 text-sm text-ink/50">No edited frame</div>
+                                )}
+                                <p className="mt-2 text-xs text-ink/70">{describeImageEditSettings(row.startVariant)}</p>
+                                <p className="text-[11px] text-ink/50">{row.startVariant ? formatCompactTimestamp(row.startVariant.createdAt) : "n/a"}</p>
+                              </td>
+                              <td className="px-2 py-3">
+                                {row.endFrameUrl ? (
+                                  <img src={row.endFrameUrl} alt="End frame" className="w-full rounded border border-ink/10 bg-bg object-contain" />
+                                ) : (
+                                  <div className="rounded border border-dashed border-ink/20 p-6 text-sm text-ink/50">No end frame</div>
+                                )}
+                                <p className="mt-2 text-xs text-ink/70">{describeFrame(row.endFrame)}</p>
+                                <p className="text-[11px] text-ink/50">{durationText}</p>
+                              </td>
+                              <td className="px-2 py-3">
+                                {row.generatedVideoUrl ? (
+                                  <video src={row.generatedVideoUrl} controls className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain" />
+                                ) : (
+                                  <div className="rounded border border-dashed border-ink/20 p-6 text-sm text-ink/50">No generated video</div>
+                                )}
+                                <p className="mt-2 text-xs text-ink/70">{describeVideoGenerationSettings(row.generation)}</p>
+                                <p className="text-[11px] text-ink/50">{truncateIdentifier(row.generation.genId, 16)} · {formatCompactTimestamp(row.generation.createdAt)}</p>
+                              </td>
+                            </tr>
+                          );
+
+                          if (!row.generatedVideoUrl) {
+                            return [baseRow];
+                          }
+
+                          const qcRow = (
+                            <tr key={`${row.generation.genId}-qc`} className="border-b border-ink/10 bg-bg/40 align-top">
+                              <td className="px-2 py-3">
+                                {qcStatus === "complete" ? (
+                                  <div className="space-y-1 rounded border border-ink/10 bg-white p-2 text-[11px] text-ink/70">
+                                    <p className="font-semibold text-ink/90">Frame Analysis (Original vs Edited)</p>
+                                    <p>Changed: {frameChangePct !== null ? `${frameChangePct.toFixed(2)}%` : "n/a"}</p>
+                                    <p>Outside mask leak: {frameOutsidePct !== null ? `${frameOutsidePct.toFixed(2)}%` : "n/a"}</p>
+                                    <p>Boundary spill: {frameBoundaryPct !== null ? `${frameBoundaryPct.toFixed(2)}%` : "n/a"}</p>
+                                    <p className="pt-1 font-semibold text-ink/90">Video Analysis (Original vs Generated)</p>
+                                    <p>Changed mean: {videoChangeMean !== null ? `${videoChangeMean.toFixed(2)}%` : "n/a"}</p>
+                                    <p>Outside mean: {videoOutsideMean !== null ? `${videoOutsideMean.toFixed(2)}%` : "n/a"}</p>
+                                    <p>SSIM: {ssimMean !== null ? ssimMean.toFixed(4) : "n/a"} · PSNR: {psnrMean !== null ? `${psnrMean.toFixed(2)} dB` : "n/a"}</p>
+                                    <p>VMAF mean: {vmafMean !== null ? vmafMean.toFixed(2) : "n/a"}</p>
+                                  </div>
+                                ) : (
+                                  <p className={`text-xs ${qcStatus === "failed" ? "text-red-600" : "text-ink/60"}`}>
+                                    {qcStatus === "failed"
+                                      ? `QC failed: ${row.generation.qc?.error ?? "unknown error"}`
+                                      : qcStatus === "running"
+                                        ? "QC analysis running..."
+                                        : "QC analysis not run yet."}
                                   </p>
-                                  {(row.generation.qc.video?.artifacts?.diffVideoUrl as string | undefined) ? (
-                                    <a
-                                      href={row.generation.qc?.video?.artifacts?.diffVideoUrl as string}
-                                      target="_blank"
-                                      rel="noreferrer"
-                                      className="underline"
-                                    >
-                                      Diff video map
-                                    </a>
-                                  ) : null}
-                                </div>
-                              ) : null}
-                            </td>
-                          </tr>
-                        ))}
+                                )}
+                              </td>
+                              <td className="px-2 py-3">
+                                {boundaryOverlayUrl ? (
+                                  <img
+                                    src={boundaryOverlayUrl}
+                                    alt="Mask boundary and binary change overlay"
+                                    className="w-full rounded border border-ink/10 bg-bg object-contain"
+                                  />
+                                ) : (
+                                  <div className="rounded border border-dashed border-ink/20 p-6 text-sm text-ink/50">No boundary overlay</div>
+                                )}
+                              </td>
+                              <td className="px-2 py-3">
+                                {heatmapOverlayUrl ? (
+                                  <img src={heatmapOverlayUrl} alt="Frame diff heatmap overlay" className="w-full rounded border border-ink/10 bg-bg object-contain" />
+                                ) : (
+                                  <div className="rounded border border-dashed border-ink/20 p-6 text-sm text-ink/50">No heatmap overlay</div>
+                                )}
+                              </td>
+                              <td className="px-2 py-3">
+                                {timelineGraphUrl ? (
+                                  <button
+                                    type="button"
+                                    className="block w-full"
+                                    onClick={() => setReportGraphModal({ url: timelineGraphUrl, label: `QC timeline: ${row.generation.genId}` })}
+                                  >
+                                    <img src={timelineGraphUrl} alt="QC timeline graph" className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain" />
+                                  </button>
+                                ) : (
+                                  <div className="rounded border border-dashed border-ink/20 p-6 text-sm text-ink/50">No timeline graph</div>
+                                )}
+                                {timelineCsvUrl ? (
+                                  <a href={timelineCsvUrl} target="_blank" rel="noreferrer" className="mt-2 inline-block text-xs text-ink/70 underline">
+                                    Download timeline CSV
+                                  </a>
+                                ) : null}
+                              </td>
+                              <td className="px-2 py-3">
+                                {diffVideoUrl ? (
+                                  <video src={diffVideoUrl} controls className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain" />
+                                ) : (
+                                  <div className="rounded border border-dashed border-ink/20 p-6 text-sm text-ink/50">No diff video map</div>
+                                )}
+                              </td>
+                            </tr>
+                          );
+
+                          return [baseRow, qcRow];
+                        })}
                       </tbody>
                     </table>
                   </div>
@@ -1970,6 +1913,16 @@ export default function App() {
             </>
           ) : null}
         </div>
+        {reportGraphModal ? (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4" onClick={() => setReportGraphModal(null)}>
+            <div className="relative w-[92vw] max-w-6xl rounded-lg border border-ink/20 bg-white p-3" onClick={(event) => event.stopPropagation()}>
+              <button className="absolute right-2 top-2 rounded bg-black/70 px-3 py-1 text-sm text-white" onClick={() => setReportGraphModal(null)}>
+                x
+              </button>
+              <img src={reportGraphModal.url} alt={reportGraphModal.label} className="w-full rounded object-contain" />
+            </div>
+          </div>
+        ) : null}
       </main>
     );
   }

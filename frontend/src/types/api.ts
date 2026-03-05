@@ -120,6 +120,8 @@ export type SegmentGeneration = {
         overlayUrl?: string;
         binaryChangeKey?: string;
         binaryChangeUrl?: string;
+        boundaryOverlayKey?: string;
+        boundaryOverlayUrl?: string;
         [key: string]: unknown;
       };
     };
@@ -142,6 +144,8 @@ export type SegmentGeneration = {
         diffVideoUrl?: string;
         timelineCsvKey?: string;
         timelineCsvUrl?: string;
+        timelineGraphKey?: string;
+        timelineGraphUrl?: string;
         reportJsonKey?: string;
         reportJsonUrl?: string;
         [key: string]: unknown;

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import boto3
-from PIL import Image, ImageChops, ImageFilter, ImageOps, ImageStat
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageOps, ImageStat
 from aws_lambda_powertools import Logger
 
 from src.core.assets import AssetPaths, AssetStore
@@ -1322,7 +1322,8 @@ def _create_overlay_artifacts(
     heatmap = ImageOps.colorize(diff_gray.convert("L"), black="#000000", mid="#ff9900", white="#ff0000")
     overlay_base = edited_image.convert("RGBA")
     heat_rgba = heatmap.convert("RGBA")
-    heat_rgba.putalpha(120)
+    heat_alpha = diff_gray.convert("L").point(lambda value: min(190, int(value * 1.7)))
+    heat_rgba.putalpha(heat_alpha)
     overlay_base.alpha_composite(heat_rgba)
 
     if mask_bin is not None:
@@ -1342,6 +1343,100 @@ def _create_overlay_artifacts(
     binary_bytes = BytesIO()
     binary_change.convert("L").save(binary_bytes, format="PNG")
     return heat_bytes.getvalue(), overlay_bytes.getvalue(), binary_bytes.getvalue()
+
+
+def _create_mask_boundary_overlay(
+    *,
+    original_image: Image.Image,
+    binary_change: Image.Image,
+    mask_bin: Image.Image | None,
+) -> bytes:
+    base = original_image.convert("RGBA")
+    change_mask = binary_change.convert("L").point(lambda value: 255 if value >= 128 else 0)
+    change_layer = Image.new("RGBA", base.size, (255, 72, 40, 168))
+    change_overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    change_overlay.paste(change_layer, (0, 0), change_mask)
+    base = Image.alpha_composite(base, change_overlay)
+
+    if mask_bin is not None:
+        boundary = ImageChops.subtract(
+            mask_bin.filter(ImageFilter.MaxFilter(5)),
+            mask_bin.filter(ImageFilter.MinFilter(5)),
+        ).point(lambda value: 255 if value >= 128 else 0)
+        boundary_layer = Image.new("RGBA", base.size, (26, 188, 156, 210))
+        overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+        overlay.paste(boundary_layer, (0, 0), boundary)
+        base = Image.alpha_composite(base, overlay)
+
+    output = BytesIO()
+    base.save(output, format="PNG")
+    return output.getvalue()
+
+
+def _build_timeline_graph_png(rows: list[dict[str, Any]]) -> bytes:
+    width, height = 1280, 720
+    chart = Image.new("RGB", (width, height), (244, 247, 249))
+    draw = ImageDraw.Draw(chart)
+    left, top, right, bottom = 84, 36, width - 40, height - 72
+    draw.rectangle((left, top, right, bottom), fill=(255, 255, 255), outline=(206, 214, 222), width=2)
+
+    if not rows:
+        draw.text((left + 24, top + 20), "No QC timeline data", fill=(90, 105, 120))
+        output = BytesIO()
+        chart.save(output, format="PNG")
+        return output.getvalue()
+
+    time_values = [float(item.get("timeSec") or 0.0) for item in rows]
+    changed_values = [max(0.0, float(item.get("changedPctTotal") or 0.0)) for item in rows]
+    outside_values = [
+        max(0.0, float(item.get("outsideLeakagePct") or 0.0))
+        for item in rows
+        if item.get("outsideLeakagePct") is not None
+    ]
+    max_time = max(0.1, max(time_values))
+    y_max = max(1.0, max(changed_values), max(outside_values) if outside_values else 0.0, QC_OUTSIDE_LEAK_BUDGET_PCT)
+
+    def _point(time_sec: float, value: float) -> tuple[float, float]:
+        x = left + ((time_sec / max_time) * (right - left))
+        y = bottom - ((value / y_max) * (bottom - top))
+        return x, y
+
+    for tick in range(6):
+        y = top + ((bottom - top) * tick / 5.0)
+        value = y_max * (1.0 - tick / 5.0)
+        draw.line((left, y, right, y), fill=(232, 236, 241), width=1)
+        draw.text((18, y - 8), f"{value:.1f}%", fill=(96, 110, 124))
+
+    for tick in range(6):
+        x = left + ((right - left) * tick / 5.0)
+        value = max_time * tick / 5.0
+        draw.line((x, top, x, bottom), fill=(236, 240, 244), width=1)
+        draw.text((x - 12, bottom + 10), f"{value:.1f}s", fill=(96, 110, 124))
+
+    budget_y = _point(0.0, QC_OUTSIDE_LEAK_BUDGET_PCT)[1]
+    step = 16
+    for start_x in range(left, right, step):
+        draw.line((start_x, budget_y, min(right, start_x + (step // 2)), budget_y), fill=(210, 74, 74), width=2)
+
+    changed_points = [_point(float(item.get("timeSec") or 0.0), max(0.0, float(item.get("changedPctTotal") or 0.0))) for item in rows]
+    if len(changed_points) >= 2:
+        draw.line(changed_points, fill=(239, 133, 49), width=4, joint="curve")
+
+    outside_points = [
+        _point(float(item.get("timeSec") or 0.0), max(0.0, float(item.get("outsideLeakagePct") or 0.0)))
+        for item in rows
+        if item.get("outsideLeakagePct") is not None
+    ]
+    if len(outside_points) >= 2:
+        draw.line(outside_points, fill=(40, 122, 214), width=3, joint="curve")
+
+    draw.text((left + 14, top + 10), "Changed %", fill=(239, 133, 49))
+    draw.text((left + 130, top + 10), "Outside leak %", fill=(40, 122, 214))
+    draw.text((left + 300, top + 10), "Leak budget", fill=(210, 74, 74))
+
+    output = BytesIO()
+    chart.save(output, format="PNG")
+    return output.getvalue()
 
 
 def _parse_metric_log(log_path: Path, pattern: re.Pattern[str], group_name: str) -> list[float]:
@@ -1542,12 +1637,19 @@ def _handle_qc_analysis(
                     binary_change=frame_binary,
                     mask_bin=frame_mask_bin,
                 )
+                frame_boundary_overlay_bytes = _create_mask_boundary_overlay(
+                    original_image=original_frame_image,
+                    binary_change=frame_binary,
+                    mask_bin=frame_mask_bin,
+                )
                 frame_heatmap_key = paths.qc_artifact(segment["segmentId"], gen_id, "frame_heatmap", ".png")
                 frame_overlay_key = paths.qc_artifact(segment["segmentId"], gen_id, "frame_overlay", ".png")
                 frame_binary_key = paths.qc_artifact(segment["segmentId"], gen_id, "frame_binary", ".png")
+                frame_boundary_overlay_key = paths.qc_artifact(segment["segmentId"], gen_id, "frame_boundary_overlay", ".png")
                 asset_store.put_bytes(frame_heatmap_key, frame_heatmap_bytes, content_type="image/png")
                 asset_store.put_bytes(frame_overlay_key, frame_overlay_bytes, content_type="image/png")
                 asset_store.put_bytes(frame_binary_key, frame_binary_bytes, content_type="image/png")
+                asset_store.put_bytes(frame_boundary_overlay_key, frame_boundary_overlay_bytes, content_type="image/png")
 
                 original_segment_key = _ensure_segment_clip(
                     s3=s3,
@@ -1761,8 +1863,10 @@ def _handle_qc_analysis(
                     for item in timeline_rows
                 )
                 timeline_csv_key = paths.qc_artifact(segment["segmentId"], gen_id, "timeline", ".csv")
+                timeline_graph_key = paths.qc_artifact(segment["segmentId"], gen_id, "timeline_graph", ".png")
                 report_json_key = paths.qc_artifact(segment["segmentId"], gen_id, "report", ".json")
                 asset_store.put_bytes(timeline_csv_key, timeline_csv.encode("utf-8"), content_type="text/csv")
+                asset_store.put_bytes(timeline_graph_key, _build_timeline_graph_png(timeline_rows), content_type="image/png")
 
                 video_aggregates = {
                     "sampledFrameCount": paired_count,
@@ -1807,6 +1911,7 @@ def _handle_qc_analysis(
                             "heatmapKey": frame_heatmap_key,
                             "overlayKey": frame_overlay_key,
                             "binaryChangeKey": frame_binary_key,
+                            "boundaryOverlayKey": frame_boundary_overlay_key,
                         },
                     },
                     "video": {
@@ -1815,6 +1920,7 @@ def _handle_qc_analysis(
                         "artifacts": {
                             "diffVideoKey": diff_video_key,
                             "timelineCsvKey": timeline_csv_key,
+                            "timelineGraphKey": timeline_graph_key,
                         },
                     },
                 }
