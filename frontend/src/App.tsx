@@ -145,32 +145,19 @@ function FrameSelectCard({
     <div className="rounded-lg border border-ink/10 bg-white p-3">
       <p className="mb-2 text-sm font-semibold">{title}</p>
       {frame?.imageUrl ? (
-        <div className="relative">
+        <div>
           <img src={frame.imageUrl} alt={`${title} preview`} className="max-h-28 w-full rounded-md bg-bg object-contain" />
-          <button
-            onClick={onClear}
-            className="absolute right-2 top-2 rounded bg-black/70 p-1 text-white"
-            aria-label={`Remove ${title.toLowerCase()}`}
-            title="Remove selected frame"
-          >
-            <svg viewBox="0 0 24 24" className="h-4 w-4 fill-current" aria-hidden="true">
-              <path d="M9 3h6l1 2h4v2H4V5h4l1-2Zm1 6h2v9h-2V9Zm4 0h2v9h-2V9ZM7 9h2v9H7V9Z" />
-            </svg>
-          </button>
           <div className="mt-2 flex items-center justify-between gap-2">
             <p className="text-xs text-ink/70">
               frame {frame.frameIndex} ({frame.timecode})
             </p>
-            <a
-              href={frame.imageUrl}
-              target="_blank"
-              rel="noreferrer"
-              download
+            <button
+              onClick={onClear}
               className="rounded border border-ink/20 bg-white px-2 py-1 text-xs"
-              title="Download full quality frame"
+              title="Clear selected frame"
             >
-              Download
-            </a>
+              Clear Frame selection
+            </button>
           </div>
         </div>
       ) : (
@@ -1508,7 +1495,7 @@ export default function App() {
       return {
         title: "Runway Gen-4.5",
         lines: [
-          "Uses only the selected first frame as the initial frame. It does not use source segment motion.",
+          "Uses only the selected start frame as the initial frame. It does not use source segment motion.",
           "Best prompt style: describe the motion and evolution from frame one while preserving composition.",
           "Avoid conflicting scene changes in one prompt; short and specific prompts usually hold frame identity better.",
         ],
@@ -1517,7 +1504,7 @@ export default function App() {
     return {
       title: modelName === "ray-flash-2" ? "Luma Ray Flash 2" : "Luma Ray 2",
       lines: [
-        "Uses source segment video + selected first frame. The first frame anchors look/style while segment drives motion.",
+        "Uses source segment video + selected start frame. The start frame anchors look/style while segment drives motion.",
         "Mode dropdown (Luma only): adhere = closest to source, flex = moderate change, reimagine = strongest change.",
         `Current mode: ${modeValue}. For stronger style shifts raise mode; for shot continuity lower mode and keep prompts concise.`,
       ],
@@ -2046,27 +2033,32 @@ export default function App() {
             {tab === "timeline" && (
               <div className="space-y-4">
                 <h3 className="text-lg font-semibold">Pick Frame & Segment Selection</h3>
-                {timelinePlaybackUrl ? (
-                  <div className="mx-auto w-fit max-w-full">
-                    <video
-                      ref={timelineVideoRef}
-                      className="max-h-[360px] max-w-full rounded-lg border border-ink/10"
-                      src={timelinePlaybackUrl}
-                      controls
-                      onTimeUpdate={(e) => {
-                        const totalFrames = frameCount(task);
-                        if (!totalFrames) return;
-                        const fps = fpsValue(task);
-                        const nextFrame = Math.max(0, Math.min(totalFrames - 1, Math.round(e.currentTarget.currentTime * fps)));
-                        if (nextFrame !== currentFrameIndex) {
-                          setCurrentFrameIndex(nextFrame);
-                        }
-                      }}
-                    />
+                <div className="grid gap-3 lg:grid-cols-[240px_1fr]">
+                  <div className="rounded-lg border border-ink/15 bg-bg p-3 text-xs text-ink/70">
+                    Select the segment of video you want AI edit or add effects by selecting a start and end frame. Play and pause the video or use the slide to pick the frames. Moving to the next step saves the segment.
                   </div>
-                ) : (
-                  <p className="text-sm text-ink/70">Ingest must complete before timeline is available.</p>
-                )}
+                  {timelinePlaybackUrl ? (
+                    <div className="w-fit max-w-full">
+                      <video
+                        ref={timelineVideoRef}
+                        className="max-h-[360px] max-w-full rounded-lg border border-ink/10"
+                        src={timelinePlaybackUrl}
+                        controls
+                        onTimeUpdate={(e) => {
+                          const totalFrames = frameCount(task);
+                          if (!totalFrames) return;
+                          const fps = fpsValue(task);
+                          const nextFrame = Math.max(0, Math.min(totalFrames - 1, Math.round(e.currentTarget.currentTime * fps)));
+                          if (nextFrame !== currentFrameIndex) {
+                            setCurrentFrameIndex(nextFrame);
+                          }
+                        }}
+                      />
+                    </div>
+                  ) : (
+                    <p className="text-sm text-ink/70">Ingest must complete before timeline is available.</p>
+                  )}
+                </div>
                 <div>
                   <label className="mb-1 block text-sm font-medium">Current frame: {currentFrameIndex}</label>
                   <input
@@ -2081,7 +2073,7 @@ export default function App() {
 
                 <div className="grid grid-cols-[1fr_auto_1fr] items-stretch gap-2">
                   <FrameSelectCard
-                    title="First Frame"
+                    title="Start Frame"
                     frame={firstFrame}
                     onSelect={() => captureCurrentFrameFor("first")}
                     onClear={() => setFirstFrameId(null)}
@@ -2103,7 +2095,7 @@ export default function App() {
                   </div>
 
                   <FrameSelectCard
-                    title="Last Frame"
+                    title="End Frame"
                     frame={lastFrame}
                     onSelect={() => captureCurrentFrameFor("last")}
                     onClear={() => setLastFrameId(null)}
@@ -2158,19 +2150,19 @@ export default function App() {
                     onClick={() => setEditFrameTab("first")}
                     className={`rounded-md px-3 py-2 text-sm ${editFrameTab === "first" ? "bg-ink text-white" : "bg-ink/10"}`}
                   >
-                    First Frame
+                    Start Frame
                   </button>
                   <button
                     onClick={() => setEditFrameTab("last")}
                     className={`rounded-md px-3 py-2 text-sm ${editFrameTab === "last" ? "bg-ink text-white" : "bg-ink/10"}`}
                   >
-                    Last Frame (Optional)
+                    End Frame (Optional)
                   </button>
                 </div>
 
                 <div className="space-y-3 rounded-lg border border-ink/10 bg-white p-3">
                   <p className="text-sm text-ink/70">
-                    Working on: {editFrameTab === "first" ? "First Frame" : "Last Frame"}
+                    Working on: {editFrameTab === "first" ? "Start Frame" : "End Frame"}
                     {activeEditFrame ? ` (frame ${activeEditFrame.frameIndex}, ${activeEditFrame.timecode})` : ""}
                   </p>
 
