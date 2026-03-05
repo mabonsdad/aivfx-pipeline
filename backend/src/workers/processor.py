@@ -30,12 +30,13 @@ from src.core.ffmpeg import (
 from src.core.ids import new_id, prompt_hash
 from src.core.secrets import load_secret
 from src.core.store import S3JsonStore, now_iso
-from src.integrations.gemini import generate_image_edit
+from src.integrations.gemini import generate_image_edit as generate_gemini_image_edit
 from src.integrations.kling import (
     create_start_end_generation as create_kling_start_end_generation,
     get_generation_response as get_kling_generation_response,
 )
 from src.integrations.luma import create_modify_generation, get_generation
+from src.integrations.openai_images import generate_image_edit as generate_openai_image_edit
 from src.integrations.runware import patch_edit_aceplusplus, patch_edit_flux_fill
 from src.integrations.runway import (
     create_ephemeral_upload,
@@ -592,18 +593,33 @@ def _handle_full_edit(
     frame = task["frames"][frame_id]
     source_key = payload.get("sourceKey") or frame["captureKey"]
     secrets = load_secret(settings.secrets_arn)
-    gemini_key = secrets["GEMINI_API_KEY"]
+    model_name = payload["model"]
+    provider_name = "gemini"
 
     _job_progress(job, store, 10, "running", "Loading source frame")
     src_bytes = asset_store.read_bytes(source_key)
     src_image = ImageOps.exif_transpose(Image.open(BytesIO(src_bytes))).convert("RGBA")
-    _job_progress(job, store, 30, "running", "Calling Gemini edit")
-    out_bytes = generate_image_edit(
-        api_key=gemini_key,
-        model=payload["model"],
-        prompt=payload["prompt"],
-        input_image_bytes=src_bytes,
-    )
+    if model_name == "chatgpt":
+        openai_key = secrets.get("OPENAI_API_KEY")
+        if not openai_key:
+            raise RuntimeError("OPENAI_API_KEY is required for ChatGPT image edits")
+        provider_name = "openai"
+        _job_progress(job, store, 30, "running", "Calling OpenAI edit")
+        out_bytes = generate_openai_image_edit(
+            api_key=openai_key,
+            model="chatgpt",
+            prompt=payload["prompt"],
+            input_image_bytes=src_bytes,
+        )
+    else:
+        gemini_key = secrets["GEMINI_API_KEY"]
+        _job_progress(job, store, 30, "running", "Calling Gemini edit")
+        out_bytes = generate_gemini_image_edit(
+            api_key=gemini_key,
+            model=model_name,
+            prompt=payload["prompt"],
+            input_image_bytes=src_bytes,
+        )
     normalized_bytes = _normalize_full_variant(source_bytes=src_bytes, variant_bytes=out_bytes)
     normalized_image = ImageOps.exif_transpose(Image.open(BytesIO(normalized_bytes))).convert("RGBA")
 
@@ -628,6 +644,7 @@ def _handle_full_edit(
             "outputResolution": {"width": normalized_image.width, "height": normalized_image.height},
         },
     }
+    variant["generationSettings"]["provider"] = provider_name
     frame.setdefault("variants", []).append(variant)
     if not frame.get("selectedVariantId"):
         frame["selectedVariantId"] = variant_id
@@ -652,7 +669,6 @@ def _handle_patch_edit(
     frame = task["frames"][frame_id]
 
     secrets = load_secret(settings.secrets_arn)
-    gemini_key = secrets["GEMINI_API_KEY"]
 
     source_key = payload.get("sourceKey") or frame["captureKey"]
     source_variant_id = payload.get("sourceVariantId")
@@ -737,14 +753,29 @@ def _handle_patch_edit(
             refined_mask_io = BytesIO()
             refined_mask_image.save(refined_mask_io, format="PNG")
             refined_mask_bytes = refined_mask_io.getvalue()
-        _job_progress(job, store, 30, "running", "Calling Gemini patch edit")
-        edited_patch = generate_image_edit(
-            api_key=gemini_key,
-            model="nano_banana_pro",
-            prompt=payload["prompt"],
-            input_image_bytes=patch_bytes,
-            mask_image_bytes=refined_mask_bytes,
-        )
+        if model_name == "chatgpt":
+            openai_key = secrets.get("OPENAI_API_KEY")
+            if not openai_key:
+                raise RuntimeError("OPENAI_API_KEY is required for ChatGPT patch edits")
+            provider_name = "openai"
+            _job_progress(job, store, 30, "running", "Calling OpenAI patch edit")
+            edited_patch = generate_openai_image_edit(
+                api_key=openai_key,
+                model="chatgpt",
+                prompt=payload["prompt"],
+                input_image_bytes=patch_bytes,
+                mask_image_bytes=refined_mask_bytes,
+            )
+        else:
+            gemini_key = secrets["GEMINI_API_KEY"]
+            _job_progress(job, store, 30, "running", "Calling Gemini patch edit")
+            edited_patch = generate_gemini_image_edit(
+                api_key=gemini_key,
+                model="nano_banana_pro",
+                prompt=payload["prompt"],
+                input_image_bytes=patch_bytes,
+                mask_image_bytes=refined_mask_bytes,
+            )
 
     variant_id = new_id("var")
     paths = _asset_paths(task)

@@ -10,7 +10,7 @@ export type TaskSummary = {
 export type FrameVariant = {
   variantId: string;
   type: "full" | "patch";
-  model: "nano_banana" | "nano_banana_pro" | "runware_flux_fill" | "runware_ace_pp";
+  model: "nano_banana" | "nano_banana_pro" | "chatgpt" | "runware_flux_fill" | "runware_ace_pp";
   promptHash: string;
   createdAt: string;
   outputKey: string;

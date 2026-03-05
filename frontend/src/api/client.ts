@@ -66,7 +66,7 @@ export const apiClient = {
   fullEdit: (
     taskId: string,
     frameId: string,
-    payload: { model: "nano_banana" | "nano_banana_pro"; prompt: string; sourceVariantId?: string },
+    payload: { model: "nano_banana" | "nano_banana_pro" | "chatgpt"; prompt: string; sourceVariantId?: string },
   ) =>
     api<{ jobId: string }>(`/tasks/${taskId}/frames/${frameId}/edits/full`, {
       method: "POST",
@@ -94,7 +94,7 @@ export const apiClient = {
     taskId: string,
     frameId: string,
     payload: {
-      model: "nano_banana_pro" | "runware_flux_fill" | "runware_ace_pp";
+      model: "nano_banana_pro" | "chatgpt" | "runware_flux_fill" | "runware_ace_pp";
       prompt: string;
       patchKey: string;
       maskKey?: string;

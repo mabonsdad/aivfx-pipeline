@@ -31,7 +31,7 @@ class FrameCaptureRequest(BaseModel):
 
 
 class FullEditRequest(BaseModel):
-    model: Literal["nano_banana", "nano_banana_pro"]
+    model: Literal["nano_banana", "nano_banana_pro", "chatgpt"]
     prompt: str = Field(min_length=1)
     sourceVariantId: str | None = None
 
@@ -52,7 +52,7 @@ class PatchInitRequest(BaseModel):
 
 
 class PatchSubmitRequest(BaseModel):
-    model: Literal["nano_banana_pro", "runware_flux_fill", "runware_ace_pp"]
+    model: Literal["nano_banana_pro", "chatgpt", "runware_flux_fill", "runware_ace_pp"]
     prompt: str = Field(min_length=1)
     patchKey: str
     maskKey: str | None = None
@@ -121,7 +121,7 @@ class AssetDeleteRequest(BaseModel):
 class TaskFrameVariant(BaseModel):
     variantId: str
     type: Literal["full", "patch"]
-    model: Literal["nano_banana", "nano_banana_pro", "runware_flux_fill", "runware_ace_pp"]
+    model: Literal["nano_banana", "nano_banana_pro", "chatgpt", "runware_flux_fill", "runware_ace_pp"]
     promptHash: str
     createdAt: datetime
     outputKey: str

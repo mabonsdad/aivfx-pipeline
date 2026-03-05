@@ -127,6 +127,7 @@ Required at runtime:
 ```json
 {
   "GEMINI_API_KEY": "...",
+  "OPENAI_API_KEY": "...",
   "LUMA_API_KEY": "...",
   "RUNWAY_API_KEY": "...",
   "RUNWARE_API_KEY": "...",
@@ -136,6 +137,7 @@ Required at runtime:
 
 `RUNWARE_API_KEY` is required for current Kling 2.6 generation via Runware.
 `KLING_API_KEY` is only used as a legacy fallback.
+`OPENAI_API_KEY` is required only when using ChatGPT (`gpt-image-1`) for frame edits.
 
 ### Frontend env vars
 

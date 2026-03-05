@@ -28,7 +28,7 @@ type LibraryAsset = {
     | { assetType: "export"; exportId: string };
 };
 
-type PatchEngine = "nano_banana_pro" | "runware_flux_fill" | "runware_ace_pp";
+type PatchEngine = "nano_banana_pro" | "chatgpt" | "runware_flux_fill" | "runware_ace_pp";
 type PatchToolMode = "brush_add" | "brush_erase" | "lasso_add" | "lasso_erase";
 
 type MaskPoint = {
@@ -331,7 +331,7 @@ export default function App() {
   const [videoAssetsVisible, setVideoAssetsVisible] = useState(6);
   const [jobsVisible, setJobsVisible] = useState(6);
   const [prompt, setPrompt] = useState("");
-  const [model, setModel] = useState<"nano_banana" | "nano_banana_pro">("nano_banana_pro");
+  const [model, setModel] = useState<"nano_banana" | "nano_banana_pro" | "chatgpt">("nano_banana_pro");
   const [patchPrompt, setPatchPrompt] = useState("");
   const [patchEngine, setPatchEngine] = useState<PatchEngine>("nano_banana_pro");
   const [runwareRepaintingScale, setRunwareRepaintingScale] = useState(0.7);
@@ -2159,11 +2159,12 @@ export default function App() {
                     <div className="flex flex-wrap items-center gap-2">
                       <select
                         value={model}
-                        onChange={(e) => setModel(e.target.value as "nano_banana" | "nano_banana_pro")}
+                        onChange={(e) => setModel(e.target.value as "nano_banana" | "nano_banana_pro" | "chatgpt")}
                         className="rounded-md border border-ink/20 px-2 py-2"
                       >
                         <option value="nano_banana">std</option>
                         <option value="nano_banana_pro">pro</option>
+                        <option value="chatgpt">chatgpt</option>
                       </select>
                       <button
                         className="rounded-md bg-accent px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-50"
@@ -2341,6 +2342,7 @@ export default function App() {
                               className="mt-1 block w-full rounded border border-ink/20 px-2 py-1 text-sm"
                             >
                               <option value="nano_banana_pro">Google Nano Banana Pro</option>
+                              <option value="chatgpt">OpenAI ChatGPT (gpt-image-1)</option>
                               <option value="runware_flux_fill">Runware FLUX Fill</option>
                               <option value="runware_ace_pp">Runware ACE++ + FLUX Fill</option>
                             </select>
