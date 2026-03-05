@@ -7,7 +7,7 @@ import requests
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 OPENAI_IMAGE_MODEL_MAP = {
-    "chatgpt": "gpt-image-1",
+    "chatgpt": "gpt-image-1.5",
 }
 
 
@@ -32,12 +32,11 @@ def _post(
     data: dict[str, str] = {
         "model": model_id,
         "prompt": prompt,
-        "response_format": "b64_json",
         "size": "auto",
         "quality": "auto",
     }
     files: list[tuple[str, tuple[str, bytes, str]]] = [
-        ("image", ("source.png", input_image_bytes, input_mime_type)),
+        ("image[]", ("source.png", input_image_bytes, input_mime_type)),
     ]
     if mask_image_bytes:
         files.append(("mask", ("mask.png", mask_image_bytes, "image/png")))
@@ -49,7 +48,9 @@ def _post(
         files=files,
         timeout=120,
     )
-    response.raise_for_status()
+    if response.status_code >= 400:
+        detail = response.text[:1000]
+        raise OpenAIImageError(f"OpenAI image edit failed ({response.status_code}): {detail}")
     return response.json()
 
 

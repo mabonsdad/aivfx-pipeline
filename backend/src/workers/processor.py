@@ -580,6 +580,19 @@ def _normalize_full_variant(*, source_bytes: bytes, variant_bytes: bytes) -> byt
     return out.getvalue()
 
 
+def _to_openai_alpha_mask(mask_bytes: bytes | None) -> bytes | None:
+    if not mask_bytes:
+        return None
+    # Our paint mask is white=edit, black=preserve. OpenAI expects transparent=edit.
+    mask_l = ImageOps.exif_transpose(Image.open(BytesIO(mask_bytes))).convert("L")
+    alpha = ImageOps.invert(mask_l)
+    rgba = Image.new("RGBA", mask_l.size, (0, 0, 0, 255))
+    rgba.putalpha(alpha)
+    out = BytesIO()
+    rgba.save(out, format="PNG")
+    return out.getvalue()
+
+
 def _handle_full_edit(
     *,
     job: dict[str, Any],
@@ -758,13 +771,14 @@ def _handle_patch_edit(
             if not openai_key:
                 raise RuntimeError("OPENAI_API_KEY is required for ChatGPT patch edits")
             provider_name = "openai"
+            openai_mask_bytes = _to_openai_alpha_mask(refined_mask_bytes)
             _job_progress(job, store, 30, "running", "Calling OpenAI patch edit")
             edited_patch = generate_openai_image_edit(
                 api_key=openai_key,
                 model="chatgpt",
                 prompt=payload["prompt"],
                 input_image_bytes=patch_bytes,
-                mask_image_bytes=refined_mask_bytes,
+                mask_image_bytes=openai_mask_bytes,
             )
         else:
             gemini_key = secrets["GEMINI_API_KEY"]
