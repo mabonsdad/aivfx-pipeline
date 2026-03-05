@@ -4,7 +4,7 @@ from uuid import uuid4
 from typing import Any
 
 import requests
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 
 class KlingError(RuntimeError):
@@ -22,14 +22,24 @@ def _headers(api_key: str) -> dict[str, str]:
     }
 
 
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=8), reraise=True)
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=8),
+    retry=retry_if_exception_type((requests.RequestException,)),
+    reraise=True,
+)
 def _request_json(
     payload: list[dict[str, Any]],
     *,
     api_key: str,
 ) -> dict[str, Any]:
     response = requests.post(RUNWARE_API_ENDPOINT, headers=_headers(api_key), json=payload, timeout=90)
-    response.raise_for_status()
+    if response.status_code >= 400:
+        try:
+            error_payload = response.json()
+        except Exception:
+            error_payload = {"raw": response.text[:2000]}
+        raise KlingError(f"Runware API error ({response.status_code}): {error_payload}")
     response_payload = response.json()
     if isinstance(response_payload, dict):
         errors = response_payload.get("errors")
@@ -45,8 +55,6 @@ def create_start_end_generation(
     end_image_url: str,
     duration_seconds: int,
     prompt: str | None,
-    width: int,
-    height: int,
 ) -> dict[str, Any]:
     task_uuid = str(uuid4())
     payload: list[dict[str, Any]] = [
@@ -57,14 +65,14 @@ def create_start_end_generation(
             "model": KLING_RUNWARE_MODEL,
             "positivePrompt": prompt or "Generate a coherent motion sequence between the start and end frames.",
             "duration": int(duration_seconds),
-            "width": int(width),
-            "height": int(height),
-            "frameImages": [
-                {"inputImage": start_image_url, "frame": "first"},
-                {"inputImage": end_image_url, "frame": "last"},
-            ],
             "numberResults": 1,
             "outputFormat": "mp4",
+            "inputs": {
+                "frameImages": [
+                    {"image": start_image_url, "frame": "first"},
+                    {"image": end_image_url, "frame": "last"},
+                ],
+            },
         }
     ]
     created = _request_json(payload, api_key=api_key)

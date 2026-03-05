@@ -1027,8 +1027,6 @@ def _handle_segment_generate(
             end_image_url=last_frame_url or first_frame_url,
             duration_seconds=kling_duration,
             prompt=payload.get("prompt"),
-            width=first_target_w,
-            height=first_target_h,
         )
         generation_id = created.get("taskUUID")
         if not isinstance(generation_id, str):
