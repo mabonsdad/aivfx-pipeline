@@ -1529,6 +1529,43 @@ export default function App() {
     setTab("report");
   }
 
+  async function ensureSegmentForSelectedFrames(): Promise<string | null> {
+    if (!task || !selectedRange) return null;
+    const existing = task.segments.find(
+      (segment) =>
+        segment.startFrame === selectedRange.startFrame &&
+        segment.endFrameExclusive === selectedRange.endFrameExclusive,
+    );
+    if (existing) {
+      setSelectedSegmentId(existing.segmentId);
+      return existing.segmentId;
+    }
+    const created = await createSegmentMutation.mutateAsync({
+      startFrameIndex: selectedRange.startFrame,
+      endFrameExclusive: selectedRange.endFrameExclusive,
+    });
+    setSelectedSegmentId(created.segmentId);
+    return created.segmentId;
+  }
+
+  async function handleTabChange(nextTab: TabId) {
+    if (nextTab === tab) return;
+    if (tab === "timeline" && nextTab !== "timeline" && nextTab !== "report") {
+      if (!selectedRange) {
+        window.alert("You need to pick a start and end frame before moving on.");
+        return;
+      }
+      try {
+        await ensureSegmentForSelectedFrames();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Failed to create segment from selected frames.";
+        window.alert(message);
+        return;
+      }
+    }
+    setTab(nextTab);
+  }
+
   function selectCompareCandidate(frameId: string, tabKey: "first" | "last", candidate: EditFrameCandidate) {
     const sourceVariantId = candidate.kind === "variant" ? candidate.variantId ?? null : null;
     setCompareVariantIds((previous) => ({ ...previous, [tabKey]: sourceVariantId }));
@@ -1988,7 +2025,7 @@ export default function App() {
               </div>
             ))}
           </div>
-          <button className="mt-4 text-sm text-accent underline" onClick={() => setTab("assets")}>
+          <button className="mt-4 text-sm text-accent underline" onClick={() => void handleTabChange("assets")}>
             Open Asset Library
           </button>
         </aside>
@@ -1999,7 +2036,7 @@ export default function App() {
               {tabs.map(({ id, label }, index) => (
                 <div key={id} className="flex items-center gap-2">
                   <button
-                    onClick={() => setTab(id)}
+                    onClick={() => void handleTabChange(id)}
                     className={`rounded-md px-3 py-2 text-sm ${tab === id ? "bg-ink text-white" : "bg-ink/10"}`}
                   >
                     {label}
@@ -2082,18 +2119,6 @@ export default function App() {
                       Selected range: {selectedRange.startFrame} {"->"} {selectedRange.endFrameInclusive} (
                       {selectedRange.durationFrames} frames / {selectedRange.durationSec.toFixed(2)}s)
                     </p>
-                    <button
-                      className="rounded-md bg-accent2 px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-50"
-                      disabled={createSegmentMutation.isPending}
-                      onClick={() =>
-                        createSegmentMutation.mutate({
-                          startFrameIndex: selectedRange.startFrame,
-                          endFrameExclusive: selectedRange.endFrameExclusive,
-                        })
-                      }
-                    >
-                      Use Selected Frames as Segment
-                    </button>
                     {selectedRange.overLimit ? (
                       <p className="text-xs text-red-600">
                         This exceeds the current Luma model limit ({lumaHardLimitSeconds}s for {lumaModel}). You can still save the segment, but generation will be blocked until under the hard limit.
@@ -2103,6 +2128,7 @@ export default function App() {
                 ) : null}
 
                 <div className="grid gap-2">
+                  <p className="text-sm font-medium text-ink/80">Available segments - click to reuse a segment</p>
                   {task?.segments.map((seg) => (
                     <button
                       key={seg.segmentId}
