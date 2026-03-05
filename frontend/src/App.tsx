@@ -1761,8 +1761,7 @@ export default function App() {
                           const boundaryOverlayUrl =
                             (frameArtifacts?.boundaryOverlayUrl as string | undefined) ??
                             (frameArtifacts?.binaryChangeUrl as string | undefined);
-                          const heatmapOverlayUrl =
-                            (frameArtifacts?.overlayUrl as string | undefined) ?? (frameArtifacts?.heatmapUrl as string | undefined);
+                          const heatmapUrl = frameArtifacts?.heatmapUrl as string | undefined;
                           const promptText = row.generation.luma.prompt?.trim() || "No prompt supplied";
                           const hasMask = Boolean(row.maskUrl);
                           const frameChangePct = asNumber(frameMetrics?.changedPctTotal);
@@ -1858,6 +1857,17 @@ export default function App() {
                                 )}
                               </td>
                               <td className="px-2 py-3">
+                                {heatmapUrl ? (
+                                  <img
+                                    src={heatmapUrl}
+                                    alt="Frame diff heatmap"
+                                    className="w-full rounded border border-ink/10 bg-bg object-contain"
+                                  />
+                                ) : (
+                                  <div className="rounded border border-dashed border-ink/20 p-6 text-sm text-ink/50">No heatmap</div>
+                                )}
+                              </td>
+                              <td className="px-2 py-3">
                                 {boundaryOverlayUrl ? (
                                   <img
                                     src={boundaryOverlayUrl}
@@ -1866,13 +1876,6 @@ export default function App() {
                                   />
                                 ) : (
                                   <div className="rounded border border-dashed border-ink/20 p-6 text-sm text-ink/50">No boundary overlay</div>
-                                )}
-                              </td>
-                              <td className="px-2 py-3">
-                                {heatmapOverlayUrl ? (
-                                  <img src={heatmapOverlayUrl} alt="Frame diff heatmap overlay" className="w-full rounded border border-ink/10 bg-bg object-contain" />
-                                ) : (
-                                  <div className="rounded border border-dashed border-ink/20 p-6 text-sm text-ink/50">No heatmap overlay</div>
                                 )}
                               </td>
                               <td className="px-2 py-3">

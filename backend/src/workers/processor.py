@@ -1319,7 +1319,7 @@ def _create_overlay_artifacts(
     binary_change: Image.Image,
     mask_bin: Image.Image | None,
 ) -> tuple[bytes, bytes, bytes]:
-    heatmap = ImageOps.colorize(diff_gray.convert("L"), black="#000000", mid="#ff9900", white="#ff0000")
+    heatmap = ImageOps.colorize(diff_gray.convert("L"), black="#1e4fba", mid="#ffd84d", white="#e22626")
     overlay_base = edited_image.convert("RGBA")
     heat_rgba = heatmap.convert("RGBA")
     heat_alpha = diff_gray.convert("L").point(lambda value: min(190, int(value * 1.7)))
