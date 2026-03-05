@@ -643,8 +643,7 @@ export default function App() {
     maskCanvas.height = height;
     const maskCtx = maskCanvas.getContext("2d");
     if (maskCtx) {
-      maskCtx.fillStyle = "black";
-      maskCtx.fillRect(0, 0, width, height);
+      maskCtx.clearRect(0, 0, width, height);
     }
     patchMaskCanvasRef.current = maskCanvas;
     const overlay = patchOverlayCanvasRef.current;
@@ -1312,7 +1311,7 @@ export default function App() {
     if (!maskCtx) return false;
     const data = maskCtx.getImageData(0, 0, maskCanvas.width, maskCanvas.height).data;
     for (let index = 0; index < data.length; index += 4) {
-      if (data[index] > 5) return true;
+      if (data[index + 3] > 5) return true;
     }
     return false;
   }
@@ -1323,9 +1322,10 @@ export default function App() {
     const maskCtx = maskCanvas.getContext("2d");
     if (!maskCtx) return;
 
-    const color = mode === "add" ? "white" : "black";
-    maskCtx.strokeStyle = color;
-    maskCtx.fillStyle = color;
+    const isErase = mode === "erase";
+    maskCtx.globalCompositeOperation = isErase ? "destination-out" : "source-over";
+    maskCtx.strokeStyle = "rgba(255,255,255,1)";
+    maskCtx.fillStyle = "rgba(255,255,255,1)";
     maskCtx.lineCap = "round";
     maskCtx.lineJoin = "round";
     maskCtx.lineWidth = patchBrushSize;
@@ -1340,6 +1340,7 @@ export default function App() {
       maskCtx.lineTo(x, y);
       maskCtx.stroke();
     }
+    maskCtx.globalCompositeOperation = "source-over";
     renderPatchOverlay();
   }
 
@@ -1349,7 +1350,8 @@ export default function App() {
     if (!maskCanvas) return;
     const maskCtx = maskCanvas.getContext("2d");
     if (!maskCtx) return;
-    maskCtx.fillStyle = mode === "add" ? "white" : "black";
+    maskCtx.globalCompositeOperation = mode === "erase" ? "destination-out" : "source-over";
+    maskCtx.fillStyle = "rgba(255,255,255,1)";
     maskCtx.beginPath();
     maskCtx.moveTo(points[0].x, points[0].y);
     for (const point of points.slice(1)) {
@@ -1357,6 +1359,7 @@ export default function App() {
     }
     maskCtx.closePath();
     maskCtx.fill();
+    maskCtx.globalCompositeOperation = "source-over";
     renderPatchOverlay();
   }
 
@@ -1365,8 +1368,7 @@ export default function App() {
     if (maskCanvas) {
       const maskCtx = maskCanvas.getContext("2d");
       if (maskCtx) {
-        maskCtx.fillStyle = "black";
-        maskCtx.fillRect(0, 0, maskCanvas.width, maskCanvas.height);
+        maskCtx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
       }
     }
     renderPatchOverlay();
