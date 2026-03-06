@@ -168,11 +168,13 @@ const GENERATION_MODELS_BY_INPUT: Record<GenerateInputMode, Array<{ value: Video
 function FrameSelectCard({
   title,
   frame,
+  selectLabel,
   onSelect,
   onClear,
 }: {
   title: string;
   frame: { frameId: string; frameIndex: number; timecode: string; imageUrl?: string } | null;
+  selectLabel: string;
   onSelect: () => void;
   onClear: () => void;
 }) {
@@ -200,7 +202,7 @@ function FrameSelectCard({
           onClick={onSelect}
           className="w-full rounded-md border border-accent bg-accent/10 px-3 py-4 text-left transition hover:bg-accent/20"
         >
-          <span className="block text-sm font-semibold text-ink">Select Frames</span>
+          <span className="block text-sm font-semibold text-ink">{selectLabel}</span>
           <span className="text-xs text-ink/70">at selected timeline position</span>
         </button>
       )}
@@ -2138,10 +2140,7 @@ export default function App() {
             {tab === "timeline" && (
               <div className="space-y-4">
                 <h3 className="text-lg font-semibold">Pick Frame & Segment Selection</h3>
-                <div className="grid gap-3 lg:grid-cols-[240px_1fr]">
-                  <div className="rounded-lg border border-ink/15 bg-bg p-3 text-xs text-ink/70">
-                    Select the segment of video you want AI edit or add effects by selecting a start and end frame. Play and pause the video or use the slide to pick the frames. Moving to the next step saves the segment.
-                  </div>
+                <div className="grid gap-3 lg:grid-cols-[1fr_180px]">
                   {timelinePlaybackUrl ? (
                     <div className="w-fit max-w-full">
                       <video
@@ -2163,6 +2162,9 @@ export default function App() {
                   ) : (
                     <p className="text-sm text-ink/70">Ingest must complete before timeline is available.</p>
                   )}
+                  <div className="rounded-lg border border-ink/15 bg-bg p-3 text-xs text-ink/70 whitespace-pre-line">
+                    {"To select the segment of video that you want AI to edit or add effects to:\n\nPlay and pause the video or use the slider to pick the start frame, then click the Select Start Frame button\n\nDo the same but for the End Frame\n\nMoving to the next step saves the segment."}
+                  </div>
                 </div>
                 <div>
                   <label className="mb-1 block text-sm font-medium">Current frame: {currentFrameIndex}</label>
@@ -2180,6 +2182,7 @@ export default function App() {
                   <FrameSelectCard
                     title="Start Frame"
                     frame={firstFrame}
+                    selectLabel="Select Start Frame"
                     onSelect={() => captureCurrentFrameFor("first")}
                     onClear={() => setFirstFrameId(null)}
                   />
@@ -2202,6 +2205,7 @@ export default function App() {
                   <FrameSelectCard
                     title="End Frame"
                     frame={lastFrame}
+                    selectLabel="Select End Frame"
                     onSelect={() => captureCurrentFrameFor("last")}
                     onClear={() => setLastFrameId(null)}
                   />
