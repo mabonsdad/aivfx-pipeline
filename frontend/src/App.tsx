@@ -8,6 +8,16 @@ import { useUiStore } from "./store/uiStore";
 import type { FrameRecord, FrameVariant, SegmentGeneration, SegmentRecord, TaskDetail } from "./types/api";
 
 type TabId = "timeline" | "frames" | "generate" | "merge" | "assets" | "report";
+type GenerateInputMode = "start_video" | "start_end" | "start_only";
+type VideoModel =
+  | "ray-2"
+  | "ray-flash-2"
+  | "runway-gen4.5"
+  | "kling-2.6"
+  | "veo-3.1"
+  | "veo-3.1-fast"
+  | "wan2.2-a14b"
+  | "wan2.2-animate";
 
 type NewTaskStage = "idle" | "creating" | "uploading" | "ingesting" | "error";
 
@@ -123,15 +133,7 @@ function fpsValue(task: TaskDetail | undefined): number {
 }
 
 function lumaModelMaxDurationSeconds(
-  model:
-    | "ray-2"
-    | "ray-flash-2"
-    | "runway-gen4.5"
-    | "kling-2.6"
-    | "veo-3.1"
-    | "veo-3.1-fast"
-    | "wan2.2-a14b"
-    | "wan2.2-animate",
+  model: VideoModel,
 ): number {
   if (model === "ray-2") return 10;
   if (model === "ray-flash-2") return 15;
@@ -142,6 +144,26 @@ function lumaModelMaxDurationSeconds(
   if (model === "wan2.2-animate") return 10;
   return 60;
 }
+
+const GENERATION_MODELS_BY_INPUT: Record<GenerateInputMode, Array<{ value: VideoModel; label: string }>> = {
+  start_video: [
+    { value: "ray-flash-2", label: "ray-flash-2" },
+    { value: "ray-2", label: "ray-2" },
+    { value: "wan2.2-animate", label: "wan2.2-animate (image + segment motion)" },
+  ],
+  start_end: [
+    { value: "kling-2.6", label: "kling-2.6 (start/end frames)" },
+    { value: "veo-3.1", label: "veo-3.1 (start/end frames, no audio)" },
+    { value: "veo-3.1-fast", label: "veo-3.1-fast (start/end frames, no audio)" },
+  ],
+  start_only: [
+    { value: "runway-gen4.5", label: "runway-gen4.5 (start frame image-to-video)" },
+    { value: "wan2.2-a14b", label: "wan2.2-a14b (start frame image-to-video)" },
+    { value: "veo-3.1", label: "veo-3.1 (start/end capable, uses start if end unchanged)" },
+    { value: "veo-3.1-fast", label: "veo-3.1-fast (start/end capable, uses start if end unchanged)" },
+    { value: "kling-2.6", label: "kling-2.6 (start/end capable, uses start if end unchanged)" },
+  ],
+};
 
 function FrameSelectCard({
   title,
@@ -350,11 +372,13 @@ export default function App() {
   const [edgeAwareRadiusPx, setEdgeAwareRadiusPx] = useState(6);
   const [maskGrowPx, setMaskGrowPx] = useState(0);
   const [maskHasPaint, setMaskHasPaint] = useState(false);
-  const [lumaModel, setLumaModel] = useState<
-    "ray-2" | "ray-flash-2" | "runway-gen4.5" | "kling-2.6" | "veo-3.1" | "veo-3.1-fast" | "wan2.2-a14b" | "wan2.2-animate"
-  >(
-    "ray-flash-2",
-  );
+  const [generationInputMode, setGenerationInputMode] = useState<GenerateInputMode>("start_video");
+  const [generationModelByInput, setGenerationModelByInput] = useState<Record<GenerateInputMode, VideoModel>>({
+    start_video: "ray-flash-2",
+    start_end: "kling-2.6",
+    start_only: "runway-gen4.5",
+  });
+  const [lumaModel, setLumaModel] = useState<VideoModel>("ray-flash-2");
   const [advancedMode, setAdvancedMode] = useState("flex_1");
   const [lumaPrompt, setLumaPrompt] = useState("");
   const [editSourceVariantIds, setEditSourceVariantIds] = useState<{ first: string | null; last: string | null }>({
@@ -403,6 +427,13 @@ export default function App() {
     newTaskStage !== "creating" &&
     newTaskStage !== "uploading" &&
     newTaskStage !== "ingesting";
+
+  useEffect(() => {
+    const modelForInput = generationModelByInput[generationInputMode];
+    if (modelForInput !== lumaModel) {
+      setLumaModel(modelForInput);
+    }
+  }, [generationInputMode, generationModelByInput, lumaModel]);
 
   useEffect(() => {
     if (!selectedTaskId && tasksQuery.data?.length) {
@@ -1062,6 +1093,10 @@ export default function App() {
     if (!selectedSegment || !hasHardDurationLimit) return false;
     return selectedSegment.durationSec > lumaHardLimitSeconds + 1e-6;
   }, [hasHardDurationLimit, lumaHardLimitSeconds, selectedSegment]);
+  const generationModelOptions = useMemo(
+    () => GENERATION_MODELS_BY_INPUT[generationInputMode],
+    [generationInputMode],
+  );
   const generationHelp = useMemo(() => generationModelHelp(lumaModel, advancedMode), [advancedMode, lumaModel]);
   const generationInputNote = useMemo(() => {
     if (lumaModel === "wan2.2-a14b" || lumaModel === "runway-gen4.5") {
@@ -1070,8 +1105,11 @@ export default function App() {
     if (lumaModel === "wan2.2-animate") {
       return "Start frame variant and source segment video are taken automatically from earlier steps.";
     }
+    if (generationInputMode === "start_only" && (lumaModel === "kling-2.6" || lumaModel === "veo-3.1" || lumaModel === "veo-3.1-fast")) {
+      return "This model can use start+end frames. In this tab, generation can run from start frame only; if an end frame is selected it will still be used.";
+    }
     return "Start and end frame variants are taken automatically from your Edit Frame selections.";
-  }, [lumaModel]);
+  }, [generationInputMode, lumaModel]);
 
   const uploadAssets = useMemo<LibraryAsset[]>(() => {
     const assets: LibraryAsset[] = [];
@@ -1517,18 +1555,7 @@ export default function App() {
     return details.join(" · ");
   }
 
-  function generationModelHelp(
-    modelName:
-      | "ray-2"
-      | "ray-flash-2"
-      | "runway-gen4.5"
-      | "kling-2.6"
-      | "veo-3.1"
-      | "veo-3.1-fast"
-      | "wan2.2-a14b"
-      | "wan2.2-animate",
-    modeValue: string,
-  ) {
+  function generationModelHelp(modelName: VideoModel, modeValue: string) {
     if (modelName === "kling-2.6") {
       return {
         title: "Kling 2.6 Start/End",
@@ -2644,76 +2671,90 @@ export default function App() {
             {tab === "generate" && (
               <div className="space-y-4">
                 <h3 className="text-lg font-semibold">Generate Video</h3>
-                <div className="grid gap-3 lg:grid-cols-[1.65fr_1fr]">
-                  <div className="space-y-3">
-                    <div className="rounded-md border border-ink/20 bg-bg px-3 py-2 text-xs text-ink/70">
-                      Segment in use: {selectedSegment ? describeSegment(selectedSegment) : "No segment selected. Go to Pick Frame first."}
-                    </div>
-                    <div className="grid gap-3 md:grid-cols-2">
-                      <select
-                        value={lumaModel}
-                        onChange={(e) =>
-                          setLumaModel(
-                            e.target.value as
-                              | "ray-2"
-                              | "ray-flash-2"
-                              | "runway-gen4.5"
-                              | "kling-2.6"
-                              | "veo-3.1"
-                              | "veo-3.1-fast"
-                              | "wan2.2-a14b"
-                              | "wan2.2-animate",
-                          )
-                        }
-                        className="rounded-md border border-ink/20 px-3 py-2"
+                <div className="rounded-xl border border-ink/15 bg-white">
+                  <div className="flex items-end gap-1 border-b border-ink/15 px-2 pt-2">
+                    {[
+                      { id: "start_video" as const, label: "start frame + video" },
+                      { id: "start_end" as const, label: "start frame + end frame" },
+                      { id: "start_only" as const, label: "start frame only" },
+                    ].map((entry) => (
+                      <button
+                        key={entry.id}
+                        type="button"
+                        onClick={() => {
+                          setGenerationInputMode(entry.id);
+                          setLumaModel(generationModelByInput[entry.id]);
+                        }}
+                        className={`rounded-t-md border px-3 py-2 text-xs ${
+                          generationInputMode === entry.id
+                            ? "-mb-px border-ink/25 border-b-white bg-white font-semibold text-ink"
+                            : "border-ink/10 bg-bg text-ink/65"
+                        }`}
                       >
-                        <option value="ray-2">ray-2</option>
-                        <option value="ray-flash-2">ray-flash-2</option>
-                        <option value="runway-gen4.5">runway-gen4.5 (first image)</option>
-                        <option value="kling-2.6">kling-2.6 (start/end frames)</option>
-                        <option value="veo-3.1">veo-3.1 (start/end frames, no audio)</option>
-                        <option value="veo-3.1-fast">veo-3.1-fast (start/end frames, no audio)</option>
-                        <option value="wan2.2-a14b">wan2.2-a14b (start frame image-to-video)</option>
-                        <option value="wan2.2-animate">wan2.2-animate (image + segment motion)</option>
-                      </select>
-                      {lumaModel === "ray-2" || lumaModel === "ray-flash-2" ? (
-                        <select value={advancedMode} onChange={(e) => setAdvancedMode(e.target.value)} className="rounded-md border border-ink/20 px-3 py-2">
-                          {[
-                            "adhere_1",
-                            "adhere_2",
-                            "adhere_3",
-                            "flex_1",
-                            "flex_2",
-                            "flex_3",
-                            "reimagine_1",
-                            "reimagine_2",
-                            "reimagine_3",
-                          ].map((mode) => (
-                            <option key={mode} value={mode}>
-                              mode: {mode}
+                        {entry.label}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="grid gap-3 p-3 lg:grid-cols-[1.65fr_1fr]">
+                    <div className="space-y-3">
+                      <div className="rounded-md border border-ink/20 bg-bg px-3 py-2 text-xs text-ink/70">
+                        Segment in use: {selectedSegment ? describeSegment(selectedSegment) : "No segment selected. Go to Pick Frame first."}
+                      </div>
+                      <div className="grid gap-3 md:grid-cols-2">
+                        <select
+                          value={lumaModel}
+                          onChange={(e) => {
+                            const nextModel = e.target.value as VideoModel;
+                            setGenerationModelByInput((previous) => ({ ...previous, [generationInputMode]: nextModel }));
+                            setLumaModel(nextModel);
+                          }}
+                          className="rounded-md border border-ink/20 px-3 py-2"
+                        >
+                          {generationModelOptions.map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
                             </option>
                           ))}
                         </select>
-                      ) : (
-                        <div className="rounded-md border border-ink/20 bg-bg px-3 py-2 text-xs text-ink/60">
-                          Mode dropdown is only used by Luma models.
-                        </div>
-                      )}
+                        {lumaModel === "ray-2" || lumaModel === "ray-flash-2" ? (
+                          <select value={advancedMode} onChange={(e) => setAdvancedMode(e.target.value)} className="rounded-md border border-ink/20 px-3 py-2">
+                            {[
+                              "adhere_1",
+                              "adhere_2",
+                              "adhere_3",
+                              "flex_1",
+                              "flex_2",
+                              "flex_3",
+                              "reimagine_1",
+                              "reimagine_2",
+                              "reimagine_3",
+                            ].map((mode) => (
+                              <option key={mode} value={mode}>
+                                mode: {mode}
+                              </option>
+                            ))}
+                          </select>
+                        ) : (
+                          <div className="rounded-md border border-ink/20 bg-bg px-3 py-2 text-xs text-ink/60">
+                            Mode dropdown is only used by Luma models.
+                          </div>
+                        )}
+                      </div>
+                      <textarea
+                        value={lumaPrompt}
+                        onChange={(e) => setLumaPrompt(e.target.value)}
+                        placeholder="Optional generation prompt"
+                        className="h-20 w-full rounded-md border border-ink/20 p-2"
+                      />
+                      <p className="text-xs text-ink/60">{generationInputNote}</p>
                     </div>
-                    <textarea
-                      value={lumaPrompt}
-                      onChange={(e) => setLumaPrompt(e.target.value)}
-                      placeholder="Optional generation prompt"
-                      className="h-20 w-full rounded-md border border-ink/20 p-2"
-                    />
-                    <p className="text-xs text-ink/60">{generationInputNote}</p>
-                  </div>
-                  <div className="rounded-lg border border-ink/15 bg-bg p-3">
-                    <p className="text-sm font-semibold">{generationHelp.title}</p>
-                    <div className="mt-2 space-y-2 text-xs text-ink/70">
-                      {generationHelp.lines.map((line) => (
-                        <p key={line}>{line}</p>
-                      ))}
+                    <div className="rounded-lg border border-ink/15 bg-bg p-3">
+                      <p className="text-sm font-semibold">{generationHelp.title}</p>
+                      <div className="mt-2 space-y-2 text-xs text-ink/70">
+                        {generationHelp.lines.map((line) => (
+                          <p key={line}>{line}</p>
+                        ))}
+                      </div>
                     </div>
                   </div>
                 </div>
