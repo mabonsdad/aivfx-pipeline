@@ -14,6 +14,8 @@ class RunwareVideoError(RuntimeError):
 RUNWARE_API_ENDPOINT = "https://api.runware.ai/v1"
 RUNWARE_VEO_31_MODEL = "google:3@2"
 RUNWARE_VEO_31_FAST_MODEL = "google:3@3"
+RUNWARE_WAN22_A14B_MODEL = "runware:200@6"
+RUNWARE_WAN22_ANIMATE_MODEL = "runware:200@8"
 
 
 def _headers(api_key: str) -> dict[str, str]:
@@ -73,6 +75,79 @@ def create_veo_first_last_generation(
                 {"inputImage": end_image_url, "frame": "last"},
             ],
             "generateAudio": bool(generate_audio),
+            "numberResults": 1,
+            "outputFormat": "mp4",
+        }
+    ]
+    created = _request_json(payload, api_key=api_key)
+    return {
+        "taskUUID": task_uuid,
+        "response": created,
+    }
+
+
+def create_wan22_a14b_generation(
+    *,
+    api_key: str,
+    start_image_url: str,
+    duration_seconds: int,
+    prompt: str | None,
+    width: int,
+    height: int,
+) -> dict[str, Any]:
+    task_uuid = str(uuid4())
+    payload: list[dict[str, Any]] = [
+        {
+            "taskType": "videoInference",
+            "taskUUID": task_uuid,
+            "deliveryMethod": "async",
+            "model": RUNWARE_WAN22_A14B_MODEL,
+            "positivePrompt": prompt or "Generate coherent motion from the provided start frame while preserving scene identity.",
+            "width": int(width),
+            "height": int(height),
+            "duration": int(duration_seconds),
+            "frameImages": [
+                {"inputImage": start_image_url, "frame": "first"},
+            ],
+            "numberResults": 1,
+            "outputFormat": "mp4",
+        }
+    ]
+    created = _request_json(payload, api_key=api_key)
+    return {
+        "taskUUID": task_uuid,
+        "response": created,
+    }
+
+
+def create_wan22_animate_generation(
+    *,
+    api_key: str,
+    reference_image_url: str,
+    reference_video_url: str,
+    prompt: str | None,
+    width: int,
+    height: int,
+) -> dict[str, Any]:
+    task_uuid = str(uuid4())
+    payload: list[dict[str, Any]] = [
+        {
+            "taskType": "videoInference",
+            "taskUUID": task_uuid,
+            "deliveryMethod": "async",
+            "model": RUNWARE_WAN22_ANIMATE_MODEL,
+            "positivePrompt": prompt or "Replace the subject with realistic motion while preserving scene coherence and camera movement.",
+            "width": int(width),
+            "height": int(height),
+            "inputs": {
+                "referenceImages": [{"inputImage": reference_image_url}],
+                "referenceVideos": [{"inputVideo": reference_video_url}],
+            },
+            "advancedFeatures": {
+                "wanAnimate": {
+                    "mode": "replace",
+                }
+            },
             "numberResults": 1,
             "outputFormat": "mp4",
         }

@@ -123,13 +123,23 @@ function fpsValue(task: TaskDetail | undefined): number {
 }
 
 function lumaModelMaxDurationSeconds(
-  model: "ray-2" | "ray-flash-2" | "runway-gen4.5" | "kling-2.6" | "veo-3.1" | "veo-3.1-fast",
+  model:
+    | "ray-2"
+    | "ray-flash-2"
+    | "runway-gen4.5"
+    | "kling-2.6"
+    | "veo-3.1"
+    | "veo-3.1-fast"
+    | "wan2.2-a14b"
+    | "wan2.2-animate",
 ): number {
   if (model === "ray-2") return 10;
   if (model === "ray-flash-2") return 15;
   if (model === "runway-gen4.5") return 10;
   if (model === "kling-2.6") return 10;
   if (model === "veo-3.1" || model === "veo-3.1-fast") return 8;
+  if (model === "wan2.2-a14b") return 5;
+  if (model === "wan2.2-animate") return 10;
   return 60;
 }
 
@@ -340,7 +350,9 @@ export default function App() {
   const [edgeAwareRadiusPx, setEdgeAwareRadiusPx] = useState(6);
   const [maskGrowPx, setMaskGrowPx] = useState(0);
   const [maskHasPaint, setMaskHasPaint] = useState(false);
-  const [lumaModel, setLumaModel] = useState<"ray-2" | "ray-flash-2" | "runway-gen4.5" | "kling-2.6" | "veo-3.1" | "veo-3.1-fast">(
+  const [lumaModel, setLumaModel] = useState<
+    "ray-2" | "ray-flash-2" | "runway-gen4.5" | "kling-2.6" | "veo-3.1" | "veo-3.1-fast" | "wan2.2-a14b" | "wan2.2-animate"
+  >(
     "ray-flash-2",
   );
   const [advancedMode, setAdvancedMode] = useState("flex_1");
@@ -903,6 +915,10 @@ export default function App() {
               ? "kling_start_end"
               : lumaModel === "veo-3.1" || lumaModel === "veo-3.1-fast"
                 ? "veo_start_end"
+                : lumaModel === "wan2.2-a14b"
+                  ? "wan_a14b_i2v"
+                  : lumaModel === "wan2.2-animate"
+                    ? "wan_animate_replace"
                 : advancedMode,
         prompt: lumaPrompt.trim() || undefined,
         firstFrameVariantId: compareVariantIds.first || undefined,
@@ -1009,7 +1025,9 @@ export default function App() {
     lumaModel === "runway-gen4.5" ||
     lumaModel === "kling-2.6" ||
     lumaModel === "veo-3.1" ||
-    lumaModel === "veo-3.1-fast";
+    lumaModel === "veo-3.1-fast" ||
+    lumaModel === "wan2.2-a14b" ||
+    lumaModel === "wan2.2-animate";
   const lumaHardLimitFrames = Math.round(lumaHardLimitSeconds * fpsValue(task));
   const timelineDelta = useMemo(() => {
     const fps = fpsValue(task);
@@ -1045,6 +1063,15 @@ export default function App() {
     return selectedSegment.durationSec > lumaHardLimitSeconds + 1e-6;
   }, [hasHardDurationLimit, lumaHardLimitSeconds, selectedSegment]);
   const generationHelp = useMemo(() => generationModelHelp(lumaModel, advancedMode), [advancedMode, lumaModel]);
+  const generationInputNote = useMemo(() => {
+    if (lumaModel === "wan2.2-a14b" || lumaModel === "runway-gen4.5") {
+      return "Start frame variant is taken automatically from your Edit Frame selection.";
+    }
+    if (lumaModel === "wan2.2-animate") {
+      return "Start frame variant and source segment video are taken automatically from earlier steps.";
+    }
+    return "Start and end frame variants are taken automatically from your Edit Frame selections.";
+  }, [lumaModel]);
 
   const uploadAssets = useMemo<LibraryAsset[]>(() => {
     const assets: LibraryAsset[] = [];
@@ -1491,7 +1518,15 @@ export default function App() {
   }
 
   function generationModelHelp(
-    modelName: "ray-2" | "ray-flash-2" | "runway-gen4.5" | "kling-2.6" | "veo-3.1" | "veo-3.1-fast",
+    modelName:
+      | "ray-2"
+      | "ray-flash-2"
+      | "runway-gen4.5"
+      | "kling-2.6"
+      | "veo-3.1"
+      | "veo-3.1-fast"
+      | "wan2.2-a14b"
+      | "wan2.2-animate",
     modeValue: string,
   ) {
     if (modelName === "kling-2.6") {
@@ -1521,6 +1556,26 @@ export default function App() {
           "Uses selected start and end frames as keyframes. No source segment video is sent.",
           "Duration is fixed at 8 seconds for Veo 3.1 API runs; merged output may be time-adjusted at insert.",
           "Prompting works best with clear motion direction and continuity constraints between start and end frames.",
+        ],
+      };
+    }
+    if (modelName === "wan2.2-a14b") {
+      return {
+        title: "Runware Wan2.2 A14B",
+        lines: [
+          "Best for high-quality image-to-video from the selected start frame.",
+          "Uses the start frame as the anchor image; this flow does not consume the source segment video.",
+          "Prompt tips: describe camera motion and subject movement clearly, keep style constraints concise and specific.",
+        ],
+      };
+    }
+    if (modelName === "wan2.2-animate") {
+      return {
+        title: "Runware Wan2.2 Animate",
+        lines: [
+          "Best for realistic character replacement/animation using reference image + reference video motion.",
+          "This flow uses selected start frame plus the source segment video as motion reference.",
+          "Prompt tips: focus on performance realism, continuity, and identity retention; avoid large scene changes.",
         ],
       };
     }
@@ -2599,7 +2654,15 @@ export default function App() {
                         value={lumaModel}
                         onChange={(e) =>
                           setLumaModel(
-                            e.target.value as "ray-2" | "ray-flash-2" | "runway-gen4.5" | "kling-2.6" | "veo-3.1" | "veo-3.1-fast",
+                            e.target.value as
+                              | "ray-2"
+                              | "ray-flash-2"
+                              | "runway-gen4.5"
+                              | "kling-2.6"
+                              | "veo-3.1"
+                              | "veo-3.1-fast"
+                              | "wan2.2-a14b"
+                              | "wan2.2-animate",
                           )
                         }
                         className="rounded-md border border-ink/20 px-3 py-2"
@@ -2610,6 +2673,8 @@ export default function App() {
                         <option value="kling-2.6">kling-2.6 (start/end frames)</option>
                         <option value="veo-3.1">veo-3.1 (start/end frames, no audio)</option>
                         <option value="veo-3.1-fast">veo-3.1-fast (start/end frames, no audio)</option>
+                        <option value="wan2.2-a14b">wan2.2-a14b (start frame image-to-video)</option>
+                        <option value="wan2.2-animate">wan2.2-animate (image + segment motion)</option>
                       </select>
                       {lumaModel === "ray-2" || lumaModel === "ray-flash-2" ? (
                         <select value={advancedMode} onChange={(e) => setAdvancedMode(e.target.value)} className="rounded-md border border-ink/20 px-3 py-2">
@@ -2641,9 +2706,7 @@ export default function App() {
                       placeholder="Optional generation prompt"
                       className="h-20 w-full rounded-md border border-ink/20 p-2"
                     />
-                    <p className="text-xs text-ink/60">
-                      Start and end frame variants are taken automatically from your Edit Frame selections.
-                    </p>
+                    <p className="text-xs text-ink/60">{generationInputNote}</p>
                   </div>
                   <div className="rounded-lg border border-ink/15 bg-bg p-3">
                     <p className="text-sm font-semibold">{generationHelp.title}</p>

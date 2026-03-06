@@ -45,7 +45,11 @@ from src.integrations.runway import (
 from src.integrations.runware_video import (
     RUNWARE_VEO_31_FAST_MODEL,
     RUNWARE_VEO_31_MODEL,
+    RUNWARE_WAN22_A14B_MODEL,
+    RUNWARE_WAN22_ANIMATE_MODEL,
     create_veo_first_last_generation,
+    create_wan22_a14b_generation,
+    create_wan22_animate_generation,
     get_generation_response as get_runware_video_generation_response,
 )
 
@@ -892,7 +896,7 @@ def _handle_segment_generate(
     s3 = boto3.client("s3")
     model_name = payload["lumaModel"]
     segment_key: str | None = None
-    if model_name in {"ray-2", "ray-flash-2"}:
+    if model_name in {"ray-2", "ray-flash-2", "wan2.2-animate"}:
         segment_key = _ensure_segment_clip(
             s3=s3,
             asset_store=asset_store,
@@ -965,12 +969,27 @@ def _handle_segment_generate(
                 provider_media_height = src_height
 
         frame_bytes = asset_store.read_bytes(first_frame_key)
-        first_target_w, first_target_h = _target_by_orientation(
-            src_width,
-            src_height,
-            landscape=(1280, 720) if model_name == "runway-gen4.5" else (1920, 1080),
-            portrait=(720, 1280) if model_name == "runway-gen4.5" else (1080, 1920),
-        )
+        if model_name in {"runway-gen4.5", "veo-3.1", "veo-3.1-fast", "wan2.2-a14b"}:
+            first_target_w, first_target_h = _target_by_orientation(
+                src_width,
+                src_height,
+                landscape=(1280, 720),
+                portrait=(720, 1280),
+            )
+        elif model_name == "wan2.2-animate":
+            first_target_w, first_target_h = _target_by_orientation(
+                src_width,
+                src_height,
+                landscape=(1280, 832),
+                portrait=(832, 1280),
+            )
+        else:
+            first_target_w, first_target_h = _target_by_orientation(
+                src_width,
+                src_height,
+                landscape=(1920, 1080),
+                portrait=(1080, 1920),
+            )
         prepared_first_frame, first_frame_content_type, first_frame_ext = _prepare_first_frame_image_payload(
             frame_bytes,
             target_width=first_target_w,
@@ -984,7 +1003,11 @@ def _handle_segment_generate(
             gen_id,
             "runway"
             if model_name == "runway-gen4.5"
-            else ("kling" if model_name == "kling-2.6" else ("runware" if model_name in {"veo-3.1", "veo-3.1-fast"} else "luma")),
+            else (
+                "kling"
+                if model_name == "kling-2.6"
+                else ("runware" if model_name in {"veo-3.1", "veo-3.1-fast", "wan2.2-a14b", "wan2.2-animate"} else "luma")
+            ),
             ext=first_frame_ext,
         )
         _upload_s3(s3, settings.assets_bucket, first_frame_input_key, local_first_frame, first_frame_content_type)
@@ -1090,6 +1113,58 @@ def _handle_segment_generate(
         out_url = _parse_runware_video_output_url(result)
         provider_name = "runware"
         used_provider_model = runware_model
+    elif model_name == "wan2.2-a14b":
+        runware_key = secrets.get("RUNWARE_API_KEY")
+        if not runware_key:
+            raise RuntimeError("Wan2.2 generation requires RUNWARE_API_KEY")
+        provider_duration_sec = 5.0
+        _job_progress(job, store, 35, "running", "Creating Runware Wan2.2 A14B image-to-video generation")
+        created = create_wan22_a14b_generation(
+            api_key=runware_key,
+            start_image_url=first_frame_url,
+            duration_seconds=5,
+            prompt=payload.get("prompt"),
+            width=first_target_w,
+            height=first_target_h,
+        )
+        generation_id = created.get("taskUUID")
+        if not isinstance(generation_id, str):
+            raise RuntimeError(f"Unexpected Runware Wan2.2 A14B create response: {created}")
+        _job_progress(job, store, 55, "running", "Polling Runware Wan2.2 A14B generation")
+        result = _wait_runware_video_complete(
+            runware_key,
+            task_uuid=generation_id,
+        )
+        out_url = _parse_runware_video_output_url(result)
+        provider_name = "runware"
+        used_provider_model = RUNWARE_WAN22_A14B_MODEL
+    elif model_name == "wan2.2-animate":
+        runware_key = secrets.get("RUNWARE_API_KEY")
+        if not runware_key:
+            raise RuntimeError("Wan2.2 generation requires RUNWARE_API_KEY")
+        if not media_url:
+            raise RuntimeError("Wan2.2 Animate generation requires a prepared segment media URL")
+        provider_duration_sec = round(segment_duration_sec, 3)
+        _job_progress(job, store, 35, "running", "Creating Runware Wan2.2 Animate generation")
+        created = create_wan22_animate_generation(
+            api_key=runware_key,
+            reference_image_url=first_frame_url,
+            reference_video_url=media_url,
+            prompt=payload.get("prompt"),
+            width=first_target_w,
+            height=first_target_h,
+        )
+        generation_id = created.get("taskUUID")
+        if not isinstance(generation_id, str):
+            raise RuntimeError(f"Unexpected Runware Wan2.2 Animate create response: {created}")
+        _job_progress(job, store, 55, "running", "Polling Runware Wan2.2 Animate generation")
+        result = _wait_runware_video_complete(
+            runware_key,
+            task_uuid=generation_id,
+        )
+        out_url = _parse_runware_video_output_url(result)
+        provider_name = "runware"
+        used_provider_model = RUNWARE_WAN22_ANIMATE_MODEL
     else:
         luma_key = secrets["LUMA_API_KEY"]
         if not media_url:

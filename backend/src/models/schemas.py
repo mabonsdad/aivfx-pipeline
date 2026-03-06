@@ -78,7 +78,16 @@ class ReferenceUploadRequest(BaseModel):
 
 
 class SegmentGenerateRequest(BaseModel):
-    lumaModel: Literal["ray-2", "ray-flash-2", "runway-gen4.5", "kling-2.6", "veo-3.1", "veo-3.1-fast"] = "ray-2"
+    lumaModel: Literal[
+        "ray-2",
+        "ray-flash-2",
+        "runway-gen4.5",
+        "kling-2.6",
+        "veo-3.1",
+        "veo-3.1-fast",
+        "wan2.2-a14b",
+        "wan2.2-animate",
+    ] = "ray-2"
     mode: Literal[
         "adhere_1",
         "adhere_2",
@@ -92,6 +101,8 @@ class SegmentGenerateRequest(BaseModel):
         "runway_i2v",
         "kling_start_end",
         "veo_start_end",
+        "wan_a14b_i2v",
+        "wan_animate_replace",
     ]
     prompt: str | None = Field(default=None)
     firstFrameVariantId: str | None = None
