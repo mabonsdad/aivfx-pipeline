@@ -78,6 +78,8 @@ type EditFrameCandidate = {
   isSelected: boolean;
 };
 
+const VIDEO_THUMBNAIL_CACHE = new Map<string, string | null>();
+
 function normalizeTaskNameInput(value: string): string {
   return value
     .trim()
@@ -215,11 +217,17 @@ function VideoThumbnail({
   label,
   onClick,
   disabled,
+  cacheKey,
+  interactive = true,
+  thumbClassName = "aspect-video",
 }: {
   videoUrl?: string;
   label: string;
   onClick: () => void;
   disabled?: boolean;
+  cacheKey?: string;
+  interactive?: boolean;
+  thumbClassName?: string;
 }) {
   const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(null);
 
@@ -227,6 +235,11 @@ function VideoThumbnail({
     let cancelled = false;
     setThumbnailUrl(null);
     if (!videoUrl) return;
+    const key = cacheKey || videoUrl;
+    if (key && VIDEO_THUMBNAIL_CACHE.has(key)) {
+      setThumbnailUrl(VIDEO_THUMBNAIL_CACHE.get(key) ?? null);
+      return;
+    }
 
     const video = document.createElement("video");
     video.crossOrigin = "anonymous";
@@ -245,8 +258,11 @@ function VideoThumbnail({
       if (!ctx) return;
       try {
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        setThumbnailUrl(canvas.toDataURL("image/jpeg", 0.86));
+        const dataUrl = canvas.toDataURL("image/jpeg", 0.86);
+        if (key) VIDEO_THUMBNAIL_CACHE.set(key, dataUrl);
+        setThumbnailUrl(dataUrl);
       } catch {
+        if (key) VIDEO_THUMBNAIL_CACHE.set(key, null);
         setThumbnailUrl(null);
       }
     };
@@ -266,7 +282,10 @@ function VideoThumbnail({
 
     const handleSeeked = () => capture();
     const handleError = () => {
-      if (!cancelled) setThumbnailUrl(null);
+      if (!cancelled) {
+        if (key) VIDEO_THUMBNAIL_CACHE.set(key, null);
+        setThumbnailUrl(null);
+      }
     };
 
     video.addEventListener("loadeddata", handleLoadedData);
@@ -282,7 +301,19 @@ function VideoThumbnail({
       video.pause();
       video.src = "";
     };
-  }, [videoUrl]);
+  }, [cacheKey, videoUrl]);
+
+  const thumbnailContent = thumbnailUrl ? (
+    <img src={thumbnailUrl} alt={label} className={`${thumbClassName} w-full rounded-md bg-bg object-contain`} />
+  ) : (
+    <div className={`flex ${thumbClassName} w-full items-center justify-center rounded-md border border-dashed border-ink/20 bg-bg text-xs text-ink/60`}>
+      Video thumbnail unavailable
+    </div>
+  );
+
+  if (!interactive) {
+    return <div className="block w-full">{thumbnailContent}</div>;
+  }
 
   return (
     <button
@@ -292,13 +323,7 @@ function VideoThumbnail({
       disabled={disabled}
       title={disabled ? "Video unavailable" : `Use ${label}`}
     >
-      {thumbnailUrl ? (
-        <img src={thumbnailUrl} alt={label} className="aspect-video w-full rounded-md bg-bg object-contain" />
-      ) : (
-        <div className="flex aspect-video w-full items-center justify-center rounded-md border border-dashed border-ink/20 bg-bg text-xs text-ink/60">
-          Video thumbnail unavailable
-        </div>
-      )}
+      {thumbnailContent}
     </button>
   );
 }
@@ -1949,7 +1974,20 @@ export default function App() {
                               </td>
                               <td className="px-2 py-3">
                                 {row.generatedVideoUrl ? (
-                                  <video src={row.generatedVideoUrl} controls className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain" />
+                                  <div className="space-y-2">
+                                    <VideoThumbnail
+                                      videoUrl={row.generatedVideoUrl}
+                                      cacheKey={row.generation.outputKey ?? row.generation.genId}
+                                      label={`Generated video ${row.generation.genId}`}
+                                      onClick={() =>
+                                        setVideoPreviewModal({
+                                          url: row.generatedVideoUrl as string,
+                                          label: `Generated video ${row.generation.genId}`,
+                                        })
+                                      }
+                                    />
+                                    <p className="text-[11px] text-ink/50">Click thumbnail to preview video.</p>
+                                  </div>
                                 ) : (
                                   <div className="rounded border border-dashed border-ink/20 p-6 text-sm text-ink/50">No generated video</div>
                                 )}
@@ -2030,7 +2068,20 @@ export default function App() {
                               </td>
                               <td className="px-2 py-3">
                                 {diffVideoUrl ? (
-                                  <video src={diffVideoUrl} controls className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain" />
+                                  <div className="space-y-2">
+                                    <VideoThumbnail
+                                      videoUrl={diffVideoUrl}
+                                      cacheKey={`${row.generation.genId}-diff-video`}
+                                      label={`Diff video ${row.generation.genId}`}
+                                      onClick={() =>
+                                        setVideoPreviewModal({
+                                          url: diffVideoUrl,
+                                          label: `Diff video ${row.generation.genId}`,
+                                        })
+                                      }
+                                    />
+                                    <p className="text-[11px] text-ink/50">Click thumbnail to preview diff video.</p>
+                                  </div>
                                 ) : (
                                   <div className="rounded border border-dashed border-ink/20 p-6 text-sm text-ink/50">No diff video map</div>
                                 )}
@@ -2856,6 +2907,7 @@ export default function App() {
                         </div>
                         <VideoThumbnail
                           videoUrl={gen.downloadUrl ?? undefined}
+                          cacheKey={gen.outputKey ?? gen.genId}
                           label={describeGeneration(gen)}
                           disabled={!gen.downloadUrl}
                           onClick={() => selectSegmentGeneration(gen.genId)}
@@ -3022,7 +3074,14 @@ export default function App() {
                             index === 0 ? "border-accent/40 bg-accent/5" : "border-ink/10"
                           }`}
                         >
-                          <video src={item.previewUrl} className="max-h-20 w-full rounded bg-bg object-contain" muted />
+                          <VideoThumbnail
+                            videoUrl={item.previewUrl}
+                            cacheKey={item.id}
+                            label={item.title}
+                            onClick={() => undefined}
+                            interactive={false}
+                            thumbClassName="max-h-20"
+                          />
                           <div>
                             <p className={`text-sm ${index === 0 ? "font-semibold" : "font-medium"}`}>{item.title}</p>
                             <p className="text-xs text-ink/60">{item.subtitle}</p>
@@ -3104,7 +3163,14 @@ export default function App() {
                             index === 0 ? "border-accent/40 bg-accent/5" : "border-ink/10"
                           }`}
                         >
-                          <video src={item.previewUrl} className="max-h-20 w-full rounded bg-bg object-contain" muted />
+                          <VideoThumbnail
+                            videoUrl={item.previewUrl}
+                            cacheKey={item.id}
+                            label={item.title}
+                            onClick={() => undefined}
+                            interactive={false}
+                            thumbClassName="max-h-20"
+                          />
                           <div>
                             <p className={`text-sm ${index === 0 ? "font-semibold" : "font-medium"}`}>{item.title}</p>
                             <p className="text-xs text-ink/60">{item.subtitle}</p>
