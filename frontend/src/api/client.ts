@@ -116,7 +116,7 @@ export const apiClient = {
     taskId: string,
     segmentId: string,
     payload: {
-      lumaModel: "ray-2" | "ray-flash-2" | "runway-gen4.5" | "kling-2.6";
+      lumaModel: "ray-2" | "ray-flash-2" | "runway-gen4.5" | "kling-2.6" | "veo-3.1" | "veo-3.1-fast";
       mode: string;
       prompt?: string;
       firstFrameVariantId?: string;

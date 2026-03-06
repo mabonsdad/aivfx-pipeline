@@ -69,8 +69,8 @@ export type SegmentGeneration = {
   genId: string;
   segmentId: string;
   luma: {
-    provider?: "luma" | "runway" | "kling";
-    model: "ray-2" | "ray-flash-2" | "runway-gen4.5" | "kling-2.6";
+    provider?: "luma" | "runway" | "kling" | "runware";
+    model: "ray-2" | "ray-flash-2" | "runway-gen4.5" | "kling-2.6" | "veo-3.1" | "veo-3.1-fast";
     mode: string;
     prompt?: string;
     lumaGenerationId?: string | null;

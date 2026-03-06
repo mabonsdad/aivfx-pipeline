@@ -42,6 +42,12 @@ from src.integrations.runway import (
     create_image_to_video,
     get_task as get_runway_task,
 )
+from src.integrations.runware_video import (
+    RUNWARE_VEO_31_FAST_MODEL,
+    RUNWARE_VEO_31_MODEL,
+    create_veo_first_last_generation,
+    get_generation_response as get_runware_video_generation_response,
+)
 
 logger = Logger()
 
@@ -413,7 +419,7 @@ def _wait_runway_complete(api_key: str, task_id: str, *, timeout_sec: int = 1800
         time.sleep(6)
 
 
-def _parse_kling_output_url(payload: dict[str, Any]) -> str:
+def _parse_runware_video_output_url(payload: dict[str, Any]) -> str:
     candidates: list[Any] = [
         payload.get("videoURL"),
         payload.get("video", {}).get("url"),
@@ -438,15 +444,10 @@ def _parse_kling_output_url(payload: dict[str, Any]) -> str:
             maybe = item.get("url") or item.get("video_url") or item.get("videoURL")
             if isinstance(maybe, str) and maybe.startswith("http"):
                 return maybe
-    raise RuntimeError(f"Kling completion payload missing output URL: {payload}")
+    raise RuntimeError(f"Runware video completion payload missing output URL: {payload}")
 
 
-def _wait_kling_complete(
-    api_key: str,
-    *,
-    task_uuid: str,
-    timeout_sec: int = 1800,
-) -> dict[str, Any]:
+def _wait_kling_complete(api_key: str, *, task_uuid: str, timeout_sec: int = 1800) -> dict[str, Any]:
     start = time.time()
     while True:
         payload = get_kling_generation_response(api_key=api_key, task_uuid=task_uuid)
@@ -457,6 +458,20 @@ def _wait_kling_complete(
             raise RuntimeError(f"Kling generation failed: {payload}")
         if time.time() - start > timeout_sec:
             raise TimeoutError("Kling generation poll timeout")
+        time.sleep(6)
+
+
+def _wait_runware_video_complete(api_key: str, *, task_uuid: str, timeout_sec: int = 1800) -> dict[str, Any]:
+    start = time.time()
+    while True:
+        payload = get_runware_video_generation_response(api_key=api_key, task_uuid=task_uuid)
+        status = str(payload.get("status", "")).upper()
+        if status in {"COMPLETED", "SUCCEEDED", "SUCCESS"}:
+            return payload
+        if status in {"FAILED", "ERROR", "CANCELLED"}:
+            raise RuntimeError(f"Runware video generation failed: {payload}")
+        if time.time() - start > timeout_sec:
+            raise TimeoutError("Runware video generation poll timeout")
         time.sleep(6)
 
 
@@ -967,12 +982,14 @@ def _handle_segment_generate(
         first_frame_input_key = paths.segment_provider_first_frame(
             segment_id,
             gen_id,
-            "runway" if model_name == "runway-gen4.5" else ("kling" if model_name == "kling-2.6" else "luma"),
+            "runway"
+            if model_name == "runway-gen4.5"
+            else ("kling" if model_name == "kling-2.6" else ("runware" if model_name in {"veo-3.1", "veo-3.1-fast"} else "luma")),
             ext=first_frame_ext,
         )
         _upload_s3(s3, settings.assets_bucket, first_frame_input_key, local_first_frame, first_frame_content_type)
 
-        if model_name == "kling-2.6":
+        if model_name in {"kling-2.6", "veo-3.1", "veo-3.1-fast"}:
             last_frame_bytes = asset_store.read_bytes(last_frame_key)
             prepared_last_frame, last_frame_content_type, last_frame_ext = _prepare_first_frame_image_payload(
                 last_frame_bytes,
@@ -982,7 +999,12 @@ def _handle_segment_generate(
             )
             local_last_frame = td_path / f"last_frame{last_frame_ext}"
             local_last_frame.write_bytes(prepared_last_frame)
-            last_frame_input_key = paths.segment_provider_last_frame(segment_id, gen_id, "kling", ext=last_frame_ext)
+            last_frame_input_key = paths.segment_provider_last_frame(
+                segment_id,
+                gen_id,
+                "kling" if model_name == "kling-2.6" else "runware",
+                ext=last_frame_ext,
+            )
             _upload_s3(s3, settings.assets_bucket, last_frame_input_key, local_last_frame, last_frame_content_type)
 
     media_url = asset_store.presign_get(media_key_for_provider, expires=3600) if media_key_for_provider else None
@@ -1036,9 +1058,38 @@ def _handle_segment_generate(
             kling_key,
             task_uuid=generation_id,
         )
-        out_url = _parse_kling_output_url(result)
+        out_url = _parse_runware_video_output_url(result)
         provider_name = "kling"
         used_provider_model = "kling-video@2.6-pro"
+    elif model_name in {"veo-3.1", "veo-3.1-fast"}:
+        runware_key = secrets.get("RUNWARE_API_KEY")
+        if not runware_key:
+            raise RuntimeError("Veo 3.1 generation requires RUNWARE_API_KEY")
+        provider_duration_sec = 8.0
+        runware_model = RUNWARE_VEO_31_MODEL if model_name == "veo-3.1" else RUNWARE_VEO_31_FAST_MODEL
+        _job_progress(job, store, 35, "running", f"Creating Runware {model_name} start/end-frame generation")
+        created = create_veo_first_last_generation(
+            api_key=runware_key,
+            model=runware_model,
+            start_image_url=first_frame_url,
+            end_image_url=last_frame_url or first_frame_url,
+            duration_seconds=8,
+            prompt=payload.get("prompt"),
+            width=first_target_w,
+            height=first_target_h,
+            generate_audio=False,
+        )
+        generation_id = created.get("taskUUID")
+        if not isinstance(generation_id, str):
+            raise RuntimeError(f"Unexpected Runware Veo create response: {created}")
+        _job_progress(job, store, 55, "running", "Polling Runware Veo generation")
+        result = _wait_runware_video_complete(
+            runware_key,
+            task_uuid=generation_id,
+        )
+        out_url = _parse_runware_video_output_url(result)
+        provider_name = "runware"
+        used_provider_model = runware_model
     else:
         luma_key = secrets["LUMA_API_KEY"]
         if not media_url:

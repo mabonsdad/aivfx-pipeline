@@ -122,11 +122,14 @@ function fpsValue(task: TaskDetail | undefined): number {
   return fps.num / fps.den;
 }
 
-function lumaModelMaxDurationSeconds(model: "ray-2" | "ray-flash-2" | "runway-gen4.5" | "kling-2.6"): number {
+function lumaModelMaxDurationSeconds(
+  model: "ray-2" | "ray-flash-2" | "runway-gen4.5" | "kling-2.6" | "veo-3.1" | "veo-3.1-fast",
+): number {
   if (model === "ray-2") return 10;
   if (model === "ray-flash-2") return 15;
   if (model === "runway-gen4.5") return 10;
   if (model === "kling-2.6") return 10;
+  if (model === "veo-3.1" || model === "veo-3.1-fast") return 8;
   return 60;
 }
 
@@ -337,7 +340,7 @@ export default function App() {
   const [edgeAwareRadiusPx, setEdgeAwareRadiusPx] = useState(6);
   const [maskGrowPx, setMaskGrowPx] = useState(0);
   const [maskHasPaint, setMaskHasPaint] = useState(false);
-  const [lumaModel, setLumaModel] = useState<"ray-2" | "ray-flash-2" | "runway-gen4.5" | "kling-2.6">(
+  const [lumaModel, setLumaModel] = useState<"ray-2" | "ray-flash-2" | "runway-gen4.5" | "kling-2.6" | "veo-3.1" | "veo-3.1-fast">(
     "ray-flash-2",
   );
   const [advancedMode, setAdvancedMode] = useState("flex_1");
@@ -898,7 +901,9 @@ export default function App() {
             ? "runway_i2v"
             : lumaModel === "kling-2.6"
               ? "kling_start_end"
-              : advancedMode,
+              : lumaModel === "veo-3.1" || lumaModel === "veo-3.1-fast"
+                ? "veo_start_end"
+                : advancedMode,
         prompt: lumaPrompt.trim() || undefined,
         firstFrameVariantId: compareVariantIds.first || undefined,
         lastFrameVariantId: compareVariantIds.last || undefined,
@@ -999,7 +1004,12 @@ export default function App() {
   );
   const lumaHardLimitSeconds = lumaModelMaxDurationSeconds(lumaModel);
   const hasHardDurationLimit =
-    lumaModel === "ray-2" || lumaModel === "ray-flash-2" || lumaModel === "runway-gen4.5" || lumaModel === "kling-2.6";
+    lumaModel === "ray-2" ||
+    lumaModel === "ray-flash-2" ||
+    lumaModel === "runway-gen4.5" ||
+    lumaModel === "kling-2.6" ||
+    lumaModel === "veo-3.1" ||
+    lumaModel === "veo-3.1-fast";
   const lumaHardLimitFrames = Math.round(lumaHardLimitSeconds * fpsValue(task));
   const timelineDelta = useMemo(() => {
     const fps = fpsValue(task);
@@ -1480,7 +1490,10 @@ export default function App() {
     return details.join(" · ");
   }
 
-  function generationModelHelp(modelName: "ray-2" | "ray-flash-2" | "runway-gen4.5" | "kling-2.6", modeValue: string) {
+  function generationModelHelp(
+    modelName: "ray-2" | "ray-flash-2" | "runway-gen4.5" | "kling-2.6" | "veo-3.1" | "veo-3.1-fast",
+    modeValue: string,
+  ) {
     if (modelName === "kling-2.6") {
       return {
         title: "Kling 2.6 Start/End",
@@ -1498,6 +1511,16 @@ export default function App() {
           "Uses only the selected start frame as the initial frame. It does not use source segment motion.",
           "Best prompt style: describe the motion and evolution from frame one while preserving composition.",
           "Avoid conflicting scene changes in one prompt; short and specific prompts usually hold frame identity better.",
+        ],
+      };
+    }
+    if (modelName === "veo-3.1" || modelName === "veo-3.1-fast") {
+      return {
+        title: modelName === "veo-3.1-fast" ? "Runware Veo 3.1 Fast (No Audio)" : "Runware Veo 3.1 (No Audio)",
+        lines: [
+          "Uses selected start and end frames as keyframes. No source segment video is sent.",
+          "Duration is fixed at 8 seconds for Veo 3.1 API runs; merged output may be time-adjusted at insert.",
+          "Prompting works best with clear motion direction and continuity constraints between start and end frames.",
         ],
       };
     }
@@ -2110,7 +2133,7 @@ export default function App() {
                     </p>
                     {selectedRange.overLimit ? (
                       <p className="text-xs text-red-600">
-                        This exceeds the current Luma model limit ({lumaHardLimitSeconds}s for {lumaModel}). You can still save the segment, but generation will be blocked until under the hard limit.
+                        This exceeds the current model limit ({lumaHardLimitSeconds}s for {lumaModel}). You can still save the segment, but generation will be blocked until under the hard limit.
                       </p>
                     ) : null}
                   </div>
@@ -2574,13 +2597,19 @@ export default function App() {
                     <div className="grid gap-3 md:grid-cols-2">
                       <select
                         value={lumaModel}
-                        onChange={(e) => setLumaModel(e.target.value as "ray-2" | "ray-flash-2" | "runway-gen4.5" | "kling-2.6")}
+                        onChange={(e) =>
+                          setLumaModel(
+                            e.target.value as "ray-2" | "ray-flash-2" | "runway-gen4.5" | "kling-2.6" | "veo-3.1" | "veo-3.1-fast",
+                          )
+                        }
                         className="rounded-md border border-ink/20 px-3 py-2"
                       >
                         <option value="ray-2">ray-2</option>
                         <option value="ray-flash-2">ray-flash-2</option>
                         <option value="runway-gen4.5">runway-gen4.5 (first image)</option>
                         <option value="kling-2.6">kling-2.6 (start/end frames)</option>
+                        <option value="veo-3.1">veo-3.1 (start/end frames, no audio)</option>
+                        <option value="veo-3.1-fast">veo-3.1-fast (start/end frames, no audio)</option>
                       </select>
                       {lumaModel === "ray-2" || lumaModel === "ray-flash-2" ? (
                         <select value={advancedMode} onChange={(e) => setAdvancedMode(e.target.value)} className="rounded-md border border-ink/20 px-3 py-2">
