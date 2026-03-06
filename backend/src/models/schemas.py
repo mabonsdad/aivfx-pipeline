@@ -109,9 +109,16 @@ class SegmentGenerateRequest(BaseModel):
     lastFrameVariantId: str | None = None
 
 
+class MergeGenerationAdjustment(BaseModel):
+    startFrameOverride: int | None = Field(default=None, ge=0)
+    trimStartFrames: int = Field(default=0, ge=0)
+    trimEndFrames: int = Field(default=0, ge=0)
+
+
 class MergeRequest(BaseModel):
     selectedSegmentGenerationIds: list[str]
     temporalFeatherFrames: int = Field(ge=0, le=30, default=0)
+    generationAdjustments: dict[str, MergeGenerationAdjustment] | None = None
 
 
 class QcRunRequest(BaseModel):

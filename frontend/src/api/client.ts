@@ -131,7 +131,21 @@ export const apiClient = {
       lastFrameVariantId?: string;
     },
   ) => api<{ jobId: string }>(`/tasks/${taskId}/segments/${segmentId}/generate`, { method: "POST", body: JSON.stringify(payload) }),
-  merge: (taskId: string, payload: { selectedSegmentGenerationIds: string[]; temporalFeatherFrames: number }) =>
+  merge: (
+    taskId: string,
+    payload: {
+      selectedSegmentGenerationIds: string[];
+      temporalFeatherFrames: number;
+      generationAdjustments?: Record<
+        string,
+        {
+          startFrameOverride?: number;
+          trimStartFrames?: number;
+          trimEndFrames?: number;
+        }
+      >;
+    },
+  ) =>
     api<{ jobId: string }>(`/tasks/${taskId}/merge`, { method: "POST", body: JSON.stringify(payload) }),
   runQc: (taskId: string, payload?: { generationIds?: string[] }) =>
     api<{ jobId: string; generationCount: number }>(`/tasks/${taskId}/qc/run`, {

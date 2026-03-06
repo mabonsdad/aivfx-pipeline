@@ -79,6 +79,31 @@ type EditFrameCandidate = {
 };
 
 const VIDEO_THUMBNAIL_CACHE = new Map<string, string | null>();
+const VIDEO_FRAME_THUMBNAIL_CACHE = new Map<string, string | null>();
+
+type VideoFrameStripItem = {
+  frameIndex: number;
+  imageUrl: string | null;
+};
+
+function clampInteger(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, Math.round(value)));
+}
+
+function frameWindow(centerFrame: number, before: number, after: number, minFrame: number, maxFrame: number): number[] {
+  if (maxFrame < minFrame) return [];
+  const values: number[] = [];
+  for (let frame = centerFrame - before; frame <= centerFrame + after; frame += 1) {
+    if (frame < minFrame || frame > maxFrame) continue;
+    values.push(frame);
+  }
+  return values;
+}
+
+function formatFramesAndSeconds(frames: number, fps: number): string {
+  const safeFps = fps > 0 ? fps : 30;
+  return `${frames}f / ${(frames / safeFps).toFixed(2)}s`;
+}
 
 function normalizeTaskNameInput(value: string): string {
   return value
@@ -328,6 +353,198 @@ function VideoThumbnail({
   );
 }
 
+function useVideoFrameStrip({
+  videoUrl,
+  fps,
+  frameIndices,
+  cachePrefix,
+}: {
+  videoUrl?: string | null;
+  fps: number;
+  frameIndices: number[];
+  cachePrefix: string;
+}): VideoFrameStripItem[] {
+  const [items, setItems] = useState<VideoFrameStripItem[]>([]);
+  const signature = useMemo(() => frameIndices.join(","), [frameIndices]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!videoUrl || !Number.isFinite(fps) || fps <= 0 || frameIndices.length === 0) {
+      setItems([]);
+      return;
+    }
+
+    const safeFps = fps;
+    const uniqueFrames = Array.from(new Set(frameIndices)).sort((a, b) => a - b);
+    const initial = uniqueFrames.map((frameIndex) => {
+      const key = `${cachePrefix}:${videoUrl}:${frameIndex}`;
+      return { frameIndex, imageUrl: VIDEO_FRAME_THUMBNAIL_CACHE.get(key) ?? null };
+    });
+    setItems(initial);
+
+    const run = async () => {
+      const video = document.createElement("video");
+      video.crossOrigin = "anonymous";
+      video.preload = "auto";
+      video.muted = true;
+      video.playsInline = true;
+      video.src = videoUrl;
+
+      const waitForMetadata = new Promise<void>((resolve, reject) => {
+        const handleLoaded = () => {
+          cleanup();
+          resolve();
+        };
+        const handleError = () => {
+          cleanup();
+          reject(new Error("Could not read video metadata"));
+        };
+        const cleanup = () => {
+          video.removeEventListener("loadedmetadata", handleLoaded);
+          video.removeEventListener("error", handleError);
+        };
+        video.addEventListener("loadedmetadata", handleLoaded);
+        video.addEventListener("error", handleError);
+      });
+
+      try {
+        video.load();
+        await waitForMetadata;
+      } catch {
+        if (!cancelled) {
+          setItems(uniqueFrames.map((frameIndex) => ({ frameIndex, imageUrl: null })));
+        }
+        video.pause();
+        video.src = "";
+        return;
+      }
+
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, video.videoWidth || 1);
+      canvas.height = Math.max(1, video.videoHeight || 1);
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        if (!cancelled) {
+          setItems(uniqueFrames.map((frameIndex) => ({ frameIndex, imageUrl: null })));
+        }
+        video.pause();
+        video.src = "";
+        return;
+      }
+
+      const results: VideoFrameStripItem[] = [];
+      const durationSec = Number.isFinite(video.duration) ? Math.max(0, video.duration) : 0;
+      const maxSeekSec = Math.max(0, durationSec - 0.001);
+
+      for (const frameIndex of uniqueFrames) {
+        if (cancelled) break;
+        const cacheKey = `${cachePrefix}:${videoUrl}:${frameIndex}`;
+        if (VIDEO_FRAME_THUMBNAIL_CACHE.has(cacheKey)) {
+          results.push({ frameIndex, imageUrl: VIDEO_FRAME_THUMBNAIL_CACHE.get(cacheKey) ?? null });
+          continue;
+        }
+
+        const targetSec = Math.max(0, Math.min(maxSeekSec, frameIndex / safeFps));
+        try {
+          if (Math.abs(video.currentTime - targetSec) > 0.0005) {
+            const seekPromise = new Promise<void>((resolve, reject) => {
+              const handleSeeked = () => {
+                cleanup();
+                resolve();
+              };
+              const handleError = () => {
+                cleanup();
+                reject(new Error("seek failed"));
+              };
+              const cleanup = () => {
+                video.removeEventListener("seeked", handleSeeked);
+                video.removeEventListener("error", handleError);
+              };
+              video.addEventListener("seeked", handleSeeked);
+              video.addEventListener("error", handleError);
+            });
+            video.currentTime = targetSec;
+            await seekPromise;
+          }
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          const dataUrl = canvas.toDataURL("image/jpeg", 0.82);
+          VIDEO_FRAME_THUMBNAIL_CACHE.set(cacheKey, dataUrl);
+          results.push({ frameIndex, imageUrl: dataUrl });
+        } catch {
+          VIDEO_FRAME_THUMBNAIL_CACHE.set(cacheKey, null);
+          results.push({ frameIndex, imageUrl: null });
+        }
+      }
+
+      video.pause();
+      video.src = "";
+      if (!cancelled) {
+        setItems(results);
+      }
+    };
+
+    run();
+    return () => {
+      cancelled = true;
+    };
+  }, [cachePrefix, fps, frameIndices, signature, videoUrl]);
+
+  return items;
+}
+
+function MergeFrameStrip({
+  title,
+  items,
+  anchorFrame,
+  overlapStart,
+  overlapEnd,
+  prefix,
+}: {
+  title: string;
+  items: VideoFrameStripItem[];
+  anchorFrame: number;
+  overlapStart?: number;
+  overlapEnd?: number;
+  prefix: string;
+}) {
+  return (
+    <div className="rounded-md border border-ink/10 bg-white p-2">
+      <p className="text-xs font-medium text-ink/80">{title}</p>
+      <div className="mt-2 flex gap-2 overflow-x-auto pb-1">
+        {items.map((item) => {
+          const inOverlap =
+            overlapStart != null &&
+            overlapEnd != null &&
+            item.frameIndex >= Math.min(overlapStart, overlapEnd) &&
+            item.frameIndex <= Math.max(overlapStart, overlapEnd);
+          const isAnchor = item.frameIndex === anchorFrame;
+          return (
+            <div
+              key={`${title}:${item.frameIndex}`}
+              className={`w-20 shrink-0 rounded border p-1 ${
+                isAnchor ? "border-teal-500 bg-teal-50" : inOverlap ? "border-amber-300 bg-amber-50" : "border-ink/10 bg-bg"
+              }`}
+            >
+              {item.imageUrl ? (
+                <img src={item.imageUrl} alt={`${prefix}${item.frameIndex}`} className="h-12 w-full rounded object-contain" />
+              ) : (
+                <div className="flex h-12 w-full items-center justify-center rounded border border-dashed border-ink/20 text-[10px] text-ink/60">
+                  no frame
+                </div>
+              )}
+              <p className="mt-1 truncate text-[10px] text-ink/70">
+                {prefix}
+                {item.frameIndex}
+                {isAnchor ? " • cut" : inOverlap ? " • feather" : ""}
+              </p>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function uploadFileWithProgress(
   uploadUrl: string,
   file: File,
@@ -419,6 +636,10 @@ export default function App() {
   const [selectedGenIds, setSelectedGenIds] = useState<string[]>([]);
   const [selectedPreviewGenId, setSelectedPreviewGenId] = useState<string>("");
   const [temporalFeatherFrames, setTemporalFeatherFrames] = useState(0);
+  const [mergeInsertStartFrame, setMergeInsertStartFrame] = useState(0);
+  const [mergeTrimStartFrames, setMergeTrimStartFrames] = useState(0);
+  const [mergeTrimEndFrames, setMergeTrimEndFrames] = useState(0);
+  const [mergeConfiguredGenId, setMergeConfiguredGenId] = useState("");
   const [imagePreviewModal, setImagePreviewModal] = useState<{ url: string; label: string } | null>(null);
   const [videoPreviewModal, setVideoPreviewModal] = useState<{ url: string; label: string } | null>(null);
   const [reportGraphModal, setReportGraphModal] = useState<{ url: string; label: string } | null>(null);
@@ -992,9 +1213,20 @@ export default function App() {
   const mergeMutation = useMutation({
     mutationFn: async () => {
       if (!selectedTaskId) throw new Error("Select a task");
+      const generationAdjustments =
+        mergeTargetGeneration && selectedGenIds.includes(mergeTargetGeneration.genId)
+          ? {
+              [mergeTargetGeneration.genId]: {
+                startFrameOverride: mergeInsertStartFrameClamped,
+                trimStartFrames: mergeTrimStartClamped,
+                trimEndFrames: mergeTrimEndClamped,
+              },
+            }
+          : undefined;
       return apiClient.merge(selectedTaskId, {
         selectedSegmentGenerationIds: selectedGenIds,
-        temporalFeatherFrames,
+        temporalFeatherFrames: mergeFeatherClamped,
+        generationAdjustments,
       });
     },
     onSuccess: (result) => {
@@ -1076,6 +1308,75 @@ export default function App() {
     () => [...(task?.exports ?? [])].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
     [task?.exports],
   );
+  const mergeTargetGeneration = selectedMergeGenerations[0] ?? null;
+  const mergeTargetSegment = mergeTargetGeneration ? segmentsById.get(mergeTargetGeneration.segmentId) ?? null : null;
+  const mergeFps = fpsValue(task);
+  const mergeOriginalStartFrame = mergeTargetSegment?.startFrame ?? 0;
+  const mergeOriginalEndFrameExclusive = mergeTargetSegment?.endFrameExclusive ?? mergeOriginalStartFrame + 1;
+  const mergeOriginalDurationFrames = Math.max(1, mergeOriginalEndFrameExclusive - mergeOriginalStartFrame);
+  const mergeProviderDurationSec =
+    asNumber(mergeTargetGeneration?.providerDurationSec) ??
+    asNumber(mergeTargetGeneration?.generationSettings?.providerDurationSec) ??
+    mergeTargetSegment?.durationSec ??
+    mergeOriginalDurationFrames / (mergeFps || 30);
+  const mergeGeneratedDurationFrames = Math.max(1, Math.round(Math.max(1 / Math.max(1, mergeFps), mergeProviderDurationSec) * mergeFps));
+  const mergeMaxFrameIndex = Math.max(0, frameCount(task) - 1);
+  const mergeInsertStartFrameClamped = clampInteger(mergeInsertStartFrame, 0, mergeMaxFrameIndex);
+  const mergeTrimStartClamped = clampInteger(mergeTrimStartFrames, 0, Math.max(0, mergeGeneratedDurationFrames - 1));
+  const mergeTrimEndClamped = clampInteger(
+    mergeTrimEndFrames,
+    0,
+    Math.max(0, mergeGeneratedDurationFrames - 1 - mergeTrimStartClamped),
+  );
+  const mergeEffectiveDurationFrames = Math.max(1, mergeGeneratedDurationFrames - mergeTrimStartClamped - mergeTrimEndClamped);
+  const mergeEffectiveEndFrameExclusive = mergeInsertStartFrameClamped + mergeEffectiveDurationFrames;
+  const mergeEndOffsetFrames = mergeEffectiveEndFrameExclusive - mergeOriginalEndFrameExclusive;
+  const mergeGeneratedStartAnchor = mergeTrimStartClamped;
+  const mergeGeneratedEndAnchor = mergeTrimStartClamped + mergeEffectiveDurationFrames - 1;
+  const mergeFeatherClamped = clampInteger(temporalFeatherFrames, 0, 30);
+  const mergeOriginalVideoForPreview = task?.video?.previewSource?.downloadUrl ?? task?.video?.editSource?.downloadUrl ?? null;
+  const mergeGeneratedVideoForPreview = mergeTargetGeneration?.downloadUrl ?? null;
+  const startBoundaryOriginalFrames = useMemo(
+    () => frameWindow(mergeInsertStartFrameClamped, 3, 3, 0, mergeMaxFrameIndex),
+    [mergeInsertStartFrameClamped, mergeMaxFrameIndex],
+  );
+  const endBoundaryOriginalFrames = useMemo(
+    () => frameWindow(mergeEffectiveEndFrameExclusive, 3, 3, 0, mergeMaxFrameIndex),
+    [mergeEffectiveEndFrameExclusive, mergeMaxFrameIndex],
+  );
+  const generatedMaxFrameIndex = Math.max(0, mergeGeneratedDurationFrames - 1);
+  const startBoundaryGeneratedFrames = useMemo(
+    () => frameWindow(mergeGeneratedStartAnchor, 3, 3, 0, generatedMaxFrameIndex),
+    [generatedMaxFrameIndex, mergeGeneratedStartAnchor],
+  );
+  const endBoundaryGeneratedFrames = useMemo(
+    () => frameWindow(mergeGeneratedEndAnchor, 3, 3, 0, generatedMaxFrameIndex),
+    [generatedMaxFrameIndex, mergeGeneratedEndAnchor],
+  );
+  const startBoundaryOriginalThumbs = useVideoFrameStrip({
+    videoUrl: mergeOriginalVideoForPreview,
+    fps: mergeFps,
+    frameIndices: startBoundaryOriginalFrames,
+    cachePrefix: "merge:start:original",
+  });
+  const startBoundaryGeneratedThumbs = useVideoFrameStrip({
+    videoUrl: mergeGeneratedVideoForPreview,
+    fps: mergeFps,
+    frameIndices: startBoundaryGeneratedFrames,
+    cachePrefix: "merge:start:generated",
+  });
+  const endBoundaryGeneratedThumbs = useVideoFrameStrip({
+    videoUrl: mergeGeneratedVideoForPreview,
+    fps: mergeFps,
+    frameIndices: endBoundaryGeneratedFrames,
+    cachePrefix: "merge:end:generated",
+  });
+  const endBoundaryOriginalThumbs = useVideoFrameStrip({
+    videoUrl: mergeOriginalVideoForPreview,
+    fps: mergeFps,
+    frameIndices: endBoundaryOriginalFrames,
+    cachePrefix: "merge:end:original",
+  });
   const lumaHardLimitSeconds = lumaModelMaxDurationSeconds(lumaModel);
   const hasHardDurationLimit =
     lumaModel === "ray-2" ||
@@ -1274,6 +1575,38 @@ export default function App() {
     }
     setSelectedGenIds([selectedId]);
   }, [selectedPreviewGeneration?.genId, task?.segmentGenerations]);
+
+  useEffect(() => {
+    const generationId = mergeTargetGeneration?.genId ?? "";
+    if (!generationId) {
+      setMergeConfiguredGenId("");
+      return;
+    }
+    if (generationId === mergeConfiguredGenId) return;
+    setMergeConfiguredGenId(generationId);
+    setMergeInsertStartFrame(mergeTargetSegment?.startFrame ?? 0);
+    setMergeTrimStartFrames(0);
+    setMergeTrimEndFrames(0);
+  }, [mergeConfiguredGenId, mergeTargetGeneration?.genId, mergeTargetSegment?.startFrame]);
+
+  useEffect(() => {
+    if (mergeInsertStartFrame !== mergeInsertStartFrameClamped) {
+      setMergeInsertStartFrame(mergeInsertStartFrameClamped);
+    }
+    if (mergeTrimStartFrames !== mergeTrimStartClamped) {
+      setMergeTrimStartFrames(mergeTrimStartClamped);
+    }
+    if (mergeTrimEndFrames !== mergeTrimEndClamped) {
+      setMergeTrimEndFrames(mergeTrimEndClamped);
+    }
+  }, [
+    mergeInsertStartFrame,
+    mergeInsertStartFrameClamped,
+    mergeTrimEndClamped,
+    mergeTrimEndFrames,
+    mergeTrimStartClamped,
+    mergeTrimStartFrames,
+  ]);
 
   function selectSegmentGeneration(genId: string) {
     setSelectedPreviewGenId(genId);
@@ -2988,40 +3321,157 @@ export default function App() {
             {tab === "merge" && (
               <div className="space-y-4">
                 <h3 className="text-lg font-semibold">Merge Video</h3>
-                <div className="grid gap-3 lg:grid-cols-[1.65fr_1fr]">
+                <div className="grid gap-3 lg:grid-cols-[1.8fr_1fr]">
                   <div className="space-y-3">
                     <div className="space-y-2 rounded-lg border border-ink/10 p-3">
                       <p className="text-sm font-medium">Generation in use</p>
-                      {selectedMergeGenerations.length === 0 ? (
+                      {!mergeTargetGeneration ? (
                         <p className="text-sm text-ink/60">No generation selected in Generate Video yet.</p>
                       ) : (
                         <div
                           className={`rounded border p-2 ${
-                            selectedMergeGenerations[0].status === "failed"
-                              ? "border-orange-400 bg-orange-50"
-                              : "border-teal-500 bg-teal-50"
+                            mergeTargetGeneration.status === "failed" ? "border-orange-400 bg-orange-50" : "border-teal-500 bg-teal-50"
                           }`}
                         >
-                          <p className="text-sm font-semibold">{describeGeneration(selectedMergeGenerations[0])}</p>
-                          <p className="text-xs text-ink/50">{selectedMergeGenerations[0].genId}</p>
+                          <p className="text-sm font-semibold">{describeGeneration(mergeTargetGeneration)}</p>
+                          <p className="text-xs text-ink/50">{mergeTargetGeneration.genId}</p>
                         </div>
                       )}
                     </div>
-                    <label className="block text-sm">Temporal feather frames (0-30)</label>
-                    <input
-                      type="number"
-                      min={0}
-                      max={30}
-                      value={temporalFeatherFrames}
-                      onChange={(e) => setTemporalFeatherFrames(Number(e.target.value))}
-                      className="w-40 rounded-md border border-ink/20 px-3 py-2"
-                    />
+
+                    {mergeTargetGeneration && mergeTargetSegment ? (
+                      <>
+                        <div className="space-y-3 rounded-lg border border-ink/10 p-3">
+                          <p className="text-sm font-medium">Advanced merge alignment</p>
+                          <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
+                            <label className="space-y-1 text-xs text-ink/70">
+                              <span className="block font-medium text-ink/80">Insert start frame</span>
+                              <input
+                                type="number"
+                                min={0}
+                                max={mergeMaxFrameIndex}
+                                value={mergeInsertStartFrame}
+                                onChange={(e) => setMergeInsertStartFrame(Number(e.target.value))}
+                                className="w-full rounded-md border border-ink/20 px-2 py-2 text-sm"
+                              />
+                            </label>
+                            <label className="space-y-1 text-xs text-ink/70">
+                              <span className="block font-medium text-ink/80">Trim generated start (frames)</span>
+                              <input
+                                type="number"
+                                min={0}
+                                max={Math.max(0, mergeGeneratedDurationFrames - 1)}
+                                value={mergeTrimStartFrames}
+                                onChange={(e) => setMergeTrimStartFrames(Number(e.target.value))}
+                                className="w-full rounded-md border border-ink/20 px-2 py-2 text-sm"
+                              />
+                            </label>
+                            <label className="space-y-1 text-xs text-ink/70">
+                              <span className="block font-medium text-ink/80">Trim generated end (frames)</span>
+                              <input
+                                type="number"
+                                min={0}
+                                max={Math.max(0, mergeGeneratedDurationFrames - 1)}
+                                value={mergeTrimEndFrames}
+                                onChange={(e) => setMergeTrimEndFrames(Number(e.target.value))}
+                                className="w-full rounded-md border border-ink/20 px-2 py-2 text-sm"
+                              />
+                            </label>
+                            <label className="space-y-1 text-xs text-ink/70">
+                              <span className="block font-medium text-ink/80">Temporal feather (frames)</span>
+                              <input
+                                type="number"
+                                min={0}
+                                max={30}
+                                value={temporalFeatherFrames}
+                                onChange={(e) => setTemporalFeatherFrames(Number(e.target.value))}
+                                className="w-full rounded-md border border-ink/20 px-2 py-2 text-sm"
+                              />
+                            </label>
+                          </div>
+                          <div className="grid gap-2 rounded-md bg-bg p-2 text-xs text-ink/70 md:grid-cols-2">
+                            <p>
+                              Original cut: <span className="font-medium text-ink">f{mergeOriginalStartFrame}</span> to{" "}
+                              <span className="font-medium text-ink">f{Math.max(mergeOriginalStartFrame, mergeOriginalEndFrameExclusive - 1)}</span> (
+                              {formatFramesAndSeconds(mergeOriginalDurationFrames, mergeFps)})
+                            </p>
+                            <p>
+                              Generated in merge: <span className="font-medium text-ink">{formatFramesAndSeconds(mergeEffectiveDurationFrames, mergeFps)}</span>{" "}
+                              (from source {formatFramesAndSeconds(mergeGeneratedDurationFrames, mergeFps)})
+                            </p>
+                            <p>
+                              Insert window now: <span className="font-medium text-ink">f{mergeInsertStartFrameClamped}</span> to{" "}
+                              <span className="font-medium text-ink">f{Math.max(mergeInsertStartFrameClamped, mergeEffectiveEndFrameExclusive - 1)}</span>
+                            </p>
+                            <p className={mergeEndOffsetFrames !== 0 ? "font-semibold text-orange-700" : ""}>
+                              End shift from original cut: {mergeEndOffsetFrames >= 0 ? "+" : ""}
+                              {mergeEndOffsetFrames} frames ({(mergeEndOffsetFrames / Math.max(1, mergeFps)).toFixed(2)}s)
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="space-y-2 rounded-lg border border-ink/10 p-3">
+                          <div className="flex items-center justify-between">
+                            <p className="text-sm font-medium">Start merge point preview</p>
+                            <p className="text-xs text-ink/60">
+                              Cut at original f{mergeInsertStartFrameClamped} -&gt; generated g{mergeGeneratedStartAnchor}
+                            </p>
+                          </div>
+                          <div className="grid gap-2 md:grid-cols-2">
+                            <MergeFrameStrip
+                              title="Original track around start cut"
+                              items={startBoundaryOriginalThumbs}
+                              anchorFrame={mergeInsertStartFrameClamped}
+                              overlapStart={mergeFeatherClamped > 0 ? mergeInsertStartFrameClamped : undefined}
+                              overlapEnd={mergeFeatherClamped > 0 ? mergeInsertStartFrameClamped + mergeFeatherClamped - 1 : undefined}
+                              prefix="f"
+                            />
+                            <MergeFrameStrip
+                              title="Generated track around start cut"
+                              items={startBoundaryGeneratedThumbs}
+                              anchorFrame={mergeGeneratedStartAnchor}
+                              overlapStart={mergeFeatherClamped > 0 ? mergeGeneratedStartAnchor : undefined}
+                              overlapEnd={mergeFeatherClamped > 0 ? mergeGeneratedStartAnchor + mergeFeatherClamped - 1 : undefined}
+                              prefix="g"
+                            />
+                          </div>
+                        </div>
+
+                        <div className="space-y-2 rounded-lg border border-ink/10 p-3">
+                          <div className="flex items-center justify-between">
+                            <p className="text-sm font-medium">End merge point preview</p>
+                            <p className="text-xs text-ink/60">
+                              Cut at generated g{mergeGeneratedEndAnchor} -&gt; original f{mergeEffectiveEndFrameExclusive}
+                            </p>
+                          </div>
+                          <div className="grid gap-2 md:grid-cols-2">
+                            <MergeFrameStrip
+                              title="Generated track around end cut"
+                              items={endBoundaryGeneratedThumbs}
+                              anchorFrame={mergeGeneratedEndAnchor}
+                              overlapStart={mergeFeatherClamped > 0 ? mergeGeneratedEndAnchor - mergeFeatherClamped + 1 : undefined}
+                              overlapEnd={mergeFeatherClamped > 0 ? mergeGeneratedEndAnchor : undefined}
+                              prefix="g"
+                            />
+                            <MergeFrameStrip
+                              title="Original track after generated segment"
+                              items={endBoundaryOriginalThumbs}
+                              anchorFrame={mergeEffectiveEndFrameExclusive}
+                              overlapStart={mergeFeatherClamped > 0 ? mergeEffectiveEndFrameExclusive : undefined}
+                              overlapEnd={mergeFeatherClamped > 0 ? mergeEffectiveEndFrameExclusive + mergeFeatherClamped - 1 : undefined}
+                              prefix="f"
+                            />
+                          </div>
+                        </div>
+                      </>
+                    ) : null}
+
                     <button
-                      className="rounded-md bg-accent2 px-4 py-2 text-white"
-                      disabled={selectedMergeGenerations.length === 0}
+                      className="rounded-md bg-accent2 px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-60"
+                      disabled={!mergeTargetGeneration || mergeMutation.isPending}
                       onClick={() => mergeMutation.mutate()}
                     >
-                      Merge generation
+                      {mergeMutation.isPending ? "Merging..." : "Merge generation"}
                     </button>
                   </div>
                   <div className="rounded-lg border border-ink/15 bg-bg p-3">
@@ -3031,12 +3481,24 @@ export default function App() {
                         The step takes the generated video (segment) you currently have selected on the Generate Video step, and re-inserts it back into the original video at the exact position it came from.
                       </p>
                       <p>
-                        Set Temporal Feathering to 0 for a hard cut or choose to cross fade based on the number of frames selected.
+                        By default the generated clip starts at the original cut start. If the generated clip is longer, the end will naturally land later in the timeline.
+                      </p>
+                      <p>
+                        Trim start/end frames to remove unstable generated heads/tails, then confirm boundaries using the two frame-strip previews before merging.
+                      </p>
+                      <p>
+                        Set Temporal Feathering to 0 for a hard cut or choose a frame count to crossfade; feathered frames are marked in yellow.
                       </p>
                       <p className="font-semibold uppercase tracking-wide text-orange-700">
                         This is an experiment to highlight the challenges merging AI and real content!
                       </p>
                     </div>
+                    {mergeTargetSegment ? (
+                      <div className="mt-3 rounded-md border border-ink/10 bg-white p-2 text-xs text-ink/70">
+                        <p className="font-medium text-ink/80">Current segment reference</p>
+                        <p className="mt-1">{describeSegment(mergeTargetSegment)}</p>
+                      </div>
+                    ) : null}
                   </div>
                 </div>
                 <div className="space-y-2">

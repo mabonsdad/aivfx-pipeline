@@ -996,6 +996,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 payload={
                     "selectedSegmentGenerationIds": req.selectedSegmentGenerationIds,
                     "temporalFeatherFrames": req.temporalFeatherFrames,
+                    "generationAdjustments": req.generationAdjustments or {},
                 },
             )
             return response(202, {"jobId": job_id}, origin=origin)

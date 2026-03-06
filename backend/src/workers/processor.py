@@ -1254,7 +1254,9 @@ def _handle_merge(
     payload = job["payload"]
     selected = payload["selectedSegmentGenerationIds"]
     feather_frames = int(payload.get("temporalFeatherFrames", 0))
+    adjustments = payload.get("generationAdjustments") or {}
     paths = _asset_paths(task)
+    total_frames = int(task.get("video", {}).get("editSource", {}).get("frameCount") or 0)
 
     with tempfile.TemporaryDirectory() as td:
         td_path = Path(td)
@@ -1272,6 +1274,14 @@ def _handle_merge(
             seg_path = td_path / f"segment_{idx}.mp4"
             out_path = td_path / f"merged_{idx}.mp4"
             _download_s3(s3, settings.assets_bucket, gen["outputKey"], seg_path)
+            raw_adjustment = adjustments.get(gen_id) or {}
+            trim_start_frames = max(0, int(raw_adjustment.get("trimStartFrames") or 0))
+            trim_end_frames = max(0, int(raw_adjustment.get("trimEndFrames") or 0))
+            start_frame_override = raw_adjustment.get("startFrameOverride")
+            if start_frame_override is not None:
+                start_frame_override = max(0, int(start_frame_override))
+                if total_frames > 0:
+                    start_frame_override = min(start_frame_override, total_frames - 1)
 
             cmd = merge_with_segment_replacement(
                 str(current_path),
@@ -1284,11 +1294,17 @@ def _handle_merge(
                 output_width=int(task["video"]["editSource"]["width"]),
                 output_height=int(task["video"]["editSource"]["height"]),
                 temporal_feather_frames=feather_frames,
+                insert_start_frame=start_frame_override,
+                generated_trim_start_frames=trim_start_frames,
+                generated_trim_end_frames=trim_end_frames,
             )
             applied.append(
                 {
                     "segmentId": segment["segmentId"],
                     "generationId": gen_id,
+                    "startFrameOverride": start_frame_override,
+                    "trimStartFrames": trim_start_frames,
+                    "trimEndFrames": trim_end_frames,
                     "ffmpeg": " ".join(cmd).replace(str(td_path), "/tmp"),
                 }
             )
