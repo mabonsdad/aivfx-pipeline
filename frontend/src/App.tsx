@@ -37,6 +37,7 @@ type LibraryAsset = {
   createdAt: string;
   previewUrl: string;
   downloadUrl: string;
+  thumbnailUrl?: string;
   mediaType: "image" | "video";
   customReportRef?: CustomReportOutputRef;
   deletePayload:
@@ -116,7 +117,6 @@ type EditFrameCandidate = {
   isSelected: boolean;
 };
 
-const VIDEO_THUMBNAIL_CACHE = new Map<string, string | null>();
 const VIDEO_FRAME_THUMBNAIL_CACHE = new Map<string, string | null>();
 
 type VideoFrameStripItem = {
@@ -141,6 +141,26 @@ function frameWindow(centerFrame: number, before: number, after: number, minFram
 function formatFramesAndSeconds(frames: number, fps: number): string {
   const safeFps = fps > 0 ? fps : 30;
   return `${frames}f / ${(frames / safeFps).toFixed(2)}s`;
+}
+
+function isValidHttpUrl(value: string | null | undefined): value is string {
+  if (!value) return false;
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "https:" || parsed.protocol === "http:";
+  } catch {
+    return false;
+  }
+}
+
+function generationThumbnailUrl(generation: SegmentGeneration): string | null {
+  return (
+    generation.inputFirstFrameUrl ??
+    generation.sourceFirstFrameCaptureUrl ??
+    generation.inputLastFrameUrl ??
+    generation.sourceLastFrameCaptureUrl ??
+    null
+  );
 }
 
 function normalizeTaskNameInput(value: string): string {
@@ -300,150 +320,42 @@ function FrameSelectCard({
   );
 }
 
-function VideoThumbnail({
-  videoUrl,
-  label,
-  onClick,
-  disabled,
-  cacheKey,
-  interactive = true,
-  thumbClassName = "aspect-video",
-}: {
-  videoUrl?: string;
-  label: string;
-  onClick: () => void;
-  disabled?: boolean;
-  cacheKey?: string;
-  interactive?: boolean;
-  thumbClassName?: string;
-}) {
-  const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    setThumbnailUrl(null);
-    if (!videoUrl) return;
-    const key = cacheKey || videoUrl;
-    if (key && VIDEO_THUMBNAIL_CACHE.has(key)) {
-      setThumbnailUrl(VIDEO_THUMBNAIL_CACHE.get(key) ?? null);
-      return;
-    }
-
-    const video = document.createElement("video");
-    video.crossOrigin = "anonymous";
-    video.preload = "metadata";
-    video.muted = true;
-    video.playsInline = true;
-    video.src = videoUrl;
-
-    const capture = () => {
-      if (cancelled) return;
-      if (!video.videoWidth || !video.videoHeight) return;
-      const canvas = document.createElement("canvas");
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return;
-      try {
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        const dataUrl = canvas.toDataURL("image/jpeg", 0.86);
-        if (key) VIDEO_THUMBNAIL_CACHE.set(key, dataUrl);
-        setThumbnailUrl(dataUrl);
-      } catch {
-        if (key) VIDEO_THUMBNAIL_CACHE.set(key, null);
-        setThumbnailUrl(null);
-      }
-    };
-
-    const handleLoadedData = () => {
-      if (!Number.isFinite(video.duration) || video.duration <= 0) {
-        capture();
-        return;
-      }
-      const previewTime = Math.min(1, Math.max(0, video.duration / 3));
-      if (previewTime <= 0) {
-        capture();
-        return;
-      }
-      video.currentTime = previewTime;
-    };
-
-    const handleSeeked = () => capture();
-    const handleError = () => {
-      if (!cancelled) {
-        if (key) VIDEO_THUMBNAIL_CACHE.set(key, null);
-        setThumbnailUrl(null);
-      }
-    };
-
-    video.addEventListener("loadeddata", handleLoadedData);
-    video.addEventListener("seeked", handleSeeked);
-    video.addEventListener("error", handleError);
-    video.load();
-
-    return () => {
-      cancelled = true;
-      video.removeEventListener("loadeddata", handleLoadedData);
-      video.removeEventListener("seeked", handleSeeked);
-      video.removeEventListener("error", handleError);
-      video.pause();
-      video.src = "";
-    };
-  }, [cacheKey, videoUrl]);
-
-  const thumbnailContent = thumbnailUrl ? (
-    <img src={thumbnailUrl} alt={label} className={`${thumbClassName} w-full rounded-md bg-bg object-contain`} />
-  ) : (
-    <div className={`flex ${thumbClassName} w-full items-center justify-center rounded-md border border-dashed border-ink/20 bg-bg text-xs text-ink/60`}>
-      Video thumbnail unavailable
-    </div>
-  );
-
-  if (!interactive) {
-    return <div className="block w-full">{thumbnailContent}</div>;
-  }
-
-  return (
-    <button
-      type="button"
-      className="block w-full disabled:cursor-not-allowed disabled:opacity-60"
-      onClick={onClick}
-      disabled={disabled}
-      title={disabled ? "Video unavailable" : `Use ${label}`}
-    >
-      {thumbnailContent}
-    </button>
-  );
-}
-
 function useVideoFrameStrip({
   videoUrl,
   fps,
   frameIndices,
   cachePrefix,
+  sourceCacheKey,
 }: {
   videoUrl?: string | null;
   fps: number;
   frameIndices: number[];
   cachePrefix: string;
+  sourceCacheKey?: string | null;
 }): VideoFrameStripItem[] {
   const [items, setItems] = useState<VideoFrameStripItem[]>([]);
   const signature = useMemo(() => frameIndices.join(","), [frameIndices]);
 
   useEffect(() => {
     let cancelled = false;
-    if (!videoUrl || !Number.isFinite(fps) || fps <= 0 || frameIndices.length === 0) {
+    if (!isValidHttpUrl(videoUrl) || !Number.isFinite(fps) || fps <= 0 || frameIndices.length === 0) {
       setItems([]);
       return;
     }
 
     const safeFps = fps;
     const uniqueFrames = Array.from(new Set(frameIndices)).sort((a, b) => a - b);
+    const sourceKey = sourceCacheKey || videoUrl;
+    const frameCacheKey = (frameIndex: number) => `${cachePrefix}:${sourceKey}:${frameIndex}`;
     const initial = uniqueFrames.map((frameIndex) => {
-      const key = `${cachePrefix}:${videoUrl}:${frameIndex}`;
+      const key = frameCacheKey(frameIndex);
       return { frameIndex, imageUrl: VIDEO_FRAME_THUMBNAIL_CACHE.get(key) ?? null };
     });
     setItems(initial);
+    const allCached = uniqueFrames.every((frameIndex) => VIDEO_FRAME_THUMBNAIL_CACHE.has(frameCacheKey(frameIndex)));
+    if (allCached) {
+      return;
+    }
 
     const run = async () => {
       const video = document.createElement("video");
@@ -501,7 +413,7 @@ function useVideoFrameStrip({
 
       for (const frameIndex of uniqueFrames) {
         if (cancelled) break;
-        const cacheKey = `${cachePrefix}:${videoUrl}:${frameIndex}`;
+        const cacheKey = frameCacheKey(frameIndex);
         if (VIDEO_FRAME_THUMBNAIL_CACHE.has(cacheKey)) {
           results.push({ frameIndex, imageUrl: VIDEO_FRAME_THUMBNAIL_CACHE.get(cacheKey) ?? null });
           continue;
@@ -550,7 +462,7 @@ function useVideoFrameStrip({
     return () => {
       cancelled = true;
     };
-  }, [cachePrefix, fps, frameIndices, signature, videoUrl]);
+  }, [cachePrefix, fps, frameIndices, signature, sourceCacheKey, videoUrl]);
 
   return items;
 }
@@ -736,6 +648,7 @@ export default function App() {
   const [uploadAssetsVisible, setUploadAssetsVisible] = useState(6);
   const [frameAssetsVisible, setFrameAssetsVisible] = useState(6);
   const [videoAssetsVisible, setVideoAssetsVisible] = useState(6);
+  const [generationCardsVisible, setGenerationCardsVisible] = useState(6);
   const [jobsVisible, setJobsVisible] = useState(6);
   const [prompt, setPrompt] = useState("");
   const [model, setModel] = useState<"nano_banana" | "nano_banana_pro" | "chatgpt">("nano_banana_pro");
@@ -1012,7 +925,7 @@ export default function App() {
         createdAt: row.generation.createdAt,
         modelLabel: row.generation.luma.model,
         promptLabel: row.generation.luma.prompt?.trim() || "No prompt provided",
-        imageUrl: null,
+        imageUrl: row.editedUrl ?? row.originalUrl ?? generationThumbnailUrl(row.generation),
         videoUrl: row.generatedVideoUrl,
         selectionRef: { assetType: "segment_generation", genId: row.generation.genId },
       }));
@@ -1226,18 +1139,16 @@ export default function App() {
   }, [firstFrameId, lastFrameId, task]);
 
   useEffect(() => {
-    if (tab === "generate" && selectedTaskId) {
-      queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
-    }
-  }, [queryClient, selectedTaskId, tab]);
-
-  useEffect(() => {
     if (tab === "assets") {
       setUploadAssetsVisible(6);
       setFrameAssetsVisible(6);
       setVideoAssetsVisible(6);
     }
   }, [tab]);
+
+  useEffect(() => {
+    setGenerationCardsVisible(6);
+  }, [selectedSegmentId]);
 
   useEffect(() => {
     if (!activeFrameWidth || !activeFrameHeight) {
@@ -1725,6 +1636,9 @@ export default function App() {
   const mergeFeatherClamped = clampInteger(temporalFeatherFrames, 0, 30);
   const mergeOriginalVideoForPreview = task?.video?.previewSource?.downloadUrl ?? task?.video?.editSource?.downloadUrl ?? null;
   const mergeGeneratedVideoForPreview = mergeTargetGeneration?.downloadUrl ?? null;
+  const mergeOriginalSourceCacheKey = task?.video?.previewSource?.s3Key ?? task?.video?.editSource?.s3Key ?? "merge:original";
+  const mergeGeneratedSourceCacheKey = mergeTargetGeneration?.outputKey ?? mergeTargetGeneration?.genId ?? "merge:generated";
+  const mergeFrameStripEnabled = tab === "merge" && Boolean(mergeTargetGeneration && mergeTargetSegment);
   const startBoundaryOriginalFrames = useMemo(
     () => frameWindow(mergeInsertStartFrameClamped, 3, 3, 0, mergeMaxFrameIndex),
     [mergeInsertStartFrameClamped, mergeMaxFrameIndex],
@@ -1743,28 +1657,32 @@ export default function App() {
     [generatedMaxFrameIndex, mergeGeneratedEndAnchor],
   );
   const startBoundaryOriginalThumbs = useVideoFrameStrip({
-    videoUrl: mergeOriginalVideoForPreview,
+    videoUrl: mergeFrameStripEnabled ? mergeOriginalVideoForPreview : null,
     fps: mergeFps,
     frameIndices: startBoundaryOriginalFrames,
     cachePrefix: "merge:start:original",
+    sourceCacheKey: mergeOriginalSourceCacheKey,
   });
   const startBoundaryGeneratedThumbs = useVideoFrameStrip({
-    videoUrl: mergeGeneratedVideoForPreview,
+    videoUrl: mergeFrameStripEnabled ? mergeGeneratedVideoForPreview : null,
     fps: mergeFps,
     frameIndices: startBoundaryGeneratedFrames,
     cachePrefix: "merge:start:generated",
+    sourceCacheKey: mergeGeneratedSourceCacheKey,
   });
   const endBoundaryGeneratedThumbs = useVideoFrameStrip({
-    videoUrl: mergeGeneratedVideoForPreview,
+    videoUrl: mergeFrameStripEnabled ? mergeGeneratedVideoForPreview : null,
     fps: mergeFps,
     frameIndices: endBoundaryGeneratedFrames,
     cachePrefix: "merge:end:generated",
+    sourceCacheKey: mergeGeneratedSourceCacheKey,
   });
   const endBoundaryOriginalThumbs = useVideoFrameStrip({
-    videoUrl: mergeOriginalVideoForPreview,
+    videoUrl: mergeFrameStripEnabled ? mergeOriginalVideoForPreview : null,
     fps: mergeFps,
     frameIndices: endBoundaryOriginalFrames,
     cachePrefix: "merge:end:original",
+    sourceCacheKey: mergeOriginalSourceCacheKey,
   });
   const lumaHardLimitSeconds = lumaModelMaxDurationSeconds(lumaModel);
   const hasHardDurationLimit =
@@ -1908,6 +1826,7 @@ export default function App() {
           createdAt: generation.createdAt,
             previewUrl: generation.downloadUrl,
             downloadUrl: generation.downloadUrl,
+            thumbnailUrl: generationThumbnailUrl(generation) ?? undefined,
             mediaType: "video",
             customReportRef: { assetType: "segment_generation", genId: generation.genId },
             deletePayload: { assetType: "segment_generation", genId: generation.genId },
@@ -2758,15 +2677,24 @@ export default function App() {
                                 />
                                 QC
                               </label>
-                              {card.videoUrl ? (
-                                <VideoThumbnail
-                                  videoUrl={card.videoUrl}
-                                  cacheKey={card.id}
-                                  label={card.title}
-                                  onClick={() => setVideoPreviewModal({ url: card.videoUrl as string, label: card.title })}
-                                />
-                              ) : card.imageUrl ? (
-                                <img src={card.imageUrl} alt={card.title} className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain" />
+                              {card.imageUrl ? (
+                                <button
+                                  type="button"
+                                  className="block w-full"
+                                  onClick={() => {
+                                    if (card.videoUrl) {
+                                      setVideoPreviewModal({ url: card.videoUrl, label: card.title });
+                                    } else {
+                                      setImagePreviewModal({ url: card.imageUrl as string, label: card.title });
+                                    }
+                                  }}
+                                >
+                                  <img src={card.imageUrl} alt={card.title} className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain" />
+                                </button>
+                              ) : card.videoUrl ? (
+                                <div className="flex aspect-video w-full items-center justify-center rounded border border-dashed border-ink/20 bg-bg text-xs text-ink/60">
+                                  Preview unavailable
+                                </div>
                               ) : (
                                 <div className="rounded border border-dashed border-ink/20 p-4 text-sm text-ink/50">Preview unavailable</div>
                               )}
@@ -3826,7 +3754,7 @@ export default function App() {
                     <p className="text-sm text-ink/60">Select a segment and generated variant to compare.</p>
                   )}
                   <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                    {selectedSegmentGenerations.map((gen, index) => (
+                    {selectedSegmentGenerations.slice(0, generationCardsVisible).map((gen, index) => (
                       <div
                         key={gen.genId}
                         className={`rounded border p-2 ${
@@ -3841,13 +3769,25 @@ export default function App() {
                           <span className={`uppercase text-ink/60 ${index === 0 ? "font-semibold" : ""}`}>{gen.status}</span>
                           <span className="text-[11px] text-ink/50">{truncateIdentifier(gen.genId, 14)}</span>
                         </div>
-                        <VideoThumbnail
-                          videoUrl={gen.downloadUrl ?? undefined}
-                          cacheKey={gen.outputKey ?? gen.genId}
-                          label={describeGeneration(gen)}
+                        <button
+                          type="button"
+                          className="block w-full disabled:cursor-not-allowed disabled:opacity-60"
                           disabled={!gen.downloadUrl}
                           onClick={() => selectSegmentGeneration(gen.genId)}
-                        />
+                          title={gen.downloadUrl ? `Use ${describeGeneration(gen)}` : "Video unavailable"}
+                        >
+                          {generationThumbnailUrl(gen) ? (
+                            <img
+                              src={generationThumbnailUrl(gen) as string}
+                              alt={describeGeneration(gen)}
+                              className="aspect-video w-full rounded-md bg-bg object-contain"
+                            />
+                          ) : (
+                            <div className="flex aspect-video w-full items-center justify-center rounded-md border border-dashed border-ink/20 bg-bg text-xs text-ink/60">
+                              Video thumbnail unavailable
+                            </div>
+                          )}
+                        </button>
                         <p className="mt-2 text-xs font-medium text-ink/80">
                           {gen.luma.model} / {gen.luma.mode}
                         </p>
@@ -3914,6 +3854,11 @@ export default function App() {
                       </div>
                     ))}
                   </div>
+                  {generationCardsVisible < selectedSegmentGenerations.length ? (
+                    <button className="text-sm text-accent underline" onClick={() => setGenerationCardsVisible((count) => count + 6)}>
+                      More...
+                    </button>
+                  ) : null}
                   {selectedSegmentGenerations.length === 0 ? (
                     <p className="text-sm text-ink/60">No generated variants for this segment yet.</p>
                   ) : null}
@@ -4119,14 +4064,13 @@ export default function App() {
                             index === 0 ? "border-accent/40 bg-accent/5" : "border-ink/10"
                           }`}
                         >
-                          <VideoThumbnail
-                            videoUrl={item.previewUrl}
-                            cacheKey={item.id}
-                            label={item.title}
-                            onClick={() => undefined}
-                            interactive={false}
-                            thumbClassName="max-h-20"
-                          />
+                          {item.thumbnailUrl ? (
+                            <img src={item.thumbnailUrl} alt={item.title} className="max-h-20 w-full rounded bg-bg object-contain" />
+                          ) : (
+                            <div className="flex max-h-20 min-h-20 w-full items-center justify-center rounded border border-dashed border-ink/20 bg-bg text-xs text-ink/60">
+                              Video
+                            </div>
+                          )}
                           <div>
                             <p className={`text-sm ${index === 0 ? "font-semibold" : "font-medium"}`}>{item.title}</p>
                             <p className="text-xs text-ink/60">{item.subtitle}</p>
@@ -4228,14 +4172,13 @@ export default function App() {
                             index === 0 ? "border-accent/40 bg-accent/5" : "border-ink/10"
                           }`}
                         >
-                          <VideoThumbnail
-                            videoUrl={item.previewUrl}
-                            cacheKey={item.id}
-                            label={item.title}
-                            onClick={() => undefined}
-                            interactive={false}
-                            thumbClassName="max-h-20"
-                          />
+                          {item.thumbnailUrl ? (
+                            <img src={item.thumbnailUrl} alt={item.title} className="max-h-20 w-full rounded bg-bg object-contain" />
+                          ) : (
+                            <div className="flex max-h-20 min-h-20 w-full items-center justify-center rounded border border-dashed border-ink/20 bg-bg text-xs text-ink/60">
+                              Video
+                            </div>
+                          )}
                           <div>
                             <p className={`text-sm ${index === 0 ? "font-semibold" : "font-medium"}`}>{item.title}</p>
                             <p className="text-xs text-ink/60">{item.subtitle}</p>
