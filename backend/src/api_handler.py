@@ -28,6 +28,7 @@ from src.core.store import S3JsonStore, now_iso
 from src.jobs.queue import JobQueue
 from src.models.schemas import (
     AssetDeleteRequest,
+    CustomReportCreateRequest,
     FrameCaptureRequest,
     FullEditRequest,
     MergeRequest,
@@ -239,6 +240,82 @@ def _prune_stale_segment_generations(task: dict[str, Any], store: S3JsonStore) -
     return True
 
 
+def _normalize_custom_report_refs(task: dict[str, Any], raw_refs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    frames = task.get("frames", {})
+    generations = task.get("segmentGenerations", {})
+    for ref in raw_refs:
+        if not isinstance(ref, dict):
+            continue
+        asset_type = str(ref.get("assetType") or "")
+        normalized_ref: dict[str, Any] | None = None
+        if asset_type == "frame_variant":
+            frame_id = str(ref.get("frameId") or "")
+            variant_id = str(ref.get("variantId") or "")
+            frame = frames.get(frame_id) if isinstance(frames, dict) else None
+            variant = (
+                next((item for item in frame.get("variants", []) if item.get("variantId") == variant_id), None)
+                if isinstance(frame, dict)
+                else None
+            )
+            if variant:
+                normalized_ref = {"assetType": "frame_variant", "frameId": frame_id, "variantId": variant_id}
+        elif asset_type == "segment_generation":
+            gen_id = str(ref.get("genId") or "")
+            generation = generations.get(gen_id) if isinstance(generations, dict) else None
+            if isinstance(generation, dict):
+                normalized_ref = {"assetType": "segment_generation", "genId": gen_id}
+        if not normalized_ref:
+            continue
+        ref_key = json.dumps(normalized_ref, sort_keys=True)
+        if ref_key in seen:
+            continue
+        seen.add(ref_key)
+        normalized.append(normalized_ref)
+    return normalized
+
+
+def _cleanup_custom_reports(task: dict[str, Any]) -> bool:
+    reports = task.get("customReports")
+    if not isinstance(reports, list):
+        task["customReports"] = []
+        return True
+    changed = False
+    cleaned_reports: list[dict[str, Any]] = []
+    for report in reports:
+        if not isinstance(report, dict):
+            changed = True
+            continue
+        report_id = str(report.get("reportId") or "").strip()
+        report_type = str(report.get("reportType") or "").strip()
+        if not report_id or report_type not in {"qc_frame", "qc_video"}:
+            changed = True
+            continue
+        output_refs = _normalize_custom_report_refs(task, list(report.get("outputRefs") or []))
+        if not output_refs:
+            changed = True
+            continue
+        created_at = str(report.get("createdAt") or now_iso())
+        updated_at = str(report.get("updatedAt") or created_at)
+        name = str(report.get("name") or "").strip() or f"{'QC Frame' if report_type == 'qc_frame' else 'QC Video'} Report"
+        cleaned = {
+            "reportId": report_id,
+            "reportType": report_type,
+            "name": name[:80],
+            "outputRefs": output_refs,
+            "createdAt": created_at,
+            "updatedAt": updated_at,
+        }
+        if cleaned != report:
+            changed = True
+        cleaned_reports.append(cleaned)
+    if cleaned_reports != reports:
+        task["customReports"] = cleaned_reports
+        changed = True
+    return changed
+
+
 def _load_task_or_404(store: S3JsonStore, user_id: str, task_id: str) -> dict[str, Any]:
     task = store.load_task(user_id, task_id)
     if not task or task.get("deletedAt"):
@@ -439,6 +516,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             "frames": {},
             "segmentGenerations": {},
             "exports": [],
+            "customReports": [],
             "history": [],
             "metaVersion": 0,
         }
@@ -448,7 +526,9 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
     if method == "GET" and path == "/tasks":
         task_items = store.list_tasks(user_id)
         for item in task_items:
-            if _prune_stale_segment_generations(item, store):
+            changed = _prune_stale_segment_generations(item, store)
+            changed = _cleanup_custom_reports(item) or changed
+            if changed:
                 store.save_task(item)
         tasks = [_task_summary(item) for item in task_items]
         return response(200, {"tasks": tasks}, origin=origin)
@@ -470,7 +550,9 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             task = _load_task_or_404(store, user_id, task_id)
         except KeyError:
             return error_response(404, "Task not found", origin=origin)
-        if _prune_stale_segment_generations(task, store):
+        changed = _prune_stale_segment_generations(task, store)
+        changed = _cleanup_custom_reports(task) or changed
+        if changed:
             store.save_task(task)
 
         decorated = json.loads(json.dumps(task))
@@ -618,6 +700,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 frame["variants"] = [v for v in variants if v.get("variantId") != variant_id]
                 if frame.get("selectedVariantId") == variant_id:
                     frame["selectedVariantId"] = frame["variants"][0]["variantId"] if frame["variants"] else None
+                _cleanup_custom_reports(task)
                 store.save_task(task)
                 return response(200, {"ok": True}, origin=origin)
 
@@ -631,6 +714,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 for segment in task.get("segments", []):
                     if segment.get("selectedGenerationId") == gen_id:
                         segment["selectedGenerationId"] = None
+                _cleanup_custom_reports(task)
                 store.save_task(task)
                 return response(200, {"ok": True}, origin=origin)
 
@@ -646,6 +730,47 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 return response(200, {"ok": True}, origin=origin)
 
             return error_response(400, "Unsupported asset type", origin=origin)
+
+        if method == "POST" and len(parts) == 3 and parts[2] == "reports":
+            req = _json_model(CustomReportCreateRequest, event)
+            raw_refs = [item.model_dump(exclude_none=True) for item in req.outputRefs]
+            output_refs = _normalize_custom_report_refs(task, raw_refs)
+            if not output_refs:
+                return error_response(400, "No valid report outputs selected", origin=origin)
+            custom_reports = task.setdefault("customReports", [])
+            report_type_label = "QC Frame" if req.reportType == "qc_frame" else "QC Video"
+            report_name = (req.name or "").strip()
+            if not report_name:
+                report_name = f"{report_type_label} Report {len(custom_reports) + 1}"
+            now = now_iso()
+            report = {
+                "reportId": new_id("report"),
+                "reportType": req.reportType,
+                "name": report_name[:80],
+                "outputRefs": output_refs,
+                "createdAt": now,
+                "updatedAt": now,
+            }
+            custom_reports.append(report)
+            _cleanup_custom_reports(task)
+            store.save_task(task)
+            return response(201, {"reportId": report["reportId"], "report": report}, origin=origin)
+
+        if method == "DELETE" and len(parts) == 4 and parts[2] == "reports":
+            report_id = parts[3]
+            reports = task.get("customReports", [])
+            if not isinstance(reports, list):
+                return error_response(404, "Report not found", origin=origin)
+            before = len(reports)
+            task["customReports"] = [
+                report
+                for report in reports
+                if not (isinstance(report, dict) and report.get("reportId") == report_id)
+            ]
+            if len(task["customReports"]) == before:
+                return error_response(404, "Report not found", origin=origin)
+            store.save_task(task)
+            return response(200, {"ok": True}, origin=origin)
 
         if method == "POST" and len(parts) == 3 and parts[2] == "ingest":
             original = task.get("video", {}).get("original")

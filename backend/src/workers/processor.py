@@ -1889,6 +1889,16 @@ def _handle_qc_analysis(
                 changed_total_values = [float(item.get("changedPctTotal") or 0.0) for item in per_frame_rows]
                 outside_values = [float(item.get("outsideLeakagePct") or 0.0) for item in per_frame_rows if item.get("outsideLeakagePct") is not None]
                 mean_diff_values = [float(item.get("meanDiffTotal") or 0.0) for item in per_frame_rows]
+                first_frame_metrics = (
+                    {key: value for key, value in per_frame_rows[0].items() if not key.startswith("_")}
+                    if per_frame_rows
+                    else None
+                )
+                last_frame_metrics = (
+                    {key: value for key, value in per_frame_rows[-1].items() if not key.startswith("_")}
+                    if per_frame_rows
+                    else None
+                )
 
                 ssim_log = td_path / "ssim.log"
                 psnr_log = td_path / "psnr.log"
@@ -2046,6 +2056,8 @@ def _handle_qc_analysis(
                     "ssimMin": round(min(ssim_values), 6) if ssim_values else None,
                     "psnrMean": round(sum(psnr_values) / len(psnr_values), 4) if psnr_values else None,
                     "psnrMin": round(min(psnr_values), 4) if psnr_values else None,
+                    "firstFrame": first_frame_metrics,
+                    "lastFrame": last_frame_metrics,
                     "vmaf": vmaf_metrics,
                 }
 

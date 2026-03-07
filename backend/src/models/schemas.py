@@ -137,6 +137,19 @@ class AssetDeleteRequest(BaseModel):
     exportId: str | None = None
 
 
+class CustomReportOutputRef(BaseModel):
+    assetType: Literal["frame_variant", "segment_generation"]
+    frameId: str | None = None
+    variantId: str | None = None
+    genId: str | None = None
+
+
+class CustomReportCreateRequest(BaseModel):
+    reportType: Literal["qc_frame", "qc_video"]
+    outputRefs: list[CustomReportOutputRef] = Field(min_length=1, max_length=400)
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+
+
 class TaskFrameVariant(BaseModel):
     variantId: str
     type: Literal["full", "patch"]
@@ -168,6 +181,7 @@ class TaskMetadata(BaseModel):
     frames: dict[str, TaskFrame] = Field(default_factory=dict)
     segmentGenerations: dict[str, Any] = Field(default_factory=dict)
     exports: list[dict[str, Any]] = Field(default_factory=list)
+    customReports: list[dict[str, Any]] = Field(default_factory=list)
     history: list[dict[str, Any]] = Field(default_factory=list)
 
     @field_validator("name")

@@ -863,7 +863,6 @@ export default function App() {
     () => assetTaskQueries.map((query) => query.data).filter((item): item is TaskDetail => Boolean(item)),
     [assetTaskQueries],
   );
-  const orderedSegments = useMemo(() => [...(task?.segments ?? [])].reverse(), [task?.segments]);
   const segmentsById = useMemo(
     () => new Map((task?.segments ?? []).map((segment) => [segment.segmentId, segment])),
     [task?.segments],
@@ -1155,11 +1154,6 @@ export default function App() {
     }
     return [] as string[];
   }, [qcFrameRows, reportView, scopedVideoRows]);
-
-  useEffect(() => {
-    setReportView("outputs");
-    setActiveCustomReportId(null);
-  }, [reportTaskId]);
 
   useEffect(() => {
     if (!activeCustomReportId) return;
@@ -2281,11 +2275,6 @@ export default function App() {
     return `${outputLabel} · ${generation.luma.model}/${generation.luma.mode} · ${segmentText} · ${formatCompactTimestamp(generation.createdAt)}`;
   }
 
-  function formatResolution(resolution: { width: number; height: number } | null | undefined): string {
-    if (!resolution) return "unknown";
-    return `${resolution.width}x${resolution.height}`;
-  }
-
   function asNumber(value: unknown): number | null {
     if (typeof value === "number" && Number.isFinite(value)) return value;
     if (typeof value === "string") {
@@ -2293,37 +2282,6 @@ export default function App() {
       if (Number.isFinite(parsed)) return parsed;
     }
     return null;
-  }
-
-  function describeFrame(frame: FrameRecord | null): string {
-    if (!frame) return "Not available";
-    return `frame ${frame.frameIndex} · ${frame.timecode}`;
-  }
-
-  function describeImageEditSettings(variant: FrameVariant | null): string {
-    if (!variant) return "No edited frame selected";
-    const settings = variant.generationSettings;
-    const details = [
-      `${variant.model}/${variant.type}`,
-      settings?.provider ? `provider ${settings.provider}` : null,
-      settings?.inputResolution ? `input ${formatResolution(settings.inputResolution)}` : null,
-      settings?.outputResolution ? `output ${formatResolution(settings.outputResolution)}` : null,
-      typeof settings?.runwareRepaintingScale === "number" ? `inpainting scale ${settings.runwareRepaintingScale.toFixed(2)}` : null,
-      typeof settings?.featherPx === "number" ? `feather ${settings.featherPx}px` : null,
-    ].filter(Boolean);
-    return details.join(" · ");
-  }
-
-  function describeVideoGenerationSettings(generation: SegmentGeneration): string {
-    const settings = generation.generationSettings;
-    const details = [
-      `${generation.luma.model}/${generation.luma.mode}`,
-      settings?.mediaResolution ? `video ${formatResolution(settings.mediaResolution)}` : null,
-      settings?.firstFrameResolution ? `frame ${formatResolution(settings.firstFrameResolution)}` : null,
-      typeof settings?.requestedDurationSec === "number" ? `requested ${settings.requestedDurationSec.toFixed(2)}s` : null,
-      typeof settings?.providerDurationSec === "number" ? `provider ${settings.providerDurationSec.toFixed(2)}s` : null,
-    ].filter(Boolean);
-    return details.join(" · ");
   }
 
   function generationModelHelp(modelName: VideoModel, modeValue: string) {
@@ -2421,6 +2379,7 @@ export default function App() {
       const result = await createCustomReportMutation.mutateAsync({ taskId, reportType, outputRefs: scopedRefs });
       setCustomReportNotice("Custom report created.");
       setReportTaskId(taskId);
+      setSelectedTaskId(taskId);
       setReportView(reportType);
       setActiveCustomReportId(result.reportId);
       setTab("report");
@@ -2445,6 +2404,7 @@ export default function App() {
 
   function openCustomReport(taskId: string, report: CustomReportRecord) {
     setReportTaskId(taskId);
+    setSelectedTaskId(taskId);
     setActiveCustomReportId(report.reportId);
     setReportView(report.reportType);
     setTab("report");
@@ -2669,9 +2629,17 @@ export default function App() {
 
   if (tab === "report") {
     const reportPlaybackUrl = reportTask?.video?.editSource?.downloadUrl ?? reportTask?.video?.original?.downloadUrl ?? null;
-    const segmentRows = [...(reportTask?.segments ?? [])].sort((a, b) => a.startFrame - b.startFrame);
     const latestQcJob =
       sortedJobs.find((job) => job.type === "qc_analysis" && (!reportTaskId || job.taskId === reportTaskId)) ?? null;
+    const selectedRefKeys = new Set(
+      reportTaskId ? (selectedOutputRefsByTask[reportTaskId] ?? []).map((ref) => reportOutputRefKey(ref)) : [],
+    );
+    const qcVideoGroupLabels: Record<VideoGenerationGroup, string> = {
+      start_video: "Start Frame + Source Video",
+      start_equals_end: "Start Frame = End Frame",
+      start_end: "Start Frame + End Frame",
+      start_only: "Start Frame Only",
+    };
     return (
       <main className="min-h-screen bg-bg text-ink">
         <div className="mx-auto w-full max-w-[1700px] space-y-4 p-4 md:p-6">
@@ -2681,6 +2649,11 @@ export default function App() {
                 Task Report: {reportTask?.name ?? reportTaskId ?? "Task"}
               </h2>
               {reportTask ? <p className="text-sm text-ink/60">Updated {formatAssetDate(reportTask.updatedAt)}</p> : null}
+              {activeCustomReport ? (
+                <p className="text-xs text-ink/60">
+                  Custom: {activeCustomReport.name} ({activeCustomReport.reportType === "qc_frame" ? "QC Frame" : "QC Video"})
+                </p>
+              ) : null}
             </div>
             <div className="flex items-center gap-3">
               <button
@@ -2707,6 +2680,39 @@ export default function App() {
               </button>
             </div>
           </div>
+          <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-ink/10 bg-card p-3">
+            <button
+              className={`rounded px-3 py-2 text-sm ${reportView === "outputs" ? "bg-ink text-white" : "bg-ink/10"}`}
+              onClick={() => {
+                setReportView("outputs");
+                setActiveCustomReportId(null);
+              }}
+            >
+              Output Report
+            </button>
+            <button
+              className={`rounded px-3 py-2 text-sm ${reportView === "qc_frame" ? "bg-ink text-white" : "bg-ink/10"}`}
+              onClick={() => {
+                setReportView("qc_frame");
+                if (!activeCustomReport || activeCustomReport.reportType !== "qc_frame") {
+                  setActiveCustomReportId(null);
+                }
+              }}
+            >
+              QC Frame Report
+            </button>
+            <button
+              className={`rounded px-3 py-2 text-sm ${reportView === "qc_video" ? "bg-ink text-white" : "bg-ink/10"}`}
+              onClick={() => {
+                setReportView("qc_video");
+                if (!activeCustomReport || activeCustomReport.reportType !== "qc_video") {
+                  setActiveCustomReportId(null);
+                }
+              }}
+            >
+              QC Video Report
+            </button>
+          </div>
           {latestQcJob ? (
             <p className="text-xs text-ink/70">
               Latest QC job {truncateIdentifier(latestQcJob.jobId, 12)}: {latestQcJob.status} ({latestQcJob.progress}%)
@@ -2719,257 +2725,307 @@ export default function App() {
 
           {reportTask ? (
             <>
-              <section className="space-y-2 rounded-2xl border border-ink/10 bg-card p-4">
-                <h3 className="text-lg font-semibold">Original Video</h3>
-                {reportPlaybackUrl ? (
-                  <video src={reportPlaybackUrl} controls className="w-full rounded border border-ink/10 bg-bg object-contain" />
-                ) : (
-                  <p className="text-sm text-ink/60">Original video not available.</p>
-                )}
-              </section>
+              {renderCustomReportBox(reportTask.taskId, reportCustomReports)}
 
-              <section className="space-y-2 rounded-2xl border border-ink/10 bg-card p-4">
-                <h3 className="text-lg font-semibold">Segment Frame Timecode Summary</h3>
-                {segmentRows.length === 0 ? (
-                  <p className="text-sm text-ink/60">No segments yet.</p>
-                ) : (
-                  <div className="overflow-x-auto">
-                    <table className="min-w-full table-auto text-sm">
-                      <thead>
-                        <tr className="border-b border-ink/10 text-left">
-                          <th className="px-2 py-2">Segment</th>
-                          <th className="px-2 py-2">Start</th>
-                          <th className="px-2 py-2">End</th>
-                          <th className="px-2 py-2">Duration</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {segmentRows.map((segment) => (
-                          <tr key={segment.segmentId} className="border-b border-ink/10 align-top">
-                            <td className="px-2 py-2 font-medium">{segment.segmentId}</td>
-                            <td className="px-2 py-2">
-                              frame {segment.startFrame} · {segment.startTimecode}
-                            </td>
-                            <td className="px-2 py-2">
-                              frame {Math.max(segment.endFrameExclusive - 1, segment.startFrame)} · {segment.endTimecode}
-                            </td>
-                            <td className="px-2 py-2">
-                              {segment.durationFrames}f / {segment.durationSec.toFixed(2)}s
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-              </section>
+              {reportView === "outputs" ? (
+                <>
+                  <section className="space-y-2 rounded-2xl border border-ink/10 bg-card p-4">
+                    <h3 className="text-lg font-semibold">Task Playback</h3>
+                    {reportPlaybackUrl ? (
+                      <video src={reportPlaybackUrl} controls className="w-full rounded border border-ink/10 bg-bg object-contain" />
+                    ) : (
+                      <p className="text-sm text-ink/60">Original video not available.</p>
+                    )}
+                  </section>
+                  {[
+                    { title: "Video Generations", items: reportOutputCards.videoGenerations },
+                    { title: "Start Frames", items: reportOutputCards.startFrames },
+                    { title: "End Frames", items: reportOutputCards.endFrames },
+                  ].map((section) => (
+                    <section key={section.title} className="space-y-3 rounded-2xl border border-ink/10 bg-card p-4">
+                      <h3 className="text-lg font-semibold">{section.title}</h3>
+                      {section.items.length === 0 ? (
+                        <p className="text-sm text-ink/60">No outputs in this section yet.</p>
+                      ) : (
+                        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                          {section.items.map((card) => (
+                            <article key={card.id} className="space-y-2 rounded-lg border border-ink/10 bg-white p-3">
+                              <label className="flex items-center gap-2 text-xs text-ink/70">
+                                <input
+                                  type="checkbox"
+                                  checked={selectedRefKeys.has(reportOutputRefKey(card.selectionRef))}
+                                  onChange={() => toggleCustomReportOutput(card.taskId, card.selectionRef)}
+                                />
+                                QC
+                              </label>
+                              {card.videoUrl ? (
+                                <VideoThumbnail
+                                  videoUrl={card.videoUrl}
+                                  cacheKey={card.id}
+                                  label={card.title}
+                                  onClick={() => setVideoPreviewModal({ url: card.videoUrl as string, label: card.title })}
+                                />
+                              ) : card.imageUrl ? (
+                                <img src={card.imageUrl} alt={card.title} className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain" />
+                              ) : (
+                                <div className="rounded border border-dashed border-ink/20 p-4 text-sm text-ink/50">Preview unavailable</div>
+                              )}
+                              <div className="space-y-1">
+                                <p className="text-sm font-semibold">{card.title}</p>
+                                <p className="text-xs text-ink/70">{card.subtitle}</p>
+                                <p className="text-xs text-ink/70">Model: {card.modelLabel}</p>
+                                <p className="text-xs text-ink/70">Prompt: {card.promptLabel}</p>
+                                <p className="text-[11px] text-ink/50">{formatCompactTimestamp(card.createdAt)}</p>
+                              </div>
+                            </article>
+                          ))}
+                        </div>
+                      )}
+                    </section>
+                  ))}
+                </>
+              ) : null}
 
-              <section className="space-y-2 rounded-2xl border border-ink/10 bg-card p-4">
-                <h3 className="text-lg font-semibold">Generation Report</h3>
-                {reportRows.rows.length === 0 ? (
-                  <p className="text-sm text-ink/60">No video generations yet.</p>
-                ) : (
-                  <div className="overflow-x-auto">
-                    <table className="table-fixed text-sm" style={{ minWidth: "120%" }}>
-                      <thead>
-                        <tr className="border-b border-ink/10 text-left text-sm">
-                          <th className="w-1/5 px-2 py-2">Original Start Frame</th>
-                          <th className="w-1/5 px-2 py-2">Mask + Prompt</th>
-                          <th className="w-1/5 px-2 py-2">Edited Start Frame</th>
-                          <th className="w-1/5 px-2 py-2">End Frame</th>
-                          <th className="w-1/5 px-2 py-2">Generated Video</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {reportRows.rows.flatMap((row) => {
-                          const frameMetrics = row.generation.qc?.frame?.metrics as Record<string, unknown> | undefined;
-                          const frameArtifacts = row.generation.qc?.frame?.artifacts;
-                          const videoAggregates = row.generation.qc?.video?.aggregates as Record<string, unknown> | undefined;
-                          const videoArtifacts = row.generation.qc?.video?.artifacts;
-                          const timelineGraphUrl = videoArtifacts?.timelineGraphUrl as string | undefined;
-                          const timelineCsvUrl = videoArtifacts?.timelineCsvUrl as string | undefined;
-                          const diffVideoUrl = videoArtifacts?.diffVideoUrl as string | undefined;
-                          const boundaryOverlayUrl =
-                            (frameArtifacts?.boundaryOverlayUrl as string | undefined) ??
-                            (frameArtifacts?.binaryChangeUrl as string | undefined);
-                          const heatmapUrl = frameArtifacts?.heatmapUrl as string | undefined;
-                          const promptText = row.generation.luma.prompt?.trim() || "No prompt supplied";
-                          const hasMask = Boolean(row.maskUrl);
-                          const frameChangePct = asNumber(frameMetrics?.changedPctTotal);
-                          const frameOutsidePct = asNumber(frameMetrics?.outsideLeakagePct);
-                          const frameBoundaryPct = asNumber(frameMetrics?.boundarySpillPct);
-                          const videoChangeMean = asNumber(videoAggregates?.changedPctTotalMean);
-                          const videoOutsideMean = asNumber(videoAggregates?.outsideLeakagePctMean);
-                          const ssimMean = asNumber(videoAggregates?.ssimMean);
-                          const psnrMean = asNumber(videoAggregates?.psnrMean);
-                          const vmafMean = asNumber((videoAggregates?.vmaf as Record<string, unknown> | undefined)?.mean);
-                          const qcStatus = row.generation.qc?.status ?? "not_run";
-                          const durationText = row.segment ? `${row.segment.durationFrames}f / ${row.segment.durationSec.toFixed(2)}s` : "n/a";
-
-                          const baseRow = (
-                            <tr key={`${row.generation.genId}-base`} className="border-b border-ink/10 align-top">
-                              <td className="px-2 py-3">
-                                {row.originalUrl ? (
-                                  <img src={row.originalUrl} alt="Original frame" className="w-full rounded border border-ink/10 bg-bg object-contain" />
+              {reportView === "qc_frame" ? (
+                <section className="space-y-3 rounded-2xl border border-ink/10 bg-card p-4">
+                  <h3 className="text-lg font-semibold">QC Frame Report</h3>
+                  {qcFrameRows.length === 0 ? (
+                    <p className="text-sm text-ink/60">No frame edits available for this report scope.</p>
+                  ) : (
+                    <div className="space-y-3">
+                      {qcFrameRows.map((row) => {
+                        const frameMetrics = row.qcGeneration?.generation.qc?.frame?.metrics as Record<string, unknown> | undefined;
+                        const frameArtifacts = row.qcGeneration?.generation.qc?.frame?.artifacts;
+                        const boundaryOverlayUrl =
+                          (frameArtifacts?.boundaryOverlayUrl as string | undefined) ??
+                          (frameArtifacts?.binaryChangeUrl as string | undefined);
+                        const qcStatus = row.qcGeneration?.generation.qc?.status ?? "not_run";
+                        return (
+                          <article key={row.id} className="space-y-2 rounded-lg border border-ink/10 bg-white p-3">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <p className="text-sm font-semibold">
+                                {row.role === "start" ? "Start" : row.role === "end" ? "End" : "Unlinked"} frame edit · frame {row.frame.frameIndex}
+                              </p>
+                              <label className="flex items-center gap-2 text-xs text-ink/70">
+                                <input
+                                  type="checkbox"
+                                  checked={selectedRefKeys.has(reportOutputRefKey({ assetType: "frame_variant", frameId: row.frame.frameId, variantId: row.variant.variantId }))}
+                                  onChange={() =>
+                                    toggleCustomReportOutput(reportTask.taskId, {
+                                      assetType: "frame_variant",
+                                      frameId: row.frame.frameId,
+                                      variantId: row.variant.variantId,
+                                    })
+                                  }
+                                />
+                                QC
+                              </label>
+                            </div>
+                            <div className="grid gap-3 md:grid-cols-4">
+                              <div>
+                                <p className="text-xs font-medium text-ink/70">Original frame</p>
+                                {row.frame.imageUrl ? (
+                                  <img src={row.frame.imageUrl} alt="Original frame" className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain" />
                                 ) : (
-                                  <div className="rounded border border-dashed border-ink/20 p-6 text-sm text-ink/50">No frame</div>
+                                  <p className="text-xs text-ink/50">Unavailable</p>
                                 )}
-                                <p className="mt-2 text-xs text-ink/70">{describeFrame(row.startFrame)}</p>
-                                <p className="text-[11px] text-ink/50">{row.segment ? `${row.segment.segmentId} · ${describeSegment(row.segment)}` : row.generation.segmentId}</p>
-                              </td>
-                              <td className="px-2 py-3">
-                                {hasMask ? (
-                                  <img src={row.maskUrl as string} alt="Patch mask" className="mx-auto w-3/4 rounded border border-ink/10 bg-bg object-contain" />
+                              </div>
+                              <div>
+                                <p className="text-xs font-medium text-ink/70">Mask edit</p>
+                                {(row.variant.patchMeta?.maskUrl as string | undefined) ? (
+                                  <img src={row.variant.patchMeta?.maskUrl as string} alt="Mask" className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain" />
                                 ) : (
-                                  <div className="mx-auto w-3/4 rounded border border-dashed border-ink/20 p-3 text-center text-xs text-ink/50">No mask used</div>
+                                  <p className="text-xs text-ink/50">No mask</p>
                                 )}
-                                <p className={`mt-2 text-sm font-medium ${hasMask ? "text-ink/90" : "text-ink"}`}>{promptText}</p>
-                                <p className="mt-1 text-[11px] text-ink/60">
-                                  {row.startVariant?.patchMeta ? `patch feather ${(row.startVariant.patchMeta.featherPx as number | undefined) ?? 0}px` : "No patch metadata"}
-                                </p>
-                              </td>
-                              <td className="px-2 py-3">
-                                {row.editedUrl ? (
-                                  <img src={row.editedUrl} alt="Edited start frame" className="w-full rounded border border-ink/10 bg-bg object-contain" />
+                              </div>
+                              <div>
+                                <p className="text-xs font-medium text-ink/70">Edited frame</p>
+                                {row.variant.imageUrl ? (
+                                  <img src={row.variant.imageUrl} alt="Edited frame" className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain" />
                                 ) : (
-                                  <div className="rounded border border-dashed border-ink/20 p-6 text-sm text-ink/50">No edited frame</div>
+                                  <p className="text-xs text-ink/50">Unavailable</p>
                                 )}
-                                <p className="mt-2 text-xs text-ink/70">{describeImageEditSettings(row.startVariant)}</p>
-                                <p className="text-[11px] text-ink/50">{row.startVariant ? formatCompactTimestamp(row.startVariant.createdAt) : "n/a"}</p>
-                              </td>
-                              <td className="px-2 py-3">
-                                {row.endFrameUrl ? (
-                                  <img src={row.endFrameUrl} alt="End frame" className="w-full rounded border border-ink/10 bg-bg object-contain" />
-                                ) : (
-                                  <div className="rounded border border-dashed border-ink/20 p-6 text-sm text-ink/50">No end frame</div>
-                                )}
-                                <p className="mt-2 text-xs text-ink/70">{describeFrame(row.endFrame)}</p>
-                                <p className="text-[11px] text-ink/50">{durationText}</p>
-                              </td>
-                              <td className="px-2 py-3">
-                                {row.generatedVideoUrl ? (
-                                  <div className="space-y-2">
-                                    <VideoThumbnail
-                                      videoUrl={row.generatedVideoUrl}
-                                      cacheKey={row.generation.outputKey ?? row.generation.genId}
-                                      label={`Generated video ${row.generation.genId}`}
-                                      onClick={() =>
-                                        setVideoPreviewModal({
-                                          url: row.generatedVideoUrl as string,
-                                          label: `Generated video ${row.generation.genId}`,
-                                        })
-                                      }
-                                    />
-                                    <p className="text-[11px] text-ink/50">Click thumbnail to preview video.</p>
-                                  </div>
-                                ) : (
-                                  <div className="rounded border border-dashed border-ink/20 p-6 text-sm text-ink/50">No generated video</div>
-                                )}
-                                <p className="mt-2 text-xs text-ink/70">{describeVideoGenerationSettings(row.generation)}</p>
-                                <p className="text-[11px] text-ink/50">{truncateIdentifier(row.generation.genId, 16)} · {formatCompactTimestamp(row.generation.createdAt)}</p>
-                              </td>
-                            </tr>
-                          );
-
-                          if (!row.generatedVideoUrl) {
-                            return [baseRow];
-                          }
-
-                          const qcRow = (
-                            <tr key={`${row.generation.genId}-qc`} className="border-b border-ink/10 bg-bg/40 align-top">
-                              <td className="px-2 py-3">
+                              </div>
+                              <div className="rounded border border-ink/10 bg-bg/40 p-2 text-xs text-ink/70">
+                                <p className="font-semibold text-ink/90">Frame QC analysis</p>
                                 {qcStatus === "complete" ? (
-                                  <div className="space-y-1 rounded border border-ink/10 bg-white p-2 text-[11px] text-ink/70">
-                                    <p className="font-semibold text-ink/90">Frame Analysis (Original vs Edited)</p>
-                                    <p>Changed: {frameChangePct !== null ? `${frameChangePct.toFixed(2)}%` : "n/a"}</p>
-                                    <p>Outside mask leak: {frameOutsidePct !== null ? `${frameOutsidePct.toFixed(2)}%` : "n/a"}</p>
-                                    <p>Boundary spill: {frameBoundaryPct !== null ? `${frameBoundaryPct.toFixed(2)}%` : "n/a"}</p>
-                                    <p className="pt-1 font-semibold text-ink/90">Video Analysis (Original vs Generated)</p>
-                                    <p>Changed mean: {videoChangeMean !== null ? `${videoChangeMean.toFixed(2)}%` : "n/a"}</p>
-                                    <p>Outside mean: {videoOutsideMean !== null ? `${videoOutsideMean.toFixed(2)}%` : "n/a"}</p>
-                                    <p>SSIM: {ssimMean !== null ? ssimMean.toFixed(4) : "n/a"} · PSNR: {psnrMean !== null ? `${psnrMean.toFixed(2)} dB` : "n/a"}</p>
-                                    <p>VMAF mean: {vmafMean !== null ? vmafMean.toFixed(2) : "n/a"}</p>
-                                  </div>
+                                  <>
+                                    <p>Changed: {asNumber(frameMetrics?.changedPctTotal)?.toFixed(2) ?? "n/a"}%</p>
+                                    <p>Outside leakage: {asNumber(frameMetrics?.outsideLeakagePct)?.toFixed(2) ?? "n/a"}%</p>
+                                    <p>Boundary spill: {asNumber(frameMetrics?.boundarySpillPct)?.toFixed(2) ?? "n/a"}%</p>
+                                    {boundaryOverlayUrl ? (
+                                      <button
+                                        type="button"
+                                        className="mt-2 underline"
+                                        onClick={() => setImagePreviewModal({ url: boundaryOverlayUrl, label: "Frame QC boundary overlay" })}
+                                      >
+                                        Open boundary overlay
+                                      </button>
+                                    ) : null}
+                                  </>
                                 ) : (
-                                  <p className={`text-xs ${qcStatus === "failed" ? "text-red-600" : "text-ink/60"}`}>
-                                    {qcStatus === "failed"
-                                      ? `QC failed: ${row.generation.qc?.error ?? "unknown error"}`
-                                      : qcStatus === "running"
-                                        ? "QC analysis running..."
-                                        : "QC analysis not run yet."}
+                                  <p>
+                                    {qcStatus === "running"
+                                      ? "QC is running..."
+                                      : qcStatus === "failed"
+                                        ? `QC failed: ${row.qcGeneration?.generation.qc?.error ?? "unknown"}`
+                                        : "No linked QC data yet."}
                                   </p>
                                 )}
-                              </td>
-                              <td className="px-2 py-3">
-                                {heatmapUrl ? (
-                                  <img
-                                    src={heatmapUrl}
-                                    alt="Frame diff heatmap"
-                                    className="w-full rounded border border-ink/10 bg-bg object-contain"
-                                  />
-                                ) : (
-                                  <div className="rounded border border-dashed border-ink/20 p-6 text-sm text-ink/50">No heatmap</div>
-                                )}
-                              </td>
-                              <td className="px-2 py-3">
-                                {boundaryOverlayUrl ? (
-                                  <img
-                                    src={boundaryOverlayUrl}
-                                    alt="Mask boundary and binary change overlay"
-                                    className="w-full rounded border border-ink/10 bg-bg object-contain"
-                                  />
-                                ) : (
-                                  <div className="rounded border border-dashed border-ink/20 p-6 text-sm text-ink/50">No boundary overlay</div>
-                                )}
-                              </td>
-                              <td className="px-2 py-3">
-                                {timelineGraphUrl ? (
-                                  <button
-                                    type="button"
-                                    className="block w-full"
-                                    onClick={() => setReportGraphModal({ url: timelineGraphUrl, label: `QC timeline: ${row.generation.genId}` })}
-                                  >
-                                    <img src={timelineGraphUrl} alt="QC timeline graph" className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain" />
-                                  </button>
-                                ) : (
-                                  <div className="rounded border border-dashed border-ink/20 p-6 text-sm text-ink/50">No timeline graph</div>
-                                )}
-                                {timelineCsvUrl ? (
-                                  <a href={timelineCsvUrl} target="_blank" rel="noreferrer" className="mt-2 inline-block text-xs text-ink/70 underline">
-                                    Download timeline CSV
-                                  </a>
-                                ) : null}
-                              </td>
-                              <td className="px-2 py-3">
-                                {diffVideoUrl ? (
-                                  <div className="space-y-2">
-                                    <VideoThumbnail
-                                      videoUrl={diffVideoUrl}
-                                      cacheKey={`${row.generation.genId}-diff-video`}
-                                      label={`Diff video ${row.generation.genId}`}
-                                      onClick={() =>
-                                        setVideoPreviewModal({
-                                          url: diffVideoUrl,
-                                          label: `Diff video ${row.generation.genId}`,
-                                        })
-                                      }
-                                    />
-                                    <p className="text-[11px] text-ink/50">Click thumbnail to preview diff video.</p>
-                                  </div>
-                                ) : (
-                                  <div className="rounded border border-dashed border-ink/20 p-6 text-sm text-ink/50">No diff video map</div>
-                                )}
-                              </td>
-                            </tr>
-                          );
+                              </div>
+                            </div>
+                          </article>
+                        );
+                      })}
+                    </div>
+                  )}
+                </section>
+              ) : null}
 
-                          return [baseRow, qcRow];
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-              </section>
+              {reportView === "qc_video" ? (
+                <section className="space-y-3 rounded-2xl border border-ink/10 bg-card p-4">
+                  <h3 className="text-lg font-semibold">QC Video Report</h3>
+                  {(["start_video", "start_equals_end", "start_end", "start_only"] as VideoGenerationGroup[]).map((group) => {
+                    const rows = qcVideoRowsByGroup[group];
+                    return (
+                      <div key={group} className="space-y-2 rounded-lg border border-ink/10 bg-white p-3">
+                        <h4 className="text-base font-semibold">{qcVideoGroupLabels[group]}</h4>
+                        {rows.length === 0 ? (
+                          <p className="text-sm text-ink/60">No generations in this category.</p>
+                        ) : (
+                          <div className="space-y-3">
+                            {rows.map((row) => {
+                              const videoAggregates = row.generation.qc?.video?.aggregates as Record<string, unknown> | undefined;
+                              const videoArtifacts = row.generation.qc?.video?.artifacts;
+                              const qcStatus = row.generation.qc?.status ?? "not_run";
+                              const firstFrameMetrics = (videoAggregates?.firstFrame as Record<string, unknown> | undefined) ?? undefined;
+                              const lastFrameMetrics = (videoAggregates?.lastFrame as Record<string, unknown> | undefined) ?? undefined;
+                              const timelineGraphUrl = videoArtifacts?.timelineGraphUrl as string | undefined;
+                              const diffVideoUrl = videoArtifacts?.diffVideoUrl as string | undefined;
+                              const fps = Math.max(1, fpsValue(reportTask));
+                              const startCaptureMismatch =
+                                row.startFrame?.captureKey &&
+                                row.generation.sourceFirstFrameCaptureKey &&
+                                row.startFrame.captureKey !== row.generation.sourceFirstFrameCaptureKey;
+                              const endCaptureMismatch =
+                                row.endFrame?.captureKey &&
+                                row.generation.sourceLastFrameCaptureKey &&
+                                row.endFrame.captureKey !== row.generation.sourceLastFrameCaptureKey;
+                              return (
+                                <article key={row.generation.genId} className="space-y-2 rounded border border-ink/10 bg-bg/30 p-3">
+                                  <div className="flex flex-wrap items-center justify-between gap-2">
+                                    <p className="text-sm font-semibold">
+                                      {row.segment ? `${row.segment.segmentId} · ${describeSegment(row.segment)}` : row.generation.segmentId}
+                                    </p>
+                                    <label className="flex items-center gap-2 text-xs text-ink/70">
+                                      <input
+                                        type="checkbox"
+                                        checked={selectedRefKeys.has(reportOutputRefKey({ assetType: "segment_generation", genId: row.generation.genId }))}
+                                        onChange={() =>
+                                          toggleCustomReportOutput(reportTask.taskId, {
+                                            assetType: "segment_generation",
+                                            genId: row.generation.genId,
+                                          })
+                                        }
+                                      />
+                                      QC
+                                    </label>
+                                  </div>
+                                  <p className="text-xs text-ink/60">
+                                    Relationships: generation {truncateIdentifier(row.generation.genId, 12)} · start frame{" "}
+                                    {row.startFrame ? `${row.startFrame.frameId}` : "n/a"} · end frame {row.endFrame ? `${row.endFrame.frameId}` : "n/a"}
+                                  </p>
+                                  {startCaptureMismatch || endCaptureMismatch ? (
+                                    <p className="text-xs text-red-600">
+                                      Relationship warning: source capture keys differ from current segment boundary frames.
+                                    </p>
+                                  ) : null}
+                                  <div className="grid gap-3 lg:grid-cols-2">
+                                    <div>
+                                      <p className="text-xs font-medium text-ink/70">Original segment video</p>
+                                      {row.segment && reportPlaybackUrl ? (
+                                        <video
+                                          src={`${reportPlaybackUrl}#t=${(row.segment.startFrame / fps).toFixed(3)},${(row.segment.endFrameExclusive / fps).toFixed(3)}`}
+                                          controls
+                                          className="w-full rounded border border-ink/10 bg-bg object-contain"
+                                        />
+                                      ) : (
+                                        <p className="text-xs text-ink/50">Unavailable</p>
+                                      )}
+                                    </div>
+                                    <div>
+                                      <p className="text-xs font-medium text-ink/70">Generated segment video</p>
+                                      {row.generatedVideoUrl ? (
+                                        <video src={row.generatedVideoUrl} controls className="w-full rounded border border-ink/10 bg-bg object-contain" />
+                                      ) : (
+                                        <p className="text-xs text-ink/50">Unavailable</p>
+                                      )}
+                                    </div>
+                                  </div>
+                                  <div className="grid gap-2 md:grid-cols-2">
+                                    <div className="rounded border border-ink/10 bg-white p-2 text-xs text-ink/70">
+                                      <p className="font-semibold text-ink/90">Video QC analysis</p>
+                                      {qcStatus === "complete" ? (
+                                        <>
+                                          <p>Changed mean: {asNumber(videoAggregates?.changedPctTotalMean)?.toFixed(2) ?? "n/a"}%</p>
+                                          <p>Outside mean: {asNumber(videoAggregates?.outsideLeakagePctMean)?.toFixed(2) ?? "n/a"}%</p>
+                                          <p>SSIM: {asNumber(videoAggregates?.ssimMean)?.toFixed(4) ?? "n/a"}</p>
+                                          <p>PSNR: {asNumber(videoAggregates?.psnrMean)?.toFixed(2) ?? "n/a"} dB</p>
+                                        </>
+                                      ) : (
+                                        <p>
+                                          {qcStatus === "running"
+                                            ? "QC analysis running..."
+                                            : qcStatus === "failed"
+                                              ? `QC failed: ${row.generation.qc?.error ?? "unknown"}`
+                                              : "No QC data yet."}
+                                        </p>
+                                      )}
+                                    </div>
+                                    <div className="rounded border border-ink/10 bg-white p-2 text-xs text-ink/70">
+                                      <p className="font-semibold text-ink/90">First/Last frame comparison</p>
+                                      <p>
+                                        First:{" "}
+                                        {firstFrameMetrics
+                                          ? `${asNumber(firstFrameMetrics.changedPctTotal)?.toFixed(2) ?? "n/a"}% changed`
+                                          : "n/a"}
+                                      </p>
+                                      <p>
+                                        Last:{" "}
+                                        {lastFrameMetrics
+                                          ? `${asNumber(lastFrameMetrics.changedPctTotal)?.toFixed(2) ?? "n/a"}% changed`
+                                          : "n/a"}
+                                      </p>
+                                      {timelineGraphUrl ? (
+                                        <button
+                                          type="button"
+                                          className="mt-2 underline"
+                                          onClick={() => setReportGraphModal({ url: timelineGraphUrl, label: `QC timeline: ${row.generation.genId}` })}
+                                        >
+                                          Open timeline graph
+                                        </button>
+                                      ) : null}
+                                      {diffVideoUrl ? (
+                                        <button
+                                          type="button"
+                                          className="mt-1 block underline"
+                                          onClick={() => setVideoPreviewModal({ url: diffVideoUrl, label: `Diff video ${row.generation.genId}` })}
+                                        >
+                                          Open diff video
+                                        </button>
+                                      ) : null}
+                                    </div>
+                                  </div>
+                                </article>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </section>
+              ) : null}
             </>
           ) : null}
         </div>
@@ -4048,6 +4104,7 @@ export default function App() {
             {tab === "assets" && (
               <div className="space-y-6">
                 <h3 className="text-lg font-semibold">Download Assets</h3>
+                {renderCustomReportBox(selectedTaskId, task?.customReports ?? [])}
                 {assetsLoading ? <p className="text-sm text-ink/60">Loading assets...</p> : null}
                 <div className="space-y-3 rounded-lg border border-ink/10 p-3">
                   <p className="font-medium">Uploads</p>
@@ -4076,6 +4133,16 @@ export default function App() {
                             <p className="text-xs text-ink/50">{formatAssetDate(item.createdAt)}</p>
                           </div>
                           <div className="flex items-center gap-2 text-sm">
+                            {item.customReportRef ? (
+                              <label className="flex items-center gap-1 text-xs text-ink/70">
+                                <input
+                                  type="checkbox"
+                                  checked={Boolean(selectedReportOutputs[`${item.taskId}:${reportOutputRefKey(item.customReportRef)}`])}
+                                  onChange={() => toggleCustomReportOutput(item.taskId, item.customReportRef as CustomReportOutputRef)}
+                                />
+                                QC
+                              </label>
+                            ) : null}
                             <a href={item.previewUrl} target="_blank" rel="noreferrer" title="Preview">
                               👁
                             </a>
@@ -4117,6 +4184,16 @@ export default function App() {
                             <p className="text-xs text-ink/50">{formatAssetDate(item.createdAt)}</p>
                           </div>
                           <div className="flex items-center gap-2 text-sm">
+                            {item.customReportRef ? (
+                              <label className="flex items-center gap-1 text-xs text-ink/70">
+                                <input
+                                  type="checkbox"
+                                  checked={Boolean(selectedReportOutputs[`${item.taskId}:${reportOutputRefKey(item.customReportRef)}`])}
+                                  onChange={() => toggleCustomReportOutput(item.taskId, item.customReportRef as CustomReportOutputRef)}
+                                />
+                                QC
+                              </label>
+                            ) : null}
                             <a href={item.previewUrl} target="_blank" rel="noreferrer" title="Preview">
                               👁
                             </a>
@@ -4165,6 +4242,16 @@ export default function App() {
                             <p className="text-xs text-ink/50">{formatAssetDate(item.createdAt)}</p>
                           </div>
                           <div className="flex items-center gap-2 text-sm">
+                            {item.customReportRef ? (
+                              <label className="flex items-center gap-1 text-xs text-ink/70">
+                                <input
+                                  type="checkbox"
+                                  checked={Boolean(selectedReportOutputs[`${item.taskId}:${reportOutputRefKey(item.customReportRef)}`])}
+                                  onChange={() => toggleCustomReportOutput(item.taskId, item.customReportRef as CustomReportOutputRef)}
+                                />
+                                QC
+                              </label>
+                            ) : null}
                             <a href={item.previewUrl} target="_blank" rel="noreferrer" title="Preview">
                               👁
                             </a>

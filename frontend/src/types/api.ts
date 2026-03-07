@@ -169,6 +169,19 @@ export type ExportRecord = {
   downloadUrl?: string;
 };
 
+export type CustomReportOutputRef =
+  | { assetType: "frame_variant"; frameId: string; variantId: string }
+  | { assetType: "segment_generation"; genId: string };
+
+export type CustomReportRecord = {
+  reportId: string;
+  reportType: "qc_frame" | "qc_video";
+  name: string;
+  outputRefs: CustomReportOutputRef[];
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type TaskDetail = {
   taskId: string;
   userId: string;
@@ -207,6 +220,7 @@ export type TaskDetail = {
   frames: Record<string, FrameRecord>;
   segmentGenerations: Record<string, SegmentGeneration>;
   exports: ExportRecord[];
+  customReports?: CustomReportRecord[];
 };
 
 export type JobStatus = {
