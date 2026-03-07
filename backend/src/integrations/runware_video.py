@@ -140,8 +140,8 @@ def create_wan22_animate_generation(
             "width": int(width),
             "height": int(height),
             "inputs": {
-                "referenceImages": [{"inputImage": reference_image_url}],
-                "referenceVideos": [{"inputVideo": reference_video_url}],
+                "referenceImages": [reference_image_url],
+                "referenceVideos": [reference_video_url],
             },
             "advancedFeatures": {
                 "wanAnimate": {
