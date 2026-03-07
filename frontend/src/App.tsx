@@ -806,7 +806,9 @@ export default function App() {
       return { rows: [] as ReportGenerationRow[] };
     }
     const frameById = reportTask.frames ?? {};
-    const allRows: ReportGenerationRow[] = Object.values(reportTask.segmentGenerations ?? {}).map((generation) => {
+    const allRows: ReportGenerationRow[] = Object.values(reportTask.segmentGenerations ?? {})
+      .filter((generation) => generation.status !== "failed")
+      .map((generation) => {
       const segment = reportSegmentsById.get(generation.segmentId) ?? null;
       const startFrame = segment ? frameById[segment.startFrameId] ?? null : null;
       const endFrame = segment ? frameById[segment.endFrameId] ?? null : null;
@@ -1282,7 +1284,9 @@ export default function App() {
 
   const segmentGenerations = useMemo(
     () =>
-      Object.values(task?.segmentGenerations ?? {}).sort(
+      Object.values(task?.segmentGenerations ?? {})
+        .filter((generation) => generation.status !== "failed")
+        .sort(
         (a, b) => safeTimestamp(b.createdAt) - safeTimestamp(a.createdAt),
       ),
     [task?.segmentGenerations],
@@ -1499,6 +1503,7 @@ export default function App() {
     const assets: LibraryAsset[] = [];
     for (const taskItem of assetTasks) {
       for (const generation of Object.values(taskItem.segmentGenerations ?? {})) {
+        if (generation.status === "failed") continue;
         if (!generation.downloadUrl) continue;
         assets.push({
           id: `generation:${taskItem.taskId}:${generation.genId}`,
@@ -1551,7 +1556,10 @@ export default function App() {
 
   useEffect(() => {
     setSelectedGenIds((previous) => {
-      const filtered = previous.filter((genId) => Boolean(task?.segmentGenerations?.[genId]));
+      const filtered = previous.filter((genId) => {
+        const generation = task?.segmentGenerations?.[genId];
+        return Boolean(generation && generation.status !== "failed");
+      });
       return filtered.length === previous.length ? previous : filtered;
     });
   }, [task?.segmentGenerations]);
@@ -1609,15 +1617,16 @@ export default function App() {
   ]);
 
   function selectSegmentGeneration(genId: string) {
+    const selectedGeneration = task?.segmentGenerations?.[genId];
+    if (!selectedGeneration || selectedGeneration.status === "failed") return;
     setSelectedPreviewGenId(genId);
     setSelectedGenIds((previous) => {
-      const selectedGeneration = task?.segmentGenerations?.[genId];
       const targetSegmentId = selectedGeneration?.segmentId;
       const filtered = previous.filter((existingGenId) => {
         if (existingGenId === genId) return false;
         if (!targetSegmentId) return true;
         const existing = task?.segmentGenerations?.[existingGenId];
-        return existing?.segmentId !== targetSegmentId;
+        return existing?.segmentId !== targetSegmentId && existing?.status !== "failed";
       });
       return [genId, ...filtered];
     });
