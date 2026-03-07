@@ -133,6 +133,23 @@ export type SegmentGeneration = {
         [key: string]: unknown;
       };
     };
+    frameByVariant?: Record<
+      string,
+      {
+        metrics?: Record<string, number | string | null>;
+        artifacts?: {
+          heatmapKey?: string;
+          heatmapUrl?: string;
+          overlayKey?: string;
+          overlayUrl?: string;
+          binaryChangeKey?: string;
+          binaryChangeUrl?: string;
+          boundaryOverlayKey?: string;
+          boundaryOverlayUrl?: string;
+          [key: string]: unknown;
+        };
+      }
+    >;
     video?: {
       aggregates?: Record<string, number | string | boolean | null | Record<string, number | null>>;
       selectedFrames?: Array<{
