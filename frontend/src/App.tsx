@@ -5,7 +5,15 @@ import { ReactCompareSlider, ReactCompareSliderImage } from "react-compare-slide
 import { apiClient } from "./api/client";
 import { currentUser, login, logout } from "./lib/auth";
 import { useUiStore } from "./store/uiStore";
-import type { FrameRecord, FrameVariant, SegmentGeneration, SegmentRecord, TaskDetail } from "./types/api";
+import type {
+  CustomReportOutputRef,
+  CustomReportRecord,
+  FrameRecord,
+  FrameVariant,
+  SegmentGeneration,
+  SegmentRecord,
+  TaskDetail,
+} from "./types/api";
 
 type TabId = "timeline" | "frames" | "generate" | "merge" | "assets" | "report";
 type GenerateInputMode = "start_video" | "start_end" | "start_only";
@@ -30,6 +38,7 @@ type LibraryAsset = {
   previewUrl: string;
   downloadUrl: string;
   mediaType: "image" | "video";
+  customReportRef?: CustomReportOutputRef;
   deletePayload:
     | { assetType: "upload" }
     | { assetType: "frame_capture"; frameId: string }
@@ -66,6 +75,35 @@ type ReportGenerationRow = {
   endFrameUrl: string | null;
   generatedVideoUrl: string | null;
 };
+
+type ReportView = "outputs" | "qc_frame" | "qc_video";
+
+type ReportOutputGroup = "video_generations" | "start_frames" | "end_frames";
+
+type ReportOutputCard = {
+  id: string;
+  taskId: string;
+  group: ReportOutputGroup;
+  title: string;
+  subtitle: string;
+  createdAt: string;
+  modelLabel: string;
+  promptLabel: string;
+  imageUrl: string | null;
+  videoUrl: string | null;
+  selectionRef: CustomReportOutputRef;
+};
+
+type QcFrameRow = {
+  id: string;
+  frame: FrameRecord;
+  variant: FrameVariant;
+  role: "start" | "end" | "unlinked";
+  linkedGenerations: ReportGenerationRow[];
+  qcGeneration: ReportGenerationRow | null;
+};
+
+type VideoGenerationGroup = "start_video" | "start_equals_end" | "start_end" | "start_only";
 
 type EditFrameCandidate = {
   id: string;
@@ -129,6 +167,32 @@ function safeTimestamp(iso: string | undefined): number {
   if (!iso) return 0;
   const timestamp = new Date(iso).getTime();
   return Number.isNaN(timestamp) ? 0 : timestamp;
+}
+
+function reportOutputRefKey(ref: CustomReportOutputRef): string {
+  if (ref.assetType === "segment_generation") {
+    return `segment_generation:${ref.genId}`;
+  }
+  return `frame_variant:${ref.frameId}:${ref.variantId}`;
+}
+
+function classifyVideoGeneration(row: ReportGenerationRow): VideoGenerationGroup {
+  const model = row.generation.luma.model;
+  if (model === "ray-2" || model === "ray-flash-2" || model === "wan2.2-animate") {
+    return "start_video";
+  }
+  if (model === "runway-gen4.5" || model === "wan2.2-a14b") {
+    return "start_only";
+  }
+  const firstKey = row.generation.sourceFirstFrameResolvedKey ?? row.generation.inputFirstFrameKey ?? null;
+  const lastKey = row.generation.sourceLastFrameResolvedKey ?? row.generation.inputLastFrameKey ?? null;
+  if (!lastKey) {
+    return "start_only";
+  }
+  if (firstKey && firstKey === lastKey) {
+    return "start_equals_end";
+  }
+  return "start_end";
 }
 
 function truncateIdentifier(value: string, maxLength = 12): string {
@@ -491,7 +555,7 @@ function useVideoFrameStrip({
   return items;
 }
 
-function MergeFrameStrip({
+function MergeTrackStrip({
   title,
   items,
   anchorFrame,
@@ -506,39 +570,110 @@ function MergeFrameStrip({
   overlapEnd?: number;
   prefix: string;
 }) {
+  const itemWidthPx = 96;
+  const anchorIndex = items.findIndex((item) => item.frameIndex === anchorFrame);
+  const overlapMin = overlapStart != null && overlapEnd != null ? Math.min(overlapStart, overlapEnd) : null;
+  const overlapMax = overlapStart != null && overlapEnd != null ? Math.max(overlapStart, overlapEnd) : null;
+  const overlapStartIndex = overlapMin != null ? items.findIndex((item) => item.frameIndex === overlapMin) : -1;
+  const overlapEndIndex = overlapMax != null ? items.findIndex((item) => item.frameIndex === overlapMax) : -1;
+
   return (
-    <div className="rounded-md border border-ink/10 bg-white p-2">
-      <p className="text-xs font-medium text-ink/80">{title}</p>
-      <div className="mt-2 flex gap-2 overflow-x-auto pb-1">
-        {items.map((item) => {
-          const inOverlap =
-            overlapStart != null &&
-            overlapEnd != null &&
-            item.frameIndex >= Math.min(overlapStart, overlapEnd) &&
-            item.frameIndex <= Math.max(overlapStart, overlapEnd);
-          const isAnchor = item.frameIndex === anchorFrame;
-          return (
+    <div className="space-y-1">
+      <div className="flex items-center justify-between text-[11px] text-ink/70">
+        <p className="font-medium text-ink/80">{title}</p>
+        <p>
+          cut {prefix}
+          {anchorFrame}
+        </p>
+      </div>
+      <div className="overflow-x-auto rounded border border-ink/15 bg-white">
+        <div className="relative inline-flex min-w-full">
+          {items.map((item) => {
+            const inOverlap = overlapMin != null && overlapMax != null && item.frameIndex >= overlapMin && item.frameIndex <= overlapMax;
+            return (
+              <div
+                key={`${title}:${item.frameIndex}`}
+                className={`shrink-0 border-r border-ink/15 ${
+                  inOverlap ? "bg-amber-50" : "bg-bg"
+                } last:border-r-0`}
+                style={{ width: `${itemWidthPx}px` }}
+              >
+                {item.imageUrl ? (
+                  <img src={item.imageUrl} alt={`${prefix}${item.frameIndex}`} className="h-16 w-full object-contain" />
+                ) : (
+                  <div className="flex h-16 w-full items-center justify-center text-[10px] text-ink/60">no frame</div>
+                )}
+                <p className="truncate px-1 py-1 text-[10px] text-ink/70">
+                  {prefix}
+                  {item.frameIndex}
+                </p>
+              </div>
+            );
+          })}
+          {anchorIndex >= 0 ? (
             <div
-              key={`${title}:${item.frameIndex}`}
-              className={`w-20 shrink-0 rounded border p-1 ${
-                isAnchor ? "border-teal-500 bg-teal-50" : inOverlap ? "border-amber-300 bg-amber-50" : "border-ink/10 bg-bg"
-              }`}
-            >
-              {item.imageUrl ? (
-                <img src={item.imageUrl} alt={`${prefix}${item.frameIndex}`} className="h-12 w-full rounded object-contain" />
-              ) : (
-                <div className="flex h-12 w-full items-center justify-center rounded border border-dashed border-ink/20 text-[10px] text-ink/60">
-                  no frame
-                </div>
-              )}
-              <p className="mt-1 truncate text-[10px] text-ink/70">
-                {prefix}
-                {item.frameIndex}
-                {isAnchor ? " • cut" : inOverlap ? " • feather" : ""}
-              </p>
-            </div>
-          );
-        })}
+              className="pointer-events-none absolute bottom-0 top-0 w-[2px] bg-teal-600"
+              style={{ left: `${anchorIndex * itemWidthPx}px` }}
+              title="Merge cut"
+            />
+          ) : null}
+          {overlapStartIndex >= 0 ? (
+            <div
+              className="pointer-events-none absolute bottom-0 top-0 w-px border-l border-dashed border-amber-500"
+              style={{ left: `${overlapStartIndex * itemWidthPx}px` }}
+              title="Feather start"
+            />
+          ) : null}
+          {overlapEndIndex >= 0 ? (
+            <div
+              className="pointer-events-none absolute bottom-0 top-0 w-px border-l border-dashed border-amber-500"
+              style={{ left: `${(overlapEndIndex + 1) * itemWidthPx}px` }}
+              title="Feather end"
+            />
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MergeBoundaryPreview({
+  title,
+  subtitle,
+  firstTrack,
+  secondTrack,
+}: {
+  title: string;
+  subtitle: string;
+  firstTrack: {
+    title: string;
+    items: VideoFrameStripItem[];
+    anchorFrame: number;
+    overlapStart?: number;
+    overlapEnd?: number;
+    prefix: string;
+  };
+  secondTrack: {
+    title: string;
+    items: VideoFrameStripItem[];
+    anchorFrame: number;
+    overlapStart?: number;
+    overlapEnd?: number;
+    prefix: string;
+  };
+}) {
+  return (
+    <div className="space-y-2 rounded-lg border border-ink/10 p-3">
+      <div className="flex items-center justify-between">
+        <p className="text-sm font-medium">{title}</p>
+        <p className="text-xs text-ink/60">{subtitle}</p>
+      </div>
+      <div className="space-y-2">
+        <MergeTrackStrip {...firstTrack} />
+        <MergeTrackStrip {...secondTrack} />
+        <p className="text-[11px] text-ink/60">
+          Solid teal line = merge cut. Dashed amber lines = feather blend boundaries.
+        </p>
       </div>
     </div>
   );
@@ -587,6 +722,10 @@ export default function App() {
   const [isAuthed, setIsAuthed] = useState(false);
   const [tab, setTab] = useState<TabId>("timeline");
   const [reportTaskId, setReportTaskId] = useState<string | null>(null);
+  const [reportView, setReportView] = useState<ReportView>("outputs");
+  const [activeCustomReportId, setActiveCustomReportId] = useState<string | null>(null);
+  const [selectedReportOutputs, setSelectedReportOutputs] = useState<Record<string, { taskId: string; ref: CustomReportOutputRef }>>({});
+  const [customReportNotice, setCustomReportNotice] = useState<string | null>(null);
   const [isNewTaskModalOpen, setIsNewTaskModalOpen] = useState(false);
   const [newTaskName, setNewTaskName] = useState("New VFX Task");
   const [newTaskFile, setNewTaskFile] = useState<File | null>(null);
@@ -653,6 +792,7 @@ export default function App() {
   const patchOverlayCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const patchMaskCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const patchDrawStateRef = useRef<{ tool: PatchToolMode; points: MaskPoint[]; last: MaskPoint | null } | null>(null);
+  const requestedAutoQcRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     currentUser().then((user) => setIsAuthed(!!user));
@@ -833,6 +973,201 @@ export default function App() {
     allRows.sort((a, b) => sortScore(a) - sortScore(b) || safeTimestamp(b.generation.createdAt) - safeTimestamp(a.generation.createdAt));
     return { rows: allRows };
   }, [reportSegmentsById, reportTask]);
+  const reportCustomReports = useMemo(
+    () =>
+      [...(reportTask?.customReports ?? [])].sort((a, b) => safeTimestamp(b.updatedAt) - safeTimestamp(a.updatedAt)),
+    [reportTask?.customReports],
+  );
+  const activeCustomReport = useMemo(
+    () => reportCustomReports.find((report) => report.reportId === activeCustomReportId) ?? null,
+    [activeCustomReportId, reportCustomReports],
+  );
+  const selectedOutputRefsByTask = useMemo(() => {
+    const grouped: Record<string, CustomReportOutputRef[]> = {};
+    for (const item of Object.values(selectedReportOutputs)) {
+      if (!grouped[item.taskId]) {
+        grouped[item.taskId] = [];
+      }
+      grouped[item.taskId].push(item.ref);
+    }
+    return grouped;
+  }, [selectedReportOutputs]);
+  const reportOutputCards = useMemo(() => {
+    if (!reportTask) {
+      return {
+        videoGenerations: [] as ReportOutputCard[],
+        startFrames: [] as ReportOutputCard[],
+        endFrames: [] as ReportOutputCard[],
+      };
+    }
+    const startFrameIds = new Set((reportTask.segments ?? []).map((segment) => segment.startFrameId));
+    const endFrameIds = new Set((reportTask.segments ?? []).map((segment) => segment.endFrameId));
+    const videoCards: ReportOutputCard[] = reportRows.rows
+      .filter((row) => Boolean(row.generatedVideoUrl))
+      .map((row) => ({
+        id: `report-card:gen:${row.generation.genId}`,
+        taskId: reportTask.taskId,
+        group: "video_generations",
+        title: row.segment ? `Segment ${row.segment.segmentId}` : row.generation.genId,
+        subtitle: row.segment ? describeSegment(row.segment) : row.generation.segmentId,
+        createdAt: row.generation.createdAt,
+        modelLabel: row.generation.luma.model,
+        promptLabel: row.generation.luma.prompt?.trim() || "No prompt provided",
+        imageUrl: null,
+        videoUrl: row.generatedVideoUrl,
+        selectionRef: { assetType: "segment_generation", genId: row.generation.genId },
+      }));
+    const startCards: ReportOutputCard[] = [];
+    const endCards: ReportOutputCard[] = [];
+    for (const frame of Object.values(reportTask.frames ?? {})) {
+      for (const variant of frame.variants ?? []) {
+        if (!variant.imageUrl) continue;
+        const baseCard: ReportOutputCard = {
+          id: `report-card:variant:${frame.frameId}:${variant.variantId}`,
+          taskId: reportTask.taskId,
+          group: startFrameIds.has(frame.frameId) ? "start_frames" : "end_frames",
+          title: `Frame ${frame.frameIndex} (${frame.timecode})`,
+          subtitle: startFrameIds.has(frame.frameId)
+            ? "Start frame edit"
+            : endFrameIds.has(frame.frameId)
+              ? "End frame edit"
+              : "Unlinked frame edit",
+          createdAt: variant.createdAt,
+          modelLabel: `${variant.model} (${variant.type})`,
+          promptLabel: `Prompt hash ${truncateIdentifier(variant.promptHash, 16)}`,
+          imageUrl: variant.imageUrl,
+          videoUrl: null,
+          selectionRef: { assetType: "frame_variant", frameId: frame.frameId, variantId: variant.variantId },
+        };
+        if (startFrameIds.has(frame.frameId)) {
+          startCards.push(baseCard);
+        } else if (endFrameIds.has(frame.frameId)) {
+          endCards.push(baseCard);
+        } else {
+          startCards.push(baseCard);
+        }
+      }
+    }
+    const byCreated = (a: ReportOutputCard, b: ReportOutputCard) => safeTimestamp(b.createdAt) - safeTimestamp(a.createdAt);
+    videoCards.sort(byCreated);
+    startCards.sort(byCreated);
+    endCards.sort(byCreated);
+    return { videoGenerations: videoCards, startFrames: startCards, endFrames: endCards };
+  }, [reportRows.rows, reportTask]);
+  const activeReportGenerationIds = useMemo(() => {
+    const ids = new Set<string>();
+    if (!activeCustomReport) return ids;
+    for (const ref of activeCustomReport.outputRefs ?? []) {
+      if (ref.assetType === "segment_generation") {
+        ids.add(ref.genId);
+      }
+    }
+    return ids;
+  }, [activeCustomReport]);
+  const activeReportFrameVariantKeys = useMemo(() => {
+    const keys = new Set<string>();
+    if (!activeCustomReport) return keys;
+    for (const ref of activeCustomReport.outputRefs ?? []) {
+      if (ref.assetType === "frame_variant") {
+        keys.add(`${ref.frameId}:${ref.variantId}`);
+      }
+    }
+    return keys;
+  }, [activeCustomReport]);
+  const scopedVideoRows = useMemo(() => {
+    const rows = reportRows.rows.filter((row) => Boolean(row.generatedVideoUrl));
+    if (!activeCustomReport) {
+      return rows;
+    }
+    return rows.filter((row) => activeReportGenerationIds.has(row.generation.genId));
+  }, [activeCustomReport, activeReportGenerationIds, reportRows.rows]);
+  const qcFrameRows = useMemo(() => {
+    if (!reportTask) return [] as QcFrameRow[];
+    const startFrameIds = new Set((reportTask.segments ?? []).map((segment) => segment.startFrameId));
+    const endFrameIds = new Set((reportTask.segments ?? []).map((segment) => segment.endFrameId));
+    const generationRowsByVariant = new Map<string, ReportGenerationRow[]>();
+    for (const row of reportRows.rows) {
+      for (const variantId of [row.generation.sourceFirstFrameVariantId, row.generation.sourceLastFrameVariantId]) {
+        if (!variantId) continue;
+        const existing = generationRowsByVariant.get(variantId) ?? [];
+        generationRowsByVariant.set(variantId, [...existing, row]);
+      }
+    }
+    const rows: QcFrameRow[] = [];
+    for (const frame of Object.values(reportTask.frames ?? {})) {
+      for (const variant of frame.variants ?? []) {
+        if (!variant.imageUrl) continue;
+        const refKey = `${frame.frameId}:${variant.variantId}`;
+        const linkedGenerations = generationRowsByVariant.get(variant.variantId) ?? [];
+        if (activeCustomReport) {
+          const includedByRef = activeReportFrameVariantKeys.has(refKey);
+          const includedByGeneration = linkedGenerations.some((row) => activeReportGenerationIds.has(row.generation.genId));
+          if (!includedByRef && !includedByGeneration) {
+            continue;
+          }
+        }
+        const qcGeneration =
+          linkedGenerations.find((row) => row.generation.qc?.status === "complete") ??
+          linkedGenerations.find((row) => row.generation.qc?.status === "running") ??
+          linkedGenerations[0] ??
+          null;
+        const role: "start" | "end" | "unlinked" = startFrameIds.has(frame.frameId)
+          ? "start"
+          : endFrameIds.has(frame.frameId)
+            ? "end"
+            : "unlinked";
+        rows.push({
+          id: `qc-frame:${frame.frameId}:${variant.variantId}`,
+          frame,
+          variant,
+          role,
+          linkedGenerations,
+          qcGeneration,
+        });
+      }
+    }
+    return rows.sort((a, b) => safeTimestamp(b.variant.createdAt) - safeTimestamp(a.variant.createdAt));
+  }, [activeCustomReport, activeReportFrameVariantKeys, activeReportGenerationIds, reportRows.rows, reportTask]);
+  const qcVideoRowsByGroup = useMemo(() => {
+    const grouped: Record<VideoGenerationGroup, ReportGenerationRow[]> = {
+      start_video: [],
+      start_equals_end: [],
+      start_end: [],
+      start_only: [],
+    };
+    for (const row of scopedVideoRows) {
+      grouped[classifyVideoGeneration(row)].push(row);
+    }
+    return grouped;
+  }, [scopedVideoRows]);
+  const scopedQcGenerationIds = useMemo(() => {
+    if (reportView === "qc_video") {
+      return scopedVideoRows.map((row) => row.generation.genId);
+    }
+    if (reportView === "qc_frame") {
+      const ids = new Set<string>();
+      for (const row of qcFrameRows) {
+        for (const linked of row.linkedGenerations) {
+          ids.add(linked.generation.genId);
+        }
+      }
+      return [...ids];
+    }
+    return [] as string[];
+  }, [qcFrameRows, reportView, scopedVideoRows]);
+
+  useEffect(() => {
+    setReportView("outputs");
+    setActiveCustomReportId(null);
+  }, [reportTaskId]);
+
+  useEffect(() => {
+    if (!activeCustomReportId) return;
+    if (!reportCustomReports.some((report) => report.reportId === activeCustomReportId)) {
+      setActiveCustomReportId(null);
+      setReportView("outputs");
+    }
+  }, [activeCustomReportId, reportCustomReports]);
 
   useEffect(() => {
     setFirstFrameId(null);
@@ -1237,11 +1572,68 @@ export default function App() {
   });
 
   const runQcMutation = useMutation({
-    mutationFn: async (taskId: string) => apiClient.runQc(taskId),
-    onSuccess: async (result, taskId) => {
+    mutationFn: async ({ taskId, generationIds }: { taskId: string; generationIds?: string[] }) =>
+      apiClient.runQc(taskId, generationIds?.length ? { generationIds } : undefined),
+    onSuccess: async (result, variables) => {
       setJobIds((previous) => Array.from(new Set([...previous, result.jobId])));
-      await queryClient.invalidateQueries({ queryKey: ["task", taskId] });
-      await queryClient.invalidateQueries({ queryKey: ["task", "report", taskId] });
+      await queryClient.invalidateQueries({ queryKey: ["task", variables.taskId] });
+      await queryClient.invalidateQueries({ queryKey: ["task", "report", variables.taskId] });
+    },
+  });
+
+  useEffect(() => {
+    if (tab !== "report" || !reportTask || reportView === "outputs") return;
+    const missing = scopedQcGenerationIds.filter((genId) => {
+      const generation = reportTask.segmentGenerations?.[genId];
+      return Boolean(
+        generation &&
+          generation.status === "complete" &&
+          generation.outputKey &&
+          generation.sourceFirstFrameVariantId &&
+          !generation.qc,
+      );
+    });
+    if (!missing.length) return;
+    const runKey = `${reportTask.taskId}:${reportView}:${activeCustomReportId ?? "default"}:${missing.sort().join(",")}`;
+    if (requestedAutoQcRef.current.has(runKey)) return;
+    requestedAutoQcRef.current.add(runKey);
+    void (async () => {
+      for (let index = 0; index < missing.length; index += 20) {
+        const generationIds = missing.slice(index, index + 20);
+        try {
+          await runQcMutation.mutateAsync({ taskId: reportTask.taskId, generationIds });
+        } catch {
+          break;
+        }
+      }
+    })();
+  }, [activeCustomReportId, reportTask, reportView, runQcMutation, scopedQcGenerationIds, tab]);
+
+  const createCustomReportMutation = useMutation({
+    mutationFn: ({
+      taskId,
+      reportType,
+      outputRefs,
+      name,
+    }: {
+      taskId: string;
+      reportType: "qc_frame" | "qc_video";
+      outputRefs: CustomReportOutputRef[];
+      name?: string;
+    }) => apiClient.createCustomReport(taskId, { reportType, outputRefs, name }),
+    onSuccess: async (_result, variables) => {
+      await queryClient.invalidateQueries({ queryKey: ["task", variables.taskId] });
+      await queryClient.invalidateQueries({ queryKey: ["task", "report", variables.taskId] });
+      await queryClient.invalidateQueries({ queryKey: ["task", "assets", variables.taskId] });
+    },
+  });
+
+  const deleteCustomReportMutation = useMutation({
+    mutationFn: ({ taskId, reportId }: { taskId: string; reportId: string }) => apiClient.deleteCustomReport(taskId, reportId),
+    onSuccess: async (_result, variables) => {
+      await queryClient.invalidateQueries({ queryKey: ["task", variables.taskId] });
+      await queryClient.invalidateQueries({ queryKey: ["task", "report", variables.taskId] });
+      await queryClient.invalidateQueries({ queryKey: ["task", "assets", variables.taskId] });
     },
   });
 
@@ -1499,6 +1891,7 @@ export default function App() {
             previewUrl: variant.imageUrl,
             downloadUrl: variant.imageUrl,
             mediaType: "image",
+            customReportRef: { assetType: "frame_variant", frameId: frame.frameId, variantId: variant.variantId },
             deletePayload: { assetType: "frame_variant", frameId: frame.frameId, variantId: variant.variantId },
           });
         }
@@ -1513,18 +1906,19 @@ export default function App() {
       for (const generation of Object.values(taskItem.segmentGenerations ?? {})) {
         if (generation.status === "failed") continue;
         if (!generation.downloadUrl) continue;
-        assets.push({
-          id: `generation:${taskItem.taskId}:${generation.genId}`,
-          taskId: taskItem.taskId,
-          title: humanizeFilename(keyBasenameFromS3Key(generation.outputKey || `${generation.genId}.mp4`)),
+          assets.push({
+            id: `generation:${taskItem.taskId}:${generation.genId}`,
+            taskId: taskItem.taskId,
+            title: humanizeFilename(keyBasenameFromS3Key(generation.outputKey || `${generation.genId}.mp4`)),
           subtitle: `${taskItem.name} · ${generation.luma.model} · ${generation.luma.mode}`,
           createdAt: generation.createdAt,
-          previewUrl: generation.downloadUrl,
-          downloadUrl: generation.downloadUrl,
-          mediaType: "video",
-          deletePayload: { assetType: "segment_generation", genId: generation.genId },
-        });
-      }
+            previewUrl: generation.downloadUrl,
+            downloadUrl: generation.downloadUrl,
+            mediaType: "video",
+            customReportRef: { assetType: "segment_generation", genId: generation.genId },
+            deletePayload: { assetType: "segment_generation", genId: generation.genId },
+          });
+        }
       for (const exportItem of taskItem.exports ?? []) {
         if (!exportItem.downloadUrl) continue;
         assets.push({
@@ -1993,8 +2387,73 @@ export default function App() {
     };
   }
 
+  function toggleCustomReportOutput(taskId: string, ref: CustomReportOutputRef) {
+    const key = `${taskId}:${reportOutputRefKey(ref)}`;
+    setSelectedReportOutputs((previous) => {
+      if (previous[key]) {
+        const next = { ...previous };
+        delete next[key];
+        return next;
+      }
+      return { ...previous, [key]: { taskId, ref } };
+    });
+  }
+
+  async function createCustomReportFromSelection(taskId: string, reportType: "qc_frame" | "qc_video") {
+    const refsForTask = selectedOutputRefsByTask[taskId] ?? [];
+    if (!refsForTask.length) {
+      setCustomReportNotice("Select one or more outputs using the QC checkboxes first.");
+      return;
+    }
+    const scopedRefs =
+      reportType === "qc_video"
+        ? refsForTask.filter((ref) => ref.assetType === "segment_generation")
+        : refsForTask;
+    if (!scopedRefs.length) {
+      setCustomReportNotice(
+        reportType === "qc_video"
+          ? "QC Video reports require at least one selected video generation."
+          : "No valid outputs selected for this report type.",
+      );
+      return;
+    }
+    try {
+      const result = await createCustomReportMutation.mutateAsync({ taskId, reportType, outputRefs: scopedRefs });
+      setCustomReportNotice("Custom report created.");
+      setReportTaskId(taskId);
+      setReportView(reportType);
+      setActiveCustomReportId(result.reportId);
+      setTab("report");
+    } catch (error) {
+      setCustomReportNotice(error instanceof Error ? error.message : "Failed to create custom report.");
+    }
+  }
+
+  async function deleteCustomReport(taskId: string, report: CustomReportRecord) {
+    const ok = window.confirm(`Delete custom report "${report.name}"?`);
+    if (!ok) return;
+    try {
+      await deleteCustomReportMutation.mutateAsync({ taskId, reportId: report.reportId });
+      if (activeCustomReportId === report.reportId) {
+        setActiveCustomReportId(null);
+        setReportView("outputs");
+      }
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : "Failed to delete report.");
+    }
+  }
+
+  function openCustomReport(taskId: string, report: CustomReportRecord) {
+    setReportTaskId(taskId);
+    setActiveCustomReportId(report.reportId);
+    setReportView(report.reportType);
+    setTab("report");
+  }
+
   function openTaskReport(taskId: string) {
     setReportTaskId(taskId);
+    setReportView("outputs");
+    setActiveCustomReportId(null);
     setSelectedTaskId(taskId);
     setTab("report");
   }
@@ -2054,6 +2513,15 @@ export default function App() {
     if (!ok) return;
     try {
       await deleteAssetMutation.mutateAsync({ taskId: item.taskId, payload: item.deletePayload });
+      if (item.customReportRef) {
+        const key = `${item.taskId}:${reportOutputRefKey(item.customReportRef)}`;
+        setSelectedReportOutputs((previous) => {
+          if (!previous[key]) return previous;
+          const next = { ...previous };
+          delete next[key];
+          return next;
+        });
+      }
     } catch (error) {
       window.alert(error instanceof Error ? error.message : "Failed to delete asset");
     }
@@ -2086,6 +2554,62 @@ export default function App() {
     setNewTaskUploadPercent(0);
     setPendingCreateJobId(null);
     setIsNewTaskModalOpen(true);
+  }
+
+  function renderCustomReportBox(taskId: string | null, reports: CustomReportRecord[] | undefined) {
+    const selectedCount = taskId ? (selectedOutputRefsByTask[taskId]?.length ?? 0) : 0;
+    return (
+      <section className="space-y-3 rounded-2xl border border-ink/10 bg-card p-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h3 className="text-lg font-semibold">Create Custom Report</h3>
+            <p className="text-xs text-ink/60">Selected outputs: {selectedCount}</p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button
+              className="rounded border border-ink/20 bg-white px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={!taskId || createCustomReportMutation.isPending}
+              onClick={() => taskId && createCustomReportFromSelection(taskId, "qc_frame")}
+            >
+              Create QC Frame report
+            </button>
+            <button
+              className="rounded border border-ink/20 bg-white px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={!taskId || createCustomReportMutation.isPending}
+              onClick={() => taskId && createCustomReportFromSelection(taskId, "qc_video")}
+            >
+              Create QC Video report
+            </button>
+          </div>
+        </div>
+        {customReportNotice ? <p className="text-xs text-ink/70">{customReportNotice}</p> : null}
+        {!reports?.length ? (
+          <p className="text-sm text-ink/60">No custom reports yet.</p>
+        ) : (
+          <div className="space-y-2">
+            {reports.map((report) => (
+              <div key={report.reportId} className="flex items-center justify-between rounded border border-ink/10 bg-white p-2 text-sm">
+                <button
+                  type="button"
+                  className="text-left text-ink underline"
+                  onClick={() => taskId && openCustomReport(taskId, report)}
+                >
+                  {report.name} ({report.reportType === "qc_frame" ? "QC Frame" : "QC Video"})
+                </button>
+                <button
+                  type="button"
+                  className="text-xs text-red-600 underline"
+                  disabled={!taskId || deleteCustomReportMutation.isPending}
+                  onClick={() => taskId && deleteCustomReport(taskId, report)}
+                >
+                  Delete
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+    );
   }
 
   async function handleCreateTaskWithUpload() {
@@ -2164,7 +2688,7 @@ export default function App() {
                 disabled={!reportTaskId || runQcMutation.isPending}
                 onClick={() => {
                   if (!reportTaskId) return;
-                  runQcMutation.mutate(reportTaskId);
+                  runQcMutation.mutate({ taskId: reportTaskId });
                 }}
               >
                 {runQcMutation.isPending ? "Starting QC..." : "Run QC Analysis"}
@@ -3344,185 +3868,164 @@ export default function App() {
             {tab === "merge" && (
               <div className="space-y-4">
                 <h3 className="text-lg font-semibold">Merge Video</h3>
-                <div className="grid gap-3 lg:grid-cols-[1.8fr_1fr]">
-                  <div className="space-y-3">
-                    <div className="space-y-2 rounded-lg border border-ink/10 p-3">
-                      <p className="text-sm font-medium">Generation in use</p>
-                      {!mergeTargetGeneration ? (
-                        <p className="text-sm text-ink/60">No generation selected in Generate Video yet.</p>
-                      ) : (
-                        <div
-                          className={`rounded border p-2 ${
-                            mergeTargetGeneration.status === "failed" ? "border-orange-400 bg-orange-50" : "border-teal-500 bg-teal-50"
-                          }`}
-                        >
-                          <p className="text-sm font-semibold">{describeGeneration(mergeTargetGeneration)}</p>
-                          <p className="text-xs text-ink/50">{mergeTargetGeneration.genId}</p>
-                        </div>
-                      )}
-                    </div>
-
-                    {mergeTargetGeneration && mergeTargetSegment ? (
-                      <>
-                        <div className="space-y-3 rounded-lg border border-ink/10 p-3">
-                          <p className="text-sm font-medium">Advanced merge alignment</p>
-                          <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
-                            <label className="space-y-1 text-xs text-ink/70">
-                              <span className="block font-medium text-ink/80">Insert start frame</span>
-                              <input
-                                type="number"
-                                min={0}
-                                max={mergeMaxFrameIndex}
-                                value={mergeInsertStartFrame}
-                                onChange={(e) => setMergeInsertStartFrame(Number(e.target.value))}
-                                className="w-full rounded-md border border-ink/20 px-2 py-2 text-sm"
-                              />
-                            </label>
-                            <label className="space-y-1 text-xs text-ink/70">
-                              <span className="block font-medium text-ink/80">Trim generated start (frames)</span>
-                              <input
-                                type="number"
-                                min={0}
-                                max={Math.max(0, mergeGeneratedDurationFrames - 1)}
-                                value={mergeTrimStartFrames}
-                                onChange={(e) => setMergeTrimStartFrames(Number(e.target.value))}
-                                className="w-full rounded-md border border-ink/20 px-2 py-2 text-sm"
-                              />
-                            </label>
-                            <label className="space-y-1 text-xs text-ink/70">
-                              <span className="block font-medium text-ink/80">Trim generated end (frames)</span>
-                              <input
-                                type="number"
-                                min={0}
-                                max={Math.max(0, mergeGeneratedDurationFrames - 1)}
-                                value={mergeTrimEndFrames}
-                                onChange={(e) => setMergeTrimEndFrames(Number(e.target.value))}
-                                className="w-full rounded-md border border-ink/20 px-2 py-2 text-sm"
-                              />
-                            </label>
-                            <label className="space-y-1 text-xs text-ink/70">
-                              <span className="block font-medium text-ink/80">Temporal feather (frames)</span>
-                              <input
-                                type="number"
-                                min={0}
-                                max={30}
-                                value={temporalFeatherFrames}
-                                onChange={(e) => setTemporalFeatherFrames(Number(e.target.value))}
-                                className="w-full rounded-md border border-ink/20 px-2 py-2 text-sm"
-                              />
-                            </label>
-                          </div>
-                          <div className="grid gap-2 rounded-md bg-bg p-2 text-xs text-ink/70 md:grid-cols-2">
-                            <p>
-                              Original cut: <span className="font-medium text-ink">f{mergeOriginalStartFrame}</span> to{" "}
-                              <span className="font-medium text-ink">f{Math.max(mergeOriginalStartFrame, mergeOriginalEndFrameExclusive - 1)}</span> (
-                              {formatFramesAndSeconds(mergeOriginalDurationFrames, mergeFps)})
-                            </p>
-                            <p>
-                              Generated in merge: <span className="font-medium text-ink">{formatFramesAndSeconds(mergeEffectiveDurationFrames, mergeFps)}</span>{" "}
-                              (from source {formatFramesAndSeconds(mergeGeneratedDurationFrames, mergeFps)})
-                            </p>
-                            <p>
-                              Insert window now: <span className="font-medium text-ink">f{mergeInsertStartFrameClamped}</span> to{" "}
-                              <span className="font-medium text-ink">f{Math.max(mergeInsertStartFrameClamped, mergeEffectiveEndFrameExclusive - 1)}</span>
-                            </p>
-                            <p className={mergeEndOffsetFrames !== 0 ? "font-semibold text-orange-700" : ""}>
-                              End shift from original cut: {mergeEndOffsetFrames >= 0 ? "+" : ""}
-                              {mergeEndOffsetFrames} frames ({(mergeEndOffsetFrames / Math.max(1, mergeFps)).toFixed(2)}s)
-                            </p>
-                          </div>
-                        </div>
-
-                        <div className="space-y-2 rounded-lg border border-ink/10 p-3">
-                          <div className="flex items-center justify-between">
-                            <p className="text-sm font-medium">Start merge point preview</p>
-                            <p className="text-xs text-ink/60">
-                              Cut at original f{mergeInsertStartFrameClamped} -&gt; generated g{mergeGeneratedStartAnchor}
-                            </p>
-                          </div>
-                          <div className="grid gap-2 md:grid-cols-2">
-                            <MergeFrameStrip
-                              title="Original track around start cut"
-                              items={startBoundaryOriginalThumbs}
-                              anchorFrame={mergeInsertStartFrameClamped}
-                              overlapStart={mergeFeatherClamped > 0 ? mergeInsertStartFrameClamped : undefined}
-                              overlapEnd={mergeFeatherClamped > 0 ? mergeInsertStartFrameClamped + mergeFeatherClamped - 1 : undefined}
-                              prefix="f"
-                            />
-                            <MergeFrameStrip
-                              title="Generated track around start cut"
-                              items={startBoundaryGeneratedThumbs}
-                              anchorFrame={mergeGeneratedStartAnchor}
-                              overlapStart={mergeFeatherClamped > 0 ? mergeGeneratedStartAnchor : undefined}
-                              overlapEnd={mergeFeatherClamped > 0 ? mergeGeneratedStartAnchor + mergeFeatherClamped - 1 : undefined}
-                              prefix="g"
-                            />
-                          </div>
-                        </div>
-
-                        <div className="space-y-2 rounded-lg border border-ink/10 p-3">
-                          <div className="flex items-center justify-between">
-                            <p className="text-sm font-medium">End merge point preview</p>
-                            <p className="text-xs text-ink/60">
-                              Cut at generated g{mergeGeneratedEndAnchor} -&gt; original f{mergeEffectiveEndFrameExclusive}
-                            </p>
-                          </div>
-                          <div className="grid gap-2 md:grid-cols-2">
-                            <MergeFrameStrip
-                              title="Generated track around end cut"
-                              items={endBoundaryGeneratedThumbs}
-                              anchorFrame={mergeGeneratedEndAnchor}
-                              overlapStart={mergeFeatherClamped > 0 ? mergeGeneratedEndAnchor - mergeFeatherClamped + 1 : undefined}
-                              overlapEnd={mergeFeatherClamped > 0 ? mergeGeneratedEndAnchor : undefined}
-                              prefix="g"
-                            />
-                            <MergeFrameStrip
-                              title="Original track after generated segment"
-                              items={endBoundaryOriginalThumbs}
-                              anchorFrame={mergeEffectiveEndFrameExclusive}
-                              overlapStart={mergeFeatherClamped > 0 ? mergeEffectiveEndFrameExclusive : undefined}
-                              overlapEnd={mergeFeatherClamped > 0 ? mergeEffectiveEndFrameExclusive + mergeFeatherClamped - 1 : undefined}
-                              prefix="f"
-                            />
-                          </div>
-                        </div>
-                      </>
-                    ) : null}
-
-                    <button
-                      className="rounded-md bg-accent2 px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-60"
-                      disabled={!mergeTargetGeneration || mergeMutation.isPending}
-                      onClick={() => mergeMutation.mutate()}
-                    >
-                      {mergeMutation.isPending ? "Merging..." : "Merge generation"}
-                    </button>
+                <div className="rounded-lg border border-ink/15 bg-bg p-3">
+                  <p className="text-sm font-semibold">Merge step guide</p>
+                  <div className="mt-2 space-y-2 text-xs text-ink/70">
+                    <p>
+                      The step takes the generated video (segment) selected in Generate Video, and re-inserts it into the original timeline.
+                    </p>
+                    <p>
+                      By default the generated clip starts at the original cut start. If it is longer, the end lands later in the timeline.
+                    </p>
+                    <p>
+                      Use trim start/end and insert start controls, then review the stacked track previews before merging.
+                    </p>
+                    <p>
+                      Solid teal lines show the cut points. Dashed amber lines show blend boundaries from temporal feathering.
+                    </p>
+                    <p className="font-semibold uppercase tracking-wide text-orange-700">
+                      This is an experiment to highlight the challenges merging AI and real content!
+                    </p>
                   </div>
-                  <div className="rounded-lg border border-ink/15 bg-bg p-3">
-                    <p className="text-sm font-semibold">Merge step guide</p>
-                    <div className="mt-2 space-y-2 text-xs text-ink/70">
-                      <p>
-                        The step takes the generated video (segment) you currently have selected on the Generate Video step, and re-inserts it back into the original video at the exact position it came from.
-                      </p>
-                      <p>
-                        By default the generated clip starts at the original cut start. If the generated clip is longer, the end will naturally land later in the timeline.
-                      </p>
-                      <p>
-                        Trim start/end frames to remove unstable generated heads/tails, then confirm boundaries using the two frame-strip previews before merging.
-                      </p>
-                      <p>
-                        Set Temporal Feathering to 0 for a hard cut or choose a frame count to crossfade; feathered frames are marked in yellow.
-                      </p>
-                      <p className="font-semibold uppercase tracking-wide text-orange-700">
-                        This is an experiment to highlight the challenges merging AI and real content!
-                      </p>
-                    </div>
-                    {mergeTargetSegment ? (
-                      <div className="mt-3 rounded-md border border-ink/10 bg-white p-2 text-xs text-ink/70">
-                        <p className="font-medium text-ink/80">Current segment reference</p>
-                        <p className="mt-1">{describeSegment(mergeTargetSegment)}</p>
+                </div>
+                <div className="space-y-3">
+                  <div className="space-y-2 rounded-lg border border-ink/10 p-3">
+                    <p className="text-sm font-medium">Generation in use</p>
+                    {!mergeTargetGeneration ? (
+                      <p className="text-sm text-ink/60">No generation selected in Generate Video yet.</p>
+                    ) : (
+                      <div className="rounded border border-teal-500 bg-teal-50 p-2">
+                        <p className="text-sm font-semibold">{describeGeneration(mergeTargetGeneration)}</p>
+                        <p className="text-xs text-ink/50">{mergeTargetGeneration.genId}</p>
                       </div>
+                    )}
+                    {mergeTargetSegment ? (
+                      <p className="text-xs text-ink/60">Current segment reference: {describeSegment(mergeTargetSegment)}</p>
                     ) : null}
                   </div>
+
+                  {mergeTargetGeneration && mergeTargetSegment ? (
+                    <>
+                      <div className="space-y-3 rounded-lg border border-ink/10 p-3">
+                        <p className="text-sm font-medium">Advanced merge alignment</p>
+                        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                          <label className="space-y-1 text-xs text-ink/70">
+                            <span className="block font-medium text-ink/80">Insert start frame</span>
+                            <input
+                              type="number"
+                              min={0}
+                              max={mergeMaxFrameIndex}
+                              value={mergeInsertStartFrame}
+                              onChange={(e) => setMergeInsertStartFrame(Number(e.target.value))}
+                              className="w-full rounded-md border border-ink/20 px-2 py-2 text-sm"
+                            />
+                          </label>
+                          <label className="space-y-1 text-xs text-ink/70">
+                            <span className="block font-medium text-ink/80">Trim generated start (frames)</span>
+                            <input
+                              type="number"
+                              min={0}
+                              max={Math.max(0, mergeGeneratedDurationFrames - 1)}
+                              value={mergeTrimStartFrames}
+                              onChange={(e) => setMergeTrimStartFrames(Number(e.target.value))}
+                              className="w-full rounded-md border border-ink/20 px-2 py-2 text-sm"
+                            />
+                          </label>
+                          <label className="space-y-1 text-xs text-ink/70">
+                            <span className="block font-medium text-ink/80">Trim generated end (frames)</span>
+                            <input
+                              type="number"
+                              min={0}
+                              max={Math.max(0, mergeGeneratedDurationFrames - 1)}
+                              value={mergeTrimEndFrames}
+                              onChange={(e) => setMergeTrimEndFrames(Number(e.target.value))}
+                              className="w-full rounded-md border border-ink/20 px-2 py-2 text-sm"
+                            />
+                          </label>
+                          <label className="space-y-1 text-xs text-ink/70">
+                            <span className="block font-medium text-ink/80">Temporal feather (frames)</span>
+                            <input
+                              type="number"
+                              min={0}
+                              max={30}
+                              value={temporalFeatherFrames}
+                              onChange={(e) => setTemporalFeatherFrames(Number(e.target.value))}
+                              className="w-full rounded-md border border-ink/20 px-2 py-2 text-sm"
+                            />
+                          </label>
+                        </div>
+                        <div className="grid gap-2 rounded-md bg-bg p-2 text-xs text-ink/70 md:grid-cols-2">
+                          <p>
+                            Original cut: <span className="font-medium text-ink">f{mergeOriginalStartFrame}</span> to{" "}
+                            <span className="font-medium text-ink">f{Math.max(mergeOriginalStartFrame, mergeOriginalEndFrameExclusive - 1)}</span> (
+                            {formatFramesAndSeconds(mergeOriginalDurationFrames, mergeFps)})
+                          </p>
+                          <p>
+                            Generated in merge: <span className="font-medium text-ink">{formatFramesAndSeconds(mergeEffectiveDurationFrames, mergeFps)}</span>{" "}
+                            (from source {formatFramesAndSeconds(mergeGeneratedDurationFrames, mergeFps)})
+                          </p>
+                          <p>
+                            Insert window now: <span className="font-medium text-ink">f{mergeInsertStartFrameClamped}</span> to{" "}
+                            <span className="font-medium text-ink">f{Math.max(mergeInsertStartFrameClamped, mergeEffectiveEndFrameExclusive - 1)}</span>
+                          </p>
+                          <p className={mergeEndOffsetFrames !== 0 ? "font-semibold text-orange-700" : ""}>
+                            End shift from original cut: {mergeEndOffsetFrames >= 0 ? "+" : ""}
+                            {mergeEndOffsetFrames} frames ({(mergeEndOffsetFrames / Math.max(1, mergeFps)).toFixed(2)}s)
+                          </p>
+                        </div>
+                      </div>
+
+                      <MergeBoundaryPreview
+                        title="Start merge point preview"
+                        subtitle={`original f${mergeInsertStartFrameClamped} -> generated g${mergeGeneratedStartAnchor}`}
+                        firstTrack={{
+                          title: "Original track around start cut",
+                          items: startBoundaryOriginalThumbs,
+                          anchorFrame: mergeInsertStartFrameClamped,
+                          overlapStart: mergeFeatherClamped > 0 ? mergeInsertStartFrameClamped : undefined,
+                          overlapEnd: mergeFeatherClamped > 0 ? mergeInsertStartFrameClamped + mergeFeatherClamped - 1 : undefined,
+                          prefix: "f",
+                        }}
+                        secondTrack={{
+                          title: "Generated track around start cut",
+                          items: startBoundaryGeneratedThumbs,
+                          anchorFrame: mergeGeneratedStartAnchor,
+                          overlapStart: mergeFeatherClamped > 0 ? mergeGeneratedStartAnchor : undefined,
+                          overlapEnd: mergeFeatherClamped > 0 ? mergeGeneratedStartAnchor + mergeFeatherClamped - 1 : undefined,
+                          prefix: "g",
+                        }}
+                      />
+
+                      <MergeBoundaryPreview
+                        title="End merge point preview"
+                        subtitle={`generated g${mergeGeneratedEndAnchor} -> original f${mergeEffectiveEndFrameExclusive}`}
+                        firstTrack={{
+                          title: "Generated track around end cut",
+                          items: endBoundaryGeneratedThumbs,
+                          anchorFrame: mergeGeneratedEndAnchor,
+                          overlapStart: mergeFeatherClamped > 0 ? mergeGeneratedEndAnchor - mergeFeatherClamped + 1 : undefined,
+                          overlapEnd: mergeFeatherClamped > 0 ? mergeGeneratedEndAnchor : undefined,
+                          prefix: "g",
+                        }}
+                        secondTrack={{
+                          title: "Original track after generated segment",
+                          items: endBoundaryOriginalThumbs,
+                          anchorFrame: mergeEffectiveEndFrameExclusive,
+                          overlapStart: mergeFeatherClamped > 0 ? mergeEffectiveEndFrameExclusive : undefined,
+                          overlapEnd: mergeFeatherClamped > 0 ? mergeEffectiveEndFrameExclusive + mergeFeatherClamped - 1 : undefined,
+                          prefix: "f",
+                        }}
+                      />
+                    </>
+                  ) : null}
+
+                  <button
+                    className="rounded-md bg-accent2 px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-60"
+                    disabled={!mergeTargetGeneration || mergeMutation.isPending}
+                    onClick={() => mergeMutation.mutate()}
+                  >
+                    {mergeMutation.isPending ? "Merging..." : "Merge generation"}
+                  </button>
                 </div>
                 <div className="space-y-2">
                   {sortedExports.map((exp) => (
