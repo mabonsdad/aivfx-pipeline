@@ -176,7 +176,6 @@ const GENERATION_MODELS_BY_INPUT: Record<GenerateInputMode, Array<{ value: Video
   start_video: [
     { value: "ray-flash-2", label: "ray-flash-2" },
     { value: "ray-2", label: "ray-2" },
-    { value: "wan2.2-animate", label: "wan2.2-animate (image + segment motion)" },
   ],
   start_end: [
     { value: "kling-2.6", label: "kling-2.6 (start/end frames)" },
@@ -184,8 +183,8 @@ const GENERATION_MODELS_BY_INPUT: Record<GenerateInputMode, Array<{ value: Video
     { value: "veo-3.1-fast", label: "veo-3.1-fast (start/end frames, no audio)" },
   ],
   start_only: [
-    { value: "runway-gen4.5", label: "runway-gen4.5 (start frame image-to-video)" },
     { value: "wan2.2-a14b", label: "wan2.2-a14b (start frame image-to-video)" },
+    { value: "runway-gen4.5", label: "runway-gen4.5 (start frame image-to-video)" },
     { value: "veo-3.1", label: "veo-3.1 (start/end capable, uses start if end unchanged)" },
     { value: "veo-3.1-fast", label: "veo-3.1-fast (start/end capable, uses start if end unchanged)" },
     { value: "kling-2.6", label: "kling-2.6 (start/end capable, uses start if end unchanged)" },
@@ -620,7 +619,7 @@ export default function App() {
   const [generationModelByInput, setGenerationModelByInput] = useState<Record<GenerateInputMode, VideoModel>>({
     start_video: "ray-flash-2",
     start_end: "kling-2.6",
-    start_only: "runway-gen4.5",
+    start_only: "wan2.2-a14b",
   });
   const [lumaModel, setLumaModel] = useState<VideoModel>("ray-flash-2");
   const [advancedMode, setAdvancedMode] = useState("flex_1");
@@ -1429,6 +1428,15 @@ export default function App() {
     () => GENERATION_MODELS_BY_INPUT[generationInputMode],
     [generationInputMode],
   );
+  useEffect(() => {
+    if (generationModelOptions.some((option) => option.value === lumaModel)) {
+      return;
+    }
+    const fallback = generationModelOptions[0]?.value;
+    if (!fallback) return;
+    setGenerationModelByInput((previous) => ({ ...previous, [generationInputMode]: fallback }));
+    setLumaModel(fallback);
+  }, [generationInputMode, generationModelOptions, lumaModel]);
   const generationHelp = useMemo(() => generationModelHelp(lumaModel, advancedMode), [advancedMode, lumaModel]);
   const generationInputNote = useMemo(() => {
     if (lumaModel === "wan2.2-a14b" || lumaModel === "runway-gen4.5") {
