@@ -63,6 +63,23 @@ QC_ANALYSIS_MAX_FRAMES = 90
 QC_DIFF_THRESHOLD = 32
 QC_OUTSIDE_LEAK_BUDGET_PCT = 0.50
 QC_BOUNDARY_RING_PX = 8
+RUNWARE_WAN22_ALLOWED_RESOLUTIONS: tuple[tuple[int, int], ...] = (
+    (848, 480),
+    (1024, 576),
+    (1280, 720),
+    (640, 640),
+    (768, 768),
+    (960, 960),
+    (480, 848),
+    (576, 1024),
+    (720, 1280),
+    (736, 560),
+    (896, 672),
+    (1104, 832),
+    (560, 736),
+    (672, 896),
+    (832, 1104),
+)
 
 
 def _target_by_orientation(
@@ -78,6 +95,18 @@ def _target_by_orientation(
     landscape_delta = abs(math.log(source_ratio / landscape_ratio))
     portrait_delta = abs(math.log(source_ratio / portrait_ratio))
     return landscape if landscape_delta <= portrait_delta else portrait
+
+
+def _nearest_runware_wan22_resolution(width: int, height: int) -> tuple[int, int]:
+    source_ratio = (width / height) if height else 1.0
+    ranked = sorted(
+        RUNWARE_WAN22_ALLOWED_RESOLUTIONS,
+        key=lambda candidate: (
+            abs(math.log(source_ratio / (candidate[0] / candidate[1]))),
+            -(candidate[0] * candidate[1]),
+        ),
+    )
+    return ranked[0]
 
 
 def _nearest_supported_kling_duration(duration_sec: float) -> int:
@@ -969,19 +998,14 @@ def _handle_segment_generate(
                 provider_media_height = src_height
 
         frame_bytes = asset_store.read_bytes(first_frame_key)
-        if model_name in {"runway-gen4.5", "veo-3.1", "veo-3.1-fast", "wan2.2-a14b"}:
+        if model_name in {"wan2.2-a14b", "wan2.2-animate"}:
+            first_target_w, first_target_h = _nearest_runware_wan22_resolution(src_width, src_height)
+        elif model_name in {"runway-gen4.5", "veo-3.1", "veo-3.1-fast"}:
             first_target_w, first_target_h = _target_by_orientation(
                 src_width,
                 src_height,
                 landscape=(1280, 720),
                 portrait=(720, 1280),
-            )
-        elif model_name == "wan2.2-animate":
-            first_target_w, first_target_h = _target_by_orientation(
-                src_width,
-                src_height,
-                landscape=(1280, 832),
-                portrait=(832, 1280),
             )
         else:
             first_target_w, first_target_h = _target_by_orientation(
