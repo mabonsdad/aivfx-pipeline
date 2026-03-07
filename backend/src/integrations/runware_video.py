@@ -136,7 +136,6 @@ def create_wan22_animate_generation(
             "taskUUID": task_uuid,
             "deliveryMethod": "async",
             "model": RUNWARE_WAN22_ANIMATE_MODEL,
-            "positivePrompt": prompt or "Replace the subject with realistic motion while preserving scene coherence and camera movement.",
             "width": int(width),
             "height": int(height),
             "inputs": {

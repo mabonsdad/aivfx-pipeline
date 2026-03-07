@@ -1199,7 +1199,7 @@ export default function App() {
                   : lumaModel === "wan2.2-animate"
                     ? "wan_animate_replace"
                 : advancedMode,
-        prompt: lumaPrompt.trim() || undefined,
+        prompt: lumaModel === "wan2.2-animate" ? undefined : lumaPrompt.trim() || undefined,
         firstFrameVariantId: compareVariantIds.first || undefined,
         lastFrameVariantId: compareVariantIds.last || undefined,
       });
@@ -1431,7 +1431,7 @@ export default function App() {
       return "Start frame variant is taken automatically from your Edit Frame selection.";
     }
     if (lumaModel === "wan2.2-animate") {
-      return "Start frame variant and source segment video are taken automatically from earlier steps.";
+      return "Wan2.2 Animate uses start frame + source segment video. Text prompt is disabled in this flow unless LoRA inputs are used.";
     }
     if (generationInputMode === "start_only" && (lumaModel === "kling-2.6" || lumaModel === "veo-3.1" || lumaModel === "veo-3.1-fast")) {
       return "This model can use start+end frames. In this tab, generation can run from start frame only; if an end frame is selected it will still be used.";
@@ -1962,7 +1962,7 @@ export default function App() {
         lines: [
           "Best for realistic character replacement/animation using reference image + reference video motion.",
           "This flow uses selected start frame plus the source segment video as motion reference.",
-          "Prompt tips: focus on performance realism, continuity, and identity retention; avoid large scene changes.",
+          "Runware currently rejects positivePrompt for this model unless LoRA inputs are supplied, so this app uses reference-driven generation only.",
         ],
       };
     }
@@ -3128,12 +3128,18 @@ export default function App() {
                           </div>
                         )}
                       </div>
-                      <textarea
-                        value={lumaPrompt}
-                        onChange={(e) => setLumaPrompt(e.target.value)}
-                        placeholder="Optional generation prompt"
-                        className="h-20 w-full rounded-md border border-ink/20 p-2"
-                      />
+                      {lumaModel === "wan2.2-animate" ? (
+                        <div className="rounded-md border border-ink/20 bg-bg px-3 py-2 text-xs text-ink/60">
+                          Text prompt is unavailable for Wan2.2 Animate in this flow. Generation uses the selected start frame plus source segment motion.
+                        </div>
+                      ) : (
+                        <textarea
+                          value={lumaPrompt}
+                          onChange={(e) => setLumaPrompt(e.target.value)}
+                          placeholder="Optional generation prompt"
+                          className="h-20 w-full rounded-md border border-ink/20 p-2"
+                        />
+                      )}
                       <p className="text-xs text-ink/60">{generationInputNote}</p>
                     </div>
                     <div className="rounded-lg border border-ink/15 bg-bg p-3">
