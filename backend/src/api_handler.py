@@ -56,6 +56,7 @@ VIDEO_MODEL_MAX_SECONDS: dict[str, int] = {
     "wan2.2-animate": 10,
 }
 PRESIGNED_GET_TTL_SECONDS = 3600
+STALE_GENERATION_MAX_AGE_SECONDS = 30 * 60
 
 
 def _normalize_task_name(raw: str) -> str:
@@ -173,6 +174,69 @@ def _queue_job(
     store.save_job(job)
     queue.enqueue({"jobId": job_id, "taskId": task_id, "userId": user_id})
     return job_id
+
+
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _prune_stale_segment_generations(task: dict[str, Any], store: S3JsonStore) -> bool:
+    generations = task.get("segmentGenerations")
+    if not isinstance(generations, dict) or not generations:
+        return False
+    now_dt = datetime.now(timezone.utc)
+    remove_ids: set[str] = set()
+    user_id = str(task.get("userId") or "")
+    for gen_id, generation in generations.items():
+        if not isinstance(generation, dict):
+            remove_ids.add(gen_id)
+            continue
+        status = str(generation.get("status") or "").lower()
+        output_key = generation.get("outputKey")
+        if status == "failed":
+            remove_ids.add(gen_id)
+            continue
+        if status not in {"queued", "running"}:
+            continue
+        if output_key:
+            continue
+        job_id = generation.get("jobId")
+        if isinstance(job_id, str) and job_id:
+            job = store.load_job(user_id, job_id)
+            if not job:
+                remove_ids.add(gen_id)
+                continue
+            job_status = str(job.get("status") or "").lower()
+            if job_status in {"failed", "complete"}:
+                remove_ids.add(gen_id)
+                continue
+        created_at = _parse_iso_datetime(generation.get("createdAt"))
+        if created_at and (now_dt - created_at).total_seconds() > STALE_GENERATION_MAX_AGE_SECONDS:
+            remove_ids.add(gen_id)
+
+    if not remove_ids:
+        return False
+    for gen_id in remove_ids:
+        generations.pop(gen_id, None)
+    for segment in task.get("segments", []):
+        if segment.get("selectedGenerationId") in remove_ids:
+            segment["selectedGenerationId"] = None
+    task.setdefault("history", []).append(
+        {
+            "at": now_iso(),
+            "event": "task.segment_generations.pruned",
+            "removedGenerationIds": sorted(remove_ids),
+        }
+    )
+    return True
 
 
 def _load_task_or_404(store: S3JsonStore, user_id: str, task_id: str) -> dict[str, Any]:
@@ -382,7 +446,11 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
         return response(201, {"taskId": task_id}, origin=origin)
 
     if method == "GET" and path == "/tasks":
-        tasks = [_task_summary(item) for item in store.list_tasks(user_id)]
+        task_items = store.list_tasks(user_id)
+        for item in task_items:
+            if _prune_stale_segment_generations(item, store):
+                store.save_task(item)
+        tasks = [_task_summary(item) for item in task_items]
         return response(200, {"tasks": tasks}, origin=origin)
 
     if method == "DELETE" and path.startswith("/tasks/") and path.count("/") == 2:
@@ -402,6 +470,8 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             task = _load_task_or_404(store, user_id, task_id)
         except KeyError:
             return error_response(404, "Task not found", origin=origin)
+        if _prune_stale_segment_generations(task, store):
+            store.save_task(task)
 
         decorated = json.loads(json.dumps(task))
         if decorated.get("status") == "error" and decorated.get("video", {}).get("editSource", {}).get("s3Key"):
@@ -931,6 +1001,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 },
                 "status": "queued",
                 "outputKey": None,
+                "jobId": None,
                 "createdAt": now_iso(),
             }
             store.save_task(task)
@@ -951,6 +1022,10 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                     "lastFrameVariantId": req.lastFrameVariantId,
                 },
             )
+            queued_generation = task.setdefault("segmentGenerations", {}).get(gen_id)
+            if isinstance(queued_generation, dict):
+                queued_generation["jobId"] = job_id
+                store.save_task(task)
             return response(202, {"jobId": job_id}, origin=origin)
 
         if method == "POST" and len(parts) == 4 and parts[2] == "qc" and parts[3] == "run":

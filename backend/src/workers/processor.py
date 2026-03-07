@@ -2156,9 +2156,26 @@ def process_job_record(record: dict[str, Any], *, settings: Any) -> None:
         job["error"] = str(exc)
         job["finishedAt"] = now_iso()
         store.save_job(job)
-        task["status"] = "error"
-        task.setdefault("history", []).append({"at": now_iso(), "event": "job.failed", "jobId": job_id})
-        store.save_task(task)
+        latest_task = store.load_task(user_id, task_id) or task
+        if job.get("type") == "segment_generate":
+            gen_id = (job.get("payload") or {}).get("genId")
+            segment_generations = latest_task.setdefault("segmentGenerations", {})
+            if gen_id in segment_generations:
+                segment_generations.pop(gen_id, None)
+                for segment in latest_task.get("segments", []):
+                    if segment.get("selectedGenerationId") == gen_id:
+                        segment["selectedGenerationId"] = None
+                latest_task.setdefault("history", []).append(
+                    {
+                        "at": now_iso(),
+                        "event": "segment_generation.failed_removed",
+                        "jobId": job_id,
+                        "genId": gen_id,
+                    }
+                )
+        latest_task["status"] = "error"
+        latest_task.setdefault("history", []).append({"at": now_iso(), "event": "job.failed", "jobId": job_id})
+        store.save_task(latest_task)
         raise
     else:
         job["finishedAt"] = now_iso()
