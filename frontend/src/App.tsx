@@ -348,20 +348,20 @@ function lumaModelMaxDurationSeconds(
 
 const GENERATION_MODELS_BY_INPUT: Record<GenerateInputMode, Array<{ value: VideoModel; label: string }>> = {
   start_video: [
-    { value: "ray-flash-2", label: "ray-flash-2" },
-    { value: "ray-2", label: "ray-2" },
+    { value: "ray-flash-2", label: "Luma Ray Flash 2" },
+    { value: "ray-2", label: "Luma Ray 2" },
   ],
   start_end: [
-    { value: "kling-2.6", label: "kling-2.6 (start/end frames)" },
-    { value: "veo-3.1", label: "veo-3.1 (start/end frames, no audio)" },
-    { value: "veo-3.1-fast", label: "veo-3.1-fast (start/end frames, no audio)" },
+    { value: "kling-2.6", label: "Kling 2.6" },
+    { value: "veo-3.1", label: "Veo 3.1" },
+    { value: "veo-3.1-fast", label: "Veo 3.1 Fast" },
   ],
   start_only: [
-    { value: "wan2.2-a14b", label: "wan2.2-a14b (start frame image-to-video)" },
-    { value: "runway-gen4.5", label: "runway-gen4.5 (start frame image-to-video)" },
-    { value: "veo-3.1", label: "veo-3.1 (start/end capable, uses start if end unchanged)" },
-    { value: "veo-3.1-fast", label: "veo-3.1-fast (start/end capable, uses start if end unchanged)" },
-    { value: "kling-2.6", label: "kling-2.6 (start/end capable, uses start if end unchanged)" },
+    { value: "wan2.2-a14b", label: "Wan 2.2 A14B" },
+    { value: "runway-gen4.5", label: "Runway Gen-4.5" },
+    { value: "veo-3.1", label: "Veo 3.1" },
+    { value: "veo-3.1-fast", label: "Veo 3.1 Fast" },
+    { value: "kling-2.6", label: "Kling 2.6" },
   ],
 };
 
@@ -1576,23 +1576,28 @@ export default function App() {
   const generateSegmentMutation = useMutation({
     mutationFn: async () => {
       if (!selectedTaskId || !selectedSegmentId) throw new Error("Select a segment");
+      const selectedMode =
+        lumaModel === "runway-gen4.5"
+          ? "runway_i2v"
+          : lumaModel === "kling-2.6"
+            ? generationInputMode === "start_only"
+              ? "kling_start_only"
+              : "kling_start_end"
+            : lumaModel === "veo-3.1" || lumaModel === "veo-3.1-fast"
+              ? generationInputMode === "start_only"
+                ? "veo_start_only"
+                : "veo_start_end"
+              : lumaModel === "wan2.2-a14b"
+                ? "wan_a14b_i2v"
+                : lumaModel === "wan2.2-animate"
+                  ? "wan_animate_replace"
+                  : advancedMode;
       return apiClient.generateSegment(selectedTaskId, selectedSegmentId, {
         lumaModel,
-        mode:
-          lumaModel === "runway-gen4.5"
-            ? "runway_i2v"
-            : lumaModel === "kling-2.6"
-              ? "kling_start_end"
-              : lumaModel === "veo-3.1" || lumaModel === "veo-3.1-fast"
-                ? "veo_start_end"
-                : lumaModel === "wan2.2-a14b"
-                  ? "wan_a14b_i2v"
-                  : lumaModel === "wan2.2-animate"
-                    ? "wan_animate_replace"
-                : advancedMode,
+        mode: selectedMode,
         prompt: lumaModel === "wan2.2-animate" ? undefined : lumaPrompt.trim() || undefined,
         firstFrameVariantId: compareVariantIds.first || undefined,
-        lastFrameVariantId: compareVariantIds.last || undefined,
+        lastFrameVariantId: generationInputMode === "start_end" ? compareVariantIds.last || undefined : undefined,
       });
     },
     onSuccess: (result) => {
@@ -1900,7 +1905,10 @@ export default function App() {
     setGenerationModelByInput((previous) => ({ ...previous, [generationInputMode]: fallback }));
     setLumaModel(fallback);
   }, [generationInputMode, generationModelOptions, lumaModel]);
-  const generationHelp = useMemo(() => generationModelHelp(lumaModel, advancedMode), [advancedMode, lumaModel]);
+  const generationHelp = useMemo(
+    () => generationModelHelp(lumaModel, advancedMode, generationInputMode),
+    [advancedMode, generationInputMode, lumaModel],
+  );
   const generationInputNote = useMemo(() => {
     if (lumaModel === "wan2.2-a14b" || lumaModel === "runway-gen4.5") {
       return "Start frame variant is taken automatically from your Edit Frame selection.";
@@ -1909,7 +1917,7 @@ export default function App() {
       return "Wan2.2 Animate uses start frame + source segment video. Text prompt is disabled in this flow unless LoRA inputs are used.";
     }
     if (generationInputMode === "start_only" && (lumaModel === "kling-2.6" || lumaModel === "veo-3.1" || lumaModel === "veo-3.1-fast")) {
-      return "This model can use start+end frames. In this tab, generation can run from start frame only; if an end frame is selected it will still be used.";
+      return "Start frame only is enforced in this tab; the end frame is not sent.";
     }
     return "Start and end frame variants are taken automatically from your Edit Frame selections.";
   }, [generationInputMode, lumaModel]);
@@ -2362,13 +2370,17 @@ export default function App() {
     return null;
   }
 
-  function generationModelHelp(modelName: VideoModel, modeValue: string) {
+  function generationModelHelp(modelName: VideoModel, modeValue: string, inputMode: GenerateInputMode) {
     if (modelName === "kling-2.6") {
       return {
-        title: "Kling 2.6 Start/End",
+        title: inputMode === "start_only" ? "Kling 2.6 (Start Frame)" : "Kling 2.6 Start/End",
         lines: [
-          "Uses start frame + end frame + segment duration. It does not use the source segment video for motion.",
-          "Best prompt style: describe camera motion and action between start and end frames.",
+          inputMode === "start_only"
+            ? "Uses only the selected start frame in this tab. It does not use source segment video."
+            : "Uses start frame + end frame + segment duration. It does not use the source segment video for motion.",
+          inputMode === "start_only"
+            ? "Best prompt style: describe motion evolution from the start frame while preserving identity."
+            : "Best prompt style: describe camera motion and action between start and end frames.",
           "Keep prompts temporal and concrete, for example 'slow push in, subtle cloth movement, keep background stable'.",
         ],
       };
@@ -2385,11 +2397,22 @@ export default function App() {
     }
     if (modelName === "veo-3.1" || modelName === "veo-3.1-fast") {
       return {
-        title: modelName === "veo-3.1-fast" ? "Runware Veo 3.1 Fast (No Audio)" : "Runware Veo 3.1 (No Audio)",
+        title:
+          modelName === "veo-3.1-fast"
+            ? inputMode === "start_only"
+              ? "Runware Veo 3.1 Fast (Start Frame, No Audio)"
+              : "Runware Veo 3.1 Fast (No Audio)"
+            : inputMode === "start_only"
+              ? "Runware Veo 3.1 (Start Frame, No Audio)"
+              : "Runware Veo 3.1 (No Audio)",
         lines: [
-          "Uses selected start and end frames as keyframes. No source segment video is sent.",
+          inputMode === "start_only"
+            ? "Uses only the selected start frame in this tab. No source segment video is sent."
+            : "Uses selected start and end frames as keyframes. No source segment video is sent.",
           "Duration is fixed at 8 seconds for Veo 3.1 API runs; merged output may be time-adjusted at insert.",
-          "Prompting works best with clear motion direction and continuity constraints between start and end frames.",
+          inputMode === "start_only"
+            ? "Prompting works best with clear motion direction and continuity constraints from the start frame."
+            : "Prompting works best with clear motion direction and continuity constraints between start and end frames.",
         ],
       };
     }

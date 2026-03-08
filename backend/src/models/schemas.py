@@ -100,7 +100,9 @@ class SegmentGenerateRequest(BaseModel):
         "reimagine_3",
         "runway_i2v",
         "kling_start_end",
+        "kling_start_only",
         "veo_start_end",
+        "veo_start_only",
         "wan_a14b_i2v",
         "wan_animate_replace",
     ]

@@ -926,6 +926,8 @@ def _handle_segment_generate(
     paths = _asset_paths(task)
     s3 = boto3.client("s3")
     model_name = payload["lumaModel"]
+    requested_mode = payload["mode"]
+    uses_end_keyframe = requested_mode in {"kling_start_end", "veo_start_end"}
     segment_key: str | None = None
     if model_name in {"ray-2", "ray-flash-2", "wan2.2-animate"}:
         segment_key = _ensure_segment_clip(
@@ -958,6 +960,9 @@ def _handle_segment_generate(
         if end_variant:
             last_frame_key = end_variant["outputKey"]
             source_last_variant_id = end_variant_id
+    if model_name in {"kling-2.6", "veo-3.1", "veo-3.1-fast"} and not uses_end_keyframe:
+        last_frame_key = first_frame_key
+        source_last_variant_id = None
 
     fps_info = task["video"]["editSource"]["fps"]
     fps = Fraction(int(fps_info["num"]), int(fps_info["den"]))
@@ -1038,7 +1043,7 @@ def _handle_segment_generate(
         )
         _upload_s3(s3, settings.assets_bucket, first_frame_input_key, local_first_frame, first_frame_content_type)
 
-        if model_name in {"kling-2.6", "veo-3.1", "veo-3.1-fast"}:
+        if model_name in {"kling-2.6", "veo-3.1", "veo-3.1-fast"} and uses_end_keyframe:
             last_frame_bytes = asset_store.read_bytes(last_frame_key)
             prepared_last_frame, last_frame_content_type, last_frame_ext = _prepare_first_frame_image_payload(
                 last_frame_bytes,
@@ -1095,7 +1100,7 @@ def _handle_segment_generate(
         created = create_kling_start_end_generation(
             api_key=kling_key,
             start_image_url=first_frame_url,
-            end_image_url=last_frame_url or first_frame_url,
+            end_image_url=(last_frame_url if uses_end_keyframe else None) or first_frame_url,
             duration_seconds=kling_duration,
             prompt=payload.get("prompt"),
         )
@@ -1121,7 +1126,7 @@ def _handle_segment_generate(
             api_key=runware_key,
             model=runware_model,
             start_image_url=first_frame_url,
-            end_image_url=last_frame_url or first_frame_url,
+            end_image_url=(last_frame_url if uses_end_keyframe else None) or first_frame_url,
             duration_seconds=8,
             prompt=payload.get("prompt"),
             width=first_target_w,
@@ -1225,7 +1230,7 @@ def _handle_segment_generate(
             "luma": {
                 "provider": provider_name,
                 "model": model_name,
-                "mode": payload["mode"],
+                "mode": requested_mode,
                 "prompt": payload.get("prompt"),
                 "lumaGenerationId": generation_id,
             },
@@ -1237,7 +1242,7 @@ def _handle_segment_generate(
             "sourceFirstFrameCaptureKey": start_frame.get("captureKey"),
             "sourceFirstFrameVariantId": source_first_variant_id,
             "sourceFirstFrameResolvedKey": first_frame_key,
-            "sourceLastFrameCaptureKey": end_frame.get("captureKey"),
+            "sourceLastFrameCaptureKey": end_frame.get("captureKey") if uses_end_keyframe else None,
             "sourceLastFrameVariantId": source_last_variant_id,
             "sourceLastFrameResolvedKey": last_frame_key,
             "requestedDurationSec": round(segment_duration_sec, 3),
@@ -1246,7 +1251,7 @@ def _handle_segment_generate(
                 "provider": provider_name,
                 "requestedModel": model_name,
                 "model": used_provider_model or model_name,
-                "mode": payload["mode"],
+                "mode": requested_mode,
                 "firstFrameResolution": {"width": first_target_w, "height": first_target_h},
                 "firstFrameContentType": first_frame_content_type,
                 "lastFrameContentType": last_frame_content_type,
