@@ -3,6 +3,14 @@ import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/rea
 import { useLocation, useNavigate } from "react-router-dom";
 
 import { apiClient } from "./api/client";
+import {
+  taskRoute,
+  type ReportView,
+  type TabId,
+  useCanonicalTaskRoute,
+  useReportRouteState,
+  useWorkflowRouteState,
+} from "./hooks/useWorkflowRouting";
 import { currentUser, login, logout } from "./lib/auth";
 import { useUiStore } from "./store/uiStore";
 import type {
@@ -15,7 +23,6 @@ import type {
   TaskDetail,
 } from "./types/api";
 
-type TabId = "timeline" | "frames" | "generate" | "merge" | "assets" | "report";
 type GenerateInputMode = "start_video" | "start_end" | "start_only";
 type VideoModel =
   | "ray-2"
@@ -77,8 +84,6 @@ type ReportGenerationRow = {
   generatedVideoUrl: string | null;
 };
 
-type ReportView = "outputs" | "qc_frame" | "qc_video";
-
 type ReportOutputGroup = "video_generations" | "start_frames" | "end_frames";
 
 type ReportOutputCard = {
@@ -129,28 +134,6 @@ const GenerateTab = lazy(() => import("./pages/workflow/GenerateTab"));
 const MergeTab = lazy(() => import("./pages/workflow/MergeTab"));
 const AssetsTab = lazy(() => import("./pages/workflow/AssetsTab"));
 const JobsPanel = lazy(() => import("./pages/workflow/JobsPanel"));
-
-const TAB_ROUTE_SEGMENT: Record<TabId, string> = {
-  timeline: "pick-frame",
-  frames: "edit-frame",
-  generate: "generate-video",
-  merge: "merge-video",
-  assets: "download-assets",
-  report: "reports",
-};
-
-const ROUTE_SEGMENT_TO_TAB: Record<string, TabId> = {
-  "pick-frame": "timeline",
-  "edit-frame": "frames",
-  "generate-video": "generate",
-  "merge-video": "merge",
-  "download-assets": "assets",
-  reports: "report",
-};
-
-function taskRoute(taskId: string, tab: TabId): string {
-  return `/tasks/${encodeURIComponent(taskId)}/${TAB_ROUTE_SEGMENT[tab]}`;
-}
 
 const VIDEO_FRAME_THUMBNAIL_CACHE = new Map<string, string | null>();
 const MAX_TRACKED_JOB_IDS = 40;
@@ -727,26 +710,9 @@ export default function App() {
     setSelectedSegmentId,
   } = useUiStore();
 
-  const routeState = useMemo(() => {
-    const normalizedPath = location.pathname.replace(/\/+$/, "") || "/";
-    const parts = normalizedPath.split("/").filter(Boolean);
-    if (parts[0] === "tasks") {
-      const taskId = parts[1] ? decodeURIComponent(parts[1]) : null;
-      const tabFromRoute = parts[2] ? ROUTE_SEGMENT_TO_TAB[parts[2]] ?? null : null;
-      return { taskId, tab: tabFromRoute };
-    }
-    const directTab = parts[0] ? ROUTE_SEGMENT_TO_TAB[parts[0]] ?? null : null;
-    return { taskId: null, tab: directTab };
-  }, [location.pathname]);
-
   const [isAuthed, setIsAuthed] = useState(false);
-  const routeSearch = useMemo(() => new URLSearchParams(location.search), [location.search]);
-  const reportViewParam = routeSearch.get("view");
-  const reportView: ReportView =
-    reportViewParam === "qc_frame" || reportViewParam === "qc_video" || reportViewParam === "outputs"
-      ? reportViewParam
-      : "outputs";
-  const activeCustomReportId = routeSearch.get("reportId");
+  const routeState = useWorkflowRouteState(location.pathname);
+  const { reportView, activeCustomReportId } = useReportRouteState(location.search);
   const [selectedReportOutputs, setSelectedReportOutputs] = useState<Record<string, { taskId: string; ref: CustomReportOutputRef }>>({});
   const [customReportNotice, setCustomReportNotice] = useState<string | null>(null);
   const [isNewTaskModalOpen, setIsNewTaskModalOpen] = useState(false);
@@ -893,36 +859,16 @@ export default function App() {
     [goToReport, reportView, selectedTaskId],
   );
 
-  useEffect(() => {
-    if (!isAuthed) return;
-    const fallbackTaskId = routeState.taskId ?? storeSelectedTaskId ?? tasksQuery.data?.[0]?.taskId ?? null;
-    if (!fallbackTaskId) return;
-    if (storeSelectedTaskId !== fallbackTaskId) {
-      setSelectedTaskId(fallbackTaskId);
-    }
-    const desiredTab = routeState.tab ?? "timeline";
-    const normalizedPath = location.pathname.replace(/\/+$/, "") || "/";
-    const expectedPath = taskRoute(fallbackTaskId, desiredTab);
-    if (normalizedPath !== expectedPath) {
-      navigate(
-        {
-          pathname: expectedPath,
-          search: desiredTab === "report" ? location.search : "",
-        },
-        { replace: normalizedPath === "/" },
-      );
-    }
-  }, [
+  useCanonicalTaskRoute({
     isAuthed,
-    location.pathname,
-    location.search,
-    navigate,
-    routeState.tab,
-    routeState.taskId,
-    setSelectedTaskId,
+    routeState,
     storeSelectedTaskId,
-    tasksQuery.data,
-  ]);
+    taskIds: (tasksQuery.data ?? []).map((taskItem) => taskItem.taskId),
+    locationPathname: location.pathname,
+    locationSearch: location.search,
+    navigate,
+    setSelectedTaskId,
+  });
 
   const taskQuery = useQuery({
     queryKey: ["task", selectedTaskId],
