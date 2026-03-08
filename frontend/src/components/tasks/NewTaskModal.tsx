@@ -14,9 +14,18 @@ type NewTaskModalProps = {
   ingestStatus: string;
   error: string | null;
   canSubmit: boolean;
+  automationEnabled: boolean;
+  automationStartPrompt: string;
+  automationEndPrompt: string;
+  automationVideoOptions: Array<{ id: string; label: string }>;
+  automationSelectedVideoOptionIds: string[];
   onClose: () => void;
   onTaskNameChange: (value: string) => void;
   onFileSelect: (file: File | null) => void;
+  onAutomationEnabledChange: (value: boolean) => void;
+  onAutomationStartPromptChange: (value: string) => void;
+  onAutomationEndPromptChange: (value: string) => void;
+  onAutomationVideoSelectionChange: (selectedIds: string[]) => void;
   onSubmit: () => void;
 };
 
@@ -32,9 +41,18 @@ export default function NewTaskModal({
   ingestStatus,
   error,
   canSubmit,
+  automationEnabled,
+  automationStartPrompt,
+  automationEndPrompt,
+  automationVideoOptions,
+  automationSelectedVideoOptionIds,
   onClose,
   onTaskNameChange,
   onFileSelect,
+  onAutomationEnabledChange,
+  onAutomationStartPromptChange,
+  onAutomationEndPromptChange,
+  onAutomationVideoSelectionChange,
   onSubmit,
 }: NewTaskModalProps) {
   if (!isOpen) return null;
@@ -87,6 +105,62 @@ export default function NewTaskModal({
               disabled={isBusy}
             />
           </div>
+          <details className="rounded-md border border-ink/15 bg-bg px-3 py-2">
+            <summary className="cursor-pointer text-sm font-medium text-ink">Automation Test (optional)</summary>
+            <div className="mt-3 space-y-3">
+              <label className="flex items-start gap-2 text-xs text-ink/70">
+                <input
+                  type="checkbox"
+                  checked={automationEnabled}
+                  onChange={(event) => onAutomationEnabledChange(event.target.checked)}
+                  disabled={isBusy}
+                />
+                <span>
+                  Run automated test - clip must be 5-10 sec. This will generate multiple videos without oversight - only use for
+                  testing!
+                </span>
+              </label>
+              <div>
+                <label className="mb-1 block text-xs font-medium text-ink/80">Start frame edit prompt</label>
+                <textarea
+                  value={automationStartPrompt}
+                  onChange={(event: ChangeEvent<HTMLTextAreaElement>) => onAutomationStartPromptChange(event.target.value)}
+                  className="h-20 w-full rounded-md border border-ink/20 bg-white p-2 text-sm"
+                  placeholder="Prompt used for automated start-frame edits (all image models)"
+                  disabled={isBusy}
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-medium text-ink/80">End frame edit prompt (optional)</label>
+                <textarea
+                  value={automationEndPrompt}
+                  onChange={(event: ChangeEvent<HTMLTextAreaElement>) => onAutomationEndPromptChange(event.target.value)}
+                  className="h-16 w-full rounded-md border border-ink/20 bg-white p-2 text-sm"
+                  placeholder="If set, automation also edits end frame across all image models"
+                  disabled={isBusy}
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-medium text-ink/80">Video models to run (multi-select)</label>
+                <select
+                  multiple
+                  value={automationSelectedVideoOptionIds}
+                  onChange={(event) => {
+                    const selectedIds = Array.from(event.currentTarget.selectedOptions).map((option) => option.value);
+                    onAutomationVideoSelectionChange(selectedIds);
+                  }}
+                  className="h-36 w-full rounded-md border border-ink/20 bg-white p-2 text-sm"
+                  disabled={isBusy}
+                >
+                  {automationVideoOptions.map((option) => (
+                    <option key={option.id} value={option.id}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          </details>
           {stage === "uploading" ? (
             <div>
               <p className="mb-1 text-sm text-ink/70">Uploading: {uploadPercent}%</p>

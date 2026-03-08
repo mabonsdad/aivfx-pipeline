@@ -10,6 +10,7 @@ type EditFrameCandidate = {
   label: string;
   createdAt?: string;
   variantId?: string;
+  qualityMatched?: boolean;
   isSelected: boolean;
 };
 
@@ -85,6 +86,7 @@ export type EditFrameTabCtx = {
   patchEditMutation: { isPending: boolean; mutate: (frameId: string) => void; error?: { message?: string } | null };
   maskHasPaint: boolean;
   formatCompactTimestamp: (iso: string | undefined) => string;
+  openQualityMatchModal: (candidate: EditFrameCandidate) => void;
 };
 
 type EditFrameTabProps = {
@@ -142,6 +144,7 @@ export default function EditFrameTab({ ctx }: EditFrameTabProps) {
     patchEditMutation,
     maskHasPaint,
     formatCompactTimestamp,
+    openQualityMatchModal,
   } = ctx;
 
   return (
@@ -283,6 +286,26 @@ export default function EditFrameTab({ ctx }: EditFrameTabProps) {
                               <path d="M12 20h9" />
                               <path d="m16.5 3.5 4 4L8 20H4v-4L16.5 3.5Z" />
                             </svg>
+                          </button>
+                          <button
+                            type="button"
+                            className={`rounded border px-2 py-1 text-xs font-semibold ${
+                              candidate.kind === "variant"
+                                ? "border-teal-300 bg-teal-50 text-teal-800 hover:bg-teal-100"
+                                : "border-ink/20 bg-white text-ink/40"
+                            } disabled:cursor-not-allowed disabled:opacity-60`}
+                            title={
+                              candidate.kind === "variant"
+                                ? "Quality Match Generated Frame"
+                                : "Quality Match is available for generated variants"
+                            }
+                            disabled={candidate.kind !== "variant"}
+                            onClick={() => {
+                              if (candidate.kind !== "variant") return;
+                              openQualityMatchModal(candidate);
+                            }}
+                          >
+                            QA
                           </button>
                           <a
                             href={candidate.imageUrl}

@@ -39,6 +39,86 @@ export type FrameVariant = {
     runwareRepaintingScale?: number;
     [key: string]: unknown;
   };
+  qualityMatch?: {
+    appliedAt?: string;
+    analysisId?: string;
+    finalMaskKey?: string;
+    finalMaskUrl?: string;
+    finalKey?: string;
+    finalUrl?: string;
+    reportJsonKey?: string;
+    reportJsonUrl?: string;
+    [key: string]: unknown;
+  };
+};
+
+export type QualityMatchStatus = {
+  qcReviewed: boolean;
+  qualityMatched: boolean;
+  qualityMatchVersion?: string;
+  qualityMatchAppliedAt?: string;
+  qualityMatchAppliedBy?: string;
+  qualityMatchSourceAnalysisId?: string;
+  qualityMatchOriginalMaskProvided?: boolean;
+  qualityMatchUserEditedMask?: boolean;
+  qualityMatchMetrics?: {
+    changedPctBefore?: number | null;
+    changedPctAfter?: number | null;
+    outsideLeakageBefore?: number | null;
+    outsideLeakageAfter?: number | null;
+    boundarySpillBefore?: number | null;
+    boundarySpillAfter?: number | null;
+  };
+  qualityMatchArtifacts?: {
+    alignedGeneratedKey?: string;
+    alignedGeneratedUrl?: string;
+    diffHeatmapKey?: string;
+    diffHeatmapUrl?: string;
+    binaryChangeMaskKey?: string;
+    binaryChangeMaskUrl?: string;
+    proposedMergeMaskKey?: string;
+    proposedMergeMaskUrl?: string;
+    restorationMapKey?: string;
+    restorationMapUrl?: string;
+    previewKey?: string;
+    previewUrl?: string;
+    finalKey?: string;
+    finalUrl?: string;
+    reportJsonKey?: string;
+    reportJsonUrl?: string;
+    [key: string]: unknown;
+  };
+};
+
+export type QualityMatchAnalysis = {
+  analysisId: string;
+  frameId: string;
+  variantId: string;
+  createdAt: string;
+  updatedAt?: string;
+  originalMaskProvided?: boolean;
+  userMaskProvided?: boolean;
+  warnings?: string[];
+  metrics?: Record<string, number | string | null | undefined>;
+  settings?: Record<string, unknown>;
+  artifacts?: {
+    alignedGeneratedKey?: string;
+    alignedGeneratedUrl?: string;
+    diffHeatmapKey?: string;
+    diffHeatmapUrl?: string;
+    binaryChangeMaskKey?: string;
+    binaryChangeMaskUrl?: string;
+    proposedMergeMaskKey?: string;
+    proposedMergeMaskUrl?: string;
+    restorationMapKey?: string;
+    restorationMapUrl?: string;
+    previewKey?: string;
+    previewUrl?: string;
+    finalKey?: string;
+    finalUrl?: string;
+    reportJsonKey?: string;
+    reportJsonUrl?: string;
+  };
 };
 
 export type FrameRecord = {
@@ -50,6 +130,9 @@ export type FrameRecord = {
   imageUrl?: string;
   variants: FrameVariant[];
   selectedVariantId?: string | null;
+  qcReviewed?: boolean;
+  qualityMatched?: boolean;
+  qualityMatchStatus?: QualityMatchStatus | null;
 };
 
 export type SegmentRecord = {
@@ -236,6 +319,7 @@ export type TaskDetail = {
   segments: SegmentRecord[];
   frames: Record<string, FrameRecord>;
   segmentGenerations: Record<string, SegmentGeneration>;
+  qualityMatchAnalyses?: Record<string, QualityMatchAnalysis>;
   exports: ExportRecord[];
   customReports?: CustomReportRecord[];
 };

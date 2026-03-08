@@ -110,6 +110,108 @@ export const apiClient = {
       sourceVariantId?: string;
     },
   ) => api<{ jobId: string }>(`/tasks/${taskId}/frames/${frameId}/edits/patch/submit`, { method: "POST", body: JSON.stringify(payload) }),
+  initQualityMatchMaskUpload: (
+    taskId: string,
+    frameId: string,
+    payload: { analysisId?: string },
+  ) =>
+    api<{ analysisId: string; maskKey: string; maskUploadUrl: string }>(
+      `/tasks/${taskId}/frames/${frameId}/quality-match/mask-upload`,
+      { method: "POST", body: JSON.stringify(payload) },
+    ),
+  analyseQualityMatch: (
+    taskId: string,
+    frameId: string,
+    payload: {
+      variantId: string;
+      existingAnalysisId?: string;
+      maskKey?: string;
+      settings?: {
+        diffThreshold?: number;
+        minRegionAreaPct?: number;
+        featherWidthPx?: number;
+        boundaryProtectionWidthPx?: number;
+        edgeSuppression?: "off" | "low" | "medium" | "high";
+        useSeamlessCloneFallback?: boolean;
+        autoDetectEditRegion?: boolean;
+      };
+    },
+  ) =>
+    api<{
+      analysisId: string;
+      originalMaskProvided: boolean;
+      artifacts: {
+        alignedGeneratedUri: string;
+        diffHeatmapUri: string;
+        binaryChangeMaskUri: string;
+        proposedMergeMaskUri: string;
+        restorationMapUri: string;
+        previewUri: string;
+        reportJsonUri: string;
+      };
+      metrics: {
+        changedPctBefore?: number;
+        changedPctPreview?: number;
+        outsideLeakageBefore?: number;
+        outsideLeakagePreview?: number;
+        boundarySpillBefore?: number;
+        boundarySpillPreview?: number;
+        proposedGeneratedCoveragePct?: number;
+        proposedOriginalRestorePct?: number;
+      };
+      warnings: string[];
+      settings: {
+        diffThreshold: number;
+        minRegionAreaPct: number;
+        featherWidthPx: number;
+        boundaryProtectionWidthPx: number;
+        edgeSuppression: "off" | "low" | "medium" | "high";
+        useSeamlessCloneFallback: boolean;
+        autoDetectEditRegion: boolean;
+      };
+      alreadyQualityMatched?: boolean;
+    }>(`/tasks/${taskId}/frames/${frameId}/quality-match/analyse`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  applyQualityMatch: (
+    taskId: string,
+    frameId: string,
+    payload: {
+      analysisId: string;
+      finalMaskKey?: string;
+      settings?: {
+        diffThreshold?: number;
+        minRegionAreaPct?: number;
+        featherWidthPx?: number;
+        boundaryProtectionWidthPx?: number;
+        edgeSuppression?: "off" | "low" | "medium" | "high";
+        useSeamlessCloneFallback?: boolean;
+        autoDetectEditRegion?: boolean;
+      };
+      overwriteGeneratedFrame?: boolean;
+    },
+  ) =>
+    api<{
+      frameId: string;
+      replacedFrameUri: string;
+      qcReviewed: boolean;
+      qualityMatched: boolean;
+      reportJsonUri: string;
+      metrics: {
+        changedPctBefore?: number;
+        changedPctAfter?: number;
+        outsideLeakageBefore?: number;
+        outsideLeakageAfter?: number;
+        boundarySpillBefore?: number;
+        boundarySpillAfter?: number;
+      };
+      artifacts?: {
+        finalUri?: string;
+        previewUri?: string;
+        maskUri?: string;
+      };
+    }>(`/tasks/${taskId}/frames/${frameId}/quality-match/apply`, { method: "POST", body: JSON.stringify(payload) }),
   selectVariant: (taskId: string, frameId: string, variantId: string) =>
     api<{ ok: true }>(`/tasks/${taskId}/frames/${frameId}/variants/${variantId}/select`, { method: "POST", body: "{}" }),
   generateSegment: (

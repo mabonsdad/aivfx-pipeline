@@ -32,6 +32,9 @@ from src.models.schemas import (
     FrameCaptureRequest,
     FullEditRequest,
     MergeRequest,
+    QualityMatchAnalyseRequest,
+    QualityMatchApplyRequest,
+    QualityMatchMaskUploadRequest,
     QcRunRequest,
     PatchInitRequest,
     PatchSubmitRequest,
@@ -42,6 +45,7 @@ from src.models.schemas import (
     TaskCreateRequest,
     UploadVideoRequest,
 )
+from src.quality_match.service import QualityMatchSettings, apply_quality_match, analyse_quality_match
 
 logger = Logger()
 tracer = Tracer()
@@ -515,6 +519,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             "segments": [],
             "frames": {},
             "segmentGenerations": {},
+            "qualityMatchAnalyses": {},
             "exports": [],
             "customReports": [],
             "history": [],
@@ -585,6 +590,10 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                     ref_key = patch_meta.get("referenceImageKey")
                     if ref_key:
                         patch_meta["referenceImageUrl"] = asset_store.presign_get(ref_key, expires=PRESIGNED_GET_TTL_SECONDS)
+            if frame.get("qualityMatchStatus"):
+                _decorate_embedded_s3_keys(frame["qualityMatchStatus"], asset_store)
+        if decorated.get("qualityMatchAnalyses"):
+            _decorate_embedded_s3_keys(decorated["qualityMatchAnalyses"], asset_store)
         for _, generation in decorated.get("segmentGenerations", {}).items():
             if generation.get("outputKey"):
                 generation["downloadUrl"] = asset_store.presign_get(generation["outputKey"], expires=PRESIGNED_GET_TTL_SECONDS)
@@ -679,6 +688,15 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                     patch_meta = variant.get("patchMeta", {})
                     _delete_key_if_present(patch_meta.get("patchOnlyKey"))
                     _delete_key_if_present(patch_meta.get("maskKey"))
+                analyses = task.get("qualityMatchAnalyses", {})
+                if isinstance(analyses, dict):
+                    remove_analysis_ids = [
+                        analysis_id
+                        for analysis_id, analysis in analyses.items()
+                        if isinstance(analysis, dict) and analysis.get("frameId") == frame_id
+                    ]
+                    for analysis_id in remove_analysis_ids:
+                        analyses.pop(analysis_id, None)
                 task.get("frames", {}).pop(frame_id, None)
                 store.save_task(task)
                 return response(200, {"ok": True}, origin=origin)
@@ -700,6 +718,23 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 frame["variants"] = [v for v in variants if v.get("variantId") != variant_id]
                 if frame.get("selectedVariantId") == variant_id:
                     frame["selectedVariantId"] = frame["variants"][0]["variantId"] if frame["variants"] else None
+                analyses = task.get("qualityMatchAnalyses", {})
+                if isinstance(analyses, dict):
+                    remove_analysis_ids = [
+                        analysis_id
+                        for analysis_id, analysis in analyses.items()
+                        if isinstance(analysis, dict)
+                        and analysis.get("frameId") == frame_id
+                        and analysis.get("variantId") == variant_id
+                    ]
+                    for analysis_id in remove_analysis_ids:
+                        analyses.pop(analysis_id, None)
+                    status = frame.get("qualityMatchStatus")
+                    if isinstance(status, dict):
+                        source_analysis = status.get("qualityMatchSourceAnalysisId")
+                        if source_analysis in remove_analysis_ids:
+                            frame["qualityMatchStatus"] = None
+                            frame["qualityMatched"] = False
                 _cleanup_custom_reports(task)
                 store.save_task(task)
                 return response(200, {"ok": True}, origin=origin)
@@ -925,6 +960,289 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 return error_response(400, str(exc), origin=origin)
             store.save_task(task)
             return response(200, out, origin=origin)
+
+        if method == "POST" and len(parts) == 6 and parts[2] == "frames" and parts[4] == "quality-match" and parts[5] == "mask-upload":
+            frame_id = parts[3]
+            frame = task.get("frames", {}).get(frame_id)
+            if not frame:
+                return error_response(404, "Frame not found", origin=origin)
+            req = _json_model(QualityMatchMaskUploadRequest, event)
+            analysis_id = req.analysisId or new_id("qm")
+            paths = _asset_paths_for_task(task)
+            mask_key = paths.quality_match_mask_upload(frame_id, analysis_id, "user_mask")
+            upload_url = asset_store.presign_put(mask_key, expires=900, content_type="image/png")
+            return response(200, {"analysisId": analysis_id, "maskKey": mask_key, "maskUploadUrl": upload_url}, origin=origin)
+
+        if method == "POST" and len(parts) == 6 and parts[2] == "frames" and parts[4] == "quality-match" and parts[5] == "analyse":
+            frame_id = parts[3]
+            frame = task.get("frames", {}).get(frame_id)
+            if not frame:
+                return error_response(404, "Frame not found", origin=origin)
+            req = _json_model(QualityMatchAnalyseRequest, event)
+            variant = next((item for item in frame.get("variants", []) if item.get("variantId") == req.variantId), None)
+            if not variant:
+                return error_response(404, "Variant not found", origin=origin)
+
+            analysis_id = req.existingAnalysisId or new_id("qm")
+            paths = _asset_paths_for_task(task)
+            task_prefix = f"{paths.task_prefix()}/frames/{frame_id}/quality_match/"
+            if req.maskKey and not str(req.maskKey).startswith(task_prefix):
+                return error_response(400, "Mask key is outside this frame quality-match path", origin=origin)
+
+            settings_payload = req.settings.model_dump(exclude_none=True) if req.settings else None
+            qm_settings = QualityMatchSettings.from_payload(settings_payload)
+
+            original_bytes = asset_store.read_bytes(frame["captureKey"])
+            generated_bytes = asset_store.read_bytes(variant["outputKey"])
+            patch_meta = variant.get("patchMeta") if isinstance(variant.get("patchMeta"), dict) else {}
+            original_mask_key = patch_meta.get("maskKey") if isinstance(patch_meta, dict) else None
+            original_mask_bytes = asset_store.read_bytes(original_mask_key) if isinstance(original_mask_key, str) and original_mask_key else None
+            override_mask_bytes = asset_store.read_bytes(req.maskKey) if req.maskKey else None
+
+            analysis = analyse_quality_match(
+                original_bytes=original_bytes,
+                generated_bytes=generated_bytes,
+                settings=qm_settings,
+                original_mask_bytes=original_mask_bytes,
+                override_mask_bytes=override_mask_bytes,
+            )
+
+            aligned_key = paths.quality_match_artifact(frame_id, analysis_id, "aligned_generated", ".png")
+            heatmap_key = paths.quality_match_artifact(frame_id, analysis_id, "diff_heatmap", ".png")
+            binary_key = paths.quality_match_artifact(frame_id, analysis_id, "binary_change_mask", ".png")
+            proposed_mask_key = paths.quality_match_artifact(frame_id, analysis_id, "proposed_merge_mask", ".png")
+            restoration_key = paths.quality_match_artifact(frame_id, analysis_id, "restoration_map", ".png")
+            preview_key = paths.quality_match_artifact(frame_id, analysis_id, "quality_match_preview", ".png")
+            report_key = paths.quality_match_artifact(frame_id, analysis_id, "quality_match_report", ".json")
+
+            artifacts = analysis["artifacts"]
+            asset_store.put_bytes(aligned_key, artifacts["alignedGenerated"], content_type="image/png")
+            asset_store.put_bytes(heatmap_key, artifacts["diffHeatmap"], content_type="image/png")
+            asset_store.put_bytes(binary_key, artifacts["binaryChangeMask"], content_type="image/png")
+            asset_store.put_bytes(proposed_mask_key, artifacts["proposedMergeMask"], content_type="image/png")
+            asset_store.put_bytes(restoration_key, artifacts["restorationMap"], content_type="image/png")
+            asset_store.put_bytes(preview_key, artifacts["preview"], content_type="image/png")
+            report_payload = {
+                "analysisId": analysis_id,
+                "taskId": task_id,
+                "frameId": frame_id,
+                "variantId": req.variantId,
+                "createdAt": now_iso(),
+                "settings": analysis["settings"],
+                "metrics": analysis["metrics"],
+                "warnings": analysis["warnings"],
+                "report": analysis["report"],
+            }
+            asset_store.put_bytes(report_key, json.dumps(report_payload).encode("utf-8"), content_type="application/json")
+
+            analysis_record = {
+                "analysisId": analysis_id,
+                "frameId": frame_id,
+                "variantId": req.variantId,
+                "createdAt": now_iso(),
+                "updatedAt": now_iso(),
+                "originalMaskProvided": analysis["originalMaskProvided"],
+                "userMaskProvided": analysis["userMaskProvided"],
+                "settings": analysis["settings"],
+                "metrics": analysis["metrics"],
+                "warnings": analysis["warnings"],
+                "artifacts": {
+                    "alignedGeneratedKey": aligned_key,
+                    "diffHeatmapKey": heatmap_key,
+                    "binaryChangeMaskKey": binary_key,
+                    "proposedMergeMaskKey": proposed_mask_key,
+                    "restorationMapKey": restoration_key,
+                    "previewKey": preview_key,
+                    "reportJsonKey": report_key,
+                },
+                "source": {
+                    "originalFrameKey": frame["captureKey"],
+                    "generatedFrameKey": variant["outputKey"],
+                    "originalMaskKey": original_mask_key,
+                    "userMaskKey": req.maskKey,
+                },
+            }
+            task.setdefault("qualityMatchAnalyses", {})[analysis_id] = analysis_record
+            store.save_task(task)
+            return response(
+                200,
+                {
+                    "analysisId": analysis_id,
+                    "originalMaskProvided": analysis["originalMaskProvided"],
+                    "artifacts": {
+                        "alignedGeneratedUri": asset_store.presign_get(aligned_key, expires=PRESIGNED_GET_TTL_SECONDS),
+                        "diffHeatmapUri": asset_store.presign_get(heatmap_key, expires=PRESIGNED_GET_TTL_SECONDS),
+                        "binaryChangeMaskUri": asset_store.presign_get(binary_key, expires=PRESIGNED_GET_TTL_SECONDS),
+                        "proposedMergeMaskUri": asset_store.presign_get(proposed_mask_key, expires=PRESIGNED_GET_TTL_SECONDS),
+                        "restorationMapUri": asset_store.presign_get(restoration_key, expires=PRESIGNED_GET_TTL_SECONDS),
+                        "previewUri": asset_store.presign_get(preview_key, expires=PRESIGNED_GET_TTL_SECONDS),
+                        "reportJsonUri": asset_store.presign_get(report_key, expires=PRESIGNED_GET_TTL_SECONDS),
+                    },
+                    "metrics": analysis["metrics"],
+                    "warnings": analysis["warnings"],
+                    "settings": analysis["settings"],
+                    "alreadyQualityMatched": bool(frame.get("qualityMatched") or (frame.get("qualityMatchStatus") or {}).get("qualityMatched")),
+                },
+                origin=origin,
+            )
+
+        if method == "POST" and len(parts) == 6 and parts[2] == "frames" and parts[4] == "quality-match" and parts[5] == "apply":
+            frame_id = parts[3]
+            frame = task.get("frames", {}).get(frame_id)
+            if not frame:
+                return error_response(404, "Frame not found", origin=origin)
+            req = _json_model(QualityMatchApplyRequest, event)
+            analysis = (task.get("qualityMatchAnalyses") or {}).get(req.analysisId)
+            if not isinstance(analysis, dict):
+                return error_response(404, "Quality Match analysis not found", origin=origin)
+            if analysis.get("frameId") != frame_id:
+                return error_response(400, "Analysis frame mismatch", origin=origin)
+            variant_id = analysis.get("variantId")
+            variant = next((item for item in frame.get("variants", []) if item.get("variantId") == variant_id), None)
+            if not variant:
+                return error_response(404, "Variant not found for analysis", origin=origin)
+
+            analysis_artifacts = analysis.get("artifacts") if isinstance(analysis.get("artifacts"), dict) else {}
+            default_mask_key = analysis_artifacts.get("proposedMergeMaskKey") if isinstance(analysis_artifacts, dict) else None
+            final_mask_key = req.finalMaskKey or default_mask_key
+            if not final_mask_key or not isinstance(final_mask_key, str):
+                return error_response(400, "Final merge mask is required", origin=origin)
+            paths = _asset_paths_for_task(task)
+            if not final_mask_key.startswith(f"{paths.task_prefix()}/frames/{frame_id}/quality_match/"):
+                return error_response(400, "Final merge mask must be in frame quality_match path", origin=origin)
+
+            settings_payload = analysis.get("settings") if isinstance(analysis.get("settings"), dict) else {}
+            if req.settings:
+                settings_payload = {**settings_payload, **req.settings.model_dump(exclude_none=True)}
+            qm_settings = QualityMatchSettings.from_payload(settings_payload)
+
+            original_bytes = asset_store.read_bytes(frame["captureKey"])
+            generated_bytes = asset_store.read_bytes(variant["outputKey"])
+            final_mask_bytes = asset_store.read_bytes(final_mask_key)
+            patch_meta = variant.get("patchMeta") if isinstance(variant.get("patchMeta"), dict) else {}
+            original_mask_key = patch_meta.get("maskKey") if isinstance(patch_meta, dict) else None
+            original_mask_bytes = asset_store.read_bytes(original_mask_key) if isinstance(original_mask_key, str) and original_mask_key else None
+
+            applied = apply_quality_match(
+                original_bytes=original_bytes,
+                generated_bytes=generated_bytes,
+                final_mask_bytes=final_mask_bytes,
+                settings=qm_settings,
+                original_mask_bytes=original_mask_bytes,
+            )
+
+            if req.overwriteGeneratedFrame:
+                asset_store.put_bytes(variant["outputKey"], applied["artifacts"]["final"], content_type="image/png")
+            final_key = paths.quality_match_artifact(frame_id, req.analysisId, "quality_match_final", ".png")
+            final_preview_key = paths.quality_match_artifact(frame_id, req.analysisId, "quality_match_preview", ".png")
+            report_key = paths.quality_match_artifact(frame_id, req.analysisId, "quality_match_report", ".json")
+            asset_store.put_bytes(final_key, applied["artifacts"]["final"], content_type="image/png")
+            asset_store.put_bytes(final_preview_key, applied["artifacts"]["final"], content_type="image/png")
+            asset_store.put_bytes(report_key, json.dumps(applied["artifacts"]["reportJson"]).encode("utf-8"), content_type="application/json")
+
+            before = analysis.get("metrics") if isinstance(analysis.get("metrics"), dict) else {}
+            after = applied.get("metricsAfter") if isinstance(applied.get("metricsAfter"), dict) else {}
+            frame_status = {
+                "qcReviewed": True,
+                "qualityMatched": True,
+                "qualityMatchVersion": "quality-match-v1",
+                "qualityMatchAppliedAt": now_iso(),
+                "qualityMatchAppliedBy": user_id,
+                "qualityMatchSourceAnalysisId": req.analysisId,
+                "qualityMatchOriginalMaskProvided": bool(analysis.get("originalMaskProvided")),
+                "qualityMatchUserEditedMask": bool(req.finalMaskKey),
+                "qualityMatchMetrics": {
+                    "changedPctBefore": before.get("changedPctBefore"),
+                    "changedPctAfter": after.get("changedPctAfter"),
+                    "outsideLeakageBefore": before.get("outsideLeakageBefore"),
+                    "outsideLeakageAfter": after.get("outsideLeakageAfter"),
+                    "boundarySpillBefore": before.get("boundarySpillBefore"),
+                    "boundarySpillAfter": after.get("boundarySpillAfter"),
+                },
+                "qualityMatchArtifacts": {
+                    "alignedGeneratedKey": analysis_artifacts.get("alignedGeneratedKey"),
+                    "diffHeatmapKey": analysis_artifacts.get("diffHeatmapKey"),
+                    "binaryChangeMaskKey": analysis_artifacts.get("binaryChangeMaskKey"),
+                    "proposedMergeMaskKey": analysis_artifacts.get("proposedMergeMaskKey"),
+                    "restorationMapKey": analysis_artifacts.get("restorationMapKey"),
+                    "previewKey": analysis_artifacts.get("previewKey"),
+                    "finalKey": final_key,
+                    "reportJsonKey": report_key,
+                },
+            }
+            frame["qcReviewed"] = True
+            frame["qualityMatched"] = True
+            frame["qualityMatchStatus"] = frame_status
+            variant["qualityMatch"] = {
+                "appliedAt": now_iso(),
+                "analysisId": req.analysisId,
+                "finalMaskKey": final_mask_key,
+                "finalKey": final_key,
+                "reportJsonKey": report_key,
+            }
+
+            analysis["updatedAt"] = now_iso()
+            analysis["applied"] = {
+                "at": now_iso(),
+                "userId": user_id,
+                "finalMaskKey": final_mask_key,
+                "finalKey": final_key,
+                "reportJsonKey": report_key,
+                "overwriteGeneratedFrame": bool(req.overwriteGeneratedFrame),
+            }
+            analysis.setdefault("artifacts", {})["finalKey"] = final_key
+            analysis.setdefault("artifacts", {})["reportJsonKey"] = report_key
+
+            shot_id = next(
+                (
+                    str(segment.get("segmentId"))
+                    for segment in task.get("segments", [])
+                    if segment.get("startFrameId") == frame_id or segment.get("endFrameId") == frame_id
+                ),
+                frame_id,
+            )
+            task.setdefault("history", []).append(
+                {
+                    "type": "QUALITY_MATCH_APPLIED",
+                    "frameId": frame_id,
+                    "shotId": shot_id,
+                    "userId": user_id,
+                    "timestamp": now_iso(),
+                    "details": {
+                        "originalMaskProvided": bool(analysis.get("originalMaskProvided")),
+                        "userEditedMask": bool(req.finalMaskKey),
+                        "changedPctBefore": before.get("changedPctBefore"),
+                        "changedPctAfter": after.get("changedPctAfter"),
+                        "outsideLeakageBefore": before.get("outsideLeakageBefore"),
+                        "outsideLeakageAfter": after.get("outsideLeakageAfter"),
+                    },
+                }
+            )
+            store.save_task(task)
+            return response(
+                200,
+                {
+                    "frameId": frame_id,
+                    "replacedFrameUri": asset_store.presign_get(variant["outputKey"], expires=PRESIGNED_GET_TTL_SECONDS),
+                    "qcReviewed": True,
+                    "qualityMatched": True,
+                    "reportJsonUri": asset_store.presign_get(report_key, expires=PRESIGNED_GET_TTL_SECONDS),
+                    "metrics": {
+                        "changedPctBefore": before.get("changedPctBefore"),
+                        "changedPctAfter": after.get("changedPctAfter"),
+                        "outsideLeakageBefore": before.get("outsideLeakageBefore"),
+                        "outsideLeakageAfter": after.get("outsideLeakageAfter"),
+                        "boundarySpillBefore": before.get("boundarySpillBefore"),
+                        "boundarySpillAfter": after.get("boundarySpillAfter"),
+                    },
+                    "artifacts": {
+                        "finalUri": asset_store.presign_get(final_key, expires=PRESIGNED_GET_TTL_SECONDS),
+                        "previewUri": asset_store.presign_get(final_preview_key, expires=PRESIGNED_GET_TTL_SECONDS),
+                        "maskUri": asset_store.presign_get(final_mask_key, expires=PRESIGNED_GET_TTL_SECONDS),
+                    },
+                },
+                origin=origin,
+            )
 
         if method == "POST" and len(parts) == 6 and parts[2] == "frames" and parts[4] == "references" and parts[5] == "uploads":
             frame_id = parts[3]

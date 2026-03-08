@@ -5,6 +5,7 @@ import { apiClient } from "../api/client";
 import type { TabId } from "./useWorkflowRouting";
 
 export type NewTaskStage = "idle" | "creating" | "uploading" | "ingesting" | "error";
+type IngestCompleteHook = (taskId: string) => void | Promise<void>;
 
 type UseTaskLifecycleParams = {
   isAuthed: boolean;
@@ -71,6 +72,8 @@ export function useTaskLifecycle({
   const [newTaskError, setNewTaskError] = useState<string | null>(null);
   const [newTaskUploadPercent, setNewTaskUploadPercent] = useState(0);
   const [pendingCreateJobId, setPendingCreateJobId] = useState<string | null>(null);
+  const [pendingCreatedTaskId, setPendingCreatedTaskId] = useState<string | null>(null);
+  const [pendingIngestCompleteHook, setPendingIngestCompleteHook] = useState<IngestCompleteHook | null>(null);
 
   const pendingCreateJobQuery = useQuery({
     queryKey: ["job", pendingCreateJobId],
@@ -99,8 +102,12 @@ export function useTaskLifecycle({
     const status = pendingCreateJobQuery.data?.status;
     if (newTaskStage !== "ingesting" || !status) return;
     if (status === "complete") {
+      const completedTaskId = pendingCreatedTaskId ?? selectedTaskId ?? null;
+      const ingestCompleteHook = pendingIngestCompleteHook;
       setNewTaskStage("idle");
       setPendingCreateJobId(null);
+      setPendingCreatedTaskId(null);
+      setPendingIngestCompleteHook(null);
       setNewTaskError(null);
       setIsNewTaskModalOpen(false);
       setTab("timeline");
@@ -108,14 +115,19 @@ export function useTaskLifecycle({
       if (selectedTaskId) {
         void queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
       }
+      if (completedTaskId && ingestCompleteHook) {
+        void ingestCompleteHook(completedTaskId);
+      }
       return;
     }
     if (status === "failed") {
       setNewTaskStage("error");
       setNewTaskError(pendingCreateJobQuery.data?.error || "Ingest failed");
       setPendingCreateJobId(null);
+      setPendingCreatedTaskId(null);
+      setPendingIngestCompleteHook(null);
     }
-  }, [newTaskStage, pendingCreateJobQuery.data, queryClient, selectedTaskId, setTab]);
+  }, [newTaskStage, pendingCreateJobQuery.data, pendingCreatedTaskId, pendingIngestCompleteHook, queryClient, selectedTaskId, setTab]);
 
   function openNewTaskModal() {
     setNewTaskName("New VFX Task");
@@ -124,10 +136,12 @@ export function useTaskLifecycle({
     setNewTaskError(null);
     setNewTaskUploadPercent(0);
     setPendingCreateJobId(null);
+    setPendingCreatedTaskId(null);
+    setPendingIngestCompleteHook(null);
     setIsNewTaskModalOpen(true);
   }
 
-  async function handleCreateTaskWithUpload() {
+  async function handleCreateTaskWithUpload(options?: { onIngestComplete?: IngestCompleteHook }) {
     if (!newTaskName.trim() || !newTaskFile) return;
     try {
       setNewTaskError(null);
@@ -146,6 +160,8 @@ export function useTaskLifecycle({
       setNewTaskStage("creating");
       setNewTaskName(normalizedTaskName);
       const created = await apiClient.createTask(normalizedTaskName);
+      setPendingCreatedTaskId(created.taskId);
+      setPendingIngestCompleteHook(() => options?.onIngestComplete ?? null);
       setSelectedTaskId(created.taskId);
       setTab("timeline", created.taskId, true);
       await queryClient.invalidateQueries({ queryKey: ["tasks"] });
@@ -166,6 +182,8 @@ export function useTaskLifecycle({
     } catch (error) {
       setNewTaskStage("error");
       setNewTaskError(error instanceof Error ? error.message : "Task setup failed");
+      setPendingCreatedTaskId(null);
+      setPendingIngestCompleteHook(null);
     }
   }
 

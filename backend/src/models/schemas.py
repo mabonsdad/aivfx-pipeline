@@ -127,6 +127,34 @@ class QcRunRequest(BaseModel):
     generationIds: list[str] | None = Field(default=None, max_length=20)
 
 
+class QualityMatchSettingsRequest(BaseModel):
+    diffThreshold: float = Field(default=0.12, ge=0.01, le=0.99)
+    minRegionAreaPct: float = Field(default=0.0005, ge=0.0, le=0.1)
+    featherWidthPx: int = Field(default=6, ge=0, le=64)
+    boundaryProtectionWidthPx: int = Field(default=8, ge=0, le=128)
+    edgeSuppression: Literal["off", "low", "medium", "high"] = "medium"
+    useSeamlessCloneFallback: bool = True
+    autoDetectEditRegion: bool = True
+
+
+class QualityMatchAnalyseRequest(BaseModel):
+    variantId: str = Field(min_length=1)
+    existingAnalysisId: str | None = None
+    maskKey: str | None = None
+    settings: QualityMatchSettingsRequest | None = None
+
+
+class QualityMatchMaskUploadRequest(BaseModel):
+    analysisId: str | None = None
+
+
+class QualityMatchApplyRequest(BaseModel):
+    analysisId: str = Field(min_length=1)
+    finalMaskKey: str | None = None
+    settings: QualityMatchSettingsRequest | None = None
+    overwriteGeneratedFrame: bool = True
+
+
 class VariantSelectRequest(BaseModel):
     ok: bool = True
 
@@ -169,6 +197,9 @@ class TaskFrame(BaseModel):
     captureKey: str
     variants: list[TaskFrameVariant] = Field(default_factory=list)
     selectedVariantId: str | None = None
+    qcReviewed: bool | None = None
+    qualityMatched: bool | None = None
+    qualityMatchStatus: dict[str, Any] | None = None
 
 
 class TaskMetadata(BaseModel):
@@ -182,6 +213,7 @@ class TaskMetadata(BaseModel):
     segments: list[dict[str, Any]] = Field(default_factory=list)
     frames: dict[str, TaskFrame] = Field(default_factory=dict)
     segmentGenerations: dict[str, Any] = Field(default_factory=dict)
+    qualityMatchAnalyses: dict[str, Any] = Field(default_factory=dict)
     exports: list[dict[str, Any]] = Field(default_factory=list)
     customReports: list[dict[str, Any]] = Field(default_factory=list)
     history: list[dict[str, Any]] = Field(default_factory=list)

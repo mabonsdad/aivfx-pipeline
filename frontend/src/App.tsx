@@ -6,6 +6,7 @@ import { apiClient } from "./api/client";
 import PreviewModals from "./components/layout/PreviewModals";
 import TaskSidebar from "./components/layout/TaskSidebar";
 import WorkflowTabs from "./components/layout/WorkflowTabs";
+import QualityMatchModal from "./components/quality/QualityMatchModal";
 import NewTaskModal from "./components/tasks/NewTaskModal";
 import {
   taskRoute,
@@ -44,6 +45,44 @@ type VideoModel =
   | "veo-3.1-fast"
   | "wan2.2-a14b"
   | "wan2.2-animate";
+
+type AutomationVideoOption = {
+  id: string;
+  label: string;
+  inputMode: GenerateInputMode;
+  lumaModel: VideoModel;
+  mode: string;
+};
+
+type AutomationVariantChoice = {
+  frameId: string;
+  variantId: string;
+  imageUrl: string;
+  model: string;
+  createdAt: string;
+};
+
+type AutomationSelectionState = {
+  taskId: string;
+  segmentId: string;
+  startFrameId: string;
+  endFrameId: string;
+  startChoices: AutomationVariantChoice[];
+  endChoices: AutomationVariantChoice[];
+  startSelectedVariantId: string | null;
+  endSelectedVariantId: string | null;
+};
+
+type AutomationVideoRunOption = AutomationVideoOption & { enabled: boolean };
+
+type AutomationRunState = {
+  isOpen: boolean;
+  taskId: string | null;
+  phase: string;
+  detail: string;
+  cancelRequested: boolean;
+  terminal: boolean;
+};
 
 type LibraryAsset = {
   id: string;
@@ -87,7 +126,18 @@ type EditFrameCandidate = {
   createdAt?: string;
   variantId?: string;
   variant?: FrameVariant;
+  qualityMatched?: boolean;
   isSelected: boolean;
+};
+
+type QualityMatchModalState = {
+  isOpen: boolean;
+  frameId: string | null;
+  variantId: string | null;
+  variantLabel: string;
+  originalFrameUrl: string | null;
+  generatedFrameUrl: string | null;
+  alreadyReviewed: boolean;
 };
 
 const ReportsPage = lazy(() => import("./pages/ReportsPage"));
@@ -101,6 +151,7 @@ const JobsPanel = lazy(() => import("./pages/workflow/JobsPanel"));
 const VIDEO_FRAME_THUMBNAIL_CACHE = new Map<string, string | null>();
 const MAX_TRACKED_JOB_IDS = 40;
 const TASK_URL_REFRESH_MS = 15 * 60 * 1000;
+const AUTOMATION_CANCELLED = "__automation_cancelled__";
 
 type VideoFrameStripItem = {
   frameIndex: number;
@@ -119,6 +170,12 @@ function frameWindow(centerFrame: number, before: number, after: number, minFram
     values.push(frame);
   }
   return values;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
 }
 
 function formatFramesAndSeconds(frames: number, fps: number): string {
@@ -228,6 +285,20 @@ const GENERATION_MODELS_BY_INPUT: Record<GenerateInputMode, Array<{ value: Video
     { value: "kling-2.6", label: "Kling 2.6" },
   ],
 };
+
+const AUTOMATION_VIDEO_OPTIONS: AutomationVideoOption[] = [
+  { id: "ray-flash-2:start_video:flex_1", label: "Luma Ray Flash 2 (Start frame + video)", inputMode: "start_video", lumaModel: "ray-flash-2", mode: "flex_1" },
+  { id: "ray-2:start_video:flex_1", label: "Luma Ray 2 (Start frame + video)", inputMode: "start_video", lumaModel: "ray-2", mode: "flex_1" },
+  { id: "wan2.2-animate:start_video:wan_animate_replace", label: "Wan 2.2 Animate (Start frame + video)", inputMode: "start_video", lumaModel: "wan2.2-animate", mode: "wan_animate_replace" },
+  { id: "kling-2.6:start_end:kling_start_end", label: "Kling 2.6 (Start/End frame)", inputMode: "start_end", lumaModel: "kling-2.6", mode: "kling_start_end" },
+  { id: "kling-2.6:start_only:kling_start_only", label: "Kling 2.6 (Start frame only)", inputMode: "start_only", lumaModel: "kling-2.6", mode: "kling_start_only" },
+  { id: "veo-3.1:start_end:veo_start_end", label: "Veo 3.1 (Start/End frame)", inputMode: "start_end", lumaModel: "veo-3.1", mode: "veo_start_end" },
+  { id: "veo-3.1:start_only:veo_start_only", label: "Veo 3.1 (Start frame only)", inputMode: "start_only", lumaModel: "veo-3.1", mode: "veo_start_only" },
+  { id: "veo-3.1-fast:start_end:veo_start_end", label: "Veo 3.1 Fast (Start/End frame)", inputMode: "start_end", lumaModel: "veo-3.1-fast", mode: "veo_start_end" },
+  { id: "veo-3.1-fast:start_only:veo_start_only", label: "Veo 3.1 Fast (Start frame only)", inputMode: "start_only", lumaModel: "veo-3.1-fast", mode: "veo_start_only" },
+  { id: "runway-gen4.5:start_only:runway_i2v", label: "Runway Gen-4.5 (Start frame only)", inputMode: "start_only", lumaModel: "runway-gen4.5", mode: "runway_i2v" },
+  { id: "wan2.2-a14b:start_only:wan_a14b_i2v", label: "Wan 2.2 A14B (Start frame only)", inputMode: "start_only", lumaModel: "wan2.2-a14b", mode: "wan_a14b_i2v" },
+];
 
 function FrameSelectCard({
   title,
@@ -610,7 +681,32 @@ export default function App() {
   const [imagePreviewModal, setImagePreviewModal] = useState<{ url: string; label: string } | null>(null);
   const [videoPreviewModal, setVideoPreviewModal] = useState<{ url: string; label: string } | null>(null);
   const [reportGraphModal, setReportGraphModal] = useState<{ url: string; label: string } | null>(null);
+  const [qualityMatchModal, setQualityMatchModal] = useState<QualityMatchModalState>({
+    isOpen: false,
+    frameId: null,
+    variantId: null,
+    variantLabel: "",
+    originalFrameUrl: null,
+    generatedFrameUrl: null,
+    alreadyReviewed: false,
+  });
   const [jobIds, setJobIds] = useState<string[]>([]);
+  const [automationEnabled, setAutomationEnabled] = useState(false);
+  const [automationStartPrompt, setAutomationStartPrompt] = useState("");
+  const [automationEndPrompt, setAutomationEndPrompt] = useState("");
+  const [automationSelectedVideoOptionIds, setAutomationSelectedVideoOptionIds] = useState<string[]>(
+    AUTOMATION_VIDEO_OPTIONS.map((option) => option.id),
+  );
+  const [automationUiError, setAutomationUiError] = useState<string | null>(null);
+  const [automationRunState, setAutomationRunState] = useState<AutomationRunState>({
+    isOpen: false,
+    taskId: null,
+    phase: "",
+    detail: "",
+    cancelRequested: false,
+    terminal: false,
+  });
+  const [automationSelectionState, setAutomationSelectionState] = useState<AutomationSelectionState | null>(null);
   const [firstFrameId, setFirstFrameId] = useState<string | null>(null);
   const [lastFrameId, setLastFrameId] = useState<string | null>(null);
   const [editFrameTab, setEditFrameTab] = useState<"first" | "last">("first");
@@ -622,6 +718,10 @@ export default function App() {
   const patchMaskCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const patchDrawStateRef = useRef<{ tool: PatchToolMode; points: MaskPoint[]; last: MaskPoint | null } | null>(null);
   const signedUrlRefreshRef = useRef<Map<string, number>>(new Map());
+  const automationCancelRef = useRef(false);
+  const automationSelectionResolverRef = useRef<
+    ((choice: { startVariantId: string; endVariantId: string | null; cancelled: boolean }) => void) | null
+  >(null);
 
   useEffect(() => {
     currentUser().then((user) => setIsAuthed(!!user));
@@ -734,6 +834,19 @@ export default function App() {
     onTrackJobId: (jobId) => setJobIds((previous) => appendTrackedJobId(previous, jobId)),
   });
 
+  const automationVideoOptions = useMemo(
+    () => AUTOMATION_VIDEO_OPTIONS.map((option) => ({ id: option.id, label: option.label })),
+    [],
+  );
+  const selectedAutomationVideoOptions = useMemo<AutomationVideoRunOption[]>(
+    () =>
+      AUTOMATION_VIDEO_OPTIONS.map((option) => ({
+        ...option,
+        enabled: automationSelectedVideoOptionIds.includes(option.id),
+      })).filter((option) => option.enabled),
+    [automationSelectedVideoOptionIds],
+  );
+
   const taskQuery = useQuery({
     queryKey: ["task", selectedTaskId],
     queryFn: async () => apiClient.getTask(selectedTaskId as string),
@@ -839,6 +952,7 @@ export default function App() {
         imageUrl: activeEditFrame.imageUrl,
         label: "Original frame",
         createdAt: activeEditFrame.createdAt,
+        qualityMatched: Boolean(activeEditFrame.qualityMatched || activeEditFrame.qualityMatchStatus?.qualityMatched),
         isSelected: !activeCompareVariantId,
       },
     ];
@@ -852,6 +966,7 @@ export default function App() {
         createdAt: variant.createdAt,
         variantId: variant.variantId,
         variant,
+        qualityMatched: Boolean(variant.qualityMatch?.analysisId),
         isSelected: activeCompareVariantId === variant.variantId,
       });
     }
@@ -879,6 +994,15 @@ export default function App() {
   useEffect(() => {
     setFirstFrameId(null);
     setLastFrameId(null);
+    setQualityMatchModal({
+      isOpen: false,
+      frameId: null,
+      variantId: null,
+      variantLabel: "",
+      originalFrameUrl: null,
+      generatedFrameUrl: null,
+      alreadyReviewed: false,
+    });
     setEditSourceVariantIds({ first: null, last: null });
     setCompareVariantIds({ first: null, last: null });
     setPatchReferenceImages((previous) => {
@@ -2040,6 +2164,382 @@ export default function App() {
     [queryClient],
   );
 
+  const openNewTaskWithAutomationDefaults = useCallback(() => {
+    setAutomationEnabled(false);
+    setAutomationStartPrompt("");
+    setAutomationEndPrompt("");
+    setAutomationSelectedVideoOptionIds(AUTOMATION_VIDEO_OPTIONS.map((option) => option.id));
+    setAutomationUiError(null);
+    openNewTaskModal();
+  }, [openNewTaskModal]);
+
+  const cancelAutomationRun = useCallback(() => {
+    automationCancelRef.current = true;
+    setAutomationRunState((previous) => ({
+      ...previous,
+      cancelRequested: true,
+      detail: "Cancel requested. Started generations continue in the background.",
+    }));
+  }, []);
+
+  const waitForAutomationJob = useCallback(
+    async (jobId: string, label: string, timeoutMs = 25 * 60 * 1000) => {
+      const startedAt = Date.now();
+      while (true) {
+        if (automationCancelRef.current) {
+          throw new Error(AUTOMATION_CANCELLED);
+        }
+        const job = await apiClient.getJob(jobId);
+        setAutomationRunState((previous) =>
+          previous.isOpen
+            ? { ...previous, phase: label, detail: `${job.status.toUpperCase()} (${job.progress ?? 0}%)` }
+            : previous,
+        );
+        if (job.status === "complete") {
+          return job;
+        }
+        if (job.status === "failed") {
+          throw new Error(job.error || `${label} failed`);
+        }
+        if (Date.now() - startedAt > timeoutMs) {
+          throw new Error(`${label} timed out`);
+        }
+        await sleep(2000);
+      }
+    },
+    [],
+  );
+
+  const requestAutomationSelection = useCallback(
+    (selection: AutomationSelectionState) =>
+      new Promise<{ startVariantId: string; endVariantId: string | null; cancelled: boolean }>((resolve) => {
+        automationSelectionResolverRef.current = resolve;
+        setAutomationSelectionState(selection);
+      }),
+    [],
+  );
+
+  const resolveAutomationSelection = useCallback((choice: { startVariantId: string; endVariantId: string | null; cancelled: boolean }) => {
+    const resolver = automationSelectionResolverRef.current;
+    automationSelectionResolverRef.current = null;
+    setAutomationSelectionState(null);
+    if (resolver) {
+      resolver(choice);
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      const resolver = automationSelectionResolverRef.current;
+      if (resolver) {
+        resolver({ startVariantId: "", endVariantId: null, cancelled: true });
+        automationSelectionResolverRef.current = null;
+      }
+    };
+  }, []);
+
+  const runAutomatedPipeline = useCallback(
+    async ({
+      taskId,
+      startPrompt,
+      endPrompt,
+      selectedVideoOptions,
+    }: {
+      taskId: string;
+      startPrompt: string;
+      endPrompt: string;
+      selectedVideoOptions: AutomationVideoRunOption[];
+    }) => {
+      automationCancelRef.current = false;
+      setAutomationUiError(null);
+      setAutomationRunState({
+        isOpen: true,
+        taskId,
+        phase: "Preparing automation",
+        detail: "Loading ingested task metadata...",
+        cancelRequested: false,
+        terminal: false,
+      });
+
+      const imageModels: Array<{ model: "nano_banana_pro" | "nano_banana" | "chatgpt"; label: string }> = [
+        { model: "nano_banana_pro", label: "Nano Banana Pro" },
+        { model: "nano_banana", label: "Nano Banana Std" },
+        { model: "chatgpt", label: "ChatGPT-image" },
+      ];
+
+      const throwIfCancelled = () => {
+        if (automationCancelRef.current) {
+          throw new Error(AUTOMATION_CANCELLED);
+        }
+      };
+
+      try {
+        setSelectedTaskId(taskId);
+        setTab("frames", taskId, true);
+
+        const loadReadyTask = async () => {
+          for (let attempt = 0; attempt < 20; attempt += 1) {
+            throwIfCancelled();
+            const current = await apiClient.getTask(taskId);
+            const hasVideo = Boolean(current.video?.editSource?.downloadUrl && current.video?.editSource?.frameCount);
+            if (hasVideo) return current;
+            await sleep(1500);
+          }
+          throw new Error("Task ingest did not become ready in time.");
+        };
+
+        let currentTask = await loadReadyTask();
+        const totalFrames = Math.max(1, currentTask.video?.editSource?.frameCount ?? 0);
+
+        setAutomationRunState((previous) => ({
+          ...previous,
+          phase: "Segment setup",
+          detail: "Creating or reusing full-clip segment...",
+        }));
+
+        let segment = currentTask.segments.find((item) => item.startFrame === 0 && item.endFrameExclusive === totalFrames) ?? null;
+        if (!segment) {
+          const created = await apiClient.createSegment(taskId, { startFrameIndex: 0, durationSeconds: 1 });
+          await apiClient.patchSegment(taskId, created.segmentId, { startFrameIndex: 0, endFrameExclusive: totalFrames });
+          setSelectedSegmentId(created.segmentId);
+        } else {
+          setSelectedSegmentId(segment.segmentId);
+        }
+
+        await queryClient.invalidateQueries({ queryKey: ["task", taskId] });
+        currentTask = await apiClient.getTask(taskId);
+        segment = currentTask.segments.find((item) => item.startFrame === 0 && item.endFrameExclusive === totalFrames) ?? null;
+        if (!segment) {
+          throw new Error("Automation could not prepare the full-clip segment.");
+        }
+
+        setAutomationRunState((previous) => ({
+          ...previous,
+          phase: "Frame capture",
+          detail: "Capturing start and end frames...",
+        }));
+        const startCapture = await apiClient.captureFrame(taskId, segment.startFrame);
+        const endCapture = await apiClient.captureFrame(taskId, Math.max(segment.startFrame, segment.endFrameExclusive - 1));
+        setFirstFrameId(startCapture.frameId);
+        setLastFrameId(endCapture.frameId);
+        setSelectedFrameId(startCapture.frameId);
+
+        const runFullEditsForFrame = async (frameId: string, promptValue: string, frameLabel: string) => {
+          if (!promptValue.trim()) return [] as Array<{ variantId: string; model: string }>;
+          const editJobs: Array<{ model: "nano_banana_pro" | "nano_banana" | "chatgpt"; jobId: string }> = [];
+          for (let index = 0; index < imageModels.length; index += 1) {
+            throwIfCancelled();
+            const modelEntry = imageModels[index];
+            setAutomationRunState((previous) => ({
+              ...previous,
+              phase: `Editing ${frameLabel} frame`,
+              detail: `Queueing ${modelEntry.label} (${index + 1}/${imageModels.length})...`,
+            }));
+            const created = await apiClient.fullEdit(taskId, frameId, {
+              model: modelEntry.model,
+              prompt: promptValue,
+              sourceVariantId: "original",
+            });
+            editJobs.push({ model: modelEntry.model, jobId: created.jobId });
+            setJobIds((previous) => appendTrackedJobId(previous, created.jobId));
+          }
+          const settled = await Promise.allSettled(
+            editJobs.map((job) => waitForAutomationJob(job.jobId, `Editing ${frameLabel} frame (${job.model})`)),
+          );
+          throwIfCancelled();
+          const variants: Array<{ variantId: string; model: string }> = [];
+          for (let index = 0; index < settled.length; index += 1) {
+            const result = settled[index];
+            if (result.status !== "fulfilled") continue;
+            const variantId = result.value.resultRefs?.variantId;
+            if (typeof variantId === "string") {
+              variants.push({ variantId, model: editJobs[index].model });
+            }
+          }
+          return variants;
+        };
+
+        const trimmedEndPrompt = endPrompt.trim();
+        const startEdits = await runFullEditsForFrame(startCapture.frameId, startPrompt, "start");
+        const endEdits = trimmedEndPrompt ? await runFullEditsForFrame(endCapture.frameId, trimmedEndPrompt, "end") : [];
+        if (!startEdits.length) {
+          throw new Error("Automation did not produce any edited start-frame variants.");
+        }
+
+        await queryClient.invalidateQueries({ queryKey: ["task", taskId] });
+        currentTask = await apiClient.getTask(taskId);
+
+        const buildChoices = (frameId: string, variants: Array<{ variantId: string; model: string }>): AutomationVariantChoice[] => {
+          const frame = currentTask.frames[frameId];
+          if (!frame) return [];
+          const choices: AutomationVariantChoice[] = [];
+          for (const variantRef of variants) {
+            const variant = frame.variants.find((item) => item.variantId === variantRef.variantId);
+            if (!variant?.imageUrl) continue;
+            choices.push({
+              frameId,
+              variantId: variant.variantId,
+              imageUrl: variant.imageUrl,
+              model: String(variant.model),
+              createdAt: variant.createdAt,
+            });
+          }
+          return choices.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+        };
+
+        const startChoices = buildChoices(startCapture.frameId, startEdits);
+        const endChoices = buildChoices(endCapture.frameId, endEdits);
+        if (!startChoices.length) {
+          throw new Error("Automation could not load edited start-frame previews.");
+        }
+
+        setAutomationRunState((previous) => ({ ...previous, isOpen: false }));
+        const choice = await requestAutomationSelection({
+          taskId,
+          segmentId: segment.segmentId,
+          startFrameId: startCapture.frameId,
+          endFrameId: endCapture.frameId,
+          startChoices,
+          endChoices,
+          startSelectedVariantId: startChoices[0]?.variantId ?? null,
+          endSelectedVariantId: endChoices[0]?.variantId ?? null,
+        });
+        if (choice.cancelled) {
+          throw new Error(AUTOMATION_CANCELLED);
+        }
+        if (!choice.startVariantId) {
+          throw new Error("Select a start-frame variant to continue automation.");
+        }
+
+        setAutomationRunState({
+          isOpen: true,
+          taskId,
+          phase: "Video generation",
+          detail: "Queueing model runs...",
+          cancelRequested: false,
+          terminal: false,
+        });
+
+        try {
+          await apiClient.selectVariant(taskId, startCapture.frameId, choice.startVariantId);
+          if (choice.endVariantId) {
+            await apiClient.selectVariant(taskId, endCapture.frameId, choice.endVariantId);
+          }
+        } catch {
+          // Non-fatal: these are convenience selections only.
+        }
+        setCompareVariantIds({
+          first: choice.startVariantId,
+          last: choice.endVariantId,
+        });
+        setEditSourceVariantIds({
+          first: choice.startVariantId,
+          last: choice.endVariantId,
+        });
+
+        const generationJobs: Array<{ option: AutomationVideoRunOption; jobId: string }> = [];
+        for (let index = 0; index < selectedVideoOptions.length; index += 1) {
+          throwIfCancelled();
+          const option = selectedVideoOptions[index];
+          setAutomationRunState((previous) => ({
+            ...previous,
+            phase: "Video generation",
+            detail: `Queueing ${option.label} (${index + 1}/${selectedVideoOptions.length})...`,
+          }));
+          try {
+            const created = await apiClient.generateSegment(taskId, segment.segmentId, {
+              lumaModel: option.lumaModel,
+              mode: option.mode,
+              firstFrameVariantId: choice.startVariantId,
+              lastFrameVariantId: option.inputMode === "start_end" ? choice.endVariantId ?? undefined : undefined,
+            });
+            generationJobs.push({ option, jobId: created.jobId });
+            setJobIds((previous) => appendTrackedJobId(previous, created.jobId));
+          } catch (error) {
+            const message = error instanceof Error ? error.message : "Unknown generation queue error";
+            setAutomationRunState((previous) => ({
+              ...previous,
+              detail: `Failed to queue ${option.label}: ${message}`,
+            }));
+          }
+        }
+
+        if (!generationJobs.length) {
+          throw new Error("No automated video generations were queued.");
+        }
+
+        const generationResults = await Promise.allSettled(
+          generationJobs.map((entry) => waitForAutomationJob(entry.jobId, `Generating ${entry.option.label}`, 35 * 60 * 1000)),
+        );
+        throwIfCancelled();
+        const succeededCount = generationResults.filter((result) => result.status === "fulfilled").length;
+        if (!succeededCount) {
+          throw new Error("All automated video generations failed.");
+        }
+
+        await queryClient.invalidateQueries({ queryKey: ["task", taskId] });
+        await queryClient.invalidateQueries({ queryKey: ["task", "report", taskId] });
+        setSelectedTaskId(taskId);
+        setSelectedSegmentId(segment.segmentId);
+        goToReport(taskId, "outputs", null, true);
+        setAutomationRunState({
+          isOpen: true,
+          taskId,
+          phase: "Completed",
+          detail: `Automation complete. ${succeededCount} of ${generationJobs.length} video generations succeeded.`,
+          cancelRequested: false,
+          terminal: true,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Automation failed";
+        const cancelled = message === AUTOMATION_CANCELLED;
+        setAutomationRunState((previous) => ({
+          ...previous,
+          isOpen: true,
+          phase: cancelled ? "Cancelled" : "Failed",
+          detail: cancelled
+            ? "Automation stopped. Already-started jobs continue in the background."
+            : message,
+          terminal: true,
+        }));
+      }
+    },
+    [fpsValue, goToReport, queryClient, requestAutomationSelection, setSelectedFrameId, setSelectedSegmentId, setSelectedTaskId, setTab, waitForAutomationJob],
+  );
+
+  const handleNewTaskSubmit = useCallback(() => {
+    setAutomationUiError(null);
+    if (automationEnabled) {
+      if (!automationStartPrompt.trim()) {
+        setAutomationUiError("Automation requires a start-frame edit prompt.");
+        return;
+      }
+      if (!selectedAutomationVideoOptions.length) {
+        setAutomationUiError("Select at least one video model variant for automation.");
+        return;
+      }
+    }
+    const startPrompt = automationStartPrompt.trim();
+    const endPrompt = automationEndPrompt.trim();
+    const selectedVideoOptions = [...selectedAutomationVideoOptions];
+    void handleCreateTaskWithUpload(
+      automationEnabled
+        ? {
+            onIngestComplete: async (taskId) => {
+              await runAutomatedPipeline({ taskId, startPrompt, endPrompt, selectedVideoOptions });
+            },
+          }
+        : undefined,
+    );
+  }, [
+    automationEnabled,
+    automationEndPrompt,
+    automationStartPrompt,
+    handleCreateTaskWithUpload,
+    runAutomatedPipeline,
+    selectedAutomationVideoOptions,
+  ]);
+
   async function ensureSegmentForSelectedFrames(): Promise<string | null> {
     if (!task || !selectedRange) return null;
     const existing = task.segments.find(
@@ -2088,6 +2588,21 @@ export default function App() {
   function setEditSourceCandidate(tabKey: "first" | "last", candidate: EditFrameCandidate) {
     const sourceVariantId = candidate.kind === "variant" ? candidate.variantId ?? null : null;
     setEditSourceVariantIds((previous) => ({ ...previous, [tabKey]: sourceVariantId }));
+  }
+
+  function openQualityMatchModal(candidate: EditFrameCandidate) {
+    if (!activeEditFrame || candidate.kind !== "variant" || !candidate.variantId) return;
+    const frameRecord = task?.frames?.[activeEditFrame.frameId];
+    if (!frameRecord) return;
+    setQualityMatchModal({
+      isOpen: true,
+      frameId: frameRecord.frameId,
+      variantId: candidate.variantId,
+      variantLabel: `${candidate.label} · frame ${frameRecord.frameIndex} (${frameRecord.timecode})`,
+      originalFrameUrl: frameRecord.imageUrl ?? null,
+      generatedFrameUrl: candidate.imageUrl,
+      alreadyReviewed: Boolean(frameRecord.qualityMatched || frameRecord.qualityMatchStatus?.qualityMatched),
+    });
   }
 
   async function handleDeleteAsset(item: LibraryAsset) {
@@ -2278,6 +2793,7 @@ export default function App() {
       patchEditMutation,
       maskHasPaint,
       formatCompactTimestamp,
+      openQualityMatchModal,
     }),
     [
       editFrameTab,
@@ -2306,6 +2822,7 @@ export default function App() {
       patchPrompt,
       patchEditMutation,
       maskHasPaint,
+      openQualityMatchModal,
     ],
   );
 
@@ -2549,7 +3066,7 @@ export default function App() {
           onSignOut={() => {
             void logout();
           }}
-          onOpenNewTask={openNewTaskModal}
+          onOpenNewTask={openNewTaskWithAutomationDefaults}
           onOpenTaskReport={openTaskReport}
           onSelectTask={(taskId) => setTab(tab, taskId)}
           onDeleteTask={(taskId) => deleteTaskMutation.mutate(taskId)}
@@ -2611,6 +3128,202 @@ export default function App() {
         onCloseVideo={() => setVideoPreviewModal(null)}
         onMediaError={() => refreshSignedUrlsForTask(selectedTaskId)}
       />
+      {automationRunState.isOpen ? (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/55 p-4">
+          <div className="w-full max-w-lg rounded-2xl border border-ink/15 bg-card p-5 shadow-xl">
+            <h3 className="text-lg font-semibold">{automationRunState.phase || "Running automation"}</h3>
+            <p className="mt-2 text-sm text-ink/75">{automationRunState.detail || "Working..."}</p>
+            <div className="mt-4 flex items-center justify-end gap-2">
+              {automationRunState.terminal ? (
+                <button
+                  type="button"
+                  className="rounded border border-ink/20 bg-white px-3 py-2 text-sm"
+                  onClick={() =>
+                    setAutomationRunState((previous) => ({
+                      ...previous,
+                      isOpen: false,
+                    }))
+                  }
+                >
+                  Close
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="rounded border border-red-400 px-3 py-2 text-sm text-red-700 disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={automationRunState.cancelRequested}
+                  onClick={cancelAutomationRun}
+                >
+                  {automationRunState.cancelRequested ? "Cancelling..." : "Cancel automation"}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {automationSelectionState ? (
+        <div className="fixed inset-0 z-[61] flex items-center justify-center bg-black/55 p-4">
+          <div className="max-h-[90vh] w-full max-w-6xl overflow-y-auto rounded-2xl border border-ink/15 bg-card p-5 shadow-xl">
+            <div className="mb-3 flex items-start justify-between gap-2">
+              <div>
+                <h3 className="text-lg font-semibold">Automation: Choose edited frames</h3>
+                <p className="text-sm text-ink/70">
+                  Select one edited start frame and an optional edited end frame before batch video generation.
+                </p>
+              </div>
+              <button
+                type="button"
+                className="rounded border border-ink/20 bg-white px-2 py-1 text-sm"
+                onClick={() => resolveAutomationSelection({ startVariantId: "", endVariantId: null, cancelled: true })}
+              >
+                Cancel
+              </button>
+            </div>
+
+            <section className="space-y-2">
+              <h4 className="text-sm font-semibold">Start frame variants</h4>
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                {automationSelectionState.startChoices.map((choice) => {
+                  const isSelected = automationSelectionState.startSelectedVariantId === choice.variantId;
+                  return (
+                    <button
+                      key={`automation-start-${choice.variantId}`}
+                      type="button"
+                      onClick={() =>
+                        setAutomationSelectionState((previous) =>
+                          previous
+                            ? {
+                                ...previous,
+                                startSelectedVariantId: choice.variantId,
+                              }
+                            : previous,
+                        )
+                      }
+                      className={`overflow-hidden rounded-lg border text-left ${
+                        isSelected ? "border-accent bg-accent/10" : "border-ink/15 bg-white"
+                      }`}
+                    >
+                      <img src={choice.imageUrl} alt={`Start ${choice.model}`} className="aspect-video w-full bg-bg object-contain" />
+                      <div className="space-y-1 p-2">
+                        <p className="text-sm font-medium">{choice.model}</p>
+                        <p className="text-xs text-ink/60">{formatCompactTimestamp(choice.createdAt)}</p>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
+
+            <section className="mt-4 space-y-2">
+              <h4 className="text-sm font-semibold">End frame variants (optional)</h4>
+              {automationSelectionState.endChoices.length ? (
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setAutomationSelectionState((previous) =>
+                        previous
+                          ? {
+                              ...previous,
+                              endSelectedVariantId: null,
+                            }
+                          : previous,
+                      )
+                    }
+                    className={`rounded-lg border p-3 text-left ${
+                      automationSelectionState.endSelectedVariantId == null ? "border-accent bg-accent/10" : "border-ink/15 bg-white"
+                    }`}
+                  >
+                    <p className="text-sm font-medium">Use original end frame</p>
+                    <p className="text-xs text-ink/60">No edited end frame will be sent.</p>
+                  </button>
+                  {automationSelectionState.endChoices.map((choice) => {
+                    const isSelected = automationSelectionState.endSelectedVariantId === choice.variantId;
+                    return (
+                      <button
+                        key={`automation-end-${choice.variantId}`}
+                        type="button"
+                        onClick={() =>
+                          setAutomationSelectionState((previous) =>
+                            previous
+                              ? {
+                                  ...previous,
+                                  endSelectedVariantId: choice.variantId,
+                                }
+                              : previous,
+                          )
+                        }
+                        className={`overflow-hidden rounded-lg border text-left ${
+                          isSelected ? "border-accent bg-accent/10" : "border-ink/15 bg-white"
+                        }`}
+                      >
+                        <img src={choice.imageUrl} alt={`End ${choice.model}`} className="aspect-video w-full bg-bg object-contain" />
+                        <div className="space-y-1 p-2">
+                          <p className="text-sm font-medium">{choice.model}</p>
+                          <p className="text-xs text-ink/60">{formatCompactTimestamp(choice.createdAt)}</p>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : (
+                <p className="text-sm text-ink/60">No edited end-frame variants were generated. Original end frame will be used.</p>
+              )}
+            </section>
+
+            <div className="mt-5 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                className="rounded border border-ink/20 bg-white px-3 py-2 text-sm"
+                onClick={() => resolveAutomationSelection({ startVariantId: "", endVariantId: null, cancelled: true })}
+              >
+                Cancel automation
+              </button>
+              <button
+                type="button"
+                className="rounded bg-accent px-4 py-2 text-sm text-white disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={!automationSelectionState.startSelectedVariantId}
+                onClick={() =>
+                  resolveAutomationSelection({
+                    startVariantId: automationSelectionState.startSelectedVariantId ?? "",
+                    endVariantId: automationSelectionState.endSelectedVariantId ?? null,
+                    cancelled: false,
+                  })
+                }
+              >
+                Continue to video generation
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      <QualityMatchModal
+        isOpen={qualityMatchModal.isOpen}
+        taskId={selectedTaskId}
+        frameId={qualityMatchModal.frameId}
+        variantId={qualityMatchModal.variantId}
+        variantLabel={qualityMatchModal.variantLabel}
+        originalFrameUrl={qualityMatchModal.originalFrameUrl}
+        generatedFrameUrl={qualityMatchModal.generatedFrameUrl}
+        alreadyReviewed={qualityMatchModal.alreadyReviewed}
+        onClose={() =>
+          setQualityMatchModal((previous) => ({
+            ...previous,
+            isOpen: false,
+          }))
+        }
+        onApplied={() => {
+          setQualityMatchModal((previous) => ({
+            ...previous,
+            isOpen: false,
+          }));
+          if (selectedTaskId) {
+            void queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
+            void queryClient.invalidateQueries({ queryKey: ["task", "report", selectedTaskId] });
+            void queryClient.invalidateQueries({ queryKey: ["task", "assets", selectedTaskId] });
+          }
+        }}
+      />
       <NewTaskModal
         isOpen={isNewTaskModalOpen}
         stage={newTaskStage}
@@ -2621,12 +3334,35 @@ export default function App() {
         uploadPercent={newTaskUploadPercent}
         ingestProgress={pendingCreateJobQuery.data?.progress ?? 0}
         ingestStatus={pendingCreateJobQuery.data?.status ?? "queued"}
-        error={newTaskError}
+        error={automationUiError ?? newTaskError}
         canSubmit={!newTaskName.trim() ? false : Boolean(normalizedNewTaskName && newTaskFile)}
-        onClose={() => setIsNewTaskModalOpen(false)}
+        automationEnabled={automationEnabled}
+        automationStartPrompt={automationStartPrompt}
+        automationEndPrompt={automationEndPrompt}
+        automationVideoOptions={automationVideoOptions}
+        automationSelectedVideoOptionIds={automationSelectedVideoOptionIds}
+        onClose={() => {
+          setAutomationUiError(null);
+          setIsNewTaskModalOpen(false);
+        }}
         onTaskNameChange={setNewTaskName}
         onFileSelect={setNewTaskFile}
-        onSubmit={handleCreateTaskWithUpload}
+        onAutomationEnabledChange={(value) => {
+          setAutomationEnabled(value);
+          if (!value) {
+            setAutomationUiError(null);
+          }
+        }}
+        onAutomationStartPromptChange={(value) => {
+          setAutomationStartPrompt(value);
+          if (automationUiError) setAutomationUiError(null);
+        }}
+        onAutomationEndPromptChange={setAutomationEndPrompt}
+        onAutomationVideoSelectionChange={(selectedIds) => {
+          setAutomationSelectedVideoOptionIds(selectedIds);
+          if (automationUiError) setAutomationUiError(null);
+        }}
+        onSubmit={handleNewTaskSubmit}
       />
     </main>
   );
