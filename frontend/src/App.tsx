@@ -15,6 +15,7 @@ import {
   useReportRouteState,
   useWorkflowRouteState,
 } from "./hooks/useWorkflowRouting";
+import { useTaskLifecycle } from "./hooks/useTaskLifecycle";
 import { currentUser, login, logout } from "./lib/auth";
 import { useUiStore } from "./store/uiStore";
 import type {
@@ -37,8 +38,6 @@ type VideoModel =
   | "veo-3.1-fast"
   | "wan2.2-a14b"
   | "wan2.2-animate";
-
-type NewTaskStage = "idle" | "creating" | "uploading" | "ingesting" | "error";
 
 type LibraryAsset = {
   id: string;
@@ -191,16 +190,6 @@ function appendTrackedJobId(previous: string[], jobId: string): string[] {
   if (!jobId) return previous;
   const deduped = [...previous.filter((item) => item !== jobId), jobId];
   return deduped.slice(-MAX_TRACKED_JOB_IDS);
-}
-
-function normalizeTaskNameInput(value: string): string {
-  return value
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]+/g, "_")
-    .replace(/_+/g, "_")
-    .replace(/^[_-]+|[_-]+$/g, "")
-    .slice(0, 15);
 }
 
 function humanizeFilename(value: string): string {
@@ -672,33 +661,6 @@ function MergeBoundaryPreview({
   );
 }
 
-function uploadFileWithProgress(
-  uploadUrl: string,
-  file: File,
-  contentType: string,
-  onProgress: (pct: number) => void,
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open("PUT", uploadUrl);
-    xhr.setRequestHeader("content-type", contentType);
-    xhr.upload.onprogress = (event) => {
-      if (!event.lengthComputable) return;
-      onProgress(Math.round((event.loaded / event.total) * 100));
-    };
-    xhr.onload = () => {
-      if (xhr.status >= 200 && xhr.status < 300) {
-        onProgress(100);
-        resolve();
-      } else {
-        reject(new Error(`Upload failed (${xhr.status})`));
-      }
-    };
-    xhr.onerror = () => reject(new Error("Upload failed due to network error"));
-    xhr.send(file);
-  });
-}
-
 export default function App() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
@@ -719,13 +681,6 @@ export default function App() {
   const { reportView, activeCustomReportId } = useReportRouteState(location.search);
   const [selectedReportOutputs, setSelectedReportOutputs] = useState<Record<string, { taskId: string; ref: CustomReportOutputRef }>>({});
   const [customReportNotice, setCustomReportNotice] = useState<string | null>(null);
-  const [isNewTaskModalOpen, setIsNewTaskModalOpen] = useState(false);
-  const [newTaskName, setNewTaskName] = useState("New VFX Task");
-  const [newTaskFile, setNewTaskFile] = useState<File | null>(null);
-  const [newTaskStage, setNewTaskStage] = useState<NewTaskStage>("idle");
-  const [newTaskError, setNewTaskError] = useState<string | null>(null);
-  const [newTaskUploadPercent, setNewTaskUploadPercent] = useState(0);
-  const [pendingCreateJobId, setPendingCreateJobId] = useState<string | null>(null);
   const [uploadAssetsVisible, setUploadAssetsVisible] = useState(6);
   const [frameAssetsVisible, setFrameAssetsVisible] = useState(6);
   const [videoAssetsVisible, setVideoAssetsVisible] = useState(6);
@@ -800,17 +755,6 @@ export default function App() {
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
   });
-  const normalizedNewTaskName = useMemo(() => normalizeTaskNameInput(newTaskName), [newTaskName]);
-  const taskNameAlreadyExists = useMemo(() => {
-    const target = normalizedNewTaskName.toLowerCase();
-    if (!target) return false;
-    return (tasksQuery.data ?? []).some((taskItem) => taskItem.name.toLowerCase() === target);
-  }, [normalizedNewTaskName, tasksQuery.data]);
-  const showTaskNameExistsWarning =
-    taskNameAlreadyExists &&
-    newTaskStage !== "creating" &&
-    newTaskStage !== "uploading" &&
-    newTaskStage !== "ingesting";
 
   useEffect(() => {
     const modelForInput = generationModelByInput[generationInputMode];
@@ -875,6 +819,32 @@ export default function App() {
     setSelectedTaskId,
   });
 
+  const {
+    isNewTaskModalOpen,
+    setIsNewTaskModalOpen,
+    newTaskName,
+    setNewTaskName,
+    newTaskFile,
+    setNewTaskFile,
+    newTaskStage,
+    newTaskError,
+    newTaskUploadPercent,
+    pendingCreateJobQuery,
+    normalizedNewTaskName,
+    taskNameAlreadyExists,
+    showTaskNameExistsWarning,
+    openNewTaskModal,
+    handleCreateTaskWithUpload,
+  } = useTaskLifecycle({
+    isAuthed,
+    selectedTaskId,
+    existingTaskNames: (tasksQuery.data ?? []).map((taskItem) => taskItem.name),
+    queryClient,
+    setSelectedTaskId,
+    setTab,
+    onTrackJobId: (jobId) => setJobIds((previous) => appendTrackedJobId(previous, jobId)),
+  });
+
   const taskQuery = useQuery({
     queryKey: ["task", selectedTaskId],
     queryFn: async () => apiClient.getTask(selectedTaskId as string),
@@ -885,17 +855,6 @@ export default function App() {
     refetchOnReconnect: false,
   });
   const reportTaskQuery = taskQuery;
-  const pendingCreateJobQuery = useQuery({
-    queryKey: ["job", pendingCreateJobId],
-    queryFn: () => apiClient.getJob(pendingCreateJobId as string),
-    enabled: isAuthed && !!pendingCreateJobId,
-    refetchInterval: (q: { state: { data?: { status?: string } } }) => {
-      const status = q?.state?.data?.status;
-      return status === "queued" || status === "running" ? 2000 : false;
-    },
-    refetchOnWindowFocus: false,
-    refetchOnReconnect: false,
-  });
   const assetTaskQueries = useQueries({
     queries: (tasksQuery.data ?? []).map((taskItem) => ({
       queryKey: ["task", "assets", taskItem.taskId],
@@ -1328,28 +1287,6 @@ export default function App() {
     setMaskHasPaint(false);
     renderPatchOverlay();
   }, [activeEditFrame?.frameId, activeFrameWidth, activeFrameHeight]);
-
-  useEffect(() => {
-    const status = pendingCreateJobQuery.data?.status;
-    if (newTaskStage !== "ingesting" || !status) return;
-    if (status === "complete") {
-      setNewTaskStage("idle");
-      setPendingCreateJobId(null);
-      setNewTaskError(null);
-      setIsNewTaskModalOpen(false);
-      setTab("timeline");
-      queryClient.invalidateQueries({ queryKey: ["tasks"] });
-      if (selectedTaskId) {
-        queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
-      }
-      return;
-    }
-    if (status === "failed") {
-      setNewTaskStage("error");
-      setNewTaskError(pendingCreateJobQuery.data?.error || "Ingest failed");
-      setPendingCreateJobId(null);
-    }
-  }, [newTaskStage, pendingCreateJobQuery.data, queryClient, selectedTaskId]);
 
   useEffect(() => {
     const frameId = activeEditFrame?.frameId ?? null;
@@ -2598,16 +2535,6 @@ export default function App() {
     { id: "assets", label: "Download Assets" },
   ];
 
-  function openNewTaskModal() {
-    setNewTaskName("New VFX Task");
-    setNewTaskFile(null);
-    setNewTaskStage("idle");
-    setNewTaskError(null);
-    setNewTaskUploadPercent(0);
-    setPendingCreateJobId(null);
-    setIsNewTaskModalOpen(true);
-  }
-
   function renderCustomReportBox(taskId: string | null, reports: CustomReportRecord[] | undefined) {
     const selectedCount = taskId ? (selectedOutputRefsByTask[taskId]?.length ?? 0) : 0;
     return (
@@ -2662,48 +2589,6 @@ export default function App() {
         )}
       </section>
     );
-  }
-
-  async function handleCreateTaskWithUpload() {
-    if (!newTaskName.trim() || !newTaskFile) return;
-    try {
-      setNewTaskError(null);
-      setNewTaskUploadPercent(0);
-      const normalizedTaskName = normalizeTaskNameInput(newTaskName);
-      if (!normalizedTaskName) {
-        setNewTaskStage("error");
-        setNewTaskError("Task name must include letters or numbers");
-        return;
-      }
-      if (taskNameAlreadyExists) {
-        setNewTaskStage("error");
-        setNewTaskError("Task name already exists. Choose a unique name.");
-        return;
-      }
-      setNewTaskStage("creating");
-      setNewTaskName(normalizedTaskName);
-      const created = await apiClient.createTask(normalizedTaskName);
-      setSelectedTaskId(created.taskId);
-      setTab("timeline", created.taskId, true);
-      await queryClient.invalidateQueries({ queryKey: ["tasks"] });
-
-      setNewTaskStage("uploading");
-      const contentType = newTaskFile.type || "video/mp4";
-      const upload = await apiClient.createVideoUpload(created.taskId, {
-        filename: newTaskFile.name,
-        contentType,
-        sizeBytes: newTaskFile.size,
-      });
-      await uploadFileWithProgress(upload.uploadUrl, newTaskFile, contentType, setNewTaskUploadPercent);
-
-      setNewTaskStage("ingesting");
-      const ingest = await apiClient.ingestTask(created.taskId);
-      setPendingCreateJobId(ingest.jobId);
-      setJobIds((prev) => appendTrackedJobId(prev, ingest.jobId));
-    } catch (error) {
-      setNewTaskStage("error");
-      setNewTaskError(error instanceof Error ? error.message : "Task setup failed");
-    }
   }
 
   if (!isAuthed) {
