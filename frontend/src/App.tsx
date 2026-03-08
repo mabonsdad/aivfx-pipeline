@@ -3,6 +3,8 @@ import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/rea
 import { useLocation, useNavigate } from "react-router-dom";
 
 import { apiClient } from "./api/client";
+import TaskSidebar from "./components/layout/TaskSidebar";
+import NewTaskModal from "./components/tasks/NewTaskModal";
 import {
   taskRoute,
   type ReportView,
@@ -2761,61 +2763,20 @@ export default function App() {
   return (
     <main className="min-h-screen bg-bg text-ink">
       <div className="mx-auto grid max-w-[1500px] grid-cols-12 gap-4 p-4 md:p-6">
-        <aside className="col-span-12 rounded-2xl border border-ink/10 bg-card p-4 md:col-span-3">
-          <div className="mb-4 flex items-center justify-between">
-            <h2 className="text-lg font-semibold">Tasks</h2>
-            <button onClick={() => logout()} className="text-sm text-ink/60 underline">
-              Sign out
-            </button>
-          </div>
-
-          <button className="mb-4 w-full rounded-md bg-accent px-3 py-2 text-sm text-white" onClick={openNewTaskModal}>
-            Add New Task
-          </button>
-
-          <div className="space-y-2">
-            {(tasksQuery.data ?? []).map((taskItem) => (
-              <div
-                key={taskItem.taskId}
-                className={`relative w-full rounded-lg border px-3 py-2 text-left ${
-                  selectedTaskId === taskItem.taskId ? "border-accent bg-accent/10" : "border-ink/10 bg-white"
-                }`}
-              >
-                <button
-                  className="absolute right-2 top-2 inline-flex h-6 w-6 items-center justify-center rounded-full border border-ink/20 bg-white text-xs font-semibold text-ink/70"
-                  title="Open task report"
-                  aria-label={`Open report for ${taskItem.name}`}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    openTaskReport(taskItem.taskId);
-                  }}
-                >
-                  i
-                </button>
-                <button className="w-full pr-8 text-left" onClick={() => setTab(tab, taskItem.taskId)}>
-                  <p className="font-medium">{taskItem.name}</p>
-                  <p
-                    className={`text-xs uppercase tracking-wide ${
-                      taskItem.status === "error"
-                        ? "text-red-600"
-                        : taskItem.status === "ingesting"
-                          ? "text-amber-600"
-                          : "text-ink/60"
-                    }`}
-                  >
-                    {taskItem.status}
-                  </p>
-                </button>
-                <button className="mt-1 text-xs text-red-600 underline" onClick={() => deleteTaskMutation.mutate(taskItem.taskId)}>
-                  Delete
-                </button>
-              </div>
-            ))}
-          </div>
-          <button className="mt-4 text-sm text-accent underline" onClick={() => void handleTabChange("assets")}>
-            Open Asset Library
-          </button>
-        </aside>
+        <TaskSidebar
+          tasks={tasksQuery.data ?? []}
+          selectedTaskId={selectedTaskId}
+          onSignOut={() => {
+            void logout();
+          }}
+          onOpenNewTask={openNewTaskModal}
+          onOpenTaskReport={openTaskReport}
+          onSelectTask={(taskId) => setTab(tab, taskId)}
+          onDeleteTask={(taskId) => deleteTaskMutation.mutate(taskId)}
+          onOpenAssetLibrary={() => {
+            void handleTabChange("assets");
+          }}
+        />
 
         <section className="col-span-12 space-y-4 md:col-span-9">
           <div className="rounded-2xl border border-ink/10 bg-card p-4">
@@ -3085,87 +3046,23 @@ export default function App() {
           </div>
         </div>
       ) : null}
-      {isNewTaskModalOpen ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="w-full max-w-xl rounded-2xl border border-ink/10 bg-card p-5 shadow-xl">
-            <div className="mb-4 flex items-center justify-between">
-              <h3 className="text-lg font-semibold">Create Task & Upload Video</h3>
-              <button
-                className="text-sm text-ink/60 underline disabled:cursor-not-allowed disabled:opacity-50"
-                onClick={() => setIsNewTaskModalOpen(false)}
-                disabled={newTaskStage === "creating" || newTaskStage === "uploading" || newTaskStage === "ingesting"}
-              >
-                Close
-              </button>
-            </div>
-            <div className="space-y-3">
-              <div>
-                <label className="mb-1 block text-sm font-medium">Task name</label>
-                <input
-                  value={newTaskName}
-                  onChange={(e) => setNewTaskName(e.target.value)}
-                  maxLength={15}
-                  className="w-full rounded-md border border-ink/20 bg-white px-3 py-2"
-                  disabled={newTaskStage === "creating" || newTaskStage === "uploading" || newTaskStage === "ingesting"}
-                />
-                <p className="mt-1 text-xs text-ink/60">
-                  Final name: <span className="font-medium">{normalizedNewTaskName || "(invalid)"}</span> (max 15 chars)
-                </p>
-                {showTaskNameExistsWarning ? <p className="text-xs text-red-600">Name already used by another task.</p> : null}
-              </div>
-              <div>
-                <label className="mb-1 block text-sm font-medium">Video file</label>
-                <input
-                  type="file"
-                  accept="video/*"
-                  onChange={(e) => setNewTaskFile(e.target.files?.[0] ?? null)}
-                  disabled={newTaskStage === "creating" || newTaskStage === "uploading" || newTaskStage === "ingesting"}
-                />
-              </div>
-              {newTaskStage === "uploading" ? (
-                <div>
-                  <p className="mb-1 text-sm text-ink/70">Uploading: {newTaskUploadPercent}%</p>
-                  <div className="h-2 w-full overflow-hidden rounded bg-ink/10">
-                    <div className="h-full bg-accent" style={{ width: `${newTaskUploadPercent}%` }} />
-                  </div>
-                </div>
-              ) : null}
-              {newTaskStage === "ingesting" ? (
-                <div>
-                  <p className="mb-1 text-sm text-ink/70">
-                    Ingesting: {pendingCreateJobQuery.data?.progress ?? 0}% ({pendingCreateJobQuery.data?.status ?? "queued"})
-                  </p>
-                  <div className="h-2 w-full overflow-hidden rounded bg-ink/10">
-                    <div className="h-full bg-accent2" style={{ width: `${pendingCreateJobQuery.data?.progress ?? 0}%` }} />
-                  </div>
-                </div>
-              ) : null}
-              {newTaskError ? <p className="text-sm text-red-600">{newTaskError}</p> : null}
-              <button
-                className="w-full rounded-md bg-accent px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-50"
-                disabled={
-                  !newTaskName.trim() ||
-                  !normalizedNewTaskName ||
-                  taskNameAlreadyExists ||
-                  !newTaskFile ||
-                  newTaskStage === "creating" ||
-                  newTaskStage === "uploading" ||
-                  newTaskStage === "ingesting"
-                }
-                onClick={handleCreateTaskWithUpload}
-              >
-                {newTaskStage === "creating"
-                  ? "Creating task..."
-                  : newTaskStage === "uploading"
-                    ? "Uploading..."
-                    : newTaskStage === "ingesting"
-                      ? "Ingesting..."
-                      : "Create Task and Ingest"}
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
+      <NewTaskModal
+        isOpen={isNewTaskModalOpen}
+        stage={newTaskStage}
+        taskName={newTaskName}
+        normalizedTaskName={normalizedNewTaskName}
+        showTaskNameExistsWarning={showTaskNameExistsWarning}
+        taskNameAlreadyExists={taskNameAlreadyExists}
+        uploadPercent={newTaskUploadPercent}
+        ingestProgress={pendingCreateJobQuery.data?.progress ?? 0}
+        ingestStatus={pendingCreateJobQuery.data?.status ?? "queued"}
+        error={newTaskError}
+        canSubmit={!newTaskName.trim() ? false : Boolean(normalizedNewTaskName && newTaskFile)}
+        onClose={() => setIsNewTaskModalOpen(false)}
+        onTaskNameChange={setNewTaskName}
+        onFileSelect={setNewTaskFile}
+        onSubmit={handleCreateTaskWithUpload}
+      />
     </main>
   );
 }
