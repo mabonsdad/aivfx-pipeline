@@ -852,13 +852,13 @@ export default function App() {
     if (routeState.taskId && routeState.taskId !== selectedTaskId) {
       setSelectedTaskId(routeState.taskId);
     }
-  }, [routeState.taskId, selectedTaskId, setSelectedTaskId]);
+  }, [routeState.taskId, setSelectedTaskId]);
 
   useEffect(() => {
     if (routeState.tab && routeState.tab !== tab) {
       setTab(routeState.tab);
     }
-  }, [routeState.tab, tab]);
+  }, [routeState.tab]);
 
   const expectedPath = useMemo(() => {
     if (!selectedTaskId) return "/";
@@ -867,12 +867,10 @@ export default function App() {
 
   useEffect(() => {
     const normalizedPath = location.pathname.replace(/\/+$/, "") || "/";
-    if (routeState.taskId && routeState.taskId !== selectedTaskId) return;
-    if (routeState.tab && routeState.tab !== tab) return;
     if (normalizedPath === expectedPath) return;
     const replace = normalizedPath === "/" && expectedPath !== "/";
     navigate(expectedPath, { replace });
-  }, [expectedPath, location.pathname, navigate, routeState.tab, routeState.taskId, selectedTaskId, tab]);
+  }, [expectedPath, location.pathname, navigate]);
 
   const taskQuery = useQuery({
     queryKey: ["task", selectedTaskId],
