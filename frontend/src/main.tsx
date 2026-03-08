@@ -22,7 +22,7 @@ const queryClient = new QueryClient({
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <QueryClientProvider client={queryClient}>
-      <HashRouter basename={import.meta.env.BASE_URL}>
+      <HashRouter>
         <App />
       </HashRouter>
     </QueryClientProvider>
