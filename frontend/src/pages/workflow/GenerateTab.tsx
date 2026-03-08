@@ -54,6 +54,7 @@ export type GenerateTabCtx = {
   generationThumbnailUrl: (generation: SegmentGeneration) => string | null;
   formatCompactTimestamp: (iso: string | undefined) => string;
   setVideoPreviewModal: (value: { url: string; label: string } | null) => void;
+  onAssetError: () => void;
   handleDeleteAsset: (item: {
     id: string;
     taskId: string;
@@ -109,6 +110,7 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
     generationThumbnailUrl,
     formatCompactTimestamp,
     setVideoPreviewModal,
+    onAssetError,
     handleDeleteAsset,
     setGenerationCardsVisible,
   } = ctx;
@@ -255,6 +257,7 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
                     }
                   }}
                   onTimeUpdate={(e) => keepOriginalWithinSegment(e.currentTarget)}
+                  onError={onAssetError}
                 />
               }
               itemTwo={
@@ -278,6 +281,7 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
                   onPause={() => {
                     compareOriginalRef.current?.pause();
                   }}
+                  onError={onAssetError}
                 />
               }
             />
@@ -313,6 +317,7 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
                     src={generationThumbnailUrl(gen) as string}
                     alt={describeGeneration(gen)}
                     className="aspect-video w-full rounded-md bg-bg object-contain"
+                    onError={onAssetError}
                   />
                 ) : (
                   <div className="flex aspect-video w-full items-center justify-center rounded-md border border-dashed border-ink/20 bg-bg text-xs text-ink/60">

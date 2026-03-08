@@ -745,6 +745,7 @@ export default function App() {
   const patchMaskCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const patchDrawStateRef = useRef<{ tool: PatchToolMode; points: MaskPoint[]; last: MaskPoint | null } | null>(null);
   const requestedAutoQcRef = useRef<Set<string>>(new Set());
+  const signedUrlRefreshRef = useRef<Map<string, number>>(new Map());
 
   useEffect(() => {
     currentUser().then((user) => setIsAuthed(!!user));
@@ -2404,6 +2405,20 @@ export default function App() {
     goToReport(taskId, "outputs", null);
   }
 
+  const refreshSignedUrlsForTask = useCallback(
+    (taskId: string | null | undefined) => {
+      if (!taskId) return;
+      const now = Date.now();
+      const previous = signedUrlRefreshRef.current.get(taskId) ?? 0;
+      if (now - previous < 15_000) return;
+      signedUrlRefreshRef.current.set(taskId, now);
+      void queryClient.invalidateQueries({ queryKey: ["task", taskId] });
+      void queryClient.invalidateQueries({ queryKey: ["task", "report", taskId] });
+      void queryClient.invalidateQueries({ queryKey: ["task", "assets", taskId] });
+    },
+    [queryClient],
+  );
+
   async function ensureSegmentForSelectedFrames(): Promise<string | null> {
     if (!task || !selectedRange) return null;
     const existing = task.segments.find(
@@ -2710,6 +2725,7 @@ export default function App() {
       generationThumbnailUrl,
       formatCompactTimestamp,
       setVideoPreviewModal,
+      onAssetError: () => refreshSignedUrlsForTask(selectedTaskId),
       handleDeleteAsset,
       setGenerationCardsVisible,
     }),
@@ -2734,6 +2750,8 @@ export default function App() {
       selectedSegmentGenerations,
       generationCardsVisible,
       selectSegmentGeneration,
+      selectedTaskId,
+      refreshSignedUrlsForTask,
       handleDeleteAsset,
     ],
   );
@@ -2976,6 +2994,7 @@ export default function App() {
         videoPreview={videoPreviewModal}
         onCloseImage={() => setImagePreviewModal(null)}
         onCloseVideo={() => setVideoPreviewModal(null)}
+        onMediaError={() => refreshSignedUrlsForTask(selectedTaskId)}
       />
       <NewTaskModal
         isOpen={isNewTaskModalOpen}

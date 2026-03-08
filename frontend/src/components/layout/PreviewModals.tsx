@@ -6,9 +6,10 @@ type PreviewModalsProps = {
   videoPreview: VideoPreviewState;
   onCloseImage: () => void;
   onCloseVideo: () => void;
+  onMediaError?: () => void;
 };
 
-export default function PreviewModals({ imagePreview, videoPreview, onCloseImage, onCloseVideo }: PreviewModalsProps) {
+export default function PreviewModals({ imagePreview, videoPreview, onCloseImage, onCloseVideo, onMediaError }: PreviewModalsProps) {
   return (
     <>
       {imagePreview ? (
@@ -17,7 +18,13 @@ export default function PreviewModals({ imagePreview, videoPreview, onCloseImage
             <button className="absolute right-2 top-2 rounded bg-black/70 px-3 py-1 text-sm text-white" onClick={onCloseImage}>
               x
             </button>
-            <img src={imagePreview.url} alt={imagePreview.label} className="h-full w-full object-contain" onClick={onCloseImage} />
+            <img
+              src={imagePreview.url}
+              alt={imagePreview.label}
+              className="h-full w-full object-contain"
+              onClick={onCloseImage}
+              onError={onMediaError}
+            />
           </div>
         </div>
       ) : null}
@@ -28,7 +35,14 @@ export default function PreviewModals({ imagePreview, videoPreview, onCloseImage
             <button className="absolute right-2 top-2 rounded bg-black/70 px-3 py-1 text-sm text-white" onClick={onCloseVideo}>
               x
             </button>
-            <video src={videoPreview.url} controls autoPlay preload="metadata" className="h-[80vh] w-full rounded object-contain" />
+            <video
+              src={videoPreview.url}
+              controls
+              autoPlay
+              preload="metadata"
+              className="h-[80vh] w-full rounded object-contain"
+              onError={onMediaError}
+            />
           </div>
         </div>
       ) : null}
