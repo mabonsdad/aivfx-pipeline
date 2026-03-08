@@ -1,8 +1,185 @@
-type ReportsPageProps = {
-  ctx: any;
+import { useEffect, useMemo, useRef } from "react";
+import type { UseMutationResult, UseQueryResult } from "@tanstack/react-query";
+
+import type {
+  CustomReportOutputRef,
+  CustomReportRecord,
+  FrameRecord,
+  FrameVariant,
+  JobStatus,
+  SegmentGeneration,
+  SegmentRecord,
+  TaskDetail,
+} from "../types/api";
+
+type ReportGenerationRow = {
+  generation: SegmentGeneration;
+  segment: SegmentRecord | null;
+  startFrame: FrameRecord | null;
+  endFrame: FrameRecord | null;
+  startVariant: FrameVariant | null;
+  endVariant: FrameVariant | null;
+  originalUrl: string | null;
+  maskUrl: string | null;
+  editedUrl: string | null;
+  endFrameUrl: string | null;
+  generatedVideoUrl: string | null;
 };
 
 type VideoGenerationGroup = "start_video" | "start_end" | "start_only";
+
+type ReportView = "outputs" | "qc_frame" | "qc_video";
+
+type ReportOutputGroup = "video_generations" | "start_frames" | "end_frames";
+
+type ReportOutputCard = {
+  id: string;
+  taskId: string;
+  group: ReportOutputGroup;
+  title: string;
+  subtitle: string;
+  createdAt: string;
+  modelLabel: string;
+  promptLabel: string;
+  imageUrl: string | null;
+  videoUrl: string | null;
+  selectionRef: CustomReportOutputRef;
+};
+
+type QcFrameResult = {
+  metrics?: Record<string, unknown>;
+  artifacts?: Record<string, unknown>;
+};
+
+type QcFrameRow = {
+  id: string;
+  frame: FrameRecord;
+  variant: FrameVariant;
+  role: "start" | "end" | "unlinked";
+  linkedGenerations: ReportGenerationRow[];
+  qcGeneration: ReportGenerationRow | null;
+};
+
+type ReportsPageCtx = {
+  reportTask: TaskDetail | undefined;
+  reportTaskId: string | null;
+  sortedJobs: JobStatus[];
+  selectedOutputRefsByTask: Record<string, CustomReportOutputRef[]>;
+  reportOutputRefKey: (ref: CustomReportOutputRef) => string;
+  reportView: ReportView;
+  setReportView: (view: ReportView) => void;
+  setActiveCustomReportId: (reportId: string | null) => void;
+  activeCustomReportId: string | null;
+  goToTaskTimeline: (taskId: string) => void;
+  logout: () => void;
+  formatAssetDate: (iso: string) => string;
+  truncateIdentifier: (value: string, maxLength?: number) => string;
+  reportTaskQuery: UseQueryResult<TaskDetail, Error>;
+  runQcMutation: UseMutationResult<
+    { jobId: string },
+    Error,
+    { taskId: string; generationIds?: string[] },
+    unknown
+  >;
+  renderCustomReportBox: (taskId: string | null, reports: CustomReportRecord[] | undefined) => React.ReactNode;
+  toggleCustomReportOutput: (taskId: string, ref: CustomReportOutputRef) => void;
+  setVideoPreviewModal: (value: { url: string; label: string } | null) => void;
+  setImagePreviewModal: (value: { url: string; label: string } | null) => void;
+  formatCompactTimestamp: (iso: string | undefined) => string;
+  asNumber: (value: unknown) => number | null;
+  describeSegment: (segment: SegmentRecord) => string;
+  fpsValue: (task: TaskDetail | undefined) => number;
+  reportGraphModal: { url: string; label: string } | null;
+  setReportGraphModal: (value: { url: string; label: string } | null) => void;
+};
+
+type ReportsPageProps = {
+  ctx: ReportsPageCtx;
+};
+
+function safeTimestamp(iso: string | undefined): number {
+  if (!iso) return 0;
+  const timestamp = new Date(iso).getTime();
+  return Number.isNaN(timestamp) ? 0 : timestamp;
+}
+
+function generationThumbnailUrl(generation: SegmentGeneration): string | null {
+  return (
+    generation.inputFirstFrameUrl ??
+    generation.sourceFirstFrameCaptureUrl ??
+    generation.inputLastFrameUrl ??
+    generation.sourceLastFrameCaptureUrl ??
+    null
+  );
+}
+
+function classifyVideoGeneration(row: ReportGenerationRow): VideoGenerationGroup {
+  const model = row.generation.luma.model;
+  if (model === "ray-2" || model === "ray-flash-2" || model === "wan2.2-animate") {
+    return "start_video";
+  }
+  if (model === "runway-gen4.5" || model === "wan2.2-a14b") {
+    return "start_only";
+  }
+  const firstKey = row.generation.sourceFirstFrameResolvedKey ?? row.generation.inputFirstFrameKey ?? null;
+  const lastKey = row.generation.sourceLastFrameResolvedKey ?? row.generation.inputLastFrameKey ?? null;
+  if (!lastKey) return "start_only";
+  if (firstKey && firstKey === lastKey) return "start_end";
+  return "start_end";
+}
+
+function frameQcForVariant(generation: SegmentGeneration, variantId: string): QcFrameResult | null {
+  const qc = generation.qc;
+  if (!qc) return null;
+  const frameByVariant = (qc.frameByVariant as Record<string, QcFrameResult> | undefined) ?? undefined;
+  if (frameByVariant?.[variantId]) return frameByVariant[variantId];
+  if (generation.sourceFirstFrameVariantId === variantId && qc.frame) return qc.frame as QcFrameResult;
+  return null;
+}
+
+function hasFrameQcArtifacts(frameQc: QcFrameResult | null): boolean {
+  const artifacts = frameQc?.artifacts as Record<string, unknown> | undefined;
+  if (!artifacts) return false;
+  return Boolean(
+    artifacts.heatmapUrl ||
+      artifacts.heatmapKey ||
+      artifacts.overlayUrl ||
+      artifacts.overlayKey ||
+      artifacts.binaryChangeUrl ||
+      artifacts.binaryChangeKey ||
+      artifacts.boundaryOverlayUrl ||
+      artifacts.boundaryOverlayKey,
+  );
+}
+
+function generationNeedsQcForVideo(generation: SegmentGeneration): boolean {
+  if (generation.status !== "complete" || !generation.outputKey) return false;
+  const qc = generation.qc;
+  if (!qc) return true;
+  if (qc.status === "running") return false;
+  if (qc.status !== "complete") return true;
+  const artifacts = qc.video?.artifacts as Record<string, unknown> | undefined;
+  const hasVideoArtifacts = Boolean(
+    artifacts?.diffVideoUrl ||
+      artifacts?.diffVideoKey ||
+      artifacts?.timelineGraphUrl ||
+      artifacts?.timelineGraphKey ||
+      artifacts?.timelineCsvUrl ||
+      artifacts?.timelineCsvKey,
+  );
+  const selectedFrames = qc.video?.selectedFrames ?? [];
+  return !hasVideoArtifacts || selectedFrames.length === 0;
+}
+
+function generationNeedsQcForFrameVariant(generation: SegmentGeneration, variantId: string): boolean {
+  if (generation.status !== "complete" || !generation.outputKey || !generation.sourceFirstFrameVariantId) return false;
+  if (generation.sourceFirstFrameVariantId !== variantId && generation.sourceLastFrameVariantId !== variantId) return false;
+  const qc = generation.qc;
+  if (!qc) return true;
+  if (qc.status === "running") return false;
+  if (qc.status !== "complete") return true;
+  return !hasFrameQcArtifacts(frameQcForVariant(generation, variantId));
+}
 
 export default function ReportsPage({ ctx }: ReportsPageProps) {
   const {
@@ -14,7 +191,7 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
     reportView,
     setReportView,
     setActiveCustomReportId,
-    activeCustomReport,
+    activeCustomReportId,
     goToTaskTimeline,
     logout,
     formatAssetDate,
@@ -22,28 +199,254 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
     reportTaskQuery,
     runQcMutation,
     renderCustomReportBox,
-    reportCustomReports,
-    reportOutputCards,
     toggleCustomReportOutput,
     setVideoPreviewModal,
     setImagePreviewModal,
     formatCompactTimestamp,
-    qcFrameRows,
-    frameQcForVariant,
-    hasFrameQcArtifacts,
     asNumber,
-    qcVideoRowsByGroup,
     describeSegment,
     fpsValue,
     reportGraphModal,
     setReportGraphModal,
-  } = ctx as any;
+  } = ctx;
+
+  const requestedAutoQcRef = useRef<Set<string>>(new Set());
+  const reportSegmentsById = useMemo(
+    () => new Map((reportTask?.segments ?? []).map((segment) => [segment.segmentId, segment])),
+    [reportTask?.segments],
+  );
+  const reportRows = useMemo(() => {
+    if (!reportTask) return { rows: [] as ReportGenerationRow[] };
+    const frameById = reportTask.frames ?? {};
+    const allRows: ReportGenerationRow[] = Object.values(reportTask.segmentGenerations ?? {})
+      .filter((generation) => generation.status !== "failed")
+      .map((generation) => {
+        const segment = reportSegmentsById.get(generation.segmentId) ?? null;
+        const startFrame = segment ? frameById[segment.startFrameId] ?? null : null;
+        const endFrame = segment ? frameById[segment.endFrameId] ?? null : null;
+        const startVariantId = generation.sourceFirstFrameVariantId ?? startFrame?.selectedVariantId ?? null;
+        const endVariantId = generation.sourceLastFrameVariantId ?? endFrame?.selectedVariantId ?? null;
+        const startVariant = startVariantId ? startFrame?.variants.find((variant) => variant.variantId === startVariantId) ?? null : null;
+        const endVariant = endVariantId ? endFrame?.variants.find((variant) => variant.variantId === endVariantId) ?? null : null;
+        return {
+          generation,
+          segment,
+          startFrame,
+          endFrame,
+          startVariant,
+          endVariant,
+          originalUrl: startFrame?.imageUrl ?? generation.sourceFirstFrameCaptureUrl ?? null,
+          maskUrl: (startVariant?.patchMeta?.maskUrl as string | undefined) ?? null,
+          editedUrl: startVariant?.imageUrl ?? generation.inputFirstFrameUrl ?? null,
+          endFrameUrl: endVariant?.imageUrl ?? generation.inputLastFrameUrl ?? endFrame?.imageUrl ?? null,
+          generatedVideoUrl: generation.downloadUrl ?? null,
+        };
+      });
+    const sortScore = (row: ReportGenerationRow) => (row.generatedVideoUrl ? 0 : 1);
+    allRows.sort((a, b) => sortScore(a) - sortScore(b) || safeTimestamp(b.generation.createdAt) - safeTimestamp(a.generation.createdAt));
+    return { rows: allRows };
+  }, [reportSegmentsById, reportTask]);
+  const reportCustomReports = useMemo(
+    () => [...(reportTask?.customReports ?? [])].sort((a, b) => safeTimestamp(b.updatedAt) - safeTimestamp(a.updatedAt)),
+    [reportTask?.customReports],
+  );
+  const activeCustomReport = useMemo(
+    () => reportCustomReports.find((report) => report.reportId === activeCustomReportId) ?? null,
+    [activeCustomReportId, reportCustomReports],
+  );
+  const reportOutputCards = useMemo(() => {
+    if (!reportTask) {
+      return {
+        videoGenerations: [] as ReportOutputCard[],
+        startFrames: [] as ReportOutputCard[],
+        endFrames: [] as ReportOutputCard[],
+      };
+    }
+    const startFrameIds = new Set((reportTask.segments ?? []).map((segment) => segment.startFrameId));
+    const endFrameIds = new Set((reportTask.segments ?? []).map((segment) => segment.endFrameId));
+    const videoCards: ReportOutputCard[] = reportRows.rows
+      .filter((row) => Boolean(row.generatedVideoUrl))
+      .map((row) => ({
+        id: `report-card:gen:${row.generation.genId}`,
+        taskId: reportTask.taskId,
+        group: "video_generations",
+        title: row.segment ? `Segment ${row.segment.segmentId}` : row.generation.genId,
+        subtitle: row.segment
+          ? `${row.segment.startFrame}-${Math.max(row.segment.startFrame, row.segment.endFrameExclusive - 1)} · ${row.segment.durationSec.toFixed(2)}s`
+          : row.generation.segmentId,
+        createdAt: row.generation.createdAt,
+        modelLabel: row.generation.luma.model,
+        promptLabel: row.generation.luma.prompt?.trim() || "No prompt provided",
+        imageUrl: row.editedUrl ?? row.originalUrl ?? generationThumbnailUrl(row.generation),
+        videoUrl: row.generatedVideoUrl,
+        selectionRef: { assetType: "segment_generation", genId: row.generation.genId },
+      }));
+    const startCards: ReportOutputCard[] = [];
+    const endCards: ReportOutputCard[] = [];
+    for (const frame of Object.values(reportTask.frames ?? {})) {
+      for (const variant of frame.variants ?? []) {
+        if (!variant.imageUrl) continue;
+        const baseCard: ReportOutputCard = {
+          id: `report-card:variant:${frame.frameId}:${variant.variantId}`,
+          taskId: reportTask.taskId,
+          group: startFrameIds.has(frame.frameId) ? "start_frames" : "end_frames",
+          title: `Frame ${frame.frameIndex} (${frame.timecode})`,
+          subtitle: startFrameIds.has(frame.frameId)
+            ? "Start frame edit"
+            : endFrameIds.has(frame.frameId)
+              ? "End frame edit"
+              : "Unlinked frame edit",
+          createdAt: variant.createdAt,
+          modelLabel: `${variant.model} (${variant.type})`,
+          promptLabel: `Prompt hash ${truncateIdentifier(variant.promptHash, 16)}`,
+          imageUrl: variant.imageUrl,
+          videoUrl: null,
+          selectionRef: { assetType: "frame_variant", frameId: frame.frameId, variantId: variant.variantId },
+        };
+        if (startFrameIds.has(frame.frameId)) {
+          startCards.push(baseCard);
+        } else if (endFrameIds.has(frame.frameId)) {
+          endCards.push(baseCard);
+        } else {
+          startCards.push(baseCard);
+        }
+      }
+    }
+    const byCreated = (a: ReportOutputCard, b: ReportOutputCard) => safeTimestamp(b.createdAt) - safeTimestamp(a.createdAt);
+    videoCards.sort(byCreated);
+    startCards.sort(byCreated);
+    endCards.sort(byCreated);
+    return { videoGenerations: videoCards, startFrames: startCards, endFrames: endCards };
+  }, [reportRows.rows, reportTask, truncateIdentifier]);
+  const activeReportGenerationIds = useMemo(() => {
+    const ids = new Set<string>();
+    if (!activeCustomReport) return ids;
+    for (const ref of activeCustomReport.outputRefs ?? []) {
+      if (ref.assetType === "segment_generation") ids.add(ref.genId);
+    }
+    return ids;
+  }, [activeCustomReport]);
+  const activeReportFrameVariantKeys = useMemo(() => {
+    const keys = new Set<string>();
+    if (!activeCustomReport) return keys;
+    for (const ref of activeCustomReport.outputRefs ?? []) {
+      if (ref.assetType === "frame_variant") {
+        keys.add(`${ref.frameId}:${ref.variantId}`);
+      }
+    }
+    return keys;
+  }, [activeCustomReport]);
+  const scopedVideoRows = useMemo(() => {
+    const rows = reportRows.rows.filter((row) => Boolean(row.generation.outputKey));
+    if (!activeCustomReport) return rows;
+    return rows.filter((row) => activeReportGenerationIds.has(row.generation.genId));
+  }, [activeCustomReport, activeReportGenerationIds, reportRows.rows]);
+  const qcFrameRows = useMemo(() => {
+    if (!reportTask) return [] as QcFrameRow[];
+    const startFrameIds = new Set((reportTask.segments ?? []).map((segment) => segment.startFrameId));
+    const endFrameIds = new Set((reportTask.segments ?? []).map((segment) => segment.endFrameId));
+    const generationRowsByVariant = new Map<string, ReportGenerationRow[]>();
+    for (const row of reportRows.rows) {
+      for (const variantId of [row.generation.sourceFirstFrameVariantId, row.generation.sourceLastFrameVariantId]) {
+        if (!variantId) continue;
+        const existing = generationRowsByVariant.get(variantId) ?? [];
+        generationRowsByVariant.set(variantId, [...existing, row]);
+      }
+    }
+    const rows: QcFrameRow[] = [];
+    for (const frame of Object.values(reportTask.frames ?? {})) {
+      for (const variant of frame.variants ?? []) {
+        if (!variant.imageUrl) continue;
+        const refKey = `${frame.frameId}:${variant.variantId}`;
+        const linkedGenerations = generationRowsByVariant.get(variant.variantId) ?? [];
+        if (activeCustomReport) {
+          const includedByRef = activeReportFrameVariantKeys.has(refKey);
+          const includedByGeneration = linkedGenerations.some((row) => activeReportGenerationIds.has(row.generation.genId));
+          if (!includedByRef && !includedByGeneration) continue;
+        }
+        const qcGeneration =
+          linkedGenerations.find(
+            (row) => row.generation.qc?.status === "complete" && hasFrameQcArtifacts(frameQcForVariant(row.generation, variant.variantId)),
+          ) ??
+          linkedGenerations.find((row) => row.generation.qc?.status === "running") ??
+          linkedGenerations.find((row) => row.generation.qc?.status === "complete") ??
+          linkedGenerations[0] ??
+          null;
+        const role: "start" | "end" | "unlinked" = startFrameIds.has(frame.frameId)
+          ? "start"
+          : endFrameIds.has(frame.frameId)
+            ? "end"
+            : "unlinked";
+        rows.push({
+          id: `qc-frame:${frame.frameId}:${variant.variantId}`,
+          frame,
+          variant,
+          role,
+          linkedGenerations,
+          qcGeneration,
+        });
+      }
+    }
+    return rows.sort((a, b) => safeTimestamp(b.variant.createdAt) - safeTimestamp(a.variant.createdAt));
+  }, [activeCustomReport, activeReportFrameVariantKeys, activeReportGenerationIds, reportRows.rows, reportTask]);
+  const qcVideoRowsByGroup = useMemo(() => {
+    const grouped: Record<VideoGenerationGroup, ReportGenerationRow[]> = {
+      start_video: [],
+      start_end: [],
+      start_only: [],
+    };
+    for (const row of scopedVideoRows) {
+      grouped[classifyVideoGeneration(row)].push(row);
+    }
+    return grouped;
+  }, [scopedVideoRows]);
+  const scopedQcGenerationIdsNeedingRun = useMemo(() => {
+    if (!reportTask) return [] as string[];
+    const ids = new Set<string>();
+    for (const row of reportRows.rows) {
+      if (generationNeedsQcForVideo(row.generation)) ids.add(row.generation.genId);
+    }
+    for (const row of qcFrameRows) {
+      for (const linked of row.linkedGenerations) {
+        if (generationNeedsQcForFrameVariant(linked.generation, row.variant.variantId)) {
+          ids.add(linked.generation.genId);
+        }
+      }
+    }
+    return [...ids];
+  }, [qcFrameRows, reportRows.rows, reportTask]);
+
+  useEffect(() => {
+    if (!activeCustomReportId) return;
+    if (!reportCustomReports.some((report) => report.reportId === activeCustomReportId)) {
+      setActiveCustomReportId(null);
+    }
+  }, [activeCustomReportId, reportCustomReports, setActiveCustomReportId]);
+
+  useEffect(() => {
+    if (!reportTask) return;
+    if (!scopedQcGenerationIdsNeedingRun.length) return;
+    const sortedMissing = [...scopedQcGenerationIdsNeedingRun].sort();
+    const runKey = `${reportTask.taskId}:all:${sortedMissing.join(",")}`;
+    if (requestedAutoQcRef.current.has(runKey)) return;
+    requestedAutoQcRef.current.add(runKey);
+    void (async () => {
+      for (let index = 0; index < sortedMissing.length; index += 20) {
+        const generationIds = sortedMissing.slice(index, index + 20);
+        try {
+          await runQcMutation.mutateAsync({ taskId: reportTask.taskId, generationIds });
+        } catch {
+          break;
+        }
+      }
+    })();
+  }, [reportTask, runQcMutation, scopedQcGenerationIdsNeedingRun]);
 
   const reportPlaybackUrl = reportTask?.video?.editSource?.downloadUrl ?? reportTask?.video?.original?.downloadUrl ?? null;
   const latestQcJob =
-    sortedJobs.find((job: any) => job.type === "qc_analysis" && (!reportTaskId || job.taskId === reportTaskId)) ?? null;
+    sortedJobs.find((job) => job.type === "qc_analysis" && (!reportTaskId || job.taskId === reportTaskId)) ?? null;
   const selectedRefKeys = new Set(
-    reportTaskId ? (selectedOutputRefsByTask[reportTaskId] ?? []).map((ref: any) => reportOutputRefKey(ref)) : [],
+    reportTaskId ? (selectedOutputRefsByTask[reportTaskId] ?? []).map((ref) => reportOutputRefKey(ref)) : [],
   );
   const qcVideoGroupLabels: Record<VideoGenerationGroup, string> = {
     start_video: "Start Frame + Source Video",
