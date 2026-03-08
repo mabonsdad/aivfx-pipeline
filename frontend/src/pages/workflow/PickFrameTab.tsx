@@ -1,5 +1,46 @@
+import type { ComponentType, RefObject } from "react";
+
+import type { TaskDetail } from "../../types/api";
+
+export type PickFrameTabCtx = {
+  timelinePlaybackUrl: string;
+  timelineVideoRef: RefObject<HTMLVideoElement>;
+  frameCount: (task: TaskDetail | undefined) => number;
+  task: TaskDetail | undefined;
+  fpsValue: (task: TaskDetail | undefined) => number;
+  currentFrameIndex: number;
+  setCurrentFrameIndex: (frameIndex: number) => void;
+  FrameSelectCard: ComponentType<{
+    title: string;
+    frame: { frameId: string; frameIndex: number; timecode: string; imageUrl?: string } | null;
+    selectLabel: string;
+    onSelect: () => void;
+    onClear: () => void;
+  }>;
+  firstFrame: { frameId: string; frameIndex: number; timecode: string; imageUrl?: string } | null;
+  captureCurrentFrameFor: (boundary: "first" | "last") => Promise<void>;
+  setFirstFrameId: (frameId: string | null) => void;
+  timelineDelta: { frames: number; seconds: number; overLimit: boolean };
+  hasHardDurationLimit: boolean;
+  lumaHardLimitFrames: number;
+  lumaHardLimitSeconds: number;
+  lastFrame: { frameId: string; frameIndex: number; timecode: string; imageUrl?: string } | null;
+  setLastFrameId: (frameId: string | null) => void;
+  selectedRange: {
+    startFrame: number;
+    endFrameInclusive: number;
+    endFrameExclusive: number;
+    durationFrames: number;
+    durationSec: number;
+    overLimit: boolean;
+  } | null;
+  lumaModel: string;
+  selectedSegmentId: string | null;
+  setSelectedSegmentId: (segmentId: string | null) => void;
+};
+
 type PickFrameTabProps = {
-  ctx: any;
+  ctx: PickFrameTabCtx;
 };
 
 export default function PickFrameTab({ ctx }: PickFrameTabProps) {
@@ -25,7 +66,7 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
     lumaModel,
     selectedSegmentId,
     setSelectedSegmentId,
-  } = ctx as any;
+  } = ctx;
 
   return (
     <div className="space-y-4">
@@ -115,7 +156,7 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
 
       <div className="grid gap-2">
         <p className="text-sm font-medium text-ink/80">Available segments - click to reuse a segment</p>
-        {task?.segments.map((seg: any) => (
+        {task?.segments.map((seg) => (
           <button
             key={seg.segmentId}
             onClick={() => {

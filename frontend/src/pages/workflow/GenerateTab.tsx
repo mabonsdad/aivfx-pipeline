@@ -1,7 +1,75 @@
 import { ReactCompareSlider } from "react-compare-slider";
+import type { RefObject } from "react";
+
+import type { SegmentGeneration, SegmentRecord, TaskDetail } from "../../types/api";
+
+type GenerateInputMode = "start_video" | "start_end" | "start_only";
+type VideoModel =
+  | "ray-2"
+  | "ray-flash-2"
+  | "runway-gen4.5"
+  | "kling-2.6"
+  | "veo-3.1"
+  | "veo-3.1-fast"
+  | "wan2.2-a14b"
+  | "wan2.2-animate";
+
+export type GenerateTabCtx = {
+  setGenerationInputMode: (mode: GenerateInputMode) => void;
+  setLumaModel: (model: VideoModel) => void;
+  generationModelByInput: Record<GenerateInputMode, VideoModel>;
+  generationInputMode: GenerateInputMode;
+  selectedSegment: SegmentRecord | null;
+  describeSegment: (segment: SegmentRecord) => string;
+  lumaModel: VideoModel;
+  setGenerationModelByInput: (
+    update:
+      | Record<GenerateInputMode, VideoModel>
+      | ((previous: Record<GenerateInputMode, VideoModel>) => Record<GenerateInputMode, VideoModel>),
+  ) => void;
+  generationModelOptions: Array<{ value: VideoModel; label: string }>;
+  advancedMode: string;
+  setAdvancedMode: (value: string) => void;
+  lumaPrompt: string;
+  setLumaPrompt: (value: string) => void;
+  generationInputNote: string;
+  generationHelp: { title: string; lines: string[] };
+  selectedSegmentOverLimit: boolean;
+  lumaHardLimitSeconds: number;
+  selectedSegmentId: string | null;
+  generateSegmentMutation: { mutate: () => void };
+  segmentWindow: { startSec: number; endSec: number; startLabel: string; endLabel: string } | null;
+  originalSegmentPreviewUrl: string | null;
+  selectedPreviewGeneration: SegmentGeneration | null;
+  task: TaskDetail | undefined;
+  compareOriginalRef: RefObject<HTMLVideoElement>;
+  keepOriginalWithinSegment: (video: HTMLVideoElement) => void;
+  compareVariantRef: RefObject<HTMLVideoElement>;
+  syncOriginalToGenerated: (generatedVideo: HTMLVideoElement) => void;
+  selectedSegmentGenerations: SegmentGeneration[];
+  generationCardsVisible: number;
+  truncateIdentifier: (value: string, maxLength?: number) => string;
+  selectSegmentGeneration: (genId: string) => void;
+  describeGeneration: (generation: SegmentGeneration) => string;
+  generationThumbnailUrl: (generation: SegmentGeneration) => string | null;
+  formatCompactTimestamp: (iso: string | undefined) => string;
+  setVideoPreviewModal: (value: { url: string; label: string } | null) => void;
+  handleDeleteAsset: (item: {
+    id: string;
+    taskId: string;
+    title: string;
+    subtitle: string;
+    createdAt: string;
+    previewUrl: string;
+    downloadUrl: string;
+    mediaType: "image" | "video";
+    deletePayload: { assetType: "segment_generation"; genId: string };
+  }) => Promise<void>;
+  setGenerationCardsVisible: (update: number | ((count: number) => number)) => void;
+};
 
 type GenerateTabProps = {
-  ctx: any;
+  ctx: GenerateTabCtx;
 };
 
 export default function GenerateTab({ ctx }: GenerateTabProps) {
@@ -43,7 +111,7 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
     setVideoPreviewModal,
     handleDeleteAsset,
     setGenerationCardsVisible,
-  } = ctx as any;
+  } = ctx;
 
   return (
     <div className="space-y-4">
@@ -81,13 +149,13 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
               <select
                 value={lumaModel}
                 onChange={(e) => {
-                  const nextModel = e.target.value as any;
-                  setGenerationModelByInput((previous: Record<string, string>) => ({ ...previous, [generationInputMode]: nextModel }));
+                  const nextModel = e.target.value as VideoModel;
+                  setGenerationModelByInput((previous) => ({ ...previous, [generationInputMode]: nextModel }));
                   setLumaModel(nextModel);
                 }}
                 className="rounded-md border border-ink/20 px-3 py-2"
               >
-                {generationModelOptions.map((option: { value: string; label: string }) => (
+                {generationModelOptions.map((option) => (
                   <option key={option.value} value={option.value}>
                     {option.label}
                   </option>
@@ -218,7 +286,7 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
           <p className="text-sm text-ink/60">Select a segment and generated variant to compare.</p>
         )}
         <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-          {selectedSegmentGenerations.slice(0, generationCardsVisible).map((gen: any, index: number) => (
+          {selectedSegmentGenerations.slice(0, generationCardsVisible).map((gen, index) => (
             <div
               key={gen.genId}
               className={`rounded border p-2 ${
@@ -317,7 +385,7 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
           ))}
         </div>
         {generationCardsVisible < selectedSegmentGenerations.length ? (
-          <button className="text-sm text-accent underline" onClick={() => setGenerationCardsVisible((count: number) => count + 6)}>
+          <button className="text-sm text-accent underline" onClick={() => setGenerationCardsVisible((count) => count + 6)}>
             More...
           </button>
         ) : null}

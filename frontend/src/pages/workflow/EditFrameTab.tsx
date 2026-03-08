@@ -1,7 +1,94 @@
 import { ReactCompareSlider, ReactCompareSliderImage } from "react-compare-slider";
+import type { PointerEvent, RefObject } from "react";
+
+import type { TaskDetail } from "../../types/api";
+
+type EditFrameCandidate = {
+  id: string;
+  kind: "original" | "variant";
+  imageUrl: string;
+  label: string;
+  createdAt?: string;
+  variantId?: string;
+  isSelected: boolean;
+};
+
+type PatchReferenceImage = {
+  file: File;
+  previewUrl: string;
+};
+
+export type EditFrameTabCtx = {
+  setEditFrameTab: (tab: "first" | "last") => void;
+  editFrameTab: "first" | "last";
+  activeEditFrame:
+    | {
+        frameId: string;
+        frameIndex: number;
+        timecode: string;
+        imageUrl?: string;
+      }
+    | null;
+  prompt: string;
+  setPrompt: (value: string) => void;
+  model: "nano_banana" | "nano_banana_pro" | "chatgpt";
+  setModel: (value: "nano_banana" | "nano_banana_pro" | "chatgpt") => void;
+  fullEditMutation: { isPending: boolean; mutate: (frameId: string) => void };
+  task: TaskDetail | undefined;
+  activeEditSourceImageUrl: string | null;
+  activeCompareImageUrl: string | null;
+  activeEditCandidates: EditFrameCandidate[];
+  selectCompareCandidate: (frameId: string, tabKey: "first" | "last", candidate: EditFrameCandidate) => void;
+  setImagePreviewModal: (value: { url: string; label: string } | null) => void;
+  setEditSourceCandidate: (tabKey: "first" | "last", candidate: EditFrameCandidate) => void;
+  selectedTaskId: string | null;
+  handleDeleteAsset: (item: {
+    id: string;
+    taskId: string;
+    title: string;
+    subtitle: string;
+    createdAt: string;
+    previewUrl: string;
+    downloadUrl: string;
+    mediaType: "image" | "video";
+    deletePayload: { assetType: "frame_variant"; frameId: string; variantId: string };
+  }) => Promise<void>;
+  activeFrameDimensions: { width: number; height: number } | null;
+  patchOverlayCanvasRef: RefObject<HTMLCanvasElement>;
+  onPatchMaskPointerDown: (event: PointerEvent<HTMLCanvasElement>) => void;
+  onPatchMaskPointerMove: (event: PointerEvent<HTMLCanvasElement>) => void;
+  onPatchMaskPointerUp: (event: PointerEvent<HTMLCanvasElement>) => void;
+  patchEngine: "nano_banana_pro" | "chatgpt" | "runware_flux_fill" | "runware_ace_pp";
+  setPatchEngine: (value: "nano_banana_pro" | "chatgpt" | "runware_flux_fill" | "runware_ace_pp") => void;
+  patchToolMode: "brush_add" | "brush_erase" | "lasso_add" | "lasso_erase";
+  setPatchToolMode: (value: "brush_add" | "brush_erase" | "lasso_add" | "lasso_erase") => void;
+  patchBrushSize: number;
+  setPatchBrushSize: (value: number) => void;
+  featherPx: number;
+  setFeatherPx: (value: number) => void;
+  clearPatchMask: () => void;
+  edgeAwareRefine: boolean;
+  setEdgeAwareRefine: (value: boolean) => void;
+  edgeAwareStrength: number;
+  setEdgeAwareStrength: (value: number) => void;
+  edgeAwareRadiusPx: number;
+  setEdgeAwareRadiusPx: (value: number) => void;
+  maskGrowPx: number;
+  setMaskGrowPx: (value: number) => void;
+  activePatchReference: PatchReferenceImage | null;
+  setPatchReferenceForTab: (tabKey: "first" | "last", file: File) => void;
+  clearPatchReferenceForTab: (tabKey: "first" | "last") => void;
+  runwareRepaintingScale: number;
+  setRunwareRepaintingScale: (value: number) => void;
+  patchPrompt: string;
+  setPatchPrompt: (value: string) => void;
+  patchEditMutation: { isPending: boolean; mutate: (frameId: string) => void; error?: { message?: string } | null };
+  maskHasPaint: boolean;
+  formatCompactTimestamp: (iso: string | undefined) => string;
+};
 
 type EditFrameTabProps = {
-  ctx: any;
+  ctx: EditFrameTabCtx;
 };
 
 export default function EditFrameTab({ ctx }: EditFrameTabProps) {
@@ -55,7 +142,7 @@ export default function EditFrameTab({ ctx }: EditFrameTabProps) {
     patchEditMutation,
     maskHasPaint,
     formatCompactTimestamp,
-  } = ctx as any;
+  } = ctx;
 
   return (
               <div className="space-y-4">
@@ -152,7 +239,7 @@ export default function EditFrameTab({ ctx }: EditFrameTabProps) {
                     </div>
                   )}
                   <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                    {activeEditCandidates.map((candidate: any) => (
+                    {activeEditCandidates.map((candidate) => (
                       <div
                         key={candidate.id}
                         className={`rounded border p-2 ${
@@ -277,7 +364,7 @@ export default function EditFrameTab({ ctx }: EditFrameTabProps) {
                             Patch engine
                             <select
                               value={patchEngine}
-                              onChange={(e) => setPatchEngine(e.target.value as any)}
+                              onChange={(e) => setPatchEngine(e.target.value as EditFrameTabCtx["patchEngine"])}
                               className="mt-1 block w-full rounded border border-ink/20 px-2 py-1 text-sm"
                             >
                               <option value="nano_banana_pro">Google Nano Banana Pro</option>
@@ -290,7 +377,7 @@ export default function EditFrameTab({ ctx }: EditFrameTabProps) {
                             Tool
                             <select
                               value={patchToolMode}
-                              onChange={(e) => setPatchToolMode(e.target.value as any)}
+                              onChange={(e) => setPatchToolMode(e.target.value as EditFrameTabCtx["patchToolMode"])}
                               className="mt-1 block w-full rounded border border-ink/20 px-2 py-1 text-sm"
                             >
                               <option value="brush_add">Brush (add)</option>

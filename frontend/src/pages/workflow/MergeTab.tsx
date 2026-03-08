@@ -1,5 +1,72 @@
+import type { ComponentType } from "react";
+
+import type { ExportRecord, SegmentGeneration, SegmentRecord } from "../../types/api";
+
+type VideoFrameStripItem = {
+  frameIndex: number;
+  imageUrl: string | null;
+};
+
+export type MergeTabCtx = {
+  mergeTargetGeneration: SegmentGeneration | null;
+  mergeTargetSegment: SegmentRecord | null;
+  describeGeneration: (generation: SegmentGeneration) => string;
+  describeSegment: (segment: SegmentRecord) => string;
+  mergeMaxFrameIndex: number;
+  mergeInsertStartFrame: number;
+  setMergeInsertStartFrame: (value: number) => void;
+  mergeGeneratedDurationFrames: number;
+  mergeTrimStartFrames: number;
+  setMergeTrimStartFrames: (value: number) => void;
+  mergeTrimEndFrames: number;
+  setMergeTrimEndFrames: (value: number) => void;
+  temporalFeatherFrames: number;
+  setTemporalFeatherFrames: (value: number) => void;
+  mergeOriginalStartFrame: number;
+  mergeOriginalEndFrameExclusive: number;
+  mergeOriginalDurationFrames: number;
+  formatFramesAndSeconds: (frames: number, fps: number) => string;
+  mergeFps: number;
+  mergeEffectiveDurationFrames: number;
+  mergeInsertStartFrameClamped: number;
+  mergeEffectiveEndFrameExclusive: number;
+  mergeEndOffsetFrames: number;
+  mergeGeneratedStartAnchor: number;
+  mergeFeatherClamped: number;
+  startBoundaryOriginalThumbs: VideoFrameStripItem[];
+  startBoundaryGeneratedThumbs: VideoFrameStripItem[];
+  MergeBoundaryPreview: ComponentType<{
+    title: string;
+    subtitle: string;
+    firstTrack: {
+      title: string;
+      items: VideoFrameStripItem[];
+      anchorFrame: number;
+      overlapStart?: number;
+      overlapEnd?: number;
+      prefix: string;
+    };
+    secondTrack: {
+      title: string;
+      items: VideoFrameStripItem[];
+      anchorFrame: number;
+      overlapStart?: number;
+      overlapEnd?: number;
+      prefix: string;
+    };
+  }>;
+  mergeGeneratedEndAnchor: number;
+  endBoundaryGeneratedThumbs: VideoFrameStripItem[];
+  endBoundaryOriginalThumbs: VideoFrameStripItem[];
+  mergeMutation: { isPending: boolean; mutate: () => void };
+  sortedExports: ExportRecord[];
+  humanizeFilename: (value: string) => string;
+  keyBasenameFromS3Key: (key: string) => string;
+  formatCompactTimestamp: (iso: string | undefined) => string;
+};
+
 type MergeTabProps = {
-  ctx: any;
+  ctx: MergeTabCtx;
 };
 
 export default function MergeTab({ ctx }: MergeTabProps) {
@@ -40,7 +107,7 @@ export default function MergeTab({ ctx }: MergeTabProps) {
     humanizeFilename,
     keyBasenameFromS3Key,
     formatCompactTimestamp,
-  } = ctx as any;
+  } = ctx;
 
   return (
     <div className="space-y-4">
@@ -195,7 +262,7 @@ export default function MergeTab({ ctx }: MergeTabProps) {
         </button>
       </div>
       <div className="space-y-2">
-        {sortedExports.map((exp: any) => (
+        {sortedExports.map((exp) => (
           <div key={exp.exportId} className="rounded border border-ink/10 p-3">
             <p className="font-medium">{humanizeFilename(keyBasenameFromS3Key(exp.outputKey || `${exp.exportId}.mp4`))}</p>
             <p className="text-xs text-ink/60">

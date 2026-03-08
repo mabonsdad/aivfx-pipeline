@@ -1,16 +1,24 @@
+import type { JobStatus } from "../../types/api";
+
+export type JobsPanelCtx = {
+  sortedJobs: JobStatus[];
+  jobsVisible: number;
+  setJobsVisible: (update: number | ((count: number) => number)) => void;
+};
+
 type JobsPanelProps = {
-  ctx: any;
+  ctx: JobsPanelCtx;
 };
 
 export default function JobsPanel({ ctx }: JobsPanelProps) {
-  const { sortedJobs, jobsVisible, setJobsVisible } = ctx as any;
+  const { sortedJobs, jobsVisible, setJobsVisible } = ctx;
 
   return (
     <div className="rounded-2xl border border-ink/10 bg-card p-4">
       <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide">Jobs</h3>
       <div className="space-y-2 text-sm">
         {sortedJobs.length === 0 && <p className="text-ink/60">No jobs yet.</p>}
-        {sortedJobs.slice(0, jobsVisible).map((job: any) => {
+        {sortedJobs.slice(0, jobsVisible).map((job) => {
           return (
             <div
               key={job.jobId}
@@ -27,7 +35,7 @@ export default function JobsPanel({ ctx }: JobsPanelProps) {
           );
         })}
         {jobsVisible < sortedJobs.length ? (
-          <button className="text-sm text-accent underline" onClick={() => setJobsVisible((count: number) => count + 6)}>
+          <button className="text-sm text-accent underline" onClick={() => setJobsVisible((count) => count + 6)}>
             More...
           </button>
         ) : null}

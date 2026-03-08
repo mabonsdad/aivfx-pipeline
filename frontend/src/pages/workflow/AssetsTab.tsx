@@ -1,7 +1,49 @@
-import type { CustomReportOutputRef } from "../../types/api";
+import type { ReactNode } from "react";
+
+import type { CustomReportOutputRef, CustomReportRecord, TaskDetail } from "../../types/api";
+
+type LibraryAsset = {
+  id: string;
+  taskId: string;
+  title: string;
+  subtitle: string;
+  createdAt: string;
+  previewUrl: string;
+  downloadUrl: string;
+  thumbnailUrl?: string;
+  mediaType: "image" | "video";
+  customReportRef?: CustomReportOutputRef;
+  deletePayload:
+    | { assetType: "upload" }
+    | { assetType: "frame_capture"; frameId: string }
+    | { assetType: "frame_variant"; frameId: string; variantId: string }
+    | { assetType: "segment_generation"; genId: string }
+    | { assetType: "export"; exportId: string };
+};
+
+export type AssetsTabCtx = {
+  selectedTaskId: string | null;
+  task: TaskDetail | undefined;
+  renderCustomReportBox: (taskId: string | null, reports: CustomReportRecord[] | undefined) => ReactNode;
+  assetsLoading: boolean;
+  uploadAssets: LibraryAsset[];
+  uploadAssetsVisible: number;
+  formatAssetDate: (iso: string) => string;
+  selectedReportOutputs: Record<string, { taskId: string; ref: CustomReportOutputRef }>;
+  reportOutputRefKey: (ref: CustomReportOutputRef) => string;
+  toggleCustomReportOutput: (taskId: string, ref: CustomReportOutputRef) => void;
+  handleDeleteAsset: (item: LibraryAsset) => Promise<void>;
+  setUploadAssetsVisible: (update: number | ((count: number) => number)) => void;
+  frameAssets: LibraryAsset[];
+  frameAssetsVisible: number;
+  setFrameAssetsVisible: (update: number | ((count: number) => number)) => void;
+  outputVideoAssets: LibraryAsset[];
+  videoAssetsVisible: number;
+  setVideoAssetsVisible: (update: number | ((count: number) => number)) => void;
+};
 
 type AssetsTabProps = {
-  ctx: any;
+  ctx: AssetsTabCtx;
 };
 
 export default function AssetsTab({ ctx }: AssetsTabProps) {
@@ -24,7 +66,7 @@ export default function AssetsTab({ ctx }: AssetsTabProps) {
     outputVideoAssets,
     videoAssetsVisible,
     setVideoAssetsVisible,
-  } = ctx as any;
+  } = ctx;
 
   return (
     <div className="space-y-6">
@@ -37,7 +79,7 @@ export default function AssetsTab({ ctx }: AssetsTabProps) {
           <p className="text-sm text-ink/60">No uploads found.</p>
         ) : (
           <div className="space-y-2">
-            {uploadAssets.slice(0, uploadAssetsVisible).map((item: any, index: number) => (
+            {uploadAssets.slice(0, uploadAssetsVisible).map((item, index) => (
               <div
                 key={item.id}
                 className={`grid gap-2 rounded border p-2 md:grid-cols-[140px_1fr_auto] md:items-center ${
@@ -80,7 +122,7 @@ export default function AssetsTab({ ctx }: AssetsTabProps) {
               </div>
             ))}
             {uploadAssetsVisible < uploadAssets.length ? (
-              <button className="text-sm text-accent underline" onClick={() => setUploadAssetsVisible((count: number) => count + 6)}>
+              <button className="text-sm text-accent underline" onClick={() => setUploadAssetsVisible((count) => count + 6)}>
                 More...
               </button>
             ) : null}
@@ -94,7 +136,7 @@ export default function AssetsTab({ ctx }: AssetsTabProps) {
           <p className="text-sm text-ink/60">No frame assets found.</p>
         ) : (
           <div className="space-y-2">
-            {frameAssets.slice(0, frameAssetsVisible).map((item: any, index: number) => (
+            {frameAssets.slice(0, frameAssetsVisible).map((item, index) => (
               <div
                 key={item.id}
                 className={`grid gap-2 rounded border p-2 md:grid-cols-[140px_1fr_auto] md:items-center ${
@@ -131,7 +173,7 @@ export default function AssetsTab({ ctx }: AssetsTabProps) {
               </div>
             ))}
             {frameAssetsVisible < frameAssets.length ? (
-              <button className="text-sm text-accent underline" onClick={() => setFrameAssetsVisible((count: number) => count + 6)}>
+              <button className="text-sm text-accent underline" onClick={() => setFrameAssetsVisible((count) => count + 6)}>
                 More...
               </button>
             ) : null}
@@ -145,7 +187,7 @@ export default function AssetsTab({ ctx }: AssetsTabProps) {
           <p className="text-sm text-ink/60">No output videos found.</p>
         ) : (
           <div className="space-y-2">
-            {outputVideoAssets.slice(0, videoAssetsVisible).map((item: any, index: number) => (
+            {outputVideoAssets.slice(0, videoAssetsVisible).map((item, index) => (
               <div
                 key={item.id}
                 className={`grid gap-2 rounded border p-2 md:grid-cols-[140px_1fr_auto] md:items-center ${
@@ -188,7 +230,7 @@ export default function AssetsTab({ ctx }: AssetsTabProps) {
               </div>
             ))}
             {videoAssetsVisible < outputVideoAssets.length ? (
-              <button className="text-sm text-accent underline" onClick={() => setVideoAssetsVisible((count: number) => count + 6)}>
+              <button className="text-sm text-accent underline" onClick={() => setVideoAssetsVisible((count) => count + 6)}>
                 More...
               </button>
             ) : null}
