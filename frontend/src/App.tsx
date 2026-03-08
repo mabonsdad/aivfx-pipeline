@@ -684,6 +684,9 @@ export default function App() {
   } = useUiStore();
 
   const [isAuthed, setIsAuthed] = useState(false);
+  const [isPageVisible, setIsPageVisible] = useState(
+    typeof document === "undefined" ? true : document.visibilityState === "visible",
+  );
   const routeState = useWorkflowRouteState(location.pathname);
   const { reportView, activeCustomReportId } = useReportRouteState(location.search);
   const [selectedReportOutputs, setSelectedReportOutputs] = useState<Record<string, { taskId: string; ref: CustomReportOutputRef }>>({});
@@ -745,6 +748,14 @@ export default function App() {
 
   useEffect(() => {
     currentUser().then((user) => setIsAuthed(!!user));
+  }, []);
+  useEffect(() => {
+    if (typeof document === "undefined") return undefined;
+    const onVisibilityChange = () => {
+      setIsPageVisible(document.visibilityState === "visible");
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
   }, []);
 
   const tasksQuery = useQuery({
@@ -837,6 +848,7 @@ export default function App() {
     handleCreateTaskWithUpload,
   } = useTaskLifecycle({
     isAuthed,
+    isPageVisible,
     selectedTaskId,
     existingTaskNames: (tasksQuery.data ?? []).map((taskItem) => taskItem.name),
     queryClient,
@@ -848,18 +860,28 @@ export default function App() {
   const taskQuery = useQuery({
     queryKey: ["task", selectedTaskId],
     queryFn: async () => apiClient.getTask(selectedTaskId as string),
-    enabled: isAuthed && !!selectedTaskId,
+    enabled: isAuthed && !!selectedTaskId && !isReportTab,
     staleTime: 15_000,
-    refetchInterval: isAuthed && !!selectedTaskId ? TASK_URL_REFRESH_MS : false,
+    refetchInterval: isAuthed && !!selectedTaskId && isPageVisible ? TASK_URL_REFRESH_MS : false,
+    refetchOnMount: "always",
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
   });
-  const reportTaskQuery = taskQuery;
+  const reportTaskQuery = useQuery({
+    queryKey: ["task", "report", reportTaskId],
+    queryFn: async () => apiClient.getTask(reportTaskId as string),
+    enabled: isAuthed && !!reportTaskId && isReportTab,
+    staleTime: 15_000,
+    refetchInterval: isAuthed && !!reportTaskId && isPageVisible ? TASK_URL_REFRESH_MS : false,
+    refetchOnMount: "always",
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+  });
   const assetTaskQueries = useQueries({
     queries: (tasksQuery.data ?? []).map((taskItem) => ({
       queryKey: ["task", "assets", taskItem.taskId],
       queryFn: () => apiClient.getTask(taskItem.taskId),
-      enabled: isAuthed && tab === "assets",
+      enabled: isAuthed && tab === "assets" && isPageVisible,
       refetchOnWindowFocus: false as const,
     })),
   });
@@ -1659,6 +1681,7 @@ export default function App() {
       queryKey: ["job", jobId],
       queryFn: () => apiClient.getJob(jobId),
       refetchInterval: (q: { state: { data?: { status?: string } } }) => {
+        if (!isPageVisible) return false;
         const status = q?.state?.data?.status;
         return status === "queued" || status === "running" ? 3000 : false;
       },

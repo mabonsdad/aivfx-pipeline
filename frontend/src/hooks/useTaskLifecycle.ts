@@ -8,6 +8,7 @@ export type NewTaskStage = "idle" | "creating" | "uploading" | "ingesting" | "er
 
 type UseTaskLifecycleParams = {
   isAuthed: boolean;
+  isPageVisible: boolean;
   selectedTaskId: string | null;
   existingTaskNames: string[];
   queryClient: QueryClient;
@@ -55,6 +56,7 @@ function uploadFileWithProgress(
 
 export function useTaskLifecycle({
   isAuthed,
+  isPageVisible,
   selectedTaskId,
   existingTaskNames,
   queryClient,
@@ -75,6 +77,7 @@ export function useTaskLifecycle({
     queryFn: () => apiClient.getJob(pendingCreateJobId as string),
     enabled: isAuthed && !!pendingCreateJobId,
     refetchInterval: (q: { state: { data?: { status?: string } } }) => {
+      if (!isPageVisible) return false;
       const status = q?.state?.data?.status;
       return status === "queued" || status === "running" ? 2000 : false;
     },
