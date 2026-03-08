@@ -74,7 +74,6 @@ def create_veo_first_last_generation(
                 {"inputImage": start_image_url, "frame": "first"},
                 {"inputImage": end_image_url, "frame": "last"},
             ],
-            "generateAudio": bool(generate_audio),
             "numberResults": 1,
             "outputFormat": "mp4",
         }
