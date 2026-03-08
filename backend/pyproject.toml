@@ -9,7 +9,6 @@ description = "Serverless backend for AI-assisted VFX micro-pipeline"
 requires-python = ">=3.10"
 dependencies = [
   "aws-lambda-powertools==3.8.0",
-  "aws-xray-sdk==2.14.0",
   "pydantic==2.10.6",
   "requests==2.32.3",
   "tenacity==9.0.0",

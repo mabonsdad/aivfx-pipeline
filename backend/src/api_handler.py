@@ -12,7 +12,7 @@ from typing import Any
 from urllib.parse import parse_qs
 
 import boto3
-from aws_lambda_powertools import Logger, Tracer
+from aws_lambda_powertools import Logger
 from botocore.exceptions import ClientError
 from pydantic import ValidationError
 
@@ -48,7 +48,6 @@ from src.models.schemas import (
 from src.quality_match.service import QualityMatchSettings, apply_quality_match, analyse_quality_match
 
 logger = Logger()
-tracer = Tracer()
 settings = load_settings()
 VIDEO_MODEL_MAX_SECONDS: dict[str, int] = {
     "ray-2": 10,
@@ -1529,7 +1528,6 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
 
 
 @logger.inject_lambda_context(log_event=False)
-@tracer.capture_lambda_handler
 def handler(event, context):
     try:
         return _route(event)
