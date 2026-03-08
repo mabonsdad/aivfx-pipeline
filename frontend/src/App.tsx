@@ -740,8 +740,13 @@ export default function App() {
   }, [location.pathname]);
 
   const [isAuthed, setIsAuthed] = useState(false);
-  const [reportView, setReportView] = useState<ReportView>("outputs");
-  const [activeCustomReportId, setActiveCustomReportId] = useState<string | null>(null);
+  const routeSearch = useMemo(() => new URLSearchParams(location.search), [location.search]);
+  const reportViewParam = routeSearch.get("view");
+  const reportView: ReportView =
+    reportViewParam === "qc_frame" || reportViewParam === "qc_video" || reportViewParam === "outputs"
+      ? reportViewParam
+      : "outputs";
+  const activeCustomReportId = routeSearch.get("reportId");
   const [selectedReportOutputs, setSelectedReportOutputs] = useState<Record<string, { taskId: string; ref: CustomReportOutputRef }>>({});
   const [customReportNotice, setCustomReportNotice] = useState<string | null>(null);
   const [isNewTaskModalOpen, setIsNewTaskModalOpen] = useState(false);
@@ -857,6 +862,37 @@ export default function App() {
     [navigate, selectedTaskId, tasksQuery.data],
   );
 
+  const goToReport = useCallback(
+    (taskId: string, view: ReportView, reportId: string | null = null, replace = false) => {
+      const params = new URLSearchParams();
+      params.set("view", view);
+      if (reportId) {
+        params.set("reportId", reportId);
+      }
+      const nextPath = taskRoute(taskId, "report");
+      const nextSearch = `?${params.toString()}`;
+      if (location.pathname === nextPath && location.search === nextSearch) return;
+      navigate({ pathname: nextPath, search: nextSearch }, { replace });
+    },
+    [location.pathname, location.search, navigate],
+  );
+
+  const setReportView = useCallback(
+    (nextView: ReportView) => {
+      if (!selectedTaskId) return;
+      goToReport(selectedTaskId, nextView, nextView === "outputs" ? null : activeCustomReportId);
+    },
+    [activeCustomReportId, goToReport, selectedTaskId],
+  );
+
+  const setActiveCustomReportId = useCallback(
+    (reportId: string | null) => {
+      if (!selectedTaskId) return;
+      goToReport(selectedTaskId, reportView, reportId);
+    },
+    [goToReport, reportView, selectedTaskId],
+  );
+
   useEffect(() => {
     if (!isAuthed) return;
     const fallbackTaskId = routeState.taskId ?? storeSelectedTaskId ?? tasksQuery.data?.[0]?.taskId ?? null;
@@ -868,11 +904,18 @@ export default function App() {
     const normalizedPath = location.pathname.replace(/\/+$/, "") || "/";
     const expectedPath = taskRoute(fallbackTaskId, desiredTab);
     if (normalizedPath !== expectedPath) {
-      navigate(expectedPath, { replace: normalizedPath === "/" });
+      navigate(
+        {
+          pathname: expectedPath,
+          search: desiredTab === "report" ? location.search : "",
+        },
+        { replace: normalizedPath === "/" },
+      );
     }
   }, [
     isAuthed,
     location.pathname,
+    location.search,
     navigate,
     routeState.tab,
     routeState.taskId,
@@ -1216,10 +1259,11 @@ export default function App() {
   useEffect(() => {
     if (!activeCustomReportId) return;
     if (!reportCustomReports.some((report) => report.reportId === activeCustomReportId)) {
-      setActiveCustomReportId(null);
-      setReportView("outputs");
+      if (selectedTaskId) {
+        goToReport(selectedTaskId, "outputs", null, true);
+      }
     }
-  }, [activeCustomReportId, reportCustomReports]);
+  }, [activeCustomReportId, goToReport, reportCustomReports, selectedTaskId]);
 
   useEffect(() => {
     setFirstFrameId(null);
@@ -2475,9 +2519,7 @@ export default function App() {
     try {
       const result = await createCustomReportMutation.mutateAsync({ taskId, reportType, outputRefs: scopedRefs });
       setCustomReportNotice("Custom report created.");
-      setReportView(reportType);
-      setActiveCustomReportId(result.reportId);
-      setTab("report", taskId);
+      goToReport(taskId, reportType, result.reportId);
     } catch (error) {
       setCustomReportNotice(error instanceof Error ? error.message : "Failed to create custom report.");
     }
@@ -2489,8 +2531,7 @@ export default function App() {
     try {
       await deleteCustomReportMutation.mutateAsync({ taskId, reportId: report.reportId });
       if (activeCustomReportId === report.reportId) {
-        setActiveCustomReportId(null);
-        setReportView("outputs");
+        goToReport(taskId, "outputs", null, true);
       }
     } catch (error) {
       window.alert(error instanceof Error ? error.message : "Failed to delete report.");
@@ -2498,15 +2539,11 @@ export default function App() {
   }
 
   function openCustomReport(taskId: string, report: CustomReportRecord) {
-    setActiveCustomReportId(report.reportId);
-    setReportView(report.reportType);
-    setTab("report", taskId);
+    goToReport(taskId, report.reportType, report.reportId);
   }
 
   function openTaskReport(taskId: string) {
-    setReportView("outputs");
-    setActiveCustomReportId(null);
-    setTab("report", taskId);
+    goToReport(taskId, "outputs", null);
   }
 
   async function ensureSegmentForSelectedFrames(): Promise<string | null> {
