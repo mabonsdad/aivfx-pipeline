@@ -1,4 +1,4 @@
-import { Suspense, lazy, type PointerEvent, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, type PointerEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocation, useNavigate } from "react-router-dom";
 
@@ -147,6 +147,10 @@ const ROUTE_SEGMENT_TO_TAB: Record<string, TabId> = {
   "download-assets": "assets",
   reports: "report",
 };
+
+function taskRoute(taskId: string, tab: TabId): string {
+  return `/tasks/${encodeURIComponent(taskId)}/${TAB_ROUTE_SEGMENT[tab]}`;
+}
 
 const VIDEO_FRAME_THUMBNAIL_CACHE = new Map<string, string | null>();
 const MAX_TRACKED_JOB_IDS = 40;
@@ -713,7 +717,7 @@ export default function App() {
   const navigate = useNavigate();
   const location = useLocation();
   const {
-    selectedTaskId,
+    selectedTaskId: storeSelectedTaskId,
     currentFrameIndex,
     selectedFrameId,
     selectedSegmentId,
@@ -736,8 +740,6 @@ export default function App() {
   }, [location.pathname]);
 
   const [isAuthed, setIsAuthed] = useState(false);
-  const [tab, setTab] = useState<TabId>(routeState.tab ?? "timeline");
-  const [reportTaskId, setReportTaskId] = useState<string | null>(null);
   const [reportView, setReportView] = useState<ReportView>("outputs");
   const [activeCustomReportId, setActiveCustomReportId] = useState<string | null>(null);
   const [selectedReportOutputs, setSelectedReportOutputs] = useState<Record<string, { taskId: string; ref: CustomReportOutputRef }>>({});
@@ -842,37 +844,42 @@ export default function App() {
     }
   }, [generationInputMode, generationModelByInput, lumaModel]);
 
+  const tab: TabId = routeState.tab ?? "timeline";
+  const selectedTaskId = routeState.taskId ?? storeSelectedTaskId;
+  const reportTaskId = selectedTaskId;
+
+  const setTab = useCallback(
+    (nextTab: TabId, taskIdOverride?: string | null, replace = false) => {
+      const targetTaskId = taskIdOverride ?? selectedTaskId ?? tasksQuery.data?.[0]?.taskId ?? null;
+      if (!targetTaskId) return;
+      navigate(taskRoute(targetTaskId, nextTab), { replace });
+    },
+    [navigate, selectedTaskId, tasksQuery.data],
+  );
+
   useEffect(() => {
-    if (!selectedTaskId && tasksQuery.data?.length) {
-      setSelectedTaskId(tasksQuery.data[0].taskId);
+    if (!isAuthed) return;
+    const fallbackTaskId = routeState.taskId ?? storeSelectedTaskId ?? tasksQuery.data?.[0]?.taskId ?? null;
+    if (!fallbackTaskId) return;
+    if (storeSelectedTaskId !== fallbackTaskId) {
+      setSelectedTaskId(fallbackTaskId);
     }
-  }, [selectedTaskId, setSelectedTaskId, tasksQuery.data]);
-
-  useEffect(() => {
-    if (routeState.taskId && routeState.taskId !== selectedTaskId) {
-      setSelectedTaskId(routeState.taskId);
-    }
-  }, [routeState.taskId, selectedTaskId, setSelectedTaskId]);
-
-  useEffect(() => {
-    if (routeState.tab && routeState.tab !== tab) {
-      setTab(routeState.tab);
-    }
-  }, [routeState.tab, tab]);
-
-  const expectedPath = useMemo(() => {
-    if (!selectedTaskId) return "/";
-    return `/tasks/${encodeURIComponent(selectedTaskId)}/${TAB_ROUTE_SEGMENT[tab]}`;
-  }, [selectedTaskId, tab]);
-
-  useEffect(() => {
-    if (routeState.tab && routeState.tab !== tab) return;
-    if (routeState.taskId && routeState.taskId !== selectedTaskId) return;
+    const desiredTab = routeState.tab ?? "timeline";
     const normalizedPath = location.pathname.replace(/\/+$/, "") || "/";
-    if (normalizedPath === expectedPath) return;
-    const replace = normalizedPath === "/" && expectedPath !== "/";
-    navigate(expectedPath, { replace });
-  }, [expectedPath, location.pathname, navigate, routeState.tab, routeState.taskId, selectedTaskId, tab]);
+    const expectedPath = taskRoute(fallbackTaskId, desiredTab);
+    if (normalizedPath !== expectedPath) {
+      navigate(expectedPath, { replace: normalizedPath === "/" });
+    }
+  }, [
+    isAuthed,
+    location.pathname,
+    navigate,
+    routeState.tab,
+    routeState.taskId,
+    setSelectedTaskId,
+    storeSelectedTaskId,
+    tasksQuery.data,
+  ]);
 
   const taskQuery = useQuery({
     queryKey: ["task", selectedTaskId],
@@ -883,15 +890,7 @@ export default function App() {
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
   });
-  const reportTaskQuery = useQuery({
-    queryKey: ["task", "report", reportTaskId],
-    queryFn: async () => apiClient.getTask(reportTaskId as string),
-    enabled: isAuthed && tab === "report" && !!reportTaskId,
-    staleTime: 15_000,
-    refetchInterval: isAuthed && tab === "report" && !!reportTaskId ? TASK_URL_REFRESH_MS : false,
-    refetchOnWindowFocus: false,
-    refetchOnReconnect: false,
-  });
+  const reportTaskQuery = taskQuery;
   const pendingCreateJobQuery = useQuery({
     queryKey: ["job", pendingCreateJobId],
     queryFn: () => apiClient.getJob(pendingCreateJobId as string),
@@ -1293,12 +1292,6 @@ export default function App() {
   }, [tab]);
 
   useEffect(() => {
-    if (tab === "report" && selectedTaskId && reportTaskId !== selectedTaskId) {
-      setReportTaskId(selectedTaskId);
-    }
-  }, [reportTaskId, selectedTaskId, tab]);
-
-  useEffect(() => {
     setGenerationCardsVisible(6);
   }, [selectedSegmentId]);
 
@@ -1391,6 +1384,7 @@ export default function App() {
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["tasks"] });
       setSelectedTaskId(null);
+      navigate("/", { replace: true });
     },
   });
   const deleteAssetMutation = useMutation({
@@ -2481,11 +2475,9 @@ export default function App() {
     try {
       const result = await createCustomReportMutation.mutateAsync({ taskId, reportType, outputRefs: scopedRefs });
       setCustomReportNotice("Custom report created.");
-      setReportTaskId(taskId);
-      setSelectedTaskId(taskId);
       setReportView(reportType);
       setActiveCustomReportId(result.reportId);
-      setTab("report");
+      setTab("report", taskId);
     } catch (error) {
       setCustomReportNotice(error instanceof Error ? error.message : "Failed to create custom report.");
     }
@@ -2506,19 +2498,15 @@ export default function App() {
   }
 
   function openCustomReport(taskId: string, report: CustomReportRecord) {
-    setReportTaskId(taskId);
-    setSelectedTaskId(taskId);
     setActiveCustomReportId(report.reportId);
     setReportView(report.reportType);
-    setTab("report");
+    setTab("report", taskId);
   }
 
   function openTaskReport(taskId: string) {
-    setReportTaskId(taskId);
     setReportView("outputs");
     setActiveCustomReportId(null);
-    setSelectedTaskId(taskId);
-    setTab("report");
+    setTab("report", taskId);
   }
 
   async function ensureSegmentForSelectedFrames(): Promise<string | null> {
@@ -2695,6 +2683,7 @@ export default function App() {
       setNewTaskName(normalizedTaskName);
       const created = await apiClient.createTask(normalizedTaskName);
       setSelectedTaskId(created.taskId);
+      setTab("timeline", created.taskId, true);
       await queryClient.invalidateQueries({ queryKey: ["tasks"] });
 
       setNewTaskStage("uploading");
@@ -2744,8 +2733,7 @@ export default function App() {
             setReportView,
             setActiveCustomReportId,
             activeCustomReport,
-            setSelectedTaskId,
-            setTab,
+            goToTaskTimeline: (taskId: string) => setTab("timeline", taskId),
             logout,
             formatAssetDate,
             truncateIdentifier,
@@ -2807,7 +2795,7 @@ export default function App() {
                 >
                   i
                 </button>
-                <button className="w-full pr-8 text-left" onClick={() => setSelectedTaskId(taskItem.taskId)}>
+                <button className="w-full pr-8 text-left" onClick={() => setTab(tab, taskItem.taskId)}>
                   <p className="font-medium">{taskItem.name}</p>
                   <p
                     className={`text-xs uppercase tracking-wide ${

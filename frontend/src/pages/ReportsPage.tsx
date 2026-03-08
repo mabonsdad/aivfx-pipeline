@@ -15,8 +15,7 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
     setReportView,
     setActiveCustomReportId,
     activeCustomReport,
-    setSelectedTaskId,
-    setTab,
+    goToTaskTimeline,
     logout,
     formatAssetDate,
     truncateIdentifier,
@@ -69,8 +68,9 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
             <button
               className="rounded border border-ink/20 bg-white px-3 py-2 text-sm"
               onClick={() => {
-                if (reportTaskId) setSelectedTaskId(reportTaskId);
-                setTab("timeline");
+                if (reportTaskId) {
+                  goToTaskTimeline(reportTaskId);
+                }
               }}
             >
               Back to Task
