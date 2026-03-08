@@ -142,6 +142,8 @@ const ROUTE_SEGMENT_TO_TAB: Record<string, TabId> = {
 };
 
 const VIDEO_FRAME_THUMBNAIL_CACHE = new Map<string, string | null>();
+const MAX_TRACKED_JOB_IDS = 40;
+const TASK_URL_REFRESH_MS = 15 * 60 * 1000;
 
 type VideoFrameStripItem = {
   frameIndex: number;
@@ -185,6 +187,12 @@ function generationThumbnailUrl(generation: SegmentGeneration): string | null {
     generation.sourceLastFrameCaptureUrl ??
     null
   );
+}
+
+function appendTrackedJobId(previous: string[], jobId: string): string[] {
+  if (!jobId) return previous;
+  const deduped = [...previous.filter((item) => item !== jobId), jobId];
+  return deduped.slice(-MAX_TRACKED_JOB_IDS);
 }
 
 function normalizeTaskNameInput(value: string): string {
@@ -804,6 +812,9 @@ export default function App() {
     queryKey: ["tasks"],
     queryFn: async () => (await apiClient.listTasks()).tasks,
     enabled: isAuthed,
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
   });
   const normalizedNewTaskName = useMemo(() => normalizeTaskNameInput(newTaskName), [newTaskName]);
   const taskNameAlreadyExists = useMemo(() => {
@@ -860,12 +871,19 @@ export default function App() {
     queryKey: ["task", selectedTaskId],
     queryFn: async () => apiClient.getTask(selectedTaskId as string),
     enabled: isAuthed && !!selectedTaskId,
-    refetchInterval: tab === "generate" ? 4 * 60 * 1000 : false,
+    staleTime: 15_000,
+    refetchInterval: isAuthed && !!selectedTaskId ? TASK_URL_REFRESH_MS : false,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
   });
   const reportTaskQuery = useQuery({
     queryKey: ["task", "report", reportTaskId],
     queryFn: async () => apiClient.getTask(reportTaskId as string),
     enabled: isAuthed && tab === "report" && !!reportTaskId,
+    staleTime: 15_000,
+    refetchInterval: isAuthed && tab === "report" && !!reportTaskId ? TASK_URL_REFRESH_MS : false,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
   });
   const pendingCreateJobQuery = useQuery({
     queryKey: ["job", pendingCreateJobId],
@@ -875,6 +893,8 @@ export default function App() {
       const status = q?.state?.data?.status;
       return status === "queued" || status === "running" ? 2000 : false;
     },
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
   });
   const assetTaskQueries = useQueries({
     queries: (tasksQuery.data ?? []).map((taskItem) => ({
@@ -1438,7 +1458,7 @@ export default function App() {
         sourceVariantId: activeEditSourceVariantId ?? "original",
       });
     },
-    onSuccess: (result) => setJobIds((prev) => Array.from(new Set([...prev, result.jobId]))),
+    onSuccess: (result) => setJobIds((prev) => appendTrackedJobId(prev, result.jobId)),
   });
 
   const patchEditMutation = useMutation({
@@ -1541,7 +1561,7 @@ export default function App() {
         sourceVariantId: activeEditSourceVariantId ?? "original",
       });
     },
-    onSuccess: (result) => setJobIds((prev) => Array.from(new Set([...prev, result.jobId]))),
+    onSuccess: (result) => setJobIds((prev) => appendTrackedJobId(prev, result.jobId)),
   });
 
   const selectVariantMutation = useMutation({
@@ -1577,7 +1597,7 @@ export default function App() {
       });
     },
     onSuccess: (result) => {
-      setJobIds((prev) => Array.from(new Set([...prev, result.jobId])));
+      setJobIds((prev) => appendTrackedJobId(prev, result.jobId));
       setTab("generate");
     },
   });
@@ -1602,7 +1622,7 @@ export default function App() {
       });
     },
     onSuccess: (result) => {
-      setJobIds((prev) => Array.from(new Set([...prev, result.jobId])));
+      setJobIds((prev) => appendTrackedJobId(prev, result.jobId));
       setTab("merge");
     },
   });
@@ -1611,7 +1631,7 @@ export default function App() {
     mutationFn: async ({ taskId, generationIds }: { taskId: string; generationIds?: string[] }) =>
       apiClient.runQc(taskId, generationIds?.length ? { generationIds } : undefined),
     onSuccess: async (result, variables) => {
-      setJobIds((previous) => Array.from(new Set([...previous, result.jobId])));
+      setJobIds((previous) => appendTrackedJobId(previous, result.jobId));
       await queryClient.invalidateQueries({ queryKey: ["task", variables.taskId] });
       await queryClient.invalidateQueries({ queryKey: ["task", "report", variables.taskId] });
     },
@@ -1672,21 +1692,39 @@ export default function App() {
         const status = q?.state?.data?.status;
         return status === "queued" || status === "running" ? 3000 : false;
       },
+      staleTime: 10_000,
+      refetchOnWindowFocus: false as const,
+      refetchOnReconnect: false as const,
     })),
   });
 
   const seenDoneRef = useRef<Set<string>>(new Set());
   useEffect(() => {
+    let foundFreshTerminal = false;
     for (const jq of jobQueries) {
       const data = jq.data;
       if (!data) continue;
       if ((data.status === "complete" || data.status === "failed") && !seenDoneRef.current.has(data.jobId)) {
         seenDoneRef.current.add(data.jobId);
-        queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
-        queryClient.invalidateQueries({ queryKey: ["tasks"] });
+        foundFreshTerminal = true;
       }
     }
+    if (!foundFreshTerminal) return;
+    void queryClient.invalidateQueries({ queryKey: ["tasks"] });
+    if (selectedTaskId) {
+      void queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
+    }
+    while (seenDoneRef.current.size > MAX_TRACKED_JOB_IDS * 5) {
+      const oldest = seenDoneRef.current.values().next().value as string | undefined;
+      if (!oldest) break;
+      seenDoneRef.current.delete(oldest);
+    }
   }, [jobQueries, queryClient, selectedTaskId]);
+
+  useEffect(() => {
+    if (jobIds.length <= MAX_TRACKED_JOB_IDS) return;
+    setJobIds((previous) => previous.slice(-MAX_TRACKED_JOB_IDS));
+  }, [jobIds]);
   const sortedJobs = useMemo(
     () =>
       jobQueries
@@ -2647,7 +2685,7 @@ export default function App() {
       setNewTaskStage("ingesting");
       const ingest = await apiClient.ingestTask(created.taskId);
       setPendingCreateJobId(ingest.jobId);
-      setJobIds((prev) => Array.from(new Set([...prev, ingest.jobId])));
+      setJobIds((prev) => appendTrackedJobId(prev, ingest.jobId));
     } catch (error) {
       setNewTaskStage("error");
       setNewTaskError(error instanceof Error ? error.message : "Task setup failed");
@@ -2762,7 +2800,12 @@ export default function App() {
                   <section className="space-y-2 rounded-2xl border border-ink/10 bg-card p-4">
                     <h3 className="text-lg font-semibold">Task Playback</h3>
                     {reportPlaybackUrl ? (
-                      <video src={reportPlaybackUrl} controls className="w-full rounded border border-ink/10 bg-bg object-contain" />
+                      <video
+                        src={reportPlaybackUrl}
+                        controls
+                        preload="metadata"
+                        className="w-full rounded border border-ink/10 bg-bg object-contain"
+                      />
                     ) : (
                       <p className="text-sm text-ink/60">Original video not available.</p>
                     )}
@@ -3055,6 +3098,7 @@ export default function App() {
                                         <video
                                           src={`${reportPlaybackUrl}#t=${(row.segment.startFrame / fps).toFixed(3)},${(row.segment.endFrameExclusive / fps).toFixed(3)}`}
                                           controls
+                                          preload="none"
                                           className="w-full rounded border border-ink/10 bg-bg object-contain"
                                         />
                                       ) : (
@@ -3064,7 +3108,12 @@ export default function App() {
                                     <div>
                                       <p className="text-xs font-medium text-ink/70">Generated segment video</p>
                                       {row.generatedVideoUrl ? (
-                                        <video src={row.generatedVideoUrl} controls className="w-full rounded border border-ink/10 bg-bg object-contain" />
+                                        <video
+                                          src={row.generatedVideoUrl}
+                                          controls
+                                          preload="none"
+                                          className="w-full rounded border border-ink/10 bg-bg object-contain"
+                                        />
                                       ) : (
                                         <p className="text-xs text-ink/50">Unavailable</p>
                                       )}
@@ -3152,7 +3201,12 @@ export default function App() {
                                     <div className="space-y-1">
                                       <p className="text-xs font-medium text-ink/70">Diff map video</p>
                                       {diffVideoUrl ? (
-                                        <video src={diffVideoUrl} controls className="w-full rounded border border-ink/10 bg-bg object-contain" />
+                                        <video
+                                          src={diffVideoUrl}
+                                          controls
+                                          preload="none"
+                                          className="w-full rounded border border-ink/10 bg-bg object-contain"
+                                        />
                                       ) : (
                                         <p className="text-xs text-ink/50">No diff map video</p>
                                       )}
@@ -3322,6 +3376,7 @@ export default function App() {
                         className="max-h-[360px] max-w-full rounded-lg border border-ink/10"
                         src={timelinePlaybackUrl}
                         controls
+                        preload="metadata"
                         onTimeUpdate={(e) => {
                           const totalFrames = frameCount(task);
                           if (!totalFrames) return;
@@ -3982,6 +4037,7 @@ export default function App() {
                             src={originalSegmentPreviewUrl}
                             muted
                             playsInline
+                            preload="metadata"
                             className="h-full w-full object-contain"
                             onLoadedMetadata={(e) => {
                               if (segmentWindow) {
@@ -3997,6 +4053,7 @@ export default function App() {
                             src={selectedPreviewGeneration.downloadUrl}
                             controls
                             playsInline
+                            preload="none"
                             className="h-full w-full object-contain"
                             onLoadedMetadata={(e) => {
                               e.currentTarget.currentTime = 0;
@@ -4551,6 +4608,7 @@ export default function App() {
               src={videoPreviewModal.url}
               controls
               autoPlay
+              preload="metadata"
               className="h-[80vh] w-full rounded object-contain"
             />
           </div>
