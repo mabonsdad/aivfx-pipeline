@@ -16,6 +16,7 @@ import {
   useWorkflowRouteState,
 } from "./hooks/useWorkflowRouting";
 import { useTaskLifecycle } from "./hooks/useTaskLifecycle";
+import { useGenerationMergeState } from "./hooks/useGenerationMergeState";
 import { currentUser, login, logout } from "./lib/auth";
 import { useUiStore } from "./store/uiStore";
 import type {
@@ -720,13 +721,6 @@ export default function App() {
     first: null,
     last: null,
   });
-  const [selectedGenIds, setSelectedGenIds] = useState<string[]>([]);
-  const [selectedPreviewGenId, setSelectedPreviewGenId] = useState<string>("");
-  const [temporalFeatherFrames, setTemporalFeatherFrames] = useState(0);
-  const [mergeInsertStartFrame, setMergeInsertStartFrame] = useState(0);
-  const [mergeTrimStartFrames, setMergeTrimStartFrames] = useState(0);
-  const [mergeTrimEndFrames, setMergeTrimEndFrames] = useState(0);
-  const [mergeConfiguredGenId, setMergeConfiguredGenId] = useState("");
   const [imagePreviewModal, setImagePreviewModal] = useState<{ url: string; label: string } | null>(null);
   const [videoPreviewModal, setVideoPreviewModal] = useState<{ url: string; label: string } | null>(null);
   const [reportGraphModal, setReportGraphModal] = useState<{ url: string; label: string } | null>(null);
@@ -874,6 +868,31 @@ export default function App() {
     () => new Map((task?.segments ?? []).map((segment) => [segment.segmentId, segment])),
     [task?.segments],
   );
+  const {
+    selectedGenIds,
+    setSelectedGenIds,
+    temporalFeatherFrames,
+    setTemporalFeatherFrames,
+    mergeInsertStartFrame,
+    setMergeInsertStartFrame,
+    mergeTrimStartFrames,
+    setMergeTrimStartFrames,
+    mergeTrimEndFrames,
+    setMergeTrimEndFrames,
+    segmentGenerations,
+    selectedSegmentGenerations,
+    selectedMergeGenerations,
+    selectedPreviewGeneration,
+    sortedExports,
+    mergeTargetGeneration,
+    mergeTargetSegment,
+    selectSegmentGeneration,
+  } = useGenerationMergeState({
+    task,
+    selectedSegmentId,
+    segmentsById,
+  });
+
   const reportSegmentsById = useMemo(
     () =>
       isReportTab
@@ -1683,38 +1702,6 @@ export default function App() {
     [jobQueries],
   );
 
-  const segmentGenerations = useMemo(
-    () =>
-      Object.values(task?.segmentGenerations ?? {})
-        .filter((generation) => generation.status !== "failed")
-        .sort(
-        (a, b) => safeTimestamp(b.createdAt) - safeTimestamp(a.createdAt),
-      ),
-    [task?.segmentGenerations],
-  );
-  const selectedSegmentGenerations = useMemo(
-    () =>
-      segmentGenerations
-        .filter((gen) => !selectedSegmentId || gen.segmentId === selectedSegmentId)
-        .sort((a, b) => safeTimestamp(b.createdAt) - safeTimestamp(a.createdAt)),
-    [segmentGenerations, selectedSegmentId],
-  );
-  const selectedMergeGenerations = useMemo(
-    () =>
-      selectedGenIds
-        .map((genId) => task?.segmentGenerations?.[genId])
-        .filter((generation): generation is SegmentGeneration => Boolean(generation))
-        .sort((a, b) => safeTimestamp(b.createdAt) - safeTimestamp(a.createdAt)),
-    [selectedGenIds, task?.segmentGenerations],
-  );
-  const selectedPreviewGeneration =
-    selectedSegmentGenerations.find((gen) => gen.genId === selectedPreviewGenId) ?? selectedSegmentGenerations[0] ?? null;
-  const sortedExports = useMemo(
-    () => [...(task?.exports ?? [])].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
-    [task?.exports],
-  );
-  const mergeTargetGeneration = selectedMergeGenerations[0] ?? null;
-  const mergeTargetSegment = mergeTargetGeneration ? segmentsById.get(mergeTargetGeneration.segmentId) ?? null : null;
   const mergeFps = fpsValue(task);
   const mergeOriginalStartFrame = mergeTargetSegment?.startFrame ?? 0;
   const mergeOriginalEndFrameExclusive = mergeTargetSegment?.endFrameExclusive ?? mergeOriginalStartFrame + 1;
@@ -1978,49 +1965,6 @@ export default function App() {
   const timelinePlaybackUrl = task?.video?.previewSource?.downloadUrl ?? task?.video?.editSource?.downloadUrl ?? "";
 
   useEffect(() => {
-    setSelectedGenIds((previous) => {
-      const filtered = previous.filter((genId) => {
-        const generation = task?.segmentGenerations?.[genId];
-        return Boolean(generation && generation.status !== "failed");
-      });
-      return filtered.length === previous.length ? previous : filtered;
-    });
-  }, [task?.segmentGenerations]);
-
-  useEffect(() => {
-    if (!selectedSegmentGenerations.length) {
-      setSelectedPreviewGenId("");
-      return;
-    }
-    const stillValid = selectedSegmentGenerations.some((gen) => gen.genId === selectedPreviewGenId);
-    if (!stillValid) {
-      setSelectedPreviewGenId(selectedSegmentGenerations[0].genId);
-    }
-  }, [selectedPreviewGenId, selectedSegmentGenerations]);
-
-  useEffect(() => {
-    const selectedId = selectedPreviewGeneration?.genId;
-    if (!selectedId) {
-      setSelectedGenIds([]);
-      return;
-    }
-    setSelectedGenIds([selectedId]);
-  }, [selectedPreviewGeneration?.genId, task?.segmentGenerations]);
-
-  useEffect(() => {
-    const generationId = mergeTargetGeneration?.genId ?? "";
-    if (!generationId) {
-      setMergeConfiguredGenId("");
-      return;
-    }
-    if (generationId === mergeConfiguredGenId) return;
-    setMergeConfiguredGenId(generationId);
-    setMergeInsertStartFrame(mergeTargetSegment?.startFrame ?? 0);
-    setMergeTrimStartFrames(0);
-    setMergeTrimEndFrames(0);
-  }, [mergeConfiguredGenId, mergeTargetGeneration?.genId, mergeTargetSegment?.startFrame]);
-
-  useEffect(() => {
     if (mergeInsertStartFrame !== mergeInsertStartFrameClamped) {
       setMergeInsertStartFrame(mergeInsertStartFrameClamped);
     }
@@ -2038,22 +1982,6 @@ export default function App() {
     mergeTrimStartClamped,
     mergeTrimStartFrames,
   ]);
-
-  function selectSegmentGeneration(genId: string) {
-    const selectedGeneration = task?.segmentGenerations?.[genId];
-    if (!selectedGeneration || selectedGeneration.status === "failed") return;
-    setSelectedPreviewGenId(genId);
-    setSelectedGenIds((previous) => {
-      const targetSegmentId = selectedGeneration?.segmentId;
-      const filtered = previous.filter((existingGenId) => {
-        if (existingGenId === genId) return false;
-        if (!targetSegmentId) return true;
-        const existing = task?.segmentGenerations?.[existingGenId];
-        return existing?.segmentId !== targetSegmentId && existing?.status !== "failed";
-      });
-      return [genId, ...filtered];
-    });
-  }
 
   function syncOriginalToGenerated(generatedVideo: HTMLVideoElement) {
     const originalVideo = compareOriginalRef.current;
