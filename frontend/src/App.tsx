@@ -816,6 +816,7 @@ export default function App() {
   }, [generationInputMode, generationModelByInput, lumaModel]);
 
   const tab: TabId = routeState.tab ?? "timeline";
+  const isReportTab = tab === "report";
   const selectedTaskId = routeState.taskId ?? storeSelectedTaskId;
   const reportTaskId = selectedTaskId;
 
@@ -911,8 +912,11 @@ export default function App() {
     [task?.segments],
   );
   const reportSegmentsById = useMemo(
-    () => new Map((reportTask?.segments ?? []).map((segment) => [segment.segmentId, segment])),
-    [reportTask?.segments],
+    () =>
+      isReportTab
+        ? new Map((reportTask?.segments ?? []).map((segment) => [segment.segmentId, segment]))
+        : new Map<string, SegmentRecord>(),
+    [isReportTab, reportTask?.segments],
   );
   const assetsLoading = tab === "assets" && assetTaskQueries.some((query) => query.isPending || query.isFetching) && assetTasks.length === 0;
   const selectedSegment = task?.segments.find((s) => s.segmentId === selectedSegmentId) ?? null;
@@ -983,7 +987,7 @@ export default function App() {
   const activeFrameHeight = activeFrameDimensions?.height ?? null;
   const activePatchReference = patchReferenceImages[editFrameTab];
   const reportRows = useMemo(() => {
-    if (!reportTask) {
+    if (!isReportTab || !reportTask) {
       return { rows: [] as ReportGenerationRow[] };
     }
     const frameById = reportTask.frames ?? {};
@@ -1014,7 +1018,7 @@ export default function App() {
     const sortScore = (row: ReportGenerationRow) => (row.generatedVideoUrl ? 0 : 1);
     allRows.sort((a, b) => sortScore(a) - sortScore(b) || safeTimestamp(b.generation.createdAt) - safeTimestamp(a.generation.createdAt));
     return { rows: allRows };
-  }, [reportSegmentsById, reportTask]);
+  }, [isReportTab, reportSegmentsById, reportTask]);
   const reportCustomReports = useMemo(
     () =>
       [...(reportTask?.customReports ?? [])].sort((a, b) => safeTimestamp(b.updatedAt) - safeTimestamp(a.updatedAt)),
@@ -1035,7 +1039,7 @@ export default function App() {
     return grouped;
   }, [selectedReportOutputs]);
   const reportOutputCards = useMemo(() => {
-    if (!reportTask) {
+    if (!isReportTab || !reportTask) {
       return {
         videoGenerations: [] as ReportOutputCard[],
         startFrames: [] as ReportOutputCard[],
@@ -1095,8 +1099,9 @@ export default function App() {
     startCards.sort(byCreated);
     endCards.sort(byCreated);
     return { videoGenerations: videoCards, startFrames: startCards, endFrames: endCards };
-  }, [reportRows.rows, reportTask]);
+  }, [isReportTab, reportRows.rows, reportTask]);
   const activeReportGenerationIds = useMemo(() => {
+    if (!isReportTab) return new Set<string>();
     const ids = new Set<string>();
     if (!activeCustomReport) return ids;
     for (const ref of activeCustomReport.outputRefs ?? []) {
@@ -1105,8 +1110,9 @@ export default function App() {
       }
     }
     return ids;
-  }, [activeCustomReport]);
+  }, [activeCustomReport, isReportTab]);
   const activeReportFrameVariantKeys = useMemo(() => {
+    if (!isReportTab) return new Set<string>();
     const keys = new Set<string>();
     if (!activeCustomReport) return keys;
     for (const ref of activeCustomReport.outputRefs ?? []) {
@@ -1115,16 +1121,17 @@ export default function App() {
       }
     }
     return keys;
-  }, [activeCustomReport]);
+  }, [activeCustomReport, isReportTab]);
   const scopedVideoRows = useMemo(() => {
+    if (!isReportTab) return [] as ReportGenerationRow[];
     const rows = reportRows.rows.filter((row) => Boolean(row.generation.outputKey));
     if (!activeCustomReport) {
       return rows;
     }
     return rows.filter((row) => activeReportGenerationIds.has(row.generation.genId));
-  }, [activeCustomReport, activeReportGenerationIds, reportRows.rows]);
+  }, [activeCustomReport, activeReportGenerationIds, isReportTab, reportRows.rows]);
   const qcFrameRows = useMemo(() => {
-    if (!reportTask) return [] as QcFrameRow[];
+    if (!isReportTab || !reportTask) return [] as QcFrameRow[];
     const startFrameIds = new Set((reportTask.segments ?? []).map((segment) => segment.startFrameId));
     const endFrameIds = new Set((reportTask.segments ?? []).map((segment) => segment.endFrameId));
     const generationRowsByVariant = new Map<string, ReportGenerationRow[]>();
@@ -1172,8 +1179,15 @@ export default function App() {
       }
     }
     return rows.sort((a, b) => safeTimestamp(b.variant.createdAt) - safeTimestamp(a.variant.createdAt));
-  }, [activeCustomReport, activeReportFrameVariantKeys, activeReportGenerationIds, reportRows.rows, reportTask]);
+  }, [activeCustomReport, activeReportFrameVariantKeys, activeReportGenerationIds, isReportTab, reportRows.rows, reportTask]);
   const qcVideoRowsByGroup = useMemo(() => {
+    if (!isReportTab) {
+      return {
+        start_video: [] as ReportGenerationRow[],
+        start_end: [] as ReportGenerationRow[],
+        start_only: [] as ReportGenerationRow[],
+      };
+    }
     const grouped: Record<VideoGenerationGroup, ReportGenerationRow[]> = {
       start_video: [],
       start_end: [],
@@ -1183,9 +1197,9 @@ export default function App() {
       grouped[classifyVideoGeneration(row)].push(row);
     }
     return grouped;
-  }, [scopedVideoRows]);
+  }, [isReportTab, scopedVideoRows]);
   const scopedQcGenerationIdsNeedingRun = useMemo(() => {
-    if (!reportTask) return [] as string[];
+    if (!isReportTab || !reportTask) return [] as string[];
     const ids = new Set<string>();
     for (const row of reportRows.rows) {
       if (generationNeedsQcForVideo(row.generation)) {
@@ -1200,7 +1214,7 @@ export default function App() {
       }
     }
     return [...ids];
-  }, [qcFrameRows, reportRows.rows, reportTask]);
+  }, [isReportTab, qcFrameRows, reportRows.rows, reportTask]);
 
   useEffect(() => {
     if (!activeCustomReportId) return;
