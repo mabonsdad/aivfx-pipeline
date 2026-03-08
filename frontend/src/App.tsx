@@ -3,7 +3,9 @@ import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/rea
 import { useLocation, useNavigate } from "react-router-dom";
 
 import { apiClient } from "./api/client";
+import PreviewModals from "./components/layout/PreviewModals";
 import TaskSidebar from "./components/layout/TaskSidebar";
+import WorkflowTabs from "./components/layout/WorkflowTabs";
 import NewTaskModal from "./components/tasks/NewTaskModal";
 import {
   taskRoute,
@@ -2780,19 +2782,13 @@ export default function App() {
 
         <section className="col-span-12 space-y-4 md:col-span-9">
           <div className="rounded-2xl border border-ink/10 bg-card p-4">
-            <div className="mb-4 flex flex-wrap items-center gap-2">
-              {tabs.map(({ id, label }, index) => (
-                <div key={id} className="flex items-center gap-2">
-                  <button
-                    onClick={() => void handleTabChange(id)}
-                    className={`rounded-md px-3 py-2 text-sm ${tab === id ? "bg-ink text-white" : "bg-ink/10"}`}
-                  >
-                    {label}
-                  </button>
-                  {index < tabs.length - 1 ? <span className="text-ink/50">→</span> : null}
-                </div>
-              ))}
-            </div>
+            <WorkflowTabs
+              tabs={tabs}
+              activeTab={tab}
+              onSelect={(tabId) => {
+                void handleTabChange(tabId);
+              }}
+            />
 
             {tab === "timeline" && (
               <Suspense fallback={<p className="text-sm text-ink/60">Loading Pick Frame...</p>}>
@@ -3000,52 +2996,12 @@ export default function App() {
           </Suspense>
         </section>
       </div>
-      {imagePreviewModal ? (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4"
-          onClick={() => setImagePreviewModal(null)}
-        >
-          <div className="relative flex h-[90vh] w-[90vw] items-center justify-center">
-            <button
-              className="absolute right-2 top-2 rounded bg-black/70 px-3 py-1 text-sm text-white"
-              onClick={() => setImagePreviewModal(null)}
-            >
-              x
-            </button>
-            <img
-              src={imagePreviewModal.url}
-              alt={imagePreviewModal.label}
-              className="h-full w-full object-contain"
-              onClick={() => setImagePreviewModal(null)}
-            />
-          </div>
-        </div>
-      ) : null}
-      {videoPreviewModal ? (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4"
-          onClick={() => setVideoPreviewModal(null)}
-        >
-          <div
-            className="relative w-[90vw] max-w-6xl rounded-lg border border-ink/20 bg-black p-3"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <button
-              className="absolute right-2 top-2 rounded bg-black/70 px-3 py-1 text-sm text-white"
-              onClick={() => setVideoPreviewModal(null)}
-            >
-              x
-            </button>
-            <video
-              src={videoPreviewModal.url}
-              controls
-              autoPlay
-              preload="metadata"
-              className="h-[80vh] w-full rounded object-contain"
-            />
-          </div>
-        </div>
-      ) : null}
+      <PreviewModals
+        imagePreview={imagePreviewModal}
+        videoPreview={videoPreviewModal}
+        onCloseImage={() => setImagePreviewModal(null)}
+        onCloseVideo={() => setVideoPreviewModal(null)}
+      />
       <NewTaskModal
         isOpen={isNewTaskModalOpen}
         stage={newTaskStage}
