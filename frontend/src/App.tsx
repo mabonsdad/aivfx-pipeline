@@ -277,7 +277,7 @@ function hasFrameQcArtifacts(frameQc: QcFrameResult | null): boolean {
 }
 
 function generationNeedsQcForVideo(generation: SegmentGeneration): boolean {
-  if (generation.status !== "complete" || !generation.outputKey || !generation.sourceFirstFrameVariantId) return false;
+  if (generation.status !== "complete" || !generation.outputKey) return false;
   const qc = generation.qc;
   if (!qc) return true;
   if (qc.status === "running") return false;
@@ -1127,7 +1127,7 @@ export default function App() {
     return keys;
   }, [activeCustomReport]);
   const scopedVideoRows = useMemo(() => {
-    const rows = reportRows.rows.filter((row) => Boolean(row.generatedVideoUrl));
+    const rows = reportRows.rows.filter((row) => Boolean(row.generation.outputKey));
     if (!activeCustomReport) {
       return rows;
     }
@@ -1195,28 +1195,22 @@ export default function App() {
     return grouped;
   }, [scopedVideoRows]);
   const scopedQcGenerationIdsNeedingRun = useMemo(() => {
-    if (!reportTask || reportView === "outputs") return [] as string[];
+    if (!reportTask) return [] as string[];
     const ids = new Set<string>();
-    if (reportView === "qc_video") {
-      for (const row of scopedVideoRows) {
-        if (generationNeedsQcForVideo(row.generation)) {
-          ids.add(row.generation.genId);
+    for (const row of reportRows.rows) {
+      if (generationNeedsQcForVideo(row.generation)) {
+        ids.add(row.generation.genId);
+      }
+    }
+    for (const row of qcFrameRows) {
+      for (const linked of row.linkedGenerations) {
+        if (generationNeedsQcForFrameVariant(linked.generation, row.variant.variantId)) {
+          ids.add(linked.generation.genId);
         }
       }
-      return [...ids];
     }
-    if (reportView === "qc_frame") {
-      for (const row of qcFrameRows) {
-        for (const linked of row.linkedGenerations) {
-          if (generationNeedsQcForFrameVariant(linked.generation, row.variant.variantId)) {
-            ids.add(linked.generation.genId);
-          }
-        }
-      }
-      return [...ids];
-    }
-    return [] as string[];
-  }, [qcFrameRows, reportTask, reportView, scopedVideoRows]);
+    return [...ids];
+  }, [qcFrameRows, reportRows.rows, reportTask]);
 
   useEffect(() => {
     if (!activeCustomReportId) return;
@@ -1643,10 +1637,10 @@ export default function App() {
   });
 
   useEffect(() => {
-    if (tab !== "report" || !reportTask || reportView === "outputs") return;
+    if (tab !== "report" || !reportTask) return;
     if (!scopedQcGenerationIdsNeedingRun.length) return;
     const sortedMissing = [...scopedQcGenerationIdsNeedingRun].sort();
-    const runKey = `${reportTask.taskId}:${reportView}:${activeCustomReportId ?? "default"}:${sortedMissing.join(",")}`;
+    const runKey = `${reportTask.taskId}:all:${sortedMissing.join(",")}`;
     if (requestedAutoQcRef.current.has(runKey)) return;
     requestedAutoQcRef.current.add(runKey);
     void (async () => {
@@ -1659,7 +1653,7 @@ export default function App() {
         }
       }
     })();
-  }, [activeCustomReportId, reportTask, reportView, runQcMutation, scopedQcGenerationIdsNeedingRun, tab]);
+  }, [reportTask, runQcMutation, scopedQcGenerationIdsNeedingRun, tab]);
 
   const createCustomReportMutation = useMutation({
     mutationFn: ({

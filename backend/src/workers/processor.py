@@ -695,6 +695,7 @@ def _handle_full_edit(
         "generationSettings": {
             "provider": "gemini",
             "workflow": "full",
+            "prompt": payload["prompt"],
             "sourceKey": source_key,
             "sourceVariantId": payload.get("sourceVariantId"),
             "inputResolution": {"width": src_image.width, "height": src_image.height},
@@ -857,6 +858,7 @@ def _handle_patch_edit(
     generation_settings: dict[str, Any] = {
         "provider": provider_name,
         "workflow": "patch",
+        "prompt": payload["prompt"],
         "sourceKey": source_key,
         "sourceVariantId": source_variant_id,
         "inputResolution": {"width": patch_source_image.width, "height": patch_source_image.height},
@@ -1688,7 +1690,6 @@ def _handle_qc_analysis(
             for gen_id, generation in task.get("segmentGenerations", {}).items()
             if generation.get("status") == "complete"
             and generation.get("outputKey")
-            and generation.get("sourceFirstFrameVariantId")
         ]
 
     if not generation_ids:
@@ -1748,20 +1749,41 @@ def _handle_qc_analysis(
             failed_ids.append(gen_id)
             continue
 
-        source_variant_id = generation.get("sourceFirstFrameVariantId")
-        source_variant = (
-            next((item for item in start_frame.get("variants", []) if item.get("variantId") == source_variant_id), None)
-            if source_variant_id
-            else None
+        def _resolve_variant_for_qc(
+            frame_record: dict[str, Any],
+            preferred_variant_id: Any,
+        ) -> tuple[str | None, dict[str, Any]]:
+            resolved_variant_id = preferred_variant_id if isinstance(preferred_variant_id, str) and preferred_variant_id else None
+            variants = frame_record.get("variants", [])
+            resolved_variant = (
+                next((item for item in variants if item.get("variantId") == resolved_variant_id), None)
+                if resolved_variant_id
+                else None
+            )
+            if not resolved_variant or not resolved_variant.get("outputKey"):
+                selected_variant_id = frame_record.get("selectedVariantId")
+                if isinstance(selected_variant_id, str) and selected_variant_id:
+                    selected_variant = next((item for item in variants if item.get("variantId") == selected_variant_id), None)
+                    if selected_variant and selected_variant.get("outputKey"):
+                        return selected_variant_id, selected_variant
+            if resolved_variant and resolved_variant.get("outputKey"):
+                return resolved_variant_id, resolved_variant
+            # Legacy generations may not carry variant linkage. Fall back to the captured frame.
+            return None, {"outputKey": frame_record["captureKey"], "patchMeta": {}}
+
+        source_first_variant_id, source_first_variant = _resolve_variant_for_qc(
+            start_frame,
+            generation.get("sourceFirstFrameVariantId"),
         )
-        if not source_variant or not source_variant.get("outputKey"):
-            generation["qc"] = {
-                "status": "skipped",
-                "reason": "No edited frame variant attached to generation",
-                "updatedAt": now_iso(),
-            }
-            failed_ids.append(gen_id)
-            continue
+
+        end_frame = task.get("frames", {}).get(segment.get("endFrameId")) if segment.get("endFrameId") else None
+        source_last_variant_id: str | None = None
+        source_last_variant: dict[str, Any] | None = None
+        if end_frame and end_frame.get("captureKey"):
+            source_last_variant_id, source_last_variant = _resolve_variant_for_qc(
+                end_frame,
+                generation.get("sourceLastFrameVariantId"),
+            )
 
         generation["qc"] = {"status": "running", "updatedAt": now_iso()}
         store.save_task(task)
@@ -1770,40 +1792,92 @@ def _handle_qc_analysis(
             with tempfile.TemporaryDirectory() as td:
                 td_path = Path(td)
 
-                original_frame_bytes = asset_store.read_bytes(start_frame["captureKey"])
-                edited_frame_bytes = asset_store.read_bytes(source_variant["outputKey"])
-                mask_key = source_variant.get("patchMeta", {}).get("maskKey") if isinstance(source_variant.get("patchMeta"), dict) else None
-                mask_bytes = asset_store.read_bytes(mask_key) if isinstance(mask_key, str) else None
+                def _analyze_frame_variant(
+                    *,
+                    frame_record: dict[str, Any],
+                    variant_record: dict[str, Any],
+                    artifact_prefix: str,
+                ) -> dict[str, Any]:
+                    original_frame_bytes = asset_store.read_bytes(frame_record["captureKey"])
+                    edited_frame_bytes = asset_store.read_bytes(variant_record["outputKey"])
+                    mask_key = (
+                        variant_record.get("patchMeta", {}).get("maskKey")
+                        if isinstance(variant_record.get("patchMeta"), dict)
+                        else None
+                    )
+                    mask_bytes = asset_store.read_bytes(mask_key) if isinstance(mask_key, str) else None
 
-                original_frame_image = ImageOps.exif_transpose(Image.open(BytesIO(original_frame_bytes))).convert("RGB")
-                edited_frame_image = ImageOps.exif_transpose(Image.open(BytesIO(edited_frame_bytes))).convert("RGB")
-                frame_mask = _load_optional_mask(mask_bytes, original_frame_image.size)
-                frame_metrics, frame_diff, frame_binary, frame_mask_bin = _analyze_image_pair(
-                    original_frame_image,
-                    edited_frame_image,
-                    mask_image=frame_mask,
-                    threshold=QC_DIFF_THRESHOLD,
-                    boundary_ring_px=QC_BOUNDARY_RING_PX,
+                    original_frame_image = ImageOps.exif_transpose(Image.open(BytesIO(original_frame_bytes))).convert("RGB")
+                    edited_frame_image = ImageOps.exif_transpose(Image.open(BytesIO(edited_frame_bytes))).convert("RGB")
+                    frame_mask = _load_optional_mask(mask_bytes, original_frame_image.size)
+                    frame_metrics, frame_diff, frame_binary, frame_mask_bin = _analyze_image_pair(
+                        original_frame_image,
+                        edited_frame_image,
+                        mask_image=frame_mask,
+                        threshold=QC_DIFF_THRESHOLD,
+                        boundary_ring_px=QC_BOUNDARY_RING_PX,
+                    )
+                    frame_heatmap_bytes, frame_overlay_bytes, frame_binary_bytes = _create_overlay_artifacts(
+                        edited_image=edited_frame_image,
+                        diff_gray=frame_diff,
+                        binary_change=frame_binary,
+                        mask_bin=frame_mask_bin,
+                    )
+                    frame_boundary_overlay_bytes = _create_mask_boundary_overlay(
+                        original_image=original_frame_image,
+                        binary_change=frame_binary,
+                        mask_bin=frame_mask_bin,
+                    )
+                    frame_heatmap_key = paths.qc_artifact(segment["segmentId"], gen_id, f"{artifact_prefix}_heatmap", ".png")
+                    frame_overlay_key = paths.qc_artifact(segment["segmentId"], gen_id, f"{artifact_prefix}_overlay", ".png")
+                    frame_binary_key = paths.qc_artifact(segment["segmentId"], gen_id, f"{artifact_prefix}_binary", ".png")
+                    frame_boundary_overlay_key = paths.qc_artifact(
+                        segment["segmentId"], gen_id, f"{artifact_prefix}_boundary_overlay", ".png"
+                    )
+                    asset_store.put_bytes(frame_heatmap_key, frame_heatmap_bytes, content_type="image/png")
+                    asset_store.put_bytes(frame_overlay_key, frame_overlay_bytes, content_type="image/png")
+                    asset_store.put_bytes(frame_binary_key, frame_binary_bytes, content_type="image/png")
+                    asset_store.put_bytes(frame_boundary_overlay_key, frame_boundary_overlay_bytes, content_type="image/png")
+                    return {
+                        "metrics": frame_metrics,
+                        "artifacts": {
+                            "heatmapKey": frame_heatmap_key,
+                            "overlayKey": frame_overlay_key,
+                            "binaryChangeKey": frame_binary_key,
+                            "boundaryOverlayKey": frame_boundary_overlay_key,
+                        },
+                    }
+
+                first_frame_qc = _analyze_frame_variant(
+                    frame_record=start_frame,
+                    variant_record=source_first_variant,
+                    artifact_prefix="frame",
                 )
-                frame_heatmap_bytes, frame_overlay_bytes, frame_binary_bytes = _create_overlay_artifacts(
-                    edited_image=edited_frame_image,
-                    diff_gray=frame_diff,
-                    binary_change=frame_binary,
-                    mask_bin=frame_mask_bin,
-                )
-                frame_boundary_overlay_bytes = _create_mask_boundary_overlay(
-                    original_image=original_frame_image,
-                    binary_change=frame_binary,
-                    mask_bin=frame_mask_bin,
-                )
-                frame_heatmap_key = paths.qc_artifact(segment["segmentId"], gen_id, "frame_heatmap", ".png")
-                frame_overlay_key = paths.qc_artifact(segment["segmentId"], gen_id, "frame_overlay", ".png")
-                frame_binary_key = paths.qc_artifact(segment["segmentId"], gen_id, "frame_binary", ".png")
-                frame_boundary_overlay_key = paths.qc_artifact(segment["segmentId"], gen_id, "frame_boundary_overlay", ".png")
-                asset_store.put_bytes(frame_heatmap_key, frame_heatmap_bytes, content_type="image/png")
-                asset_store.put_bytes(frame_overlay_key, frame_overlay_bytes, content_type="image/png")
-                asset_store.put_bytes(frame_binary_key, frame_binary_bytes, content_type="image/png")
-                asset_store.put_bytes(frame_boundary_overlay_key, frame_boundary_overlay_bytes, content_type="image/png")
+                frame_by_variant: dict[str, dict[str, Any]] = {}
+                if isinstance(source_first_variant_id, str):
+                    frame_by_variant[source_first_variant_id] = first_frame_qc
+
+                if source_last_variant and source_last_variant.get("outputKey") and end_frame and end_frame.get("captureKey"):
+                    if (
+                        isinstance(source_last_variant_id, str)
+                        and source_last_variant_id
+                        and source_last_variant_id == source_first_variant_id
+                    ):
+                        frame_by_variant[source_last_variant_id] = first_frame_qc
+                    else:
+                        last_frame_qc = _analyze_frame_variant(
+                            frame_record=end_frame,
+                            variant_record=source_last_variant,
+                            artifact_prefix="frame_last",
+                        )
+                        if isinstance(source_last_variant_id, str) and source_last_variant_id:
+                            frame_by_variant[source_last_variant_id] = last_frame_qc
+
+                frame_metrics = first_frame_qc["metrics"]
+                frame_heatmap_key = first_frame_qc["artifacts"]["heatmapKey"]
+                frame_overlay_key = first_frame_qc["artifacts"]["overlayKey"]
+                frame_binary_key = first_frame_qc["artifacts"]["binaryChangeKey"]
+                frame_boundary_overlay_key = first_frame_qc["artifacts"]["boundaryOverlayKey"]
 
                 original_segment_key = _ensure_segment_clip(
                     s3=s3,
@@ -1880,6 +1954,7 @@ def _handle_qc_analysis(
                             "index": frame_idx,
                             "timeSec": round(frame_idx / float(QC_SAMPLE_FPS), 4),
                             **row_metrics,
+                            "_original": orig_image,
                             "_diff": row_diff,
                             "_binary": row_binary,
                             "_edited": gen_image,
@@ -1964,7 +2039,7 @@ def _handle_qc_analysis(
                         edited_image=row["_edited"],
                         diff_gray=row["_diff"],
                         binary_change=row["_binary"],
-                        mask_bin=video_mask,
+                        mask_bin=None,
                     )
                     heatmap_key = paths.qc_artifact(segment["segmentId"], gen_id, f"video_frame_{frame_idx:03d}_heatmap", ".png")
                     overlay_key = paths.qc_artifact(segment["segmentId"], gen_id, f"video_frame_{frame_idx:03d}_overlay", ".png")
@@ -2080,6 +2155,7 @@ def _handle_qc_analysis(
                             "boundaryOverlayKey": frame_boundary_overlay_key,
                         },
                     },
+                    "frameByVariant": frame_by_variant,
                     "video": {
                         "aggregates": video_aggregates,
                         "selectedFrames": selected_frame_artifacts,

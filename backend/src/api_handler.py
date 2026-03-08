@@ -1167,10 +1167,9 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                     for gen_id, generation in existing_generations.items()
                     if generation.get("status") == "complete"
                     and generation.get("outputKey")
-                    and generation.get("sourceFirstFrameVariantId")
                 ]
             if not generation_ids:
-                return error_response(400, "No completed generations with edited frames available for QC", origin=origin)
+                return error_response(400, "No completed generations available for QC", origin=origin)
 
             job_id = _queue_job(
                 store=store,
