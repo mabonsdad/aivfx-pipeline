@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from aws_lambda_powertools import Logger
-
 from src.core.config import load_settings
+from src.core.logger import Logger
 from src.workers.processor import process_job_record
 
 logger = Logger()

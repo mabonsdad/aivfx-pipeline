@@ -13,7 +13,6 @@ from typing import Any
 from urllib.parse import parse_qs
 
 import boto3
-from aws_lambda_powertools import Logger
 from botocore.exceptions import ClientError
 from pydantic import ValidationError
 
@@ -25,6 +24,7 @@ from src.core.config import load_settings
 from src.core.ffmpeg import extract_frame_png
 from src.core.http import error_response, parse_json_body, response
 from src.core.ids import deterministic_frame_id, new_id, prompt_hash
+from src.core.logger import Logger
 from src.core.store import S3JsonStore, now_iso
 from src.jobs.queue import JobQueue
 from src.models.schemas import (

@@ -14,7 +14,6 @@ from typing import Any
 
 import boto3
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageOps, ImageStat
-from aws_lambda_powertools import Logger
 
 from src.core.assets import AssetPaths, AssetStore
 from src.core.ffmpeg import (
@@ -29,6 +28,7 @@ from src.core.ffmpeg import (
     transcode_to_cfr,
 )
 from src.core.ids import new_id, prompt_hash
+from src.core.logger import Logger
 from src.core.secrets import load_secret
 from src.core.store import S3JsonStore, now_iso
 from src.integrations.gemini import generate_image_edit as generate_gemini_image_edit
