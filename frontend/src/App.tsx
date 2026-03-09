@@ -2695,7 +2695,7 @@ export default function App() {
             <button
               type="button"
               className="rounded border border-ink/20 bg-white px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50"
-              disabled={!taskId || createCustomReportMutation.isPending}
+              disabled={!taskId || createCustomReportMutation.isPending || selectedCount === 0}
               onClick={() => taskId && createCustomReportFromSelection(taskId, "qc_frame")}
             >
               Create QC Frame report
@@ -2703,13 +2703,16 @@ export default function App() {
             <button
               type="button"
               className="rounded border border-ink/20 bg-white px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50"
-              disabled={!taskId || createCustomReportMutation.isPending}
+              disabled={!taskId || createCustomReportMutation.isPending || selectedCount === 0}
               onClick={() => taskId && createCustomReportFromSelection(taskId, "qc_video")}
             >
               Create QC Video report
             </button>
           </div>
         </div>
+        {selectedCount === 0 ? (
+          <p className="text-xs text-ink/60">Select outputs with checkboxes in this page to enable custom report creation.</p>
+        ) : null}
         {customReportNotice ? <p className="text-xs text-ink/70">{customReportNotice}</p> : null}
         {!reports?.length ? (
           <p className="text-sm text-ink/60">No custom reports yet.</p>
