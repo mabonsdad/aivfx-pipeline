@@ -21,12 +21,6 @@ class SegmentCreateRequest(BaseModel):
     durationSeconds: int = Field(ge=1, le=120)
 
 
-class SegmentPatchRequest(BaseModel):
-    startFrameIndex: int | None = Field(default=None, ge=0)
-    endFrameExclusive: int | None = Field(default=None, ge=1)
-    crop: "SegmentCropRequest" | None = None
-
-
 class SegmentCropRequest(BaseModel):
     aspect: Literal["16:9", "9:16"] = "16:9"
     x: int = Field(ge=0)
@@ -34,6 +28,12 @@ class SegmentCropRequest(BaseModel):
     width: int = Field(gt=0)
     height: int = Field(gt=0)
     featherPx: int = Field(default=0, ge=0, le=200)
+
+
+class SegmentPatchRequest(BaseModel):
+    startFrameIndex: int | None = Field(default=None, ge=0)
+    endFrameExclusive: int | None = Field(default=None, ge=1)
+    crop: SegmentCropRequest | None = None
 
 
 class FrameCaptureRequest(BaseModel):
