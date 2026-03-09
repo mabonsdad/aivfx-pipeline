@@ -2720,13 +2720,18 @@ export default function App() {
           <div className="space-y-2">
             {reports.map((report) => (
               <div key={report.reportId} className="flex items-center justify-between rounded border border-ink/10 bg-white p-2 text-sm">
-                <button
-                  type="button"
+                <a
                   className="text-left text-ink underline"
-                  onClick={() => taskId && openCustomReport(taskId, report)}
+                  href={taskId ? `${taskRoute(taskId, "report")}?view=${report.reportType}&reportId=${encodeURIComponent(report.reportId)}` : "#"}
+                  onClick={(event) => {
+                    event.preventDefault();
+                    if (taskId) {
+                      openCustomReport(taskId, report);
+                    }
+                  }}
                 >
                   {report.name} ({report.reportType === "qc_frame" ? "QC Frame" : "QC Video"})
-                </button>
+                </a>
                 <button
                   type="button"
                   className="text-xs text-red-600 underline"

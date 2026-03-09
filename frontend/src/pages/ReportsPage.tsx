@@ -609,6 +609,16 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
           >
             QC Video Report
           </button>
+          <button
+            type="button"
+            className="rounded border border-ink/20 bg-white px-3 py-2 text-sm"
+            onClick={() => {
+              if (typeof document === "undefined") return;
+              document.getElementById("custom-report-builder")?.scrollIntoView({ behavior: "smooth", block: "start" });
+            }}
+          >
+            Custom Reports
+          </button>
         </div>
         {latestQcJob ? (
           <p className="text-xs text-ink/70">
@@ -622,8 +632,6 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
 
         {reportTask ? (
           <>
-            {renderCustomReportBox(reportTask.taskId, reportCustomReports)}
-
             {reportView === "outputs" ? (
               <>
                 <section className="space-y-2 rounded-2xl border border-ink/10 bg-card p-4">
@@ -1118,6 +1126,8 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                 })}
               </section>
             ) : null}
+
+            <div id="custom-report-builder">{renderCustomReportBox(reportTask.taskId, reportCustomReports)}</div>
           </>
         ) : null}
       </div>
