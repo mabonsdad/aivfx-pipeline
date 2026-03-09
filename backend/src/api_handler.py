@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -61,6 +62,8 @@ VIDEO_MODEL_MAX_SECONDS: dict[str, int] = {
 }
 PRESIGNED_GET_TTL_SECONDS = 3600
 STALE_GENERATION_MAX_AGE_SECONDS = 30 * 60
+CROP_LANDSCAPE_TARGET = (1920, 1080)
+CROP_PORTRAIT_TARGET = (1080, 1920)
 
 
 def _normalize_task_name(raw: str) -> str:
@@ -104,6 +107,92 @@ def _build_file_prefix(task_name: str, task_id: str, existing_prefixes: set[str]
 
 def _asset_paths_for_task(task: dict[str, Any]) -> AssetPaths:
     return AssetPaths(user_id=task["userId"], task_id=task["taskId"], file_prefix=task.get("filePrefix", ""))
+
+
+def _segment_crop_output_size(width: int, height: int, aspect: str) -> tuple[int, int]:
+    target_w, target_h = CROP_LANDSCAPE_TARGET if aspect == "16:9" else CROP_PORTRAIT_TARGET
+    if width < target_w or height < target_h:
+        return target_w, target_h
+    return width, height
+
+
+def _normalize_segment_crop(task: dict[str, Any], raw_crop: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not raw_crop:
+        return None
+    edit_source = task.get("video", {}).get("editSource", {})
+    source_w = int(edit_source.get("width") or 0)
+    source_h = int(edit_source.get("height") or 0)
+    if source_w <= 0 or source_h <= 0:
+        raise ValueError("Edit source dimensions unavailable")
+
+    aspect = str(raw_crop.get("aspect") or "16:9")
+    if aspect not in {"16:9", "9:16"}:
+        raise ValueError("Invalid crop aspect")
+    ratio_num, ratio_den = (16, 9) if aspect == "16:9" else (9, 16)
+
+    x = int(raw_crop.get("x", 0))
+    y = int(raw_crop.get("y", 0))
+    width = int(raw_crop.get("width", source_w))
+    height = int(raw_crop.get("height", source_h))
+    feather_px = max(0, min(200, int(raw_crop.get("featherPx", 0))))
+
+    if int(raw_crop.get("x", 0)) <= 0 and int(raw_crop.get("y", 0)) <= 0 and width >= source_w and height >= source_h:
+        return {
+            "enabled": False,
+            "aspect": aspect,
+            "x": 0,
+            "y": 0,
+            "width": source_w,
+            "height": source_h,
+            "featherPx": feather_px,
+            "outputWidth": source_w,
+            "outputHeight": source_h,
+        }
+
+    width = max(2, min(source_w, width))
+    height = max(2, min(source_h, height))
+
+    # Enforce the fixed crop ratio while preserving as much area as possible.
+    if width * ratio_den != height * ratio_num:
+        alt_height = max(2, min(source_h, round(width * ratio_den / ratio_num)))
+        alt_width = max(2, min(source_w, round(height * ratio_num / ratio_den)))
+        if abs((width * ratio_den) - (alt_height * ratio_num)) <= abs((alt_width * ratio_den) - (height * ratio_num)):
+            height = alt_height
+        else:
+            width = alt_width
+
+    x = max(0, min(source_w - width, x))
+    y = max(0, min(source_h - height, y))
+
+    is_full_frame = x == 0 and y == 0 and width == source_w and height == source_h
+    output_w, output_h = _segment_crop_output_size(width, height, aspect)
+    return {
+        "enabled": not is_full_frame,
+        "aspect": aspect,
+        "x": x,
+        "y": y,
+        "width": width,
+        "height": height,
+        "featherPx": feather_px,
+        "outputWidth": output_w,
+        "outputHeight": output_h,
+    }
+
+
+def _segment_crop_signature(crop: dict[str, Any] | None) -> str:
+    if not crop or not crop.get("enabled"):
+        return "full"
+    payload = {
+        "aspect": crop.get("aspect"),
+        "x": int(crop.get("x", 0)),
+        "y": int(crop.get("y", 0)),
+        "width": int(crop.get("width", 0)),
+        "height": int(crop.get("height", 0)),
+        "outputWidth": int(crop.get("outputWidth", 0)),
+        "outputHeight": int(crop.get("outputHeight", 0)),
+    }
+    digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+    return digest[:16]
 
 
 def _origin(event: dict[str, Any]) -> str | None:
@@ -331,12 +420,21 @@ def _capture_frame_sync(
     task: dict[str, Any],
     frame_index: int,
     asset_store: AssetStore,
+    crop: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     edit_source_key = task["video"].get("editSource", {}).get("s3Key")
     if not edit_source_key:
         raise ValueError("Edit source not ready")
 
-    frame_id = deterministic_frame_id(task["taskId"], edit_source_key, frame_index)
+    normalized_crop = crop if crop and crop.get("enabled") else None
+    if normalized_crop:
+        crop_sig = _segment_crop_signature(normalized_crop)
+        crop_digest = hashlib.sha256(
+            f"{task['taskId']}:{edit_source_key}:{frame_index}:crop:{crop_sig}".encode("utf-8")
+        ).hexdigest()
+        frame_id = f"frame_{crop_digest[:20]}"
+    else:
+        frame_id = deterministic_frame_id(task["taskId"], edit_source_key, frame_index)
     frames = task.setdefault("frames", {})
     if frame_id in frames:
         frame = frames[frame_id]
@@ -345,6 +443,8 @@ def _capture_frame_sync(
             "imageUrl": asset_store.presign_get(frame["captureKey"], expires=PRESIGNED_GET_TTL_SECONDS),
             "timecode": frame["timecode"],
             "frameIndex": frame["frameIndex"],
+            "width": frame.get("width"),
+            "height": frame.get("height"),
         }
 
     s3 = boto3.client("s3")
@@ -355,7 +455,19 @@ def _capture_frame_sync(
         local_video = td_path / "edit.mp4"
         local_frame = td_path / "frame.png"
         s3.download_file(settings.assets_bucket, edit_source_key, str(local_video))
-        extract_frame_png(str(local_video), frame_index, str(local_frame))
+        extract_frame_png(
+            str(local_video),
+            frame_index,
+            str(local_frame),
+            crop_x=(int(normalized_crop["x"]) if normalized_crop else None),
+            crop_y=(int(normalized_crop["y"]) if normalized_crop else None),
+            crop_width=(int(normalized_crop["width"]) if normalized_crop else None),
+            crop_height=(int(normalized_crop["height"]) if normalized_crop else None),
+            output_width=(int(normalized_crop["outputWidth"]) if normalized_crop else None),
+            output_height=(int(normalized_crop["outputHeight"]) if normalized_crop else None),
+        )
+        with Image.open(local_frame) as captured:
+            captured_w, captured_h = captured.size
         key = paths.frame_capture(frame_id)
         s3.upload_file(
             str(local_frame),
@@ -372,8 +484,11 @@ def _capture_frame_sync(
         "timecode": timecode,
         "createdAt": now_iso(),
         "captureKey": key,
+        "width": captured_w,
+        "height": captured_h,
         "variants": [],
         "selectedVariantId": None,
+        "sourceCrop": normalized_crop,
     }
 
     return {
@@ -381,6 +496,8 @@ def _capture_frame_sync(
         "imageUrl": asset_store.presign_get(key, expires=PRESIGNED_GET_TTL_SECONDS),
         "timecode": timecode,
         "frameIndex": frame_index,
+        "width": captured_w,
+        "height": captured_h,
     }
 
 
@@ -431,6 +548,28 @@ def _decorate_embedded_s3_keys(obj: Any, asset_store: AssetStore) -> None:
 def _segment_duration_seconds(task: dict[str, Any], segment: dict[str, Any]) -> float:
     fps = _fps(task)
     return (segment["endFrameExclusive"] - segment["startFrame"]) / float(fps)
+
+
+def _capture_segment_boundary_frames(
+    *,
+    task: dict[str, Any],
+    segment: dict[str, Any],
+    asset_store: AssetStore,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    crop = segment.get("crop")
+    start_capture = _capture_frame_sync(
+        task=task,
+        frame_index=int(segment["startFrame"]),
+        asset_store=asset_store,
+        crop=(crop if isinstance(crop, dict) else None),
+    )
+    end_capture = _capture_frame_sync(
+        task=task,
+        frame_index=max(int(segment["startFrame"]), int(segment["endFrameExclusive"]) - 1),
+        asset_store=asset_store,
+        crop=(crop if isinstance(crop, dict) else None),
+    )
+    return start_capture, end_capture
 
 
 def _validated_reference_key(task: dict[str, Any], reference_key: str | None) -> str | None:
@@ -591,6 +730,10 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                         patch_meta["referenceImageUrl"] = asset_store.presign_get(ref_key, expires=PRESIGNED_GET_TTL_SECONDS)
             if frame.get("qualityMatchStatus"):
                 _decorate_embedded_s3_keys(frame["qualityMatchStatus"], asset_store)
+        for segment in decorated.get("segments", []):
+            clip_key = segment.get("segmentClipKey")
+            if clip_key:
+                segment["segmentClipUrl"] = asset_store.presign_get(clip_key, expires=PRESIGNED_GET_TTL_SECONDS)
         if decorated.get("qualityMatchAnalyses"):
             _decorate_embedded_s3_keys(decorated["qualityMatchAnalyses"], asset_store)
         for _, generation in decorated.get("segmentGenerations", {}).items():
@@ -884,8 +1027,6 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 return error_response(400, str(exc), origin=origin)
 
             segment_id = new_id("seg")
-            start_capture = _capture_frame_sync(task=task, frame_index=start, asset_store=asset_store)
-            end_capture = _capture_frame_sync(task=task, frame_index=max(start, end_excl - 1), asset_store=asset_store)
             fps = _fps(task)
             segment = {
                 "segmentId": segment_id,
@@ -895,10 +1036,16 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 "durationSec": req.durationSeconds,
                 "startTimecode": _timecode(start, fps),
                 "endTimecode": _timecode(end_excl, fps),
-                "startFrameId": start_capture["frameId"],
-                "endFrameId": end_capture["frameId"],
+                "startFrameId": "",
+                "endFrameId": "",
                 "selectedGenerationId": None,
+                "crop": None,
+                "segmentClipKey": None,
+                "segmentClipUpdatedAt": None,
             }
+            start_capture, end_capture = _capture_segment_boundary_frames(task=task, segment=segment, asset_store=asset_store)
+            segment["startFrameId"] = start_capture["frameId"]
+            segment["endFrameId"] = end_capture["frameId"]
             task.setdefault("segments", []).append(segment)
             store.save_task(task)
             return response(
@@ -914,6 +1061,8 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
         if method == "PATCH" and len(parts) == 4 and parts[2] == "segments":
             segment_id = parts[3]
             req = _json_model(SegmentPatchRequest, event)
+            raw_body = parse_json_body(event) or {}
+            crop_field_present = isinstance(raw_body, dict) and "crop" in raw_body
             segment = next((s for s in task["segments"] if s["segmentId"] == segment_id), None)
             if not segment:
                 return error_response(404, "Segment not found", origin=origin)
@@ -926,6 +1075,8 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             fps = _fps(task)
             duration_frames = end_exclusive - start_frame
             duration_seconds = duration_frames / float(fps)
+            previous_crop_signature = _segment_crop_signature(segment.get("crop"))
+            crop_changed = False
 
             segment["startFrame"] = start_frame
             segment["endFrameExclusive"] = end_exclusive
@@ -933,11 +1084,35 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             segment["durationSec"] = round(duration_seconds, 3)
             segment["startTimecode"] = _timecode(start_frame, fps)
             segment["endTimecode"] = _timecode(end_exclusive, fps)
+            if crop_field_present:
+                if raw_body.get("crop") is None:
+                    segment["crop"] = None
+                else:
+                    if req.crop is None:
+                        return error_response(400, "Invalid crop payload", origin=origin)
+                    try:
+                        normalized_crop = _normalize_segment_crop(task, req.crop.model_dump())
+                    except ValueError as exc:
+                        return error_response(400, str(exc), origin=origin)
+                    segment["crop"] = normalized_crop if normalized_crop and normalized_crop.get("enabled") else None
+                segment["cropUpdatedAt"] = now_iso()
+                crop_changed = previous_crop_signature != _segment_crop_signature(segment.get("crop"))
+            elif "crop" not in segment:
+                segment["crop"] = None
 
-            start_capture = _capture_frame_sync(task=task, frame_index=start_frame, asset_store=asset_store)
-            end_capture = _capture_frame_sync(task=task, frame_index=max(start_frame, end_exclusive - 1), asset_store=asset_store)
-            segment["startFrameId"] = start_capture["frameId"]
-            segment["endFrameId"] = end_capture["frameId"]
+            range_changed = (
+                req.startFrameIndex is not None
+                or req.endFrameExclusive is not None
+                or not segment.get("startFrameId")
+                or not segment.get("endFrameId")
+            )
+            if range_changed or crop_changed:
+                start_capture, end_capture = _capture_segment_boundary_frames(task=task, segment=segment, asset_store=asset_store)
+                segment["startFrameId"] = start_capture["frameId"]
+                segment["endFrameId"] = end_capture["frameId"]
+                segment["segmentClipKey"] = None
+                segment["segmentClipUpdatedAt"] = None
+                segment["selectedGenerationId"] = None
 
             store.save_task(task)
             return response(200, {"ok": True, "segment": segment}, origin=origin)
@@ -1444,6 +1619,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 "status": "queued",
                 "outputKey": None,
                 "jobId": None,
+                "segmentCrop": segment.get("crop"),
                 "createdAt": now_iso(),
             }
             store.save_task(task)

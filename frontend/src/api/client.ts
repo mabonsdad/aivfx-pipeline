@@ -1,6 +1,6 @@
 import { getIdToken } from "../lib/auth";
 import { config } from "../lib/config";
-import type { JobStatus, TaskDetail, TaskSummary } from "../types/api";
+import type { JobStatus, SegmentRecord, TaskDetail, TaskSummary } from "../types/api";
 
 async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const token = await getIdToken();
@@ -43,8 +43,23 @@ export const apiClient = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
-  patchSegment: (taskId: string, segmentId: string, payload: { startFrameIndex?: number; endFrameExclusive?: number }) =>
-    api<{ ok: true }>(`/tasks/${taskId}/segments/${segmentId}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  patchSegment: (
+    taskId: string,
+    segmentId: string,
+    payload: {
+      startFrameIndex?: number;
+      endFrameExclusive?: number;
+      crop?: {
+        aspect: "16:9" | "9:16";
+        x: number;
+        y: number;
+        width: number;
+        height: number;
+        featherPx?: number;
+      } | null;
+    },
+  ) =>
+    api<{ ok: true; segment: SegmentRecord }>(`/tasks/${taskId}/segments/${segmentId}`, { method: "PATCH", body: JSON.stringify(payload) }),
   deleteSegment: (taskId: string, segmentId: string) => api<{ ok: true }>(`/tasks/${taskId}/segments/${segmentId}`, { method: "DELETE" }),
   captureFrame: (taskId: string, frameIndex: number) =>
     api<{ frameId: string; imageUrl: string; frameIndex: number; timecode: string }>(`/tasks/${taskId}/frames/capture`, {

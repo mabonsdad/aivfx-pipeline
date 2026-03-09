@@ -973,8 +973,8 @@ export default function App() {
     return candidates;
   }, [activeCompareVariantId, activeEditFrame, activeEditVariants]);
   const activeFrameDimensions = useMemo(() => {
-    const width = task?.video?.editSource?.width;
-    const height = task?.video?.editSource?.height;
+    const width = activeEditFrame?.width ?? task?.video?.editSource?.width;
+    const height = activeEditFrame?.height ?? task?.video?.editSource?.height;
     if (!activeEditFrame || !width || !height) return null;
     return { width, height };
   }, [activeEditFrame, task?.video?.editSource?.height, task?.video?.editSource?.width]);
@@ -1197,6 +1197,29 @@ export default function App() {
     },
     onSuccess: async (result) => {
       setSelectedSegmentId(result.segmentId);
+      await queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
+    },
+  });
+
+  const saveSegmentCropMutation = useMutation({
+    mutationFn: async ({
+      segmentId,
+      crop,
+    }: {
+      segmentId: string;
+      crop: { aspect: "16:9" | "9:16"; x: number; y: number; width: number; height: number; featherPx?: number } | null;
+    }) => {
+      if (!selectedTaskId) throw new Error("Select task");
+      return apiClient.patchSegment(selectedTaskId, segmentId, { crop });
+    },
+    onSuccess: async (result, variables) => {
+      setSelectedSegmentId(variables.segmentId);
+      if (result.segment?.startFrameId) {
+        setFirstFrameId(result.segment.startFrameId);
+      }
+      if (result.segment?.endFrameId) {
+        setLastFrameId(result.segment.endFrameId);
+      }
       await queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
     },
   });
@@ -1734,9 +1757,10 @@ export default function App() {
   }, [selectedSegment, task]);
 
   const originalSegmentPreviewUrl = useMemo(() => {
+    if (selectedSegment?.segmentClipUrl) return selectedSegment.segmentClipUrl;
     if (!task?.video?.editSource?.downloadUrl || !segmentWindow) return null;
     return `${task.video.editSource.downloadUrl}#t=${segmentWindow.startSec},${segmentWindow.endSec}`;
-  }, [segmentWindow, task?.video?.editSource?.downloadUrl]);
+  }, [selectedSegment?.segmentClipUrl, segmentWindow, task?.video?.editSource?.downloadUrl]);
   const timelinePlaybackUrl = task?.video?.previewSource?.downloadUrl ?? task?.video?.editSource?.downloadUrl ?? "";
 
   useEffect(() => {
@@ -2559,6 +2583,21 @@ export default function App() {
     return created.segmentId;
   }
 
+  const saveSegmentCrop = useCallback(
+    async (crop: { aspect: "16:9" | "9:16"; x: number; y: number; width: number; height: number; featherPx?: number } | null) => {
+      if (!selectedTaskId) throw new Error("Select a task first.");
+      let segmentId = selectedSegmentId;
+      if (!segmentId) {
+        segmentId = await ensureSegmentForSelectedFrames();
+      }
+      if (!segmentId) {
+        throw new Error("You need to pick start and end frames before cropping.");
+      }
+      await saveSegmentCropMutation.mutateAsync({ segmentId, crop });
+    },
+    [ensureSegmentForSelectedFrames, saveSegmentCropMutation, selectedSegmentId, selectedTaskId],
+  );
+
   async function handleTabChange(nextTab: TabId) {
     if (nextTab === tab) return;
     if (tab === "timeline" && nextTab !== "timeline" && nextTab !== "report") {
@@ -2721,7 +2760,11 @@ export default function App() {
       selectedRange,
       lumaModel,
       selectedSegmentId,
+      selectedSegment,
       setSelectedSegmentId,
+      ensureSegmentForSelectedFrames,
+      saveSegmentCrop,
+      isSavingSegmentCrop: saveSegmentCropMutation.isPending,
     }),
     [
       timelinePlaybackUrl,
@@ -2736,7 +2779,11 @@ export default function App() {
       selectedRange,
       lumaModel,
       selectedSegmentId,
+      selectedSegment,
       captureCurrentFrameFor,
+      ensureSegmentForSelectedFrames,
+      saveSegmentCrop,
+      saveSegmentCropMutation.isPending,
       setCurrentFrameIndex,
       setSelectedSegmentId,
     ],

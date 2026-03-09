@@ -19,6 +19,7 @@ from aws_lambda_powertools import Logger
 from src.core.assets import AssetPaths, AssetStore
 from src.core.ffmpeg import (
     FFMPEG_BIN,
+    compose_cropped_generated_segment,
     extract_segment_by_frames,
     ffprobe_video,
     generate_thumbnail_strip,
@@ -226,17 +227,13 @@ def _ensure_segment_clip(
     assets_bucket: str,
 ) -> str:
     segment_key = asset_paths.segment_original(segment["segmentId"])
-    try:
-        asset_store.head_object(segment_key)
-        return segment_key
-    except Exception:
-        pass
 
     with tempfile.TemporaryDirectory() as td:
         edit_source_key = task["video"]["editSource"]["s3Key"]
         input_path = Path(td) / "edit.mp4"
         output_path = Path(td) / "segment.mp4"
         _download_s3(s3, assets_bucket, edit_source_key, input_path)
+        crop = segment.get("crop") if isinstance(segment.get("crop"), dict) and segment.get("crop", {}).get("enabled") else None
         extract_segment_by_frames(
             str(input_path),
             str(output_path),
@@ -244,8 +241,16 @@ def _ensure_segment_clip(
             end_frame_exclusive=segment["endFrameExclusive"],
             fps_num=task["video"]["editSource"]["fps"]["num"],
             fps_den=task["video"]["editSource"]["fps"]["den"],
+            target_width=(int(crop["outputWidth"]) if crop else None),
+            target_height=(int(crop["outputHeight"]) if crop else None),
+            crop_x=(int(crop["x"]) if crop else None),
+            crop_y=(int(crop["y"]) if crop else None),
+            crop_width=(int(crop["width"]) if crop else None),
+            crop_height=(int(crop["height"]) if crop else None),
         )
         _upload_s3(s3, assets_bucket, segment_key, output_path, "video/mp4")
+    segment["segmentClipKey"] = segment_key
+    segment["segmentClipUpdatedAt"] = now_iso()
     return segment_key
 
 
@@ -290,19 +295,11 @@ def _handle_ingest(
         if fps.numerator <= 0 or fps.denominator <= 0:
             fps = Fraction(30, 1)
         if probe.get("is_vfr_input"):
-            target_width, target_height = _target_by_orientation(
-                probe["width"],
-                probe["height"],
-                landscape=(1920, 1080),
-                portrait=(1080, 1920),
-            )
-            _job_progress(job, store, 15, "running", "Input is VFR: normalizing edit source to CFR")
+            _job_progress(job, store, 15, "running", "Input is VFR: normalizing edit source to CFR at source resolution")
             transcode_to_cfr(
                 str(original_path),
                 str(edit_path),
                 fps,
-                target_width=target_width,
-                target_height=target_height,
                 crf=16,
                 preset="medium",
                 audio_bitrate="192k",
@@ -981,6 +978,9 @@ def _handle_segment_generate(
         if segment_key:
             local_segment_source = td_path / "segment_full.mp4"
             _download_s3(s3, settings.assets_bucket, segment_key, local_segment_source)
+            segment_source_probe = ffprobe_video(str(local_segment_source))
+            segment_src_width = int(segment_source_probe.get("width") or src_width)
+            segment_src_height = int(segment_source_probe.get("height") or src_height)
             source_size = local_segment_source.stat().st_size
             if source_size > FULL_VIDEO_MAX_BYTES:
                 _job_progress(job, store, 20, "running", "Optimizing segment clip to provider size limits")
@@ -989,8 +989,8 @@ def _handle_segment_generate(
                     input_path=str(local_segment_source),
                     output_path=str(local_provider_segment),
                     fps=fps,
-                    source_width=src_width,
-                    source_height=src_height,
+                    source_width=segment_src_width,
+                    source_height=segment_src_height,
                     landscape_target=(1920, 1080),
                     portrait_target=(1080, 1920),
                     max_bytes=FULL_VIDEO_MAX_BYTES,
@@ -1001,23 +1001,25 @@ def _handle_segment_generate(
                 _upload_s3(s3, settings.assets_bucket, media_key_for_provider, local_provider_segment, "video/mp4")
             else:
                 media_key_for_provider = segment_key
-                provider_media_width = src_width
-                provider_media_height = src_height
+                provider_media_width = segment_src_width
+                provider_media_height = segment_src_height
 
         frame_bytes = asset_store.read_bytes(first_frame_key)
+        with Image.open(BytesIO(frame_bytes)) as first_image_probe:
+            first_source_width, first_source_height = first_image_probe.size
         if model_name in {"wan2.2-a14b", "wan2.2-animate"}:
-            first_target_w, first_target_h = _nearest_runware_wan22_resolution(src_width, src_height)
+            first_target_w, first_target_h = _nearest_runware_wan22_resolution(first_source_width, first_source_height)
         elif model_name in {"runway-gen4.5", "veo-3.1", "veo-3.1-fast"}:
             first_target_w, first_target_h = _target_by_orientation(
-                src_width,
-                src_height,
+                first_source_width,
+                first_source_height,
                 landscape=(1280, 720),
                 portrait=(720, 1280),
             )
         else:
             first_target_w, first_target_h = _target_by_orientation(
-                src_width,
-                src_height,
+                first_source_width,
+                first_source_height,
                 landscape=(1920, 1080),
                 portrait=(1080, 1920),
             )
@@ -1247,6 +1249,7 @@ def _handle_segment_generate(
             "sourceLastFrameResolvedKey": last_frame_key,
             "requestedDurationSec": round(segment_duration_sec, 3),
             "providerDurationSec": provider_duration_sec,
+            "segmentCrop": segment.get("crop"),
             "generationSettings": {
                 "provider": provider_name,
                 "requestedModel": model_name,
@@ -1260,6 +1263,7 @@ def _handle_segment_generate(
                     if provider_media_width and provider_media_height
                     else None
                 ),
+                "segmentCrop": segment.get("crop"),
                 "requestedDurationSec": round(segment_duration_sec, 3),
                 "providerDurationSec": provider_duration_sec,
             },
@@ -1313,10 +1317,43 @@ def _handle_merge(
                 start_frame_override = max(0, int(start_frame_override))
                 if total_frames > 0:
                     start_frame_override = min(start_frame_override, total_frames - 1)
+            merge_start_frame = segment["startFrame"] if start_frame_override is None else start_frame_override
+            effective_trim_start = trim_start_frames
+            effective_trim_end = trim_end_frames
+            merge_segment_path = seg_path
+            crop_settings = gen.get("segmentCrop") if isinstance(gen.get("segmentCrop"), dict) else segment.get("crop")
+            crop_compose_cmd: list[str] | None = None
+            if (
+                isinstance(crop_settings, dict)
+                and crop_settings.get("enabled")
+                and int(crop_settings.get("width", 0)) > 0
+                and int(crop_settings.get("height", 0)) > 0
+            ):
+                composed_path = td_path / f"segment_composed_{idx}.mp4"
+                crop_compose_cmd = compose_cropped_generated_segment(
+                    str(current_path),
+                    str(seg_path),
+                    str(composed_path),
+                    start_frame=merge_start_frame,
+                    fps_num=task["video"]["editSource"]["fps"]["num"],
+                    fps_den=task["video"]["editSource"]["fps"]["den"],
+                    output_width=int(task["video"]["editSource"]["width"]),
+                    output_height=int(task["video"]["editSource"]["height"]),
+                    crop_x=int(crop_settings.get("x", 0)),
+                    crop_y=int(crop_settings.get("y", 0)),
+                    crop_width=int(crop_settings.get("width", 0)),
+                    crop_height=int(crop_settings.get("height", 0)),
+                    crop_feather_px=int(crop_settings.get("featherPx", 0)),
+                    generated_trim_start_frames=trim_start_frames,
+                    generated_trim_end_frames=trim_end_frames,
+                )
+                merge_segment_path = composed_path
+                effective_trim_start = 0
+                effective_trim_end = 0
 
             cmd = merge_with_segment_replacement(
                 str(current_path),
-                str(seg_path),
+                str(merge_segment_path),
                 str(out_path),
                 start_frame=segment["startFrame"],
                 end_frame_exclusive=segment["endFrameExclusive"],
@@ -1326,8 +1363,8 @@ def _handle_merge(
                 output_height=int(task["video"]["editSource"]["height"]),
                 temporal_feather_frames=feather_frames,
                 insert_start_frame=start_frame_override,
-                generated_trim_start_frames=trim_start_frames,
-                generated_trim_end_frames=trim_end_frames,
+                generated_trim_start_frames=effective_trim_start,
+                generated_trim_end_frames=effective_trim_end,
             )
             applied.append(
                 {
@@ -1336,6 +1373,8 @@ def _handle_merge(
                     "startFrameOverride": start_frame_override,
                     "trimStartFrames": trim_start_frames,
                     "trimEndFrames": trim_end_frames,
+                    "segmentCrop": crop_settings if isinstance(crop_settings, dict) else None,
+                    "cropComposeFfmpeg": (" ".join(crop_compose_cmd).replace(str(td_path), "/tmp") if crop_compose_cmd else None),
                     "ffmpeg": " ".join(cmd).replace(str(td_path), "/tmp"),
                 }
             )
@@ -1757,6 +1796,7 @@ def _handle_qc_analysis(
         def _resolve_variant_for_qc(
             frame_record: dict[str, Any],
             preferred_variant_id: Any,
+            preferred_output_keys: list[Any] | None = None,
         ) -> tuple[str | None, dict[str, Any]]:
             resolved_variant_id = preferred_variant_id if isinstance(preferred_variant_id, str) and preferred_variant_id else None
             variants = frame_record.get("variants", [])
@@ -1765,20 +1805,28 @@ def _handle_qc_analysis(
                 if resolved_variant_id
                 else None
             )
+            if resolved_variant and resolved_variant.get("outputKey"):
+                return resolved_variant_id, resolved_variant
+            if preferred_output_keys:
+                for key in preferred_output_keys:
+                    if not isinstance(key, str) or not key:
+                        continue
+                    by_output = next((item for item in variants if item.get("outputKey") == key), None)
+                    if by_output and by_output.get("outputKey"):
+                        return str(by_output.get("variantId")), by_output
             if not resolved_variant or not resolved_variant.get("outputKey"):
                 selected_variant_id = frame_record.get("selectedVariantId")
                 if isinstance(selected_variant_id, str) and selected_variant_id:
                     selected_variant = next((item for item in variants if item.get("variantId") == selected_variant_id), None)
                     if selected_variant and selected_variant.get("outputKey"):
                         return selected_variant_id, selected_variant
-            if resolved_variant and resolved_variant.get("outputKey"):
-                return resolved_variant_id, resolved_variant
             # Legacy generations may not carry variant linkage. Fall back to the captured frame.
             return None, {"outputKey": frame_record["captureKey"], "patchMeta": {}}
 
         source_first_variant_id, source_first_variant = _resolve_variant_for_qc(
             start_frame,
             generation.get("sourceFirstFrameVariantId"),
+            [generation.get("sourceFirstFrameResolvedKey"), generation.get("inputFirstFrameKey")],
         )
 
         end_frame = task.get("frames", {}).get(segment.get("endFrameId")) if segment.get("endFrameId") else None
@@ -1788,6 +1836,7 @@ def _handle_qc_analysis(
             source_last_variant_id, source_last_variant = _resolve_variant_for_qc(
                 end_frame,
                 generation.get("sourceLastFrameVariantId"),
+                [generation.get("sourceLastFrameResolvedKey"), generation.get("inputLastFrameKey")],
             )
 
         generation["qc"] = {"status": "running", "updatedAt": now_iso()}
@@ -1796,6 +1845,12 @@ def _handle_qc_analysis(
         try:
             with tempfile.TemporaryDirectory() as td:
                 td_path = Path(td)
+                video_mask_key = (
+                    source_first_variant.get("patchMeta", {}).get("maskKey")
+                    if isinstance(source_first_variant.get("patchMeta"), dict)
+                    else None
+                )
+                video_mask_bytes = asset_store.read_bytes(video_mask_key) if isinstance(video_mask_key, str) else None
 
                 def _analyze_frame_variant(
                     *,
@@ -1942,7 +1997,7 @@ def _handle_qc_analysis(
                 if paired_count == 0:
                     raise RuntimeError("No sampled frames available for QC analysis")
 
-                video_mask = _load_optional_mask(mask_bytes, (analysis_width, analysis_height))
+                video_mask = _load_optional_mask(video_mask_bytes, (analysis_width, analysis_height))
                 per_frame_rows: list[dict[str, Any]] = []
                 for frame_idx in range(paired_count):
                     orig_image = Image.open(original_frames[frame_idx]).convert("RGB")

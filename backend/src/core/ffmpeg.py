@@ -144,15 +144,39 @@ def transcode_to_cfr(
     _run(cmd)
 
 
-def extract_frame_png(input_path: str, frame_index: int, output_path: str) -> None:
+def extract_frame_png(
+    input_path: str,
+    frame_index: int,
+    output_path: str,
+    *,
+    crop_x: int | None = None,
+    crop_y: int | None = None,
+    crop_width: int | None = None,
+    crop_height: int | None = None,
+    output_width: int | None = None,
+    output_height: int | None = None,
+) -> None:
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    vf_parts = [f"select=eq(n\\,{frame_index})"]
+    if (
+        crop_x is not None
+        and crop_y is not None
+        and crop_width is not None
+        and crop_height is not None
+        and crop_width > 0
+        and crop_height > 0
+    ):
+        vf_parts.append(f"crop={crop_width}:{crop_height}:{crop_x}:{crop_y}")
+    if output_width and output_height:
+        vf_parts.append(f"scale={output_width}:{output_height}:flags=lanczos")
+    vf_parts.append("setsar=1")
     cmd = [
         FFMPEG_BIN,
         "-y",
         "-i",
         input_path,
         "-vf",
-        f"select=eq(n\\,{frame_index})",
+        ",".join(vf_parts),
         "-vframes",
         "1",
         output_path,
@@ -170,6 +194,10 @@ def extract_segment_by_frames(
     fps_den: int,
     target_width: int | None = None,
     target_height: int | None = None,
+    crop_x: int | None = None,
+    crop_y: int | None = None,
+    crop_width: int | None = None,
+    crop_height: int | None = None,
     crf: int = 16,
     preset: str = "slow",
     audio_bitrate: str = "192k",
@@ -178,8 +206,17 @@ def extract_segment_by_frames(
     start_sec = Fraction(start_frame, 1) / fps
     duration_sec = Fraction(max(0, end_frame_exclusive - start_frame), 1) / fps
     vf_parts: list[str] = []
+    if (
+        crop_x is not None
+        and crop_y is not None
+        and crop_width is not None
+        and crop_height is not None
+        and crop_width > 0
+        and crop_height > 0
+    ):
+        vf_parts.append(f"crop={crop_width}:{crop_height}:{crop_x}:{crop_y}")
     if target_width and target_height:
-        vf_parts.append(_scale_pad_filter(target_width, target_height))
+        vf_parts.append(f"scale={target_width}:{target_height}:flags=lanczos")
     vf_parts.append("setsar=1")
     cmd = [
         FFMPEG_BIN,
@@ -207,6 +244,94 @@ def extract_segment_by_frames(
         output_path,
     ]
     _run(cmd)
+
+
+def compose_cropped_generated_segment(
+    edit_source_path: str,
+    generated_segment_path: str,
+    output_path: str,
+    *,
+    start_frame: int,
+    fps_num: int,
+    fps_den: int,
+    output_width: int,
+    output_height: int,
+    crop_x: int,
+    crop_y: int,
+    crop_width: int,
+    crop_height: int,
+    crop_feather_px: int = 0,
+    generated_trim_start_frames: int = 0,
+    generated_trim_end_frames: int = 0,
+) -> list[str]:
+    fps = Fraction(fps_num, fps_den)
+    fps_str = f"{fps_num}/{fps_den}"
+    one_frame_sec = float(Fraction(1, max(1, fps_num)))
+    generated_probe = ffprobe_video(generated_segment_path)
+    generated_duration_sec = max(one_frame_sec, float(generated_probe.get("duration_sec") or one_frame_sec))
+    trim_start_sec = max(0.0, float(Fraction(max(0, generated_trim_start_frames), 1) / fps))
+    trim_end_sec = max(0.0, float(Fraction(max(0, generated_trim_end_frames), 1) / fps))
+    max_trim_sec = max(0.0, generated_duration_sec - one_frame_sec)
+    trim_start_sec = min(trim_start_sec, max_trim_sec)
+    trim_end_sec = min(trim_end_sec, max(0.0, max_trim_sec - trim_start_sec))
+    generated_input_start_sec = trim_start_sec
+    generated_input_end_sec = max(generated_input_start_sec + one_frame_sec, generated_duration_sec - trim_end_sec)
+    generated_effective_duration_sec = max(one_frame_sec, generated_input_end_sec - generated_input_start_sec)
+    start_sec = float(Fraction(max(0, start_frame), 1) / fps)
+    end_sec = start_sec + generated_effective_duration_sec
+
+    norm_original = f"fps={fps_str},scale={output_width}:{output_height}:flags=lanczos,setsar=1,format=yuv420p"
+    norm_generated = f"fps={fps_str},scale={crop_width}:{crop_height}:flags=lanczos,setsar=1,format=yuv420p"
+    filter_complex: list[str] = [
+        f"[0:v]trim={_format_seconds(start_sec)}:{_format_seconds(end_sec)},{norm_original},setpts=PTS-STARTPTS[vorig]",
+        (
+            f"[1:v]trim={_format_seconds(generated_input_start_sec)}:{_format_seconds(generated_input_end_sec)},"
+            f"{norm_generated},setpts=PTS-STARTPTS[vgen]"
+        ),
+    ]
+
+    feather_px = max(0, min(int(crop_feather_px), min(crop_width // 2, crop_height // 2, 128)))
+    if feather_px > 0:
+        inner_w = max(1, crop_width - (feather_px * 2))
+        inner_h = max(1, crop_height - (feather_px * 2))
+        filter_complex.extend(
+            [
+                (
+                    f"color=black:s={crop_width}x{crop_height}:r={fps_str}:d={_format_seconds(generated_effective_duration_sec)},"
+                    f"format=gray,drawbox=x={feather_px}:y={feather_px}:w={inner_w}:h={inner_h}:color=white:t=fill,"
+                    f"boxblur={feather_px}:1[vcropmask]"
+                ),
+                "[vgen]format=rgba[vgen_rgba]",
+                "[vgen_rgba][vcropmask]alphamerge[vgen_alpha]",
+                f"[vorig][vgen_alpha]overlay={crop_x}:{crop_y}:format=auto:shortest=1[vout]",
+            ]
+        )
+    else:
+        filter_complex.append(f"[vorig][vgen]overlay={crop_x}:{crop_y}:format=auto:shortest=1[vout]")
+
+    cmd = [
+        FFMPEG_BIN,
+        "-y",
+        "-i",
+        edit_source_path,
+        "-i",
+        generated_segment_path,
+        "-filter_complex",
+        ";".join(filter_complex),
+        "-map",
+        "[vout]",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-crf",
+        "16",
+        "-preset",
+        "slow",
+        output_path,
+    ]
+    _run(cmd)
+    return cmd
 
 
 def transcode_for_preview(

@@ -52,6 +52,11 @@ backend/wrapt/
 backend/bin/
 backend/six.py
 backend/typing_extensions.py
+backend/cv2/
+backend/numpy/
+backend/numpy.libs/
+backend/opencv_python_headless.libs/
+backend/backend-full*.zip
 
 # misc
 .DS_Store

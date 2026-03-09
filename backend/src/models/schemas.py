@@ -24,6 +24,16 @@ class SegmentCreateRequest(BaseModel):
 class SegmentPatchRequest(BaseModel):
     startFrameIndex: int | None = Field(default=None, ge=0)
     endFrameExclusive: int | None = Field(default=None, ge=1)
+    crop: "SegmentCropRequest" | None = None
+
+
+class SegmentCropRequest(BaseModel):
+    aspect: Literal["16:9", "9:16"] = "16:9"
+    x: int = Field(ge=0)
+    y: int = Field(ge=0)
+    width: int = Field(gt=0)
+    height: int = Field(gt=0)
+    featherPx: int = Field(default=0, ge=0, le=200)
 
 
 class FrameCaptureRequest(BaseModel):
@@ -195,6 +205,8 @@ class TaskFrame(BaseModel):
     frameIndex: int
     timecode: str
     captureKey: str
+    width: int | None = None
+    height: int | None = None
     variants: list[TaskFrameVariant] = Field(default_factory=list)
     selectedVariantId: str | None = None
     qcReviewed: bool | None = None

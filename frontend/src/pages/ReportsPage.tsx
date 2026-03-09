@@ -60,6 +60,15 @@ type QcFrameRow = {
   qcGeneration: ReportGenerationRow | null;
 };
 
+type VideoSelectedFrameArtifact = {
+  index: number;
+  timeSec: number;
+  heatmapUrl?: string;
+  overlayUrl?: string;
+  binaryChangeUrl?: string;
+  [key: string]: unknown;
+};
+
 type ReportsPageCtx = {
   reportTask: TaskDetail | undefined;
   reportTaskId: string | null;
@@ -128,13 +137,35 @@ function classifyVideoGeneration(row: ReportGenerationRow): VideoGenerationGroup
   return "start_end";
 }
 
-function frameQcForVariant(generation: SegmentGeneration, variantId: string): QcFrameResult | null {
+function frameQcForVariant(generation: SegmentGeneration, variantId: string, variantOutputKey?: string | null): QcFrameResult | null {
   const qc = generation.qc;
   if (!qc) return null;
   const frameByVariant = (qc.frameByVariant as Record<string, QcFrameResult> | undefined) ?? undefined;
   if (frameByVariant?.[variantId]) return frameByVariant[variantId];
   if (generation.sourceFirstFrameVariantId === variantId && qc.frame) return qc.frame as QcFrameResult;
+  if (
+    qc.frame &&
+    variantOutputKey &&
+    !generation.sourceFirstFrameVariantId &&
+    (generation.sourceFirstFrameResolvedKey === variantOutputKey || generation.inputFirstFrameKey === variantOutputKey)
+  ) {
+    return qc.frame as QcFrameResult;
+  }
   return null;
+}
+
+function generationReferencesVariant(generation: SegmentGeneration, variant: FrameVariant): boolean {
+  if (generation.sourceFirstFrameVariantId === variant.variantId || generation.sourceLastFrameVariantId === variant.variantId) {
+    return true;
+  }
+  const variantKey = variant.outputKey;
+  if (!variantKey) return false;
+  return (
+    generation.sourceFirstFrameResolvedKey === variantKey ||
+    generation.inputFirstFrameKey === variantKey ||
+    generation.sourceLastFrameResolvedKey === variantKey ||
+    generation.inputLastFrameKey === variantKey
+  );
 }
 
 function hasFrameQcArtifacts(frameQc: QcFrameResult | null): boolean {
@@ -171,14 +202,14 @@ function generationNeedsQcForVideo(generation: SegmentGeneration): boolean {
   return !hasVideoArtifacts || selectedFrames.length === 0;
 }
 
-function generationNeedsQcForFrameVariant(generation: SegmentGeneration, variantId: string): boolean {
-  if (generation.status !== "complete" || !generation.outputKey || !generation.sourceFirstFrameVariantId) return false;
-  if (generation.sourceFirstFrameVariantId !== variantId && generation.sourceLastFrameVariantId !== variantId) return false;
+function generationNeedsQcForFrameVariant(generation: SegmentGeneration, variant: FrameVariant): boolean {
+  if (generation.status !== "complete" || !generation.outputKey) return false;
+  if (!generationReferencesVariant(generation, variant)) return false;
   const qc = generation.qc;
   if (!qc) return true;
   if (qc.status === "running") return false;
   if (qc.status !== "complete") return true;
-  return !hasFrameQcArtifacts(frameQcForVariant(generation, variantId));
+  return !hasFrameQcArtifacts(frameQcForVariant(generation, variant.variantId, variant.outputKey));
 }
 
 export default function ReportsPage({ ctx }: ReportsPageProps) {
@@ -218,16 +249,45 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
   const reportRows = useMemo(() => {
     if (!reportTask) return { rows: [] as ReportGenerationRow[] };
     const frameById = reportTask.frames ?? {};
+    const resolveVariant = (
+      frame: FrameRecord | null,
+      preferredVariantId: string | null | undefined,
+      preferredOutputKey: string | null | undefined,
+      fallbackOutputKey: string | null | undefined,
+    ): FrameVariant | null => {
+      if (!frame) return null;
+      if (preferredVariantId) {
+        const byId = frame.variants.find((variant) => variant.variantId === preferredVariantId) ?? null;
+        if (byId) return byId;
+      }
+      const key = preferredOutputKey ?? fallbackOutputKey ?? null;
+      if (key) {
+        const byKey = frame.variants.find((variant) => variant.outputKey === key) ?? null;
+        if (byKey) return byKey;
+      }
+      if (frame.selectedVariantId) {
+        return frame.variants.find((variant) => variant.variantId === frame.selectedVariantId) ?? null;
+      }
+      return null;
+    };
     const allRows: ReportGenerationRow[] = Object.values(reportTask.segmentGenerations ?? {})
       .filter((generation) => generation.status !== "failed")
       .map((generation) => {
         const segment = reportSegmentsById.get(generation.segmentId) ?? null;
         const startFrame = segment ? frameById[segment.startFrameId] ?? null : null;
         const endFrame = segment ? frameById[segment.endFrameId] ?? null : null;
-        const startVariantId = generation.sourceFirstFrameVariantId ?? startFrame?.selectedVariantId ?? null;
-        const endVariantId = generation.sourceLastFrameVariantId ?? endFrame?.selectedVariantId ?? null;
-        const startVariant = startVariantId ? startFrame?.variants.find((variant) => variant.variantId === startVariantId) ?? null : null;
-        const endVariant = endVariantId ? endFrame?.variants.find((variant) => variant.variantId === endVariantId) ?? null : null;
+        const startVariant = resolveVariant(
+          startFrame,
+          generation.sourceFirstFrameVariantId,
+          generation.sourceFirstFrameResolvedKey,
+          generation.inputFirstFrameKey,
+        );
+        const endVariant = resolveVariant(
+          endFrame,
+          generation.sourceLastFrameVariantId,
+          generation.sourceLastFrameResolvedKey,
+          generation.inputLastFrameKey,
+        );
         return {
           generation,
           segment,
@@ -346,8 +406,34 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
     const startFrameIds = new Set((reportTask.segments ?? []).map((segment) => segment.startFrameId));
     const endFrameIds = new Set((reportTask.segments ?? []).map((segment) => segment.endFrameId));
     const generationRowsByVariant = new Map<string, ReportGenerationRow[]>();
+    const variantIdsByOutputKey = new Map<string, string[]>();
+    for (const frame of Object.values(reportTask.frames ?? {})) {
+      for (const variant of frame.variants ?? []) {
+        if (!variant.outputKey) continue;
+        const existing = variantIdsByOutputKey.get(variant.outputKey) ?? [];
+        if (!existing.includes(variant.variantId)) {
+          variantIdsByOutputKey.set(variant.outputKey, [...existing, variant.variantId]);
+        }
+      }
+    }
     for (const row of reportRows.rows) {
+      const linkedIds = new Set<string>();
       for (const variantId of [row.generation.sourceFirstFrameVariantId, row.generation.sourceLastFrameVariantId]) {
+        if (!variantId) continue;
+        linkedIds.add(variantId);
+      }
+      for (const key of [
+        row.generation.sourceFirstFrameResolvedKey,
+        row.generation.inputFirstFrameKey,
+        row.generation.sourceLastFrameResolvedKey,
+        row.generation.inputLastFrameKey,
+      ]) {
+        if (!key) continue;
+        for (const resolvedId of variantIdsByOutputKey.get(key) ?? []) {
+          linkedIds.add(resolvedId);
+        }
+      }
+      for (const variantId of linkedIds) {
         if (!variantId) continue;
         const existing = generationRowsByVariant.get(variantId) ?? [];
         generationRowsByVariant.set(variantId, [...existing, row]);
@@ -366,7 +452,9 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
         }
         const qcGeneration =
           linkedGenerations.find(
-            (row) => row.generation.qc?.status === "complete" && hasFrameQcArtifacts(frameQcForVariant(row.generation, variant.variantId)),
+            (row) =>
+              row.generation.qc?.status === "complete" &&
+              hasFrameQcArtifacts(frameQcForVariant(row.generation, variant.variantId, variant.outputKey)),
           ) ??
           linkedGenerations.find((row) => row.generation.qc?.status === "running") ??
           linkedGenerations.find((row) => row.generation.qc?.status === "complete") ??
@@ -401,20 +489,23 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
     return grouped;
   }, [scopedVideoRows]);
   const scopedQcGenerationIdsNeedingRun = useMemo(() => {
-    if (!reportTask) return [] as string[];
+    if (!reportTask || reportView === "outputs") return [] as string[];
     const ids = new Set<string>();
-    for (const row of reportRows.rows) {
-      if (generationNeedsQcForVideo(row.generation)) ids.add(row.generation.genId);
+    if (reportView === "qc_video") {
+      for (const row of scopedVideoRows) {
+        if (generationNeedsQcForVideo(row.generation)) ids.add(row.generation.genId);
+      }
+      return [...ids];
     }
     for (const row of qcFrameRows) {
       for (const linked of row.linkedGenerations) {
-        if (generationNeedsQcForFrameVariant(linked.generation, row.variant.variantId)) {
+        if (generationNeedsQcForFrameVariant(linked.generation, row.variant)) {
           ids.add(linked.generation.genId);
         }
       }
     }
     return [...ids];
-  }, [qcFrameRows, reportRows.rows, reportTask]);
+  }, [qcFrameRows, reportTask, reportView, scopedVideoRows]);
 
   useEffect(() => {
     if (!activeCustomReportId) return;
@@ -424,23 +515,24 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
   }, [activeCustomReportId, reportCustomReports, setActiveCustomReportId]);
 
   useEffect(() => {
-    if (!reportTask) return;
+    if (!reportTask || reportView === "outputs") return;
     if (!scopedQcGenerationIdsNeedingRun.length) return;
     const sortedMissing = [...scopedQcGenerationIdsNeedingRun].sort();
-    const runKey = `${reportTask.taskId}:all:${sortedMissing.join(",")}`;
-    if (requestedAutoQcRef.current.has(runKey)) return;
-    requestedAutoQcRef.current.add(runKey);
     void (async () => {
       for (let index = 0; index < sortedMissing.length; index += 20) {
         const generationIds = sortedMissing.slice(index, index + 20);
+        const chunkKey = `${reportTask.taskId}:${reportView}:${activeCustomReportId ?? "default"}:${generationIds.join(",")}`;
+        if (requestedAutoQcRef.current.has(chunkKey)) continue;
+        requestedAutoQcRef.current.add(chunkKey);
         try {
           await runQcMutation.mutateAsync({ taskId: reportTask.taskId, generationIds });
         } catch {
+          requestedAutoQcRef.current.delete(chunkKey);
           break;
         }
       }
     })();
-  }, [reportTask, runQcMutation, scopedQcGenerationIdsNeedingRun]);
+  }, [activeCustomReportId, reportTask, reportView, runQcMutation, scopedQcGenerationIdsNeedingRun]);
 
   const reportPlaybackUrl = reportTask?.video?.editSource?.downloadUrl ?? reportTask?.video?.original?.downloadUrl ?? null;
   const latestQcJob =
@@ -556,7 +648,7 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                       <p className="text-sm text-ink/60">No outputs in this section yet.</p>
                     ) : (
                       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                        {section.items.map((card: any) => (
+                        {section.items.map((card: ReportOutputCard) => (
                           <article key={card.id} className="space-y-2 rounded-lg border border-ink/10 bg-white p-3">
                             <label className="flex items-center gap-2 text-xs text-ink/70">
                               <input
@@ -616,8 +708,10 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                   <p className="text-sm text-ink/60">No frame edits available for this report scope.</p>
                 ) : (
                   <div className="space-y-3">
-                    {qcFrameRows.map((row: any) => {
-                      const frameQc = row.qcGeneration ? frameQcForVariant(row.qcGeneration.generation, row.variant.variantId) : null;
+                    {qcFrameRows.map((row: QcFrameRow) => {
+                      const frameQc = row.qcGeneration
+                        ? frameQcForVariant(row.qcGeneration.generation, row.variant.variantId, row.variant.outputKey)
+                        : null;
                       const frameMetrics = frameQc?.metrics as Record<string, unknown> | undefined;
                       const frameArtifacts = frameQc?.artifacts as Record<string, unknown> | undefined;
                       const boundaryOverlayUrl =
@@ -785,7 +879,7 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                         <p className="text-sm text-ink/60">No generations in this category.</p>
                       ) : (
                         <div className="space-y-3">
-                          {rows.map((row: any) => {
+                          {rows.map((row: ReportGenerationRow) => {
                             const videoAggregates = row.generation.qc?.video?.aggregates as Record<string, unknown> | undefined;
                             const videoArtifacts = row.generation.qc?.video?.artifacts;
                             const qcStatus = row.generation.qc?.status ?? "not_run";
@@ -795,7 +889,7 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                             const timelineCsvUrl = videoArtifacts?.timelineCsvUrl as string | undefined;
                             const reportJsonUrl = videoArtifacts?.reportJsonUrl as string | undefined;
                             const diffVideoUrl = videoArtifacts?.diffVideoUrl as string | undefined;
-                            const selectedFrames = (row.generation.qc?.video?.selectedFrames ?? []).slice(0, 6);
+                            const selectedFrames = ((row.generation.qc?.video?.selectedFrames ?? []) as VideoSelectedFrameArtifact[]).slice(0, 6);
                             const fps = Math.max(1, fpsValue(reportTask));
                             const startCaptureMismatch =
                               row.startFrame?.captureKey &&
@@ -965,7 +1059,7 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                                   <div className="space-y-2">
                                     <p className="text-xs font-medium text-ink/70">Selected frame diff artifacts</p>
                                     <div className="grid gap-3 md:grid-cols-3">
-                                      {selectedFrames.map((frame: any) => {
+                                      {selectedFrames.map((frame: VideoSelectedFrameArtifact) => {
                                         const frameOverlayUrl =
                                           (frame.overlayUrl as string | undefined) ??
                                           ((frame as Record<string, unknown>).boundaryOverlayUrl as string | undefined);

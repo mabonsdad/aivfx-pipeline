@@ -126,6 +126,8 @@ export type FrameRecord = {
   frameIndex: number;
   timecode: string;
   captureKey: string;
+  width?: number;
+  height?: number;
   createdAt?: string;
   imageUrl?: string;
   variants: FrameVariant[];
@@ -146,6 +148,19 @@ export type SegmentRecord = {
   startFrameId: string;
   endFrameId: string;
   selectedGenerationId?: string | null;
+  segmentClipKey?: string;
+  segmentClipUrl?: string;
+  crop?: {
+    enabled: boolean;
+    aspect: "16:9" | "9:16";
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    featherPx?: number;
+    outputWidth?: number;
+    outputHeight?: number;
+  } | null;
 };
 
 export type SegmentGeneration = {

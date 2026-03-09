@@ -169,6 +169,7 @@ export class AivfxStack extends cdk.Stack {
       architecture: lambda.Architecture.ARM_64,
       handler: "src/api_handler.handler",
       code: lambda.Code.fromAsset(backendCodePath, {
+        ignoreMode: cdk.IgnoreMode.GLOB,
         exclude: ["tests", "__pycache__", ".pytest_cache", "*.pyc"],
       }),
       timeout: cdk.Duration.seconds(29),
@@ -191,6 +192,7 @@ export class AivfxStack extends cdk.Stack {
       architecture: lambda.Architecture.ARM_64,
       handler: "src/worker_handler.handler",
       code: lambda.Code.fromAsset(backendCodePath, {
+        ignoreMode: cdk.IgnoreMode.GLOB,
         exclude: ["tests", "__pycache__", ".pytest_cache", "*.pyc"],
       }),
       timeout: cdk.Duration.minutes(15),
