@@ -154,20 +154,6 @@ function frameQcForVariant(generation: SegmentGeneration, variantId: string, var
   return null;
 }
 
-function generationReferencesVariant(generation: SegmentGeneration, variant: FrameVariant): boolean {
-  if (generation.sourceFirstFrameVariantId === variant.variantId || generation.sourceLastFrameVariantId === variant.variantId) {
-    return true;
-  }
-  const variantKey = variant.outputKey;
-  if (!variantKey) return false;
-  return (
-    generation.sourceFirstFrameResolvedKey === variantKey ||
-    generation.inputFirstFrameKey === variantKey ||
-    generation.sourceLastFrameResolvedKey === variantKey ||
-    generation.inputLastFrameKey === variantKey
-  );
-}
-
 function hasFrameQcArtifacts(frameQc: QcFrameResult | null): boolean {
   const artifacts = frameQc?.artifacts as Record<string, unknown> | undefined;
   if (!artifacts) return false;
@@ -204,7 +190,6 @@ function generationNeedsQcForVideo(generation: SegmentGeneration): boolean {
 
 function generationNeedsQcForFrameVariant(generation: SegmentGeneration, variant: FrameVariant): boolean {
   if (generation.status !== "complete" || !generation.outputKey) return false;
-  if (!generationReferencesVariant(generation, variant)) return false;
   const qc = generation.qc;
   if (!qc) return true;
   if (qc.status === "running") return false;
@@ -437,6 +422,16 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
         if (!variantId) continue;
         const existing = generationRowsByVariant.get(variantId) ?? [];
         generationRowsByVariant.set(variantId, [...existing, row]);
+      }
+      for (const variant of row.startFrame?.variants ?? []) {
+        if (!variant.variantId || !variant.outputKey) continue;
+        const existing = generationRowsByVariant.get(variant.variantId) ?? [];
+        generationRowsByVariant.set(variant.variantId, [...existing, row]);
+      }
+      for (const variant of row.endFrame?.variants ?? []) {
+        if (!variant.variantId || !variant.outputKey) continue;
+        const existing = generationRowsByVariant.get(variant.variantId) ?? [];
+        generationRowsByVariant.set(variant.variantId, [...existing, row]);
       }
     }
     const rows: QcFrameRow[] = [];

@@ -1908,30 +1908,62 @@ def _handle_qc_analysis(
                         },
                     }
 
-                first_frame_qc = _analyze_frame_variant(
-                    frame_record=start_frame,
-                    variant_record=source_first_variant,
-                    artifact_prefix="frame",
-                )
                 frame_by_variant: dict[str, dict[str, Any]] = {}
-                if isinstance(source_first_variant_id, str):
-                    frame_by_variant[source_first_variant_id] = first_frame_qc
 
-                if source_last_variant and source_last_variant.get("outputKey") and end_frame and end_frame.get("captureKey"):
+                def _variants_with_output(frame_record: dict[str, Any]) -> list[dict[str, Any]]:
+                    variants = frame_record.get("variants", [])
+                    if not isinstance(variants, list):
+                        return []
+                    return [item for item in variants if isinstance(item, dict) and item.get("variantId") and item.get("outputKey")]
+
+                start_variants = _variants_with_output(start_frame)
+                first_frame_qc: dict[str, Any] | None = None
+                for variant_index, variant_record in enumerate(start_variants):
+                    variant_id = str(variant_record["variantId"])
+                    variant_qc = _analyze_frame_variant(
+                        frame_record=start_frame,
+                        variant_record=variant_record,
+                        artifact_prefix=f"frame_start_{variant_index:03d}",
+                    )
+                    frame_by_variant[variant_id] = variant_qc
+                    if variant_id == source_first_variant_id:
+                        first_frame_qc = variant_qc
+
+                if first_frame_qc is None:
+                    first_frame_qc = _analyze_frame_variant(
+                        frame_record=start_frame,
+                        variant_record=source_first_variant,
+                        artifact_prefix="frame",
+                    )
+                    if isinstance(source_first_variant_id, str) and source_first_variant_id:
+                        frame_by_variant[source_first_variant_id] = first_frame_qc
+
+                if end_frame and end_frame.get("captureKey"):
+                    end_variants = _variants_with_output(end_frame)
+                    for variant_index, variant_record in enumerate(end_variants):
+                        variant_id = str(variant_record["variantId"])
+                        if variant_id in frame_by_variant:
+                            continue
+                        variant_qc = _analyze_frame_variant(
+                            frame_record=end_frame,
+                            variant_record=variant_record,
+                            artifact_prefix=f"frame_end_{variant_index:03d}",
+                        )
+                        frame_by_variant[variant_id] = variant_qc
+
                     if (
-                        isinstance(source_last_variant_id, str)
+                        source_last_variant
+                        and source_last_variant.get("outputKey")
+                        and isinstance(source_last_variant_id, str)
                         and source_last_variant_id
-                        and source_last_variant_id == source_first_variant_id
+                        and source_last_variant_id not in frame_by_variant
                     ):
-                        frame_by_variant[source_last_variant_id] = first_frame_qc
-                    else:
                         last_frame_qc = _analyze_frame_variant(
                             frame_record=end_frame,
                             variant_record=source_last_variant,
                             artifact_prefix="frame_last",
                         )
-                        if isinstance(source_last_variant_id, str) and source_last_variant_id:
-                            frame_by_variant[source_last_variant_id] = last_frame_qc
+                        frame_by_variant[source_last_variant_id] = last_frame_qc
 
                 frame_metrics = first_frame_qc["metrics"]
                 frame_heatmap_key = first_frame_qc["artifacts"]["heatmapKey"]
