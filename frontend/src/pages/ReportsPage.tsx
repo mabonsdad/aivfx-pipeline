@@ -27,6 +27,7 @@ type ReportGenerationRow = {
 };
 
 type VideoGenerationGroup = "start_video" | "start_end" | "start_only";
+const AUTO_QC_RETRY_MS = 45_000;
 
 type ReportView = "outputs" | "qc_frame" | "qc_video";
 
@@ -226,7 +227,7 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
     setReportGraphModal,
   } = ctx;
 
-  const requestedAutoQcRef = useRef<Set<string>>(new Set());
+  const requestedAutoQcRef = useRef<Map<string, number>>(new Map());
   const reportSegmentsById = useMemo(
     () => new Map((reportTask?.segments ?? []).map((segment) => [segment.segmentId, segment])),
     [reportTask?.segments],
@@ -510,6 +511,10 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
   }, [activeCustomReportId, reportCustomReports, setActiveCustomReportId]);
 
   useEffect(() => {
+    requestedAutoQcRef.current.clear();
+  }, [activeCustomReportId, reportTaskId, reportView]);
+
+  useEffect(() => {
     if (!reportTask || reportView === "outputs") return;
     if (!scopedQcGenerationIdsNeedingRun.length) return;
     const sortedMissing = [...scopedQcGenerationIdsNeedingRun].sort();
@@ -517,8 +522,10 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
       for (let index = 0; index < sortedMissing.length; index += 20) {
         const generationIds = sortedMissing.slice(index, index + 20);
         const chunkKey = `${reportTask.taskId}:${reportView}:${activeCustomReportId ?? "default"}:${generationIds.join(",")}`;
-        if (requestedAutoQcRef.current.has(chunkKey)) continue;
-        requestedAutoQcRef.current.add(chunkKey);
+        const now = Date.now();
+        const lastRequestedAt = requestedAutoQcRef.current.get(chunkKey) ?? 0;
+        if (now - lastRequestedAt < AUTO_QC_RETRY_MS) continue;
+        requestedAutoQcRef.current.set(chunkKey, now);
         try {
           await runQcMutation.mutateAsync({ taskId: reportTask.taskId, generationIds });
         } catch {

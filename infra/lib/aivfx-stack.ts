@@ -159,7 +159,9 @@ export class AivfxStack extends cdk.Stack {
 
     const backendCodePath = `${__dirname}/../../backend`;
 
-    const layerArns = [process.env.FFMPEG_LAYER_ARN].filter((arn): arn is string => !!arn);
+    const defaultFfmpegLayerArn = `arn:aws:lambda:${this.region}:${this.account}:layer:ffmpeg-mini-arm64-python39:1`;
+    const configuredFfmpegLayerArn = process.env.FFMPEG_LAYER_ARN?.trim();
+    const layerArns = [configuredFfmpegLayerArn || defaultFfmpegLayerArn].filter((arn): arn is string => !!arn);
     const externalLayers = layerArns.map((arn, index) =>
       lambda.LayerVersion.fromLayerVersionArn(this, `ExternalLayer${index}`, arn),
     );

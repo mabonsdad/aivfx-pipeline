@@ -2693,6 +2693,7 @@ export default function App() {
           </div>
           <div className="flex flex-wrap gap-2">
             <button
+              type="button"
               className="rounded border border-ink/20 bg-white px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50"
               disabled={!taskId || createCustomReportMutation.isPending}
               onClick={() => taskId && createCustomReportFromSelection(taskId, "qc_frame")}
@@ -2700,6 +2701,7 @@ export default function App() {
               Create QC Frame report
             </button>
             <button
+              type="button"
               className="rounded border border-ink/20 bg-white px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50"
               disabled={!taskId || createCustomReportMutation.isPending}
               onClick={() => taskId && createCustomReportFromSelection(taskId, "qc_video")}
