@@ -318,16 +318,25 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
         if (!previous || sourceWidth <= 0 || sourceHeight <= 0) return previous;
         if (previous.aspect === aspect) return previous;
         if (isFullFrame) {
-          return { ...previous, aspect };
+          const full = maxAspectRect(sourceWidth, sourceHeight, aspect);
+          return { ...previous, aspect, ...full };
         }
         const cx = previous.x + previous.width / 2;
         const cy = previous.y + previous.height / 2;
         const ratio = aspect === "16:9" ? 16 / 9 : 9 / 16;
         let width = previous.width;
         let height = Math.round(width / ratio);
+        if (width > sourceWidth) {
+          width = sourceWidth;
+          height = Math.round(width / ratio);
+        }
         if (height > sourceHeight) {
           height = sourceHeight;
           width = Math.round(height * ratio);
+        }
+        if (width > sourceWidth) {
+          width = sourceWidth;
+          height = Math.round(width / ratio);
         }
         let x = Math.round(cx - width / 2);
         let y = Math.round(cy - height / 2);
@@ -365,6 +374,7 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
       const onMove = (moveEvent: globalThis.PointerEvent) => {
         const drag = dragRef.current;
         if (!drag) return;
+        moveEvent.preventDefault();
         const dxSource = (moveEvent.clientX - drag.startClientX) * drag.sourcePerClientX;
         const dySource = (moveEvent.clientY - drag.startClientY) * drag.sourcePerClientY;
         if (drag.handle === "move") {
@@ -387,9 +397,11 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
         dragRef.current = null;
         window.removeEventListener("pointermove", onMove);
         window.removeEventListener("pointerup", onUp);
+        window.removeEventListener("pointercancel", onUp);
       };
       window.addEventListener("pointermove", onMove);
       window.addEventListener("pointerup", onUp);
+      window.addEventListener("pointercancel", onUp);
     },
     [cropDraft, sourceHeight, sourceWidth],
   );
@@ -421,16 +433,19 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
   }, [cropDraft, ensureSegmentForSelectedFrames, isFullFrame, saveSegmentCrop, selectedSegmentId, setSelectedSegmentId]);
 
   const cropStyle = useMemo(() => {
-    if (!cropDraft || sourceWidth <= 0 || sourceHeight <= 0 || !modalVideoWrapRef.current) return null;
-    const rect = modalVideoWrapRef.current.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) return null;
-    const scaleX = rect.width / sourceWidth;
-    const scaleY = rect.height / sourceHeight;
+    if (!cropDraft || sourceWidth <= 0 || sourceHeight <= 0 || !modalVideoWrapRef.current || !modalVideoRef.current) return null;
+    const wrapRect = modalVideoWrapRef.current.getBoundingClientRect();
+    const videoRect = modalVideoRef.current.getBoundingClientRect();
+    if (videoRect.width <= 0 || videoRect.height <= 0 || wrapRect.width <= 0 || wrapRect.height <= 0) return null;
+    const scaleX = videoRect.width / sourceWidth;
+    const scaleY = videoRect.height / sourceHeight;
     return {
-      left: cropDraft.x * scaleX,
-      top: cropDraft.y * scaleY,
+      left: (videoRect.left - wrapRect.left) + cropDraft.x * scaleX,
+      top: (videoRect.top - wrapRect.top) + cropDraft.y * scaleY,
       width: cropDraft.width * scaleX,
       height: cropDraft.height * scaleY,
+      scaleX,
+      scaleY,
     };
   }, [cropDraft, modalLayoutTick, sourceHeight, sourceWidth, isCropModalOpen]);
 
@@ -609,24 +624,25 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
                 />
               </label>
             </div>
-            <div ref={modalVideoWrapRef} className="relative mx-auto w-full max-w-4xl">
+            <div ref={modalVideoWrapRef} className="relative mx-auto w-fit max-w-[92vw]">
               <video
                 ref={modalVideoRef}
                 src={timelinePlaybackUrl}
                 controls
                 preload="metadata"
-                className="max-h-[60vh] w-full rounded-md border border-ink/15 bg-black"
+                className="block h-auto max-h-[60vh] w-auto max-w-[92vw] rounded-md border border-ink/15 bg-black"
                 onTimeUpdate={onModalVideoTimeUpdate}
               />
               {cropStyle ? (
                 <div
                   role="presentation"
-                  className={`absolute cursor-move ${isFullFrame ? "border-2 border-dashed border-ink/40" : "border-2 border-accent"}`}
+                  className={`absolute ${isFullFrame ? "border-2 border-dashed border-sky-500/80" : "border-2 border-accent shadow-[0_0_0_9999px_rgba(0,0,0,0.28)]"}`}
                   style={{
                     left: `${cropStyle.left}px`,
                     top: `${cropStyle.top}px`,
                     width: `${cropStyle.width}px`,
                     height: `${cropStyle.height}px`,
+                    touchAction: "none",
                   }}
                   onPointerDown={(event) => startDrag("move", event)}
                 >
@@ -634,27 +650,31 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
                     <div
                       className="pointer-events-none absolute border border-dashed border-accent/70"
                       style={{
-                        left: `${Math.min(cropDraft.featherPx, Math.max(0, cropStyle.width / 2 - 1))}px`,
-                        top: `${Math.min(cropDraft.featherPx, Math.max(0, cropStyle.height / 2 - 1))}px`,
-                        right: `${Math.min(cropDraft.featherPx, Math.max(0, cropStyle.width / 2 - 1))}px`,
-                        bottom: `${Math.min(cropDraft.featherPx, Math.max(0, cropStyle.height / 2 - 1))}px`,
+                        left: `${Math.min(cropDraft.featherPx * cropStyle.scaleX, Math.max(0, cropStyle.width / 2 - 1))}px`,
+                        top: `${Math.min(cropDraft.featherPx * cropStyle.scaleY, Math.max(0, cropStyle.height / 2 - 1))}px`,
+                        right: `${Math.min(cropDraft.featherPx * cropStyle.scaleX, Math.max(0, cropStyle.width / 2 - 1))}px`,
+                        bottom: `${Math.min(cropDraft.featherPx * cropStyle.scaleY, Math.max(0, cropStyle.height / 2 - 1))}px`,
                       }}
                     />
                   ) : null}
                   {(["nw", "ne", "sw", "se"] as const).map((handle) => {
                     const pos: Record<typeof handle, string> = {
-                      nw: "left-0 top-0",
-                      ne: "right-0 top-0",
-                      sw: "left-0 bottom-0",
-                      se: "right-0 bottom-0",
+                      nw: "-left-2 -top-2 cursor-nwse-resize",
+                      ne: "-right-2 -top-2 cursor-nesw-resize",
+                      sw: "-left-2 -bottom-2 cursor-nesw-resize",
+                      se: "-right-2 -bottom-2 cursor-nwse-resize",
                     };
                     return (
                       <div
                         key={handle}
                         role="button"
                         aria-label={`Resize ${handle}`}
-                        className={`absolute h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded border border-white bg-accent ${pos[handle]}`}
-                        onPointerDown={(event) => startDrag(handle, event)}
+                        className={`absolute h-4 w-4 rounded-full border-2 border-white bg-accent shadow ${pos[handle]}`}
+                        onPointerDown={(event) => {
+                          event.stopPropagation();
+                          startDrag(handle, event);
+                        }}
+                        style={{ touchAction: "none" }}
                       />
                     );
                   })}
