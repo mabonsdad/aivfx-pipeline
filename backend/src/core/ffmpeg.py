@@ -4,12 +4,28 @@ import json
 import os
 import subprocess
 import math
+import shutil
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
-FFMPEG_BIN = os.getenv("FFMPEG_BIN", "/opt/bin/ffmpeg")
-FFPROBE_BIN = os.getenv("FFPROBE_BIN", "/opt/bin/ffprobe")
+
+def _resolve_binary(env_name: str, fallback_name: str) -> str:
+    env_value = os.getenv(env_name)
+    if env_value:
+        return env_value
+    for candidate in (
+        f"/opt/bin/{fallback_name}",
+        f"/opt/{fallback_name}",
+        f"/usr/bin/{fallback_name}",
+    ):
+        if os.path.exists(candidate):
+            return candidate
+    return shutil.which(fallback_name) or fallback_name
+
+
+FFMPEG_BIN = _resolve_binary("FFMPEG_BIN", "ffmpeg")
+FFPROBE_BIN = _resolve_binary("FFPROBE_BIN", "ffprobe")
 
 
 class FFmpegError(RuntimeError):
