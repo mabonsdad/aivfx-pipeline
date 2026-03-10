@@ -3132,7 +3132,7 @@ export default function App() {
           }}
         />
 
-        <section className="col-span-12 space-y-4 md:col-span-9">
+        <section className="col-span-12 space-y-4 md:col-span-10">
           <div className="rounded-2xl border border-ink/10 bg-card p-4">
             <WorkflowTabs
               tabs={tabs}
