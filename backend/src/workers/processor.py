@@ -2346,6 +2346,9 @@ def process_job_record(record: dict[str, Any], *, settings: Any) -> None:
         raise RuntimeError(f"Task not found: {task_id}")
 
     job["status"] = "running"
+    job["progress"] = 0
+    job.pop("error", None)
+    job.pop("resultRefs", None)
     job.setdefault("startedAt", now_iso())
     store.save_job(job)
 
