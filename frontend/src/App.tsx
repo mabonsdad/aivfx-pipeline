@@ -2849,6 +2849,7 @@ export default function App() {
       setPatchPrompt,
       patchEditMutation,
       maskHasPaint,
+      refreshPatchOverlay: () => renderPatchOverlay(),
       formatCompactTimestamp,
       openQualityMatchModal,
     }),
@@ -2879,6 +2880,7 @@ export default function App() {
       patchPrompt,
       patchEditMutation,
       maskHasPaint,
+      renderPatchOverlay,
       openQualityMatchModal,
     ],
   );

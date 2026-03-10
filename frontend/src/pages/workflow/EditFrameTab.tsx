@@ -1,5 +1,5 @@
 import { ReactCompareSlider, ReactCompareSliderImage } from "react-compare-slider";
-import type { PointerEvent, RefObject } from "react";
+import { useEffect, useState, type PointerEvent, type RefObject } from "react";
 
 import type { TaskDetail } from "../../types/api";
 
@@ -85,6 +85,7 @@ export type EditFrameTabCtx = {
   setPatchPrompt: (value: string) => void;
   patchEditMutation: { isPending: boolean; mutate: (frameId: string) => void; error?: { message?: string } | null };
   maskHasPaint: boolean;
+  refreshPatchOverlay: () => void;
   formatCompactTimestamp: (iso: string | undefined) => string;
   openQualityMatchModal: (candidate: EditFrameCandidate) => void;
 };
@@ -143,9 +144,20 @@ export default function EditFrameTab({ ctx }: EditFrameTabProps) {
     setPatchPrompt,
     patchEditMutation,
     maskHasPaint,
+    refreshPatchOverlay,
     formatCompactTimestamp,
     openQualityMatchModal,
   } = ctx;
+  const [isPatchModalOpen, setPatchModalOpen] = useState(false);
+
+  useEffect(() => {
+    if (!isPatchModalOpen) return;
+    setPatchPrompt(prompt);
+    const refreshTimer = window.setTimeout(() => {
+      refreshPatchOverlay();
+    }, 0);
+    return () => window.clearTimeout(refreshTimer);
+  }, [isPatchModalOpen, prompt, refreshPatchOverlay, setPatchPrompt]);
 
   return (
               <div className="space-y-4">
@@ -195,6 +207,14 @@ export default function EditFrameTab({ ctx }: EditFrameTabProps) {
                         <option value="nano_banana">Nano Banana Std</option>
                         <option value="chatgpt">ChatGPT-image</option>
                       </select>
+                      <button
+                        type="button"
+                        className="rounded-md border border-ink/20 bg-white px-4 py-2 disabled:cursor-not-allowed disabled:opacity-50"
+                        disabled={!activeEditFrame}
+                        onClick={() => setPatchModalOpen(true)}
+                      >
+                        Add Mask
+                      </button>
                       <button
                         className="rounded-md bg-accent px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-50"
                         disabled={!activeEditFrame || fullEditMutation.isPending || !prompt.trim()}
@@ -354,238 +374,272 @@ export default function EditFrameTab({ ctx }: EditFrameTabProps) {
                   </div>
                 </div>
 
-                <details className="rounded-lg border border-ink/10 p-3">
-                  <summary className="cursor-pointer text-sm font-medium">Advanced (Patch Tools)</summary>
-                  <div className="mt-3 space-y-3">
-                    {activeEditFrame?.imageUrl && activeFrameDimensions ? (
-                      <div className="space-y-2">
-                        <p className="text-xs text-ink/70">
-                          Paint or lasso the exact area to change. Add mode paints edit regions, erase mode removes them.
-                          Keep masks tight to the target, then use feather and edge refine to avoid seams.
+              {isPatchModalOpen ? (
+                <div className="fixed inset-0 z-[65] flex items-center justify-center bg-black/60 p-4">
+                  <div className="max-h-[94vh] w-full max-w-5xl overflow-y-auto rounded-2xl border border-ink/15 bg-card p-4">
+                    <div className="mb-3 flex items-start justify-between gap-3">
+                      <div>
+                        <h4 className="text-lg font-semibold">Patch Editor</h4>
+                        <p className="text-sm text-ink/70">
+                          {editFrameTab === "first" ? "Start Frame" : "End Frame"} mask editing
+                          {activeEditFrame ? ` · frame ${activeEditFrame.frameIndex}` : ""}
                         </p>
-                        <div className="relative inline-block max-w-full overflow-hidden rounded-md border border-ink/20 bg-bg">
-                          <img
-                            src={activeEditSourceImageUrl ?? activeEditFrame.imageUrl}
-                            alt="Patch mask base frame"
-                            className="block max-h-[420px] max-w-full select-none"
-                            draggable={false}
-                          />
-                          <canvas
-                            ref={patchOverlayCanvasRef}
-                            width={activeFrameDimensions.width}
-                            height={activeFrameDimensions.height}
-                            className="absolute inset-0 h-full w-full cursor-crosshair touch-none"
-                            onPointerDown={onPatchMaskPointerDown}
-                            onPointerMove={onPatchMaskPointerMove}
-                            onPointerUp={onPatchMaskPointerUp}
-                            onPointerLeave={onPatchMaskPointerUp}
-                            onPointerCancel={onPatchMaskPointerUp}
-                          />
-                        </div>
-                        <div className="grid gap-2 md:grid-cols-2 lg:grid-cols-4">
-                          <label className="text-xs text-ink/70">
-                            Patch engine
-                            <select
-                              value={patchEngine}
-                              onChange={(e) => setPatchEngine(e.target.value as EditFrameTabCtx["patchEngine"])}
-                              className="mt-1 block w-full rounded border border-ink/20 px-2 py-1 text-sm"
-                            >
-                              <option value="nano_banana_pro">Google Nano Banana Pro</option>
-                              <option value="chatgpt">OpenAI ChatGPT (gpt-image-1)</option>
-                              <option value="runware_flux_fill">Runware FLUX Fill</option>
-                              <option value="runware_ace_pp">Runware ACE++ + FLUX Fill</option>
-                            </select>
-                          </label>
-                          <label className="text-xs text-ink/70">
-                            Tool
-                            <select
-                              value={patchToolMode}
-                              onChange={(e) => setPatchToolMode(e.target.value as EditFrameTabCtx["patchToolMode"])}
-                              className="mt-1 block w-full rounded border border-ink/20 px-2 py-1 text-sm"
-                            >
-                              <option value="brush_add">Brush (add)</option>
-                              <option value="brush_erase">Brush (erase)</option>
-                              <option value="lasso_add">Lasso (add)</option>
-                              <option value="lasso_erase">Lasso (erase)</option>
-                            </select>
-                          </label>
-                          <label className="text-xs text-ink/70">
-                            Brush size
-                            <select
-                              value={patchBrushSize}
-                              onChange={(e) => setPatchBrushSize(Number(e.target.value))}
-                              className="mt-1 block w-full rounded border border-ink/20 px-2 py-1 text-sm"
-                            >
-                              {[8, 12, 16, 24, 32, 48, 64].map((size) => (
-                                <option key={size} value={size}>
-                                  {size}px
-                                </option>
-                              ))}
-                            </select>
-                          </label>
-                          <label className="text-xs text-ink/70">
-                            Feather edge
-                            <select
-                              value={featherPx}
-                              onChange={(e) => setFeatherPx(Number(e.target.value))}
-                              className="mt-1 block w-full rounded border border-ink/20 px-2 py-1 text-sm"
-                            >
-                              {[0, 4, 8, 12, 16, 24, 32, 48, 64, 96, 128, 160, 200].map((value) => (
-                                <option key={value} value={value}>
-                                  {value}px
-                                </option>
-                              ))}
-                            </select>
-                          </label>
-                          <div className="flex items-end lg:col-span-4">
-                            <button
-                              type="button"
-                              className="w-full rounded border border-ink/20 bg-white px-3 py-2 text-sm"
-                              onClick={clearPatchMask}
-                            >
-                              Clear mask
-                            </button>
+                      </div>
+                      <button
+                        type="button"
+                        className="rounded border border-ink/20 bg-white px-3 py-1 text-sm"
+                        onClick={() => setPatchModalOpen(false)}
+                      >
+                        Close
+                      </button>
+                    </div>
+
+                    <div className="space-y-3">
+                      {activeEditFrame?.imageUrl && activeFrameDimensions ? (
+                        <div className="space-y-2">
+                          <p className="text-xs text-ink/70">
+                            Paint or lasso the exact area to change. Add mode paints edit regions, erase mode removes them.
+                            Keep masks tight to the target, then use feather and edge refine to avoid seams.
+                          </p>
+                          <div className="relative inline-block max-w-full overflow-hidden rounded-md border border-ink/20 bg-bg">
+                            <img
+                              src={activeEditSourceImageUrl ?? activeEditFrame.imageUrl}
+                              alt="Patch mask base frame"
+                              className="block max-h-[420px] max-w-full select-none"
+                              draggable={false}
+                            />
+                            <canvas
+                              ref={patchOverlayCanvasRef}
+                              width={activeFrameDimensions.width}
+                              height={activeFrameDimensions.height}
+                              className="absolute inset-0 h-full w-full cursor-crosshair touch-none"
+                              onPointerDown={onPatchMaskPointerDown}
+                              onPointerMove={onPatchMaskPointerMove}
+                              onPointerUp={onPatchMaskPointerUp}
+                              onPointerLeave={onPatchMaskPointerUp}
+                              onPointerCancel={onPatchMaskPointerUp}
+                            />
                           </div>
-                        </div>
-                        <div className="rounded border border-ink/10 bg-white p-2">
-                          <div className="flex flex-wrap items-center justify-between gap-2">
-                            <label className="flex items-center gap-2 text-xs text-ink/70">
-                              <input
-                                type="checkbox"
-                                checked={edgeAwareRefine}
-                                onChange={(event) => setEdgeAwareRefine(event.target.checked)}
-                              />
-                              Edge-aware matte refinement
+                          <div className="grid gap-2 md:grid-cols-2 lg:grid-cols-4">
+                            <label className="text-xs text-ink/70">
+                              Patch engine
+                              <select
+                                value={patchEngine}
+                                onChange={(e) => setPatchEngine(e.target.value as EditFrameTabCtx["patchEngine"])}
+                                className="mt-1 block w-full rounded border border-ink/20 px-2 py-1 text-sm"
+                              >
+                                <option value="nano_banana_pro">Google Nano Banana Pro</option>
+                                <option value="chatgpt">OpenAI ChatGPT (gpt-image-1)</option>
+                                <option value="runware_flux_fill">Runware FLUX Fill</option>
+                                <option value="runware_ace_pp">Runware ACE++ + FLUX Fill</option>
+                              </select>
                             </label>
-                            <p className="text-[11px] text-ink/60">Helps reduce halos on detailed edges like hair, fabric and props.</p>
+                            <label className="text-xs text-ink/70">
+                              Tool
+                              <select
+                                value={patchToolMode}
+                                onChange={(e) => setPatchToolMode(e.target.value as EditFrameTabCtx["patchToolMode"])}
+                                className="mt-1 block w-full rounded border border-ink/20 px-2 py-1 text-sm"
+                              >
+                                <option value="brush_add">Brush (add)</option>
+                                <option value="brush_erase">Brush (erase)</option>
+                                <option value="lasso_add">Lasso (add)</option>
+                                <option value="lasso_erase">Lasso (erase)</option>
+                              </select>
+                            </label>
+                            <label className="text-xs text-ink/70">
+                              Brush size
+                              <select
+                                value={patchBrushSize}
+                                onChange={(e) => setPatchBrushSize(Number(e.target.value))}
+                                className="mt-1 block w-full rounded border border-ink/20 px-2 py-1 text-sm"
+                              >
+                                {[8, 12, 16, 24, 32, 48, 64].map((size) => (
+                                  <option key={size} value={size}>
+                                    {size}px
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                            <label className="text-xs text-ink/70">
+                              Feather edge
+                              <select
+                                value={featherPx}
+                                onChange={(e) => setFeatherPx(Number(e.target.value))}
+                                className="mt-1 block w-full rounded border border-ink/20 px-2 py-1 text-sm"
+                              >
+                                {[0, 4, 8, 12, 16, 24, 32, 48, 64, 96, 128, 160, 200].map((value) => (
+                                  <option key={value} value={value}>
+                                    {value}px
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                            <div className="flex items-end lg:col-span-4">
+                              <button
+                                type="button"
+                                className="w-full rounded border border-ink/20 bg-white px-3 py-2 text-sm"
+                                onClick={clearPatchMask}
+                              >
+                                Clear mask
+                              </button>
+                            </div>
                           </div>
-                          {edgeAwareRefine ? (
-                            <div className="mt-2 grid gap-2 md:grid-cols-3">
+                          <div className="rounded border border-ink/10 bg-white p-2">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <label className="flex items-center gap-2 text-xs text-ink/70">
+                                <input
+                                  type="checkbox"
+                                  checked={edgeAwareRefine}
+                                  onChange={(event) => setEdgeAwareRefine(event.target.checked)}
+                                />
+                                Edge-aware matte refinement
+                              </label>
+                              <p className="text-[11px] text-ink/60">Helps reduce halos on detailed edges like hair, fabric and props.</p>
+                            </div>
+                            {edgeAwareRefine ? (
+                              <div className="mt-2 grid gap-2 md:grid-cols-3">
+                                <label className="text-xs text-ink/70">
+                                  Refine strength
+                                  <input
+                                    type="range"
+                                    min={0}
+                                    max={1}
+                                    step={0.05}
+                                    value={edgeAwareStrength}
+                                    onChange={(event) => setEdgeAwareStrength(Number(event.target.value))}
+                                    className="mt-1 block w-full"
+                                  />
+                                  <span className="mt-1 block text-[11px] text-ink/60">{edgeAwareStrength.toFixed(2)}</span>
+                                </label>
+                                <label className="text-xs text-ink/70">
+                                  Edge radius
+                                  <select
+                                    value={edgeAwareRadiusPx}
+                                    onChange={(event) => setEdgeAwareRadiusPx(Number(event.target.value))}
+                                    className="mt-1 block w-full rounded border border-ink/20 px-2 py-1 text-sm"
+                                  >
+                                    {[0, 2, 4, 6, 8, 10, 12, 16, 20, 24].map((value) => (
+                                      <option key={value} value={value}>
+                                        {value}px
+                                      </option>
+                                    ))}
+                                  </select>
+                                </label>
+                                <label className="text-xs text-ink/70">
+                                  Mask grow/shrink
+                                  <select
+                                    value={maskGrowPx}
+                                    onChange={(event) => setMaskGrowPx(Number(event.target.value))}
+                                    className="mt-1 block w-full rounded border border-ink/20 px-2 py-1 text-sm"
+                                  >
+                                    {[-24, -16, -12, -8, -4, 0, 4, 8, 12, 16, 24].map((value) => (
+                                      <option key={value} value={value}>
+                                        {value > 0 ? `+${value}px` : `${value}px`}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </label>
+                              </div>
+                            ) : null}
+                          </div>
+                          {patchEngine === "runware_ace_pp" ? (
+                            <div className="space-y-2 rounded border border-ink/10 bg-white p-2">
+                              <p className="text-xs text-ink/70">
+                                ACE++ local editing needs one reference image plus your painted mask.
+                              </p>
+                              <input
+                                type="file"
+                                accept="image/*"
+                                onChange={(e) => {
+                                  const file = e.target.files?.[0];
+                                  if (!file) return;
+                                  setPatchReferenceForTab(editFrameTab, file);
+                                }}
+                                className="text-xs"
+                              />
+                              {activePatchReference?.previewUrl ? (
+                                <div className="flex items-start gap-2">
+                                  <img
+                                    src={activePatchReference.previewUrl}
+                                    alt="Runware ACE++ reference"
+                                    className="max-h-20 rounded border border-ink/10 bg-bg object-contain"
+                                  />
+                                  <div className="space-y-1">
+                                    <p className="text-xs text-ink/60">{activePatchReference.file.name}</p>
+                                    <button
+                                      type="button"
+                                      className="rounded border border-ink/20 px-2 py-1 text-xs"
+                                      onClick={() => clearPatchReferenceForTab(editFrameTab)}
+                                    >
+                                      Remove reference
+                                    </button>
+                                  </div>
+                                </div>
+                              ) : (
+                                <p className="text-xs text-ink/60">No ACE++ reference image selected.</p>
+                              )}
                               <label className="text-xs text-ink/70">
-                                Refine strength
+                                Repainting scale
                                 <input
                                   type="range"
                                   min={0}
                                   max={1}
                                   step={0.05}
-                                  value={edgeAwareStrength}
-                                  onChange={(event) => setEdgeAwareStrength(Number(event.target.value))}
+                                  value={runwareRepaintingScale}
+                                  onChange={(e) => setRunwareRepaintingScale(Number(e.target.value))}
                                   className="mt-1 block w-full"
                                 />
-                                <span className="mt-1 block text-[11px] text-ink/60">{edgeAwareStrength.toFixed(2)}</span>
-                              </label>
-                              <label className="text-xs text-ink/70">
-                                Edge radius
-                                <select
-                                  value={edgeAwareRadiusPx}
-                                  onChange={(event) => setEdgeAwareRadiusPx(Number(event.target.value))}
-                                  className="mt-1 block w-full rounded border border-ink/20 px-2 py-1 text-sm"
-                                >
-                                  {[0, 2, 4, 6, 8, 10, 12, 16, 20, 24].map((value) => (
-                                    <option key={value} value={value}>
-                                      {value}px
-                                    </option>
-                                  ))}
-                                </select>
-                              </label>
-                              <label className="text-xs text-ink/70">
-                                Mask grow/shrink
-                                <select
-                                  value={maskGrowPx}
-                                  onChange={(event) => setMaskGrowPx(Number(event.target.value))}
-                                  className="mt-1 block w-full rounded border border-ink/20 px-2 py-1 text-sm"
-                                >
-                                  {[-24, -16, -12, -8, -4, 0, 4, 8, 12, 16, 24].map((value) => (
-                                    <option key={value} value={value}>
-                                      {value > 0 ? `+${value}px` : `${value}px`}
-                                    </option>
-                                  ))}
-                                </select>
+                                <span className="mt-1 block text-[11px] text-ink/60">{runwareRepaintingScale.toFixed(2)}</span>
                               </label>
                             </div>
                           ) : null}
                         </div>
-                        {patchEngine === "runware_ace_pp" ? (
-                          <div className="space-y-2 rounded border border-ink/10 bg-white p-2">
-                            <p className="text-xs text-ink/70">
-                              ACE++ local editing needs one reference image plus your painted mask.
-                            </p>
-                            <input
-                              type="file"
-                              accept="image/*"
-                              onChange={(e) => {
-                                const file = e.target.files?.[0];
-                                if (!file) return;
-                                setPatchReferenceForTab(editFrameTab, file);
-                              }}
-                              className="text-xs"
-                            />
-                            {activePatchReference?.previewUrl ? (
-                              <div className="flex items-start gap-2">
-                                <img
-                                  src={activePatchReference.previewUrl}
-                                  alt="Runware ACE++ reference"
-                                  className="max-h-20 rounded border border-ink/10 bg-bg object-contain"
-                                />
-                                <div className="space-y-1">
-                                  <p className="text-xs text-ink/60">{activePatchReference.file.name}</p>
-                                  <button
-                                    type="button"
-                                    className="rounded border border-ink/20 px-2 py-1 text-xs"
-                                    onClick={() => clearPatchReferenceForTab(editFrameTab)}
-                                  >
-                                    Remove reference
-                                  </button>
-                                </div>
-                              </div>
-                            ) : (
-                              <p className="text-xs text-ink/60">No ACE++ reference image selected.</p>
-                            )}
-                            <label className="text-xs text-ink/70">
-                              Repainting scale
-                              <input
-                                type="range"
-                                min={0}
-                                max={1}
-                                step={0.05}
-                                value={runwareRepaintingScale}
-                                onChange={(e) => setRunwareRepaintingScale(Number(e.target.value))}
-                                className="mt-1 block w-full"
-                              />
-                              <span className="mt-1 block text-[11px] text-ink/60">{runwareRepaintingScale.toFixed(2)}</span>
-                            </label>
-                          </div>
-                        ) : null}
+                      ) : (
+                        <p className="text-sm text-ink/60">Select a frame above to enable mask painting.</p>
+                      )}
+                      <textarea
+                        value={patchPrompt}
+                        onChange={(e) => setPatchPrompt(e.target.value)}
+                        placeholder="Describe the masked edit"
+                        className="h-20 w-full rounded-md border border-ink/20 p-2"
+                      />
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          className="rounded-md bg-accent2 px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-50"
+                          disabled={
+                            !activeEditFrame ||
+                            patchEditMutation.isPending ||
+                            !patchPrompt.trim() ||
+                            !maskHasPaint ||
+                            (patchEngine === "runware_ace_pp" && !activePatchReference?.file)
+                          }
+                          onClick={() => {
+                            if (!activeEditFrame) return;
+                            window.alert("Generating frame from patch edit. You can track progress in Jobs.");
+                            patchEditMutation.mutate(activeEditFrame.frameId);
+                            setPatchModalOpen(false);
+                          }}
+                        >
+                          Edit
+                        </button>
+                        <button
+                          type="button"
+                          className="rounded border border-ink/20 bg-white px-4 py-2 text-sm"
+                          onClick={() => setPatchModalOpen(false)}
+                        >
+                          Cancel
+                        </button>
                       </div>
-                    ) : (
-                      <p className="text-sm text-ink/60">Select a frame above to enable mask painting.</p>
-                    )}
-                    <textarea
-                      value={patchPrompt}
-                      onChange={(e) => setPatchPrompt(e.target.value)}
-                      placeholder="Describe the masked edit"
-                      className="h-20 w-full rounded-md border border-ink/20 p-2"
-                    />
-                    <button
-                      className="rounded-md bg-accent2 px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-50"
-                      disabled={
-                        !activeEditFrame ||
-                        patchEditMutation.isPending ||
-                        !patchPrompt.trim() ||
-                        !maskHasPaint ||
-                        (patchEngine === "runware_ace_pp" && !activePatchReference?.file)
-                      }
-                      onClick={() => activeEditFrame && patchEditMutation.mutate(activeEditFrame.frameId)}
-                    >
-                      Generate Patch Variant
-                    </button>
-                    {!maskHasPaint ? <p className="text-xs text-ink/60">Draw a mask before generating a patch variant.</p> : null}
-                    {patchEngine === "runware_ace_pp" && !activePatchReference?.file ? (
-                      <p className="text-xs text-ink/60">Select one reference image to use ACE++ local editing.</p>
-                    ) : null}
-                    {patchEditMutation.error ? <p className="text-xs text-red-600">{patchEditMutation.error.message}</p> : null}
+                      {!maskHasPaint ? <p className="text-xs text-ink/60">Draw a mask before generating a patch variant.</p> : null}
+                      {patchEngine === "runware_ace_pp" && !activePatchReference?.file ? (
+                        <p className="text-xs text-ink/60">Select one reference image to use ACE++ local editing.</p>
+                      ) : null}
+                      {patchEditMutation.error ? <p className="text-xs text-red-600">{patchEditMutation.error.message}</p> : null}
+                    </div>
                   </div>
-                </details>
-              </div>
+                </div>
+              ) : null}
+            </div>
   );
 }
