@@ -1678,6 +1678,13 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             req = _json_model(MergeRequest, event)
             if not req.selectedSegmentGenerationIds:
                 return error_response(400, "Select at least one generation for merge", origin=origin)
+            generation_adjustments_payload: dict[str, Any] = {}
+            if req.generationAdjustments:
+                for gen_id, adjustment in req.generationAdjustments.items():
+                    if hasattr(adjustment, "model_dump"):
+                        generation_adjustments_payload[gen_id] = adjustment.model_dump(exclude_none=True)
+                    elif isinstance(adjustment, dict):
+                        generation_adjustments_payload[gen_id] = adjustment
 
             job_id = _queue_job(
                 store=store,
@@ -1688,7 +1695,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 payload={
                     "selectedSegmentGenerationIds": req.selectedSegmentGenerationIds,
                     "temporalFeatherFrames": req.temporalFeatherFrames,
-                    "generationAdjustments": req.generationAdjustments or {},
+                    "generationAdjustments": generation_adjustments_payload,
                 },
             )
             return response(202, {"jobId": job_id}, origin=origin)

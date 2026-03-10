@@ -1287,9 +1287,41 @@ def _handle_merge(
     settings: Any,
 ) -> dict[str, Any]:
     payload = job["payload"]
-    selected = payload["selectedSegmentGenerationIds"]
+    selected_raw = payload.get("selectedSegmentGenerationIds")
+    if isinstance(selected_raw, str):
+        selected = [selected_raw]
+    elif isinstance(selected_raw, (list, tuple)):
+        selected = [str(item) for item in selected_raw if isinstance(item, str) and item]
+    else:
+        selected = []
+    if not selected:
+        raise RuntimeError("No valid selectedSegmentGenerationIds provided for merge")
     feather_frames = int(payload.get("temporalFeatherFrames", 0))
-    adjustments = payload.get("generationAdjustments") or {}
+    raw_adjustments = payload.get("generationAdjustments") or {}
+    adjustments: dict[str, dict[str, Any]] = {}
+    if isinstance(raw_adjustments, dict):
+        for gen_id, raw_adjustment in raw_adjustments.items():
+            if not isinstance(gen_id, str):
+                continue
+            if hasattr(raw_adjustment, "model_dump"):
+                parsed_adjustment = raw_adjustment.model_dump(exclude_none=True)
+            elif isinstance(raw_adjustment, str):
+                parsed_adjustment: dict[str, Any] = {}
+                # Backward compatibility for old persisted payloads:
+                # "startFrameOverride=252 trimStartFrames=1 trimEndFrames=0"
+                for key, value in re.findall(r"(startFrameOverride|trimStartFrames|trimEndFrames)\s*=\s*(-?\d+)", raw_adjustment):
+                    parsed_adjustment[key] = int(value)
+                if not parsed_adjustment:
+                    try:
+                        decoded = json.loads(raw_adjustment)
+                        parsed_adjustment = decoded if isinstance(decoded, dict) else {}
+                    except Exception:
+                        parsed_adjustment = {}
+            elif isinstance(raw_adjustment, dict):
+                parsed_adjustment = raw_adjustment
+            else:
+                parsed_adjustment = {}
+            adjustments[gen_id] = parsed_adjustment
     paths = _asset_paths(task)
     total_frames = int(task.get("video", {}).get("editSource", {}).get("frameCount") or 0)
 
@@ -1310,6 +1342,8 @@ def _handle_merge(
             out_path = td_path / f"merged_{idx}.mp4"
             _download_s3(s3, settings.assets_bucket, gen["outputKey"], seg_path)
             raw_adjustment = adjustments.get(gen_id) or {}
+            if not isinstance(raw_adjustment, dict):
+                raw_adjustment = {}
             trim_start_frames = max(0, int(raw_adjustment.get("trimStartFrames") or 0))
             trim_end_frames = max(0, int(raw_adjustment.get("trimEndFrames") or 0))
             start_frame_override = raw_adjustment.get("startFrameOverride")
