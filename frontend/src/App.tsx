@@ -656,7 +656,7 @@ export default function App() {
   const [patchToolMode, setPatchToolMode] = useState<PatchToolMode>("brush_add");
   const [patchBrushSize, setPatchBrushSize] = useState(24);
   const [featherPx, setFeatherPx] = useState(24);
-  const [edgeAwareRefine, setEdgeAwareRefine] = useState(true);
+  const [edgeAwareRefine, setEdgeAwareRefine] = useState(false);
   const [edgeAwareStrength, setEdgeAwareStrength] = useState(0.45);
   const [edgeAwareRadiusPx, setEdgeAwareRadiusPx] = useState(6);
   const [maskGrowPx, setMaskGrowPx] = useState(0);

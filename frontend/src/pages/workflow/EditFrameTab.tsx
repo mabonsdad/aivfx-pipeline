@@ -157,7 +157,7 @@ export default function EditFrameTab({ ctx }: EditFrameTabProps) {
       refreshPatchOverlay();
     }, 0);
     return () => window.clearTimeout(refreshTimer);
-  }, [isPatchModalOpen, prompt, refreshPatchOverlay, setPatchPrompt]);
+  }, [isPatchModalOpen, refreshPatchOverlay, setPatchPrompt]);
 
   return (
               <div className="space-y-4">
@@ -497,6 +497,9 @@ export default function EditFrameTab({ ctx }: EditFrameTabProps) {
                               </label>
                               <p className="text-[11px] text-ink/60">Helps reduce halos on detailed edges like hair, fabric and props.</p>
                             </div>
+                            <p className="mt-1 text-[11px] text-ink/60">
+                              Applies only when you click <strong>Edit</strong> in this patch modal (masked patch generation). It does not affect the normal Edit mode above.
+                            </p>
                             {edgeAwareRefine ? (
                               <div className="mt-2 grid gap-2 md:grid-cols-3">
                                 <label className="text-xs text-ink/70">
