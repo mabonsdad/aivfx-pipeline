@@ -1,5 +1,5 @@
 import { ReactCompareSlider } from "react-compare-slider";
-import type { RefObject } from "react";
+import { useEffect, useRef, type RefObject } from "react";
 
 import type { SegmentGeneration, SegmentRecord, TaskDetail } from "../../types/api";
 
@@ -46,6 +46,7 @@ export type GenerateTabCtx = {
   keepOriginalWithinSegment: (video: HTMLVideoElement) => void;
   compareVariantRef: RefObject<HTMLVideoElement>;
   syncOriginalToGenerated: (generatedVideo: HTMLVideoElement) => void;
+  originalPreviewIsSegmentClip: boolean;
   selectedSegmentGenerations: SegmentGeneration[];
   generationCardsVisible: number;
   truncateIdentifier: (value: string, maxLength?: number) => string;
@@ -102,6 +103,7 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
     keepOriginalWithinSegment,
     compareVariantRef,
     syncOriginalToGenerated,
+    originalPreviewIsSegmentClip,
     selectedSegmentGenerations,
     generationCardsVisible,
     truncateIdentifier,
@@ -114,6 +116,98 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
     handleDeleteAsset,
     setGenerationCardsVisible,
   } = ctx;
+  const syncRafRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (syncRafRef.current !== null) {
+        window.cancelAnimationFrame(syncRafRef.current);
+        syncRafRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    const generated = compareVariantRef.current;
+    const original = compareOriginalRef.current;
+    if (!generated || !original) return;
+
+    const stopSyncLoop = () => {
+      if (syncRafRef.current !== null) {
+        window.cancelAnimationFrame(syncRafRef.current);
+        syncRafRef.current = null;
+      }
+    };
+
+    const loopSync = () => {
+      if (generated.paused || generated.ended) {
+        stopSyncLoop();
+        return;
+      }
+      syncOriginalToGenerated(generated);
+      syncRafRef.current = window.requestAnimationFrame(loopSync);
+    };
+
+    const startSync = () => {
+      syncOriginalToGenerated(generated);
+      original.playbackRate = generated.playbackRate || 1;
+      if (original.paused) {
+        original.play().catch(() => undefined);
+      }
+      if (syncRafRef.current === null) {
+        syncRafRef.current = window.requestAnimationFrame(loopSync);
+      }
+    };
+
+    const pauseSync = () => {
+      stopSyncLoop();
+      original.pause();
+    };
+
+    const seekSync = () => {
+      syncOriginalToGenerated(generated);
+    };
+
+    const onRateChange = () => {
+      original.playbackRate = generated.playbackRate || 1;
+      syncOriginalToGenerated(generated);
+    };
+
+    pauseSync();
+    try {
+      generated.currentTime = 0;
+      if (segmentWindow) {
+        original.currentTime = originalPreviewIsSegmentClip ? 0 : segmentWindow.startSec;
+      }
+    } catch {
+      // no-op: browsers may reject seek before metadata is ready
+    }
+    seekSync();
+
+    generated.addEventListener("play", startSync);
+    generated.addEventListener("playing", startSync);
+    generated.addEventListener("pause", pauseSync);
+    generated.addEventListener("ended", pauseSync);
+    generated.addEventListener("seeking", seekSync);
+    generated.addEventListener("ratechange", onRateChange);
+
+    return () => {
+      generated.removeEventListener("play", startSync);
+      generated.removeEventListener("playing", startSync);
+      generated.removeEventListener("pause", pauseSync);
+      generated.removeEventListener("ended", pauseSync);
+      generated.removeEventListener("seeking", seekSync);
+      generated.removeEventListener("ratechange", onRateChange);
+      stopSyncLoop();
+    };
+  }, [
+    compareOriginalRef,
+    compareVariantRef,
+    originalPreviewIsSegmentClip,
+    segmentWindow,
+    selectedPreviewGeneration?.genId,
+    syncOriginalToGenerated,
+  ]);
 
   return (
     <div className="space-y-4">
@@ -245,6 +339,7 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
               className="h-full w-full"
               itemOne={
                 <video
+                  key={`orig-${originalSegmentPreviewUrl ?? "none"}-${originalPreviewIsSegmentClip ? "segment" : "full"}`}
                   ref={compareOriginalRef}
                   src={originalSegmentPreviewUrl}
                   muted
@@ -253,7 +348,7 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
                   className="h-full w-full object-contain"
                   onLoadedMetadata={(e) => {
                     if (segmentWindow) {
-                      e.currentTarget.currentTime = segmentWindow.startSec;
+                      e.currentTarget.currentTime = originalPreviewIsSegmentClip ? 0 : segmentWindow.startSec;
                     }
                   }}
                   onTimeUpdate={(e) => keepOriginalWithinSegment(e.currentTarget)}
@@ -262,25 +357,23 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
               }
               itemTwo={
                 <video
+                  key={`gen-${selectedPreviewGeneration.genId}`}
                   ref={compareVariantRef}
                   src={selectedPreviewGeneration.downloadUrl}
                   controls
                   playsInline
-                  preload="none"
+                  preload="metadata"
+                  poster={generationThumbnailUrl(selectedPreviewGeneration) ?? undefined}
                   className="h-full w-full object-contain"
                   onLoadedMetadata={(e) => {
                     e.currentTarget.currentTime = 0;
                     syncOriginalToGenerated(e.currentTarget);
                   }}
+                  onLoadedData={(e) => {
+                    syncOriginalToGenerated(e.currentTarget);
+                  }}
                   onTimeUpdate={(e) => syncOriginalToGenerated(e.currentTarget)}
                   onSeeking={(e) => syncOriginalToGenerated(e.currentTarget)}
-                  onPlay={(e) => {
-                    syncOriginalToGenerated(e.currentTarget);
-                    compareOriginalRef.current?.play().catch(() => undefined);
-                  }}
-                  onPause={() => {
-                    compareOriginalRef.current?.pause();
-                  }}
                   onError={onAssetError}
                 />
               }

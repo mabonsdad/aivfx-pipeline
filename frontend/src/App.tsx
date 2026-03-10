@@ -1761,6 +1761,7 @@ export default function App() {
     if (!task?.video?.editSource?.downloadUrl || !segmentWindow) return null;
     return `${task.video.editSource.downloadUrl}#t=${segmentWindow.startSec},${segmentWindow.endSec}`;
   }, [selectedSegment?.segmentClipUrl, segmentWindow, task?.video?.editSource?.downloadUrl]);
+  const originalPreviewIsSegmentClip = Boolean(selectedSegment?.segmentClipUrl);
   const timelinePlaybackUrl = task?.video?.previewSource?.downloadUrl ?? task?.video?.editSource?.downloadUrl ?? "";
 
   useEffect(() => {
@@ -1782,10 +1783,10 @@ export default function App() {
     mergeTrimStartFrames,
   ]);
 
-  function syncOriginalToGenerated(generatedVideo: HTMLVideoElement) {
+  const syncOriginalToGenerated = useCallback((generatedVideo: HTMLVideoElement) => {
     const originalVideo = compareOriginalRef.current;
     if (!originalVideo || !segmentWindow) return;
-    const targetTime = segmentWindow.startSec + generatedVideo.currentTime;
+    const targetTime = originalPreviewIsSegmentClip ? generatedVideo.currentTime : segmentWindow.startSec + generatedVideo.currentTime;
     if (syncLockRef.current) return;
     syncLockRef.current = true;
     if (Math.abs(originalVideo.currentTime - targetTime) > 0.05) {
@@ -1794,17 +1795,30 @@ export default function App() {
     window.setTimeout(() => {
       syncLockRef.current = false;
     }, 0);
-  }
+  }, [originalPreviewIsSegmentClip, segmentWindow]);
 
-  function keepOriginalWithinSegment(video: HTMLVideoElement) {
+  const keepOriginalWithinSegment = useCallback((video: HTMLVideoElement) => {
     if (!segmentWindow) return;
+    if (originalPreviewIsSegmentClip) {
+      if (video.currentTime < 0) {
+        video.currentTime = 0;
+        return;
+      }
+      if (Number.isFinite(video.duration) && video.duration > 0) {
+        const maxTime = Math.max(0, video.duration - 0.001);
+        if (video.currentTime > maxTime) {
+          video.currentTime = maxTime;
+        }
+      }
+      return;
+    }
     if (video.currentTime < segmentWindow.startSec) {
       video.currentTime = segmentWindow.startSec;
     }
     if (video.currentTime >= segmentWindow.endSec) {
       video.currentTime = segmentWindow.startSec;
     }
-  }
+  }, [originalPreviewIsSegmentClip, segmentWindow]);
 
   function mapPointerToMaskCoordinates(event: PointerEvent<HTMLCanvasElement>, canvas: HTMLCanvasElement) {
     const maskCanvas = patchMaskCanvasRef.current;
@@ -2914,6 +2928,7 @@ export default function App() {
       keepOriginalWithinSegment,
       compareVariantRef,
       syncOriginalToGenerated,
+      originalPreviewIsSegmentClip,
       selectedSegmentGenerations,
       generationCardsVisible,
       truncateIdentifier,
@@ -2944,6 +2959,7 @@ export default function App() {
       originalSegmentPreviewUrl,
       selectedPreviewGeneration,
       task,
+      originalPreviewIsSegmentClip,
       selectedSegmentGenerations,
       generationCardsVisible,
       selectSegmentGeneration,
