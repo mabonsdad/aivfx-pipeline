@@ -312,6 +312,19 @@ export default function QualityMatchModal({
     }
   }, [analysisId, frameId, onApplied, settings, taskId, uploadCurrentMask]);
 
+  const processingMessage = useMemo(() => {
+    if (modalState === "analysing") {
+      return "Analysing original vs generated frame and building initial Quality Match proposal. This can take a little while.";
+    }
+    if (modalState === "reanalysing") {
+      return "Re-analysing with your updated mask/settings. This can take a little while.";
+    }
+    if (modalState === "applying") {
+      return "Applying final merge mask, writing the replacement frame, and saving QC artifacts.";
+    }
+    return null;
+  }, [modalState]);
+
   const viewerNode = useMemo(() => {
     if (!analysis) return null;
     if (viewMode === "split") {
@@ -463,6 +476,15 @@ export default function QualityMatchModal({
           </button>
         </div>
 
+        {processingMessage ? (
+          <div className="mb-3 rounded-lg border border-accent/30 bg-accent/10 px-3 py-2 text-sm text-ink/80">
+            <div className="flex items-center gap-2">
+              <span className="inline-block h-2.5 w-2.5 animate-pulse rounded-full bg-accent" aria-hidden="true" />
+              <span>{processingMessage}</span>
+            </div>
+          </div>
+        ) : null}
+
         <div className="grid gap-4 lg:grid-cols-[1.2fr_0.9fr_1fr]">
           <section className="space-y-3 rounded-lg border border-ink/10 p-3">
             <div className="flex flex-wrap items-center gap-2">
@@ -484,7 +506,11 @@ export default function QualityMatchModal({
                 Blink Original/Preview
               </label>
             </div>
-            {viewerNode}
+            {viewerNode ?? (
+              <div className="rounded-md border border-ink/15 bg-bg p-6 text-sm text-ink/60">
+                {processingMessage ?? "No preview available yet."}
+              </div>
+            )}
           </section>
 
           <section className="space-y-3 rounded-lg border border-ink/10 p-3">
@@ -551,10 +577,10 @@ export default function QualityMatchModal({
               Auto-detect edit region if no source mask
             </label>
             <div className="flex flex-wrap gap-2">
-              <button className="rounded border border-ink/20 bg-white px-3 py-2 text-sm" disabled={modalState === "analysing" || modalState === "reanalysing"} onClick={() => void handleReanalyse()}>
-                Re-analyse
+              <button className="rounded border border-ink/20 bg-white px-3 py-2 text-sm" disabled={modalState === "analysing" || modalState === "reanalysing" || modalState === "applying"} onClick={() => void handleReanalyse()}>
+                {modalState === "reanalysing" ? "Re-analysing..." : "Re-analyse"}
               </button>
-              <button className="rounded border border-ink/20 bg-white px-3 py-2 text-sm" onClick={() => void handleReset()}>
+              <button className="rounded border border-ink/20 bg-white px-3 py-2 text-sm" disabled={modalState === "analysing" || modalState === "reanalysing" || modalState === "applying"} onClick={() => void handleReset()}>
                 Reset
               </button>
             </div>
