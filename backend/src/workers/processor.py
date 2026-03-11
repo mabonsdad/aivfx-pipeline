@@ -599,6 +599,16 @@ def _composite_patch(
     return out.getvalue()
 
 
+def _normalize_patch_rect(rect: dict[str, Any], width: int, height: int) -> dict[str, int]:
+    safe_w = max(1, int(width))
+    safe_h = max(1, int(height))
+    x = max(0, min(int(rect.get("x", 0)), safe_w - 1))
+    y = max(0, min(int(rect.get("y", 0)), safe_h - 1))
+    w = max(1, min(int(rect.get("width", safe_w)), safe_w - x))
+    h = max(1, min(int(rect.get("height", safe_h)), safe_h - y))
+    return {"x": x, "y": y, "width": w, "height": h}
+
+
 def _normalize_full_variant(*, source_bytes: bytes, variant_bytes: bytes) -> bytes:
     source = ImageOps.exif_transpose(Image.open(BytesIO(source_bytes))).convert("RGBA")
     variant = ImageOps.exif_transpose(Image.open(BytesIO(variant_bytes))).convert("RGBA")
@@ -732,6 +742,7 @@ def _handle_patch_edit(
     mask_bytes = asset_store.read_bytes(payload["maskKey"]) if payload.get("maskKey") else None
     source_image = ImageOps.exif_transpose(Image.open(BytesIO(source_bytes))).convert("RGBA")
     patch_source_image = ImageOps.exif_transpose(Image.open(BytesIO(patch_bytes))).convert("RGBA")
+    patch_rect = _normalize_patch_rect(payload.get("patchRect", {}), source_image.width, source_image.height)
     edge_refine_enabled = bool(payload.get("edgeAwareRefine", False))
     edge_refine_strength = float(payload.get("edgeAwareStrength", 0.45))
     edge_refine_radius_px = int(payload.get("edgeAwareRadiusPx", 6))
@@ -842,7 +853,7 @@ def _handle_patch_edit(
     composited = _composite_patch(
         base_bytes=source_bytes,
         patch_bytes=edited_patch,
-        rect=payload["patchRect"],
+        rect=patch_rect,
         bleed_px=payload["bleedPx"],
         feather_px=payload["featherPx"],
         mask_bytes=refined_mask_bytes,
@@ -883,7 +894,7 @@ def _handle_patch_edit(
         "outputKey": output_key,
         "generationSettings": generation_settings,
         "patchMeta": {
-            "patchRect": payload["patchRect"],
+            "patchRect": patch_rect,
             "featherPx": payload["featherPx"],
             "bleedPx": payload["bleedPx"],
             "maskKey": payload.get("maskKey"),

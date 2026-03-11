@@ -152,12 +152,11 @@ export default function EditFrameTab({ ctx }: EditFrameTabProps) {
 
   useEffect(() => {
     if (!isPatchModalOpen) return;
-    setPatchPrompt(prompt);
     const refreshTimer = window.setTimeout(() => {
       refreshPatchOverlay();
     }, 0);
     return () => window.clearTimeout(refreshTimer);
-  }, [isPatchModalOpen, refreshPatchOverlay, setPatchPrompt]);
+  }, [isPatchModalOpen, refreshPatchOverlay]);
 
   return (
               <div className="space-y-4">
@@ -211,7 +210,10 @@ export default function EditFrameTab({ ctx }: EditFrameTabProps) {
                         type="button"
                         className="rounded-md border border-ink/20 bg-white px-4 py-2 disabled:cursor-not-allowed disabled:opacity-50"
                         disabled={!activeEditFrame}
-                        onClick={() => setPatchModalOpen(true)}
+                        onClick={() => {
+                          setPatchPrompt(prompt);
+                          setPatchModalOpen(true);
+                        }}
                       >
                         Add Mask
                       </button>

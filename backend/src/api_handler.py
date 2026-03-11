@@ -592,6 +592,16 @@ def _resolve_frame_source(frame: dict[str, Any], preferred_variant_id: str | Non
     return str(frame["captureKey"]), None
 
 
+def _normalize_patch_rect_for_image(rect: dict[str, Any], image_width: int, image_height: int) -> dict[str, int]:
+    safe_width = max(1, int(image_width))
+    safe_height = max(1, int(image_height))
+    x = max(0, min(int(rect.get("x", 0)), safe_width - 1))
+    y = max(0, min(int(rect.get("y", 0)), safe_height - 1))
+    width = max(1, min(int(rect.get("width", safe_width)), safe_width - x))
+    height = max(1, min(int(rect.get("height", safe_height)), safe_height - y))
+    return {"x": x, "y": y, "width": width, "height": height}
+
+
 def _route(event: dict[str, Any]) -> dict[str, Any]:
     method, path = _method_path(event)
     origin = _origin(event)
@@ -1489,11 +1499,12 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             source_bytes = asset_store.read_bytes(source_key)
 
             source = Image.open(BytesIO(source_bytes)).convert("RGBA")
+            normalized_rect = _normalize_patch_rect_for_image(req.patchRect.model_dump(), source.width, source.height)
             bleed = req.bleedPx
-            x0 = max(0, req.patchRect.x - bleed)
-            y0 = max(0, req.patchRect.y - bleed)
-            x1 = min(source.width, req.patchRect.x + req.patchRect.width + bleed)
-            y1 = min(source.height, req.patchRect.y + req.patchRect.height + bleed)
+            x0 = max(0, normalized_rect["x"] - bleed)
+            y0 = max(0, normalized_rect["y"] - bleed)
+            x1 = min(source.width, normalized_rect["x"] + normalized_rect["width"] + bleed)
+            y1 = min(source.height, normalized_rect["y"] + normalized_rect["height"] + bleed)
             patch = source.crop((x0, y0, x1, y1))
             out = BytesIO()
             patch.save(out, format="PNG")
@@ -1505,6 +1516,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 "patchUploadUrl": patch_upload,
                 "patchKey": patch_key,
                 "previewUrl": asset_store.presign_get(patch_key, expires=900),
+                "patchRect": normalized_rect,
             }
             if req.hasMask:
                 mask_key = paths.frame_mask(frame_id, variant_id)
@@ -1522,6 +1534,8 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 source_key, source_variant_id = _resolve_frame_source(frame, req.sourceVariantId)
             except ValueError as exc:
                 return error_response(400, str(exc), origin=origin)
+            source_submit = Image.open(BytesIO(asset_store.read_bytes(source_key))).convert("RGBA")
+            normalized_rect = _normalize_patch_rect_for_image(req.patchRect.model_dump(), source_submit.width, source_submit.height)
             try:
                 prompt = _sanitize_prompt(req.prompt)
                 reference_key = _validated_reference_key(task, req.referenceImageKey)
@@ -1543,7 +1557,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                     "prompt": prompt,
                     "patchKey": req.patchKey,
                     "maskKey": req.maskKey,
-                    "patchRect": req.patchRect.model_dump(),
+                    "patchRect": normalized_rect,
                     "featherPx": req.featherPx,
                     "bleedPx": req.bleedPx,
                     "referenceImageKey": reference_key,
