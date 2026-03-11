@@ -1788,8 +1788,9 @@ export default function App() {
     if (!originalVideo || !segmentWindow) return;
     const targetTime = originalPreviewIsSegmentClip ? generatedVideo.currentTime : segmentWindow.startSec + generatedVideo.currentTime;
     if (syncLockRef.current) return;
+    if (originalVideo.readyState < 2) return;
     syncLockRef.current = true;
-    if (Math.abs(originalVideo.currentTime - targetTime) > 0.05) {
+    if (Math.abs(originalVideo.currentTime - targetTime) > 0.18) {
       originalVideo.currentTime = targetTime;
     }
     window.setTimeout(() => {

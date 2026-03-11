@@ -344,7 +344,7 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
                   src={originalSegmentPreviewUrl}
                   muted
                   playsInline
-                  preload="metadata"
+                  preload="auto"
                   className="h-full w-full object-contain"
                   onLoadedMetadata={(e) => {
                     if (segmentWindow) {
@@ -372,7 +372,6 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
                   onLoadedData={(e) => {
                     syncOriginalToGenerated(e.currentTarget);
                   }}
-                  onTimeUpdate={(e) => syncOriginalToGenerated(e.currentTarget)}
                   onSeeking={(e) => syncOriginalToGenerated(e.currentTarget)}
                   onError={onAssetError}
                 />
