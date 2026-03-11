@@ -661,16 +661,28 @@ def _align_variant_to_source(*, source_bytes: bytes, variant_bytes: bytes) -> by
         variant.save(out, format="PNG")
         return out.getvalue()
 
+    dx = float(warp[0, 2])
+    dy = float(warp[1, 2])
+    max_dx = max(2.0, source.width * 0.02)
+    max_dy = max(2.0, source.height * 0.02)
+    if abs(dx) > max_dx or abs(dy) > max_dy:
+        out = BytesIO()
+        variant.save(out, format="PNG")
+        return out.getvalue()
+
     aligned_np = cv2.warpAffine(
         np.array(variant),
         warp,
         (source.width, source.height),
         flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
-        borderMode=cv2.BORDER_REPLICATE,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(0, 0, 0, 0),
     )
     aligned = Image.fromarray(aligned_np, mode="RGBA")
+    merged = source.copy()
+    merged.alpha_composite(aligned)
     out = BytesIO()
-    aligned.save(out, format="PNG")
+    merged.save(out, format="PNG")
     return out.getvalue()
 
 
@@ -730,9 +742,6 @@ def _handle_full_edit(
     normalized_bytes = _normalize_full_variant(source_bytes=src_bytes, variant_bytes=out_bytes)
     normalized_bytes = _align_variant_to_source(source_bytes=src_bytes, variant_bytes=normalized_bytes)
     normalized_image = ImageOps.exif_transpose(Image.open(BytesIO(normalized_bytes))).convert("RGBA")
-
-    edited_patch = _normalize_full_variant(source_bytes=patch_bytes, variant_bytes=edited_patch)
-    edited_patch = _align_variant_to_source(source_bytes=patch_bytes, variant_bytes=edited_patch)
 
     variant_id = new_id("var")
     paths = _asset_paths(task)
