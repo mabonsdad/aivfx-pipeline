@@ -90,12 +90,19 @@ def _select_supported_size(width: int, height: int) -> tuple[int, int]:
 
 def _prepare_input_image(
     *, input_image_bytes: bytes, mask_image_bytes: bytes | None
-) -> tuple[bytes, bytes | None, tuple[int, int], tuple[int, int]]:
+) -> tuple[bytes, bytes | None, tuple[int, int], tuple[int, int], tuple[int, int, int, int]]:
     source = ImageOps.exif_transpose(Image.open(BytesIO(input_image_bytes))).convert("RGBA")
     original_size = source.size
     target_size = _select_supported_size(source.width, source.height)
+    fit_box = (0, 0, target_size[0], target_size[1])
     if source.size != target_size:
-        source = source.resize(target_size, Image.Resampling.LANCZOS)
+        fitted = ImageOps.contain(source, target_size, Image.Resampling.LANCZOS)
+        offset_x = max(0, (target_size[0] - fitted.width) // 2)
+        offset_y = max(0, (target_size[1] - fitted.height) // 2)
+        canvas = Image.new("RGBA", target_size, (0, 0, 0, 255))
+        canvas.paste(fitted, (offset_x, offset_y))
+        source = canvas
+        fit_box = (offset_x, offset_y, offset_x + fitted.width, offset_y + fitted.height)
     source_out = BytesIO()
     source.save(source_out, format="PNG")
 
@@ -103,17 +110,22 @@ def _prepare_input_image(
     if mask_image_bytes:
         mask = ImageOps.exif_transpose(Image.open(BytesIO(mask_image_bytes))).convert("RGBA")
         if mask.size != target_size:
-            mask = mask.resize(target_size, Image.Resampling.BILINEAR)
+            fitted_mask = ImageOps.contain(mask, target_size, Image.Resampling.BILINEAR)
+            mask_canvas = Image.new("RGBA", target_size, (0, 0, 0, 255))
+            mask_canvas.paste(fitted_mask, (fit_box[0], fit_box[1]))
+            mask = mask_canvas
         mask_out = BytesIO()
         mask.save(mask_out, format="PNG")
         prepared_mask = mask_out.getvalue()
 
-    return source_out.getvalue(), prepared_mask, original_size, target_size
+    return source_out.getvalue(), prepared_mask, original_size, target_size, fit_box
 
 
-def _restore_output_size(output_bytes: bytes, original_size: tuple[int, int]) -> bytes:
+def _restore_output_size(output_bytes: bytes, original_size: tuple[int, int], fit_box: tuple[int, int, int, int]) -> bytes:
     image = ImageOps.exif_transpose(Image.open(BytesIO(output_bytes))).convert("RGBA")
     if image.size != original_size:
+        if fit_box[2] > fit_box[0] and fit_box[3] > fit_box[1] and image.size[0] >= fit_box[2] and image.size[1] >= fit_box[3]:
+            image = image.crop(fit_box)
         image = image.resize(original_size, Image.Resampling.LANCZOS)
     out = BytesIO()
     image.save(out, format="PNG")
@@ -129,7 +141,7 @@ def generate_image_edit(
     mask_image_bytes: bytes | None = None,
     input_mime_type: str = "image/png",
 ) -> bytes:
-    prepared_image, prepared_mask, original_size, target_size = _prepare_input_image(
+    prepared_image, prepared_mask, original_size, target_size, fit_box = _prepare_input_image(
         input_image_bytes=input_image_bytes,
         mask_image_bytes=mask_image_bytes,
     )
@@ -143,4 +155,4 @@ def generate_image_edit(
         target_size=target_size,
     )
     output = _extract_image_bytes(payload)
-    return _restore_output_size(output, original_size)
+    return _restore_output_size(output, original_size, fit_box)

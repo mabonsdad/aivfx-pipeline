@@ -619,15 +619,58 @@ def _normalize_full_variant(*, source_bytes: bytes, variant_bytes: bytes) -> byt
         if ratio_delta < 0.02:
             variant = variant.resize(source.size, Image.Resampling.LANCZOS)
         else:
-            fitted = ImageOps.contain(variant, source.size, Image.Resampling.LANCZOS)
-            # Preserve untouched edge detail from the source when model output AR differs.
-            aligned = source.copy()
-            offset_x = max(0, (source.width - fitted.width) // 2)
-            offset_y = max(0, (source.height - fitted.height) // 2)
-            aligned.paste(fitted, (offset_x, offset_y))
-            variant = aligned
+            # Prefer geometric consistency over padded edges when model output AR drifts.
+            variant = ImageOps.fit(variant, source.size, Image.Resampling.LANCZOS, centering=(0.5, 0.5))
     out = BytesIO()
     variant.save(out, format="PNG")
+    return out.getvalue()
+
+
+def _align_variant_to_source(*, source_bytes: bytes, variant_bytes: bytes) -> bytes:
+    source = ImageOps.exif_transpose(Image.open(BytesIO(source_bytes))).convert("RGBA")
+    variant = ImageOps.exif_transpose(Image.open(BytesIO(variant_bytes))).convert("RGBA")
+    if variant.size != source.size:
+        variant = variant.resize(source.size, Image.Resampling.LANCZOS)
+
+    try:
+        import cv2  # type: ignore
+        import numpy as np  # type: ignore
+    except Exception:
+        out = BytesIO()
+        variant.save(out, format="PNG")
+        return out.getvalue()
+
+    source_gray = np.array(source.convert("L"))
+    variant_gray = np.array(variant.convert("L"))
+    warp = np.eye(2, 3, dtype=np.float32)
+    criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 60, 1e-5)
+
+    try:
+        cc, warp = cv2.findTransformECC(
+            source_gray,
+            variant_gray,
+            warp,
+            cv2.MOTION_TRANSLATION,
+            criteria,
+        )
+    except Exception:
+        cc = 0.0
+
+    if cc < 0.2:
+        out = BytesIO()
+        variant.save(out, format="PNG")
+        return out.getvalue()
+
+    aligned_np = cv2.warpAffine(
+        np.array(variant),
+        warp,
+        (source.width, source.height),
+        flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
+        borderMode=cv2.BORDER_REPLICATE,
+    )
+    aligned = Image.fromarray(aligned_np, mode="RGBA")
+    out = BytesIO()
+    aligned.save(out, format="PNG")
     return out.getvalue()
 
 
@@ -685,7 +728,11 @@ def _handle_full_edit(
             input_image_bytes=src_bytes,
         )
     normalized_bytes = _normalize_full_variant(source_bytes=src_bytes, variant_bytes=out_bytes)
+    normalized_bytes = _align_variant_to_source(source_bytes=src_bytes, variant_bytes=normalized_bytes)
     normalized_image = ImageOps.exif_transpose(Image.open(BytesIO(normalized_bytes))).convert("RGBA")
+
+    edited_patch = _normalize_full_variant(source_bytes=patch_bytes, variant_bytes=edited_patch)
+    edited_patch = _align_variant_to_source(source_bytes=patch_bytes, variant_bytes=edited_patch)
 
     variant_id = new_id("var")
     paths = _asset_paths(task)
