@@ -49,24 +49,28 @@ def generate_image_edit(
         "x-goog-api-key": api_key,
         "content-type": "application/json",
     }
-    parts: list[dict[str, Any]] = [
+    parts: list[dict[str, Any]] = []
+    if mask_image_bytes:
+        parts.append(
+            {
+                "text": (
+                    "You are editing the FIRST image using the SECOND image as a mask.\n"
+                    "White mask areas: editable.\n"
+                    "Black mask areas: locked, must remain pixel-identical.\n"
+                    "Do not crop, pan, zoom, or shift framing.\n"
+                    "Keep dimensions unchanged and preserve all unmasked geometry, color, and texture."
+                )
+            }
+        )
+    parts.append(
         {
             "inline_data": {
                 "mime_type": input_mime_type,
                 "data": base64.b64encode(input_image_bytes).decode("utf-8"),
             }
-        },
-    ]
+        }
+    )
     if mask_image_bytes:
-        parts.append(
-            {
-                "text": (
-                    "Use the next image as an edit mask. White areas should be edited, "
-                    "black areas must remain unchanged, and gray areas should blend. "
-                    "Preserve geometry, color, and texture outside masked regions."
-                )
-            }
-        )
         parts.append(
             {
                 "inline_data": {
@@ -85,7 +89,7 @@ def generate_image_edit(
             }
         ],
         "generationConfig": {
-            "responseModalities": ["IMAGE", "TEXT"],
+            "responseModalities": ["IMAGE"],
         },
     }
     data = _post(url, headers, payload)

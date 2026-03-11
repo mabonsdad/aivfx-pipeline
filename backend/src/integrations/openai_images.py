@@ -45,7 +45,7 @@ def _post(
         "quality": "auto",
     }
     files: list[tuple[str, tuple[str, bytes, str]]] = [
-        ("image[]", ("source.png", input_image_bytes, input_mime_type)),
+        ("image", ("source.png", input_image_bytes, input_mime_type)),
     ]
     if mask_image_bytes:
         files.append(("mask", ("mask.png", mask_image_bytes, "image/png")))

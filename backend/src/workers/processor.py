@@ -691,12 +691,24 @@ def _to_openai_alpha_mask(mask_bytes: bytes | None) -> bytes | None:
         return None
     # Our paint mask is white=edit, black=preserve. OpenAI expects transparent=edit.
     mask_l = ImageOps.exif_transpose(Image.open(BytesIO(mask_bytes))).convert("L")
+    mask_l = mask_l.point(lambda value: 255 if value >= 127 else 0)
     alpha = ImageOps.invert(mask_l)
     rgba = Image.new("RGBA", mask_l.size, (0, 0, 0, 255))
     rgba.putalpha(alpha)
     out = BytesIO()
     rgba.save(out, format="PNG")
     return out.getvalue()
+
+
+def _build_mask_guided_prompt(user_prompt: str) -> str:
+    return (
+        "Edit ONLY the masked region.\n"
+        "Treat black/unmasked areas as locked and keep them pixel-identical.\n"
+        "Do not crop, pan, zoom, or shift framing.\n"
+        "Preserve geometry, perspective, lighting, and texture outside the mask.\n"
+        "Keep image dimensions unchanged.\n\n"
+        f"User edit request: {user_prompt}"
+    )
 
 
 def _handle_full_edit(
@@ -807,6 +819,7 @@ def _handle_patch_edit(
     refined_mask_bytes: bytes | None = None
 
     model_name = payload["model"]
+    model_prompt = _build_mask_guided_prompt(payload["prompt"])
     if model_name in {"runware_flux_fill", "runware_ace_pp"}:
         provider_name = "runware"
         runware_key = secrets["RUNWARE_API_KEY"]
@@ -842,7 +855,7 @@ def _handle_patch_edit(
             reference_bytes = asset_store.read_bytes(reference_key)
             edited_patch = patch_edit_aceplusplus(
                 api_key=runware_key,
-                prompt=payload["prompt"],
+                prompt=model_prompt,
                 seed_image_bytes=patch_io.getvalue(),
                 mask_image_bytes=refined_mask_bytes,
                 reference_image_bytes=reference_bytes,
@@ -853,7 +866,7 @@ def _handle_patch_edit(
         else:
             edited_patch = patch_edit_flux_fill(
                 api_key=runware_key,
-                prompt=payload["prompt"],
+                prompt=model_prompt,
                 seed_image_bytes=patch_io.getvalue(),
                 mask_image_bytes=refined_mask_bytes,
                 width=patch_image.width,
@@ -885,7 +898,7 @@ def _handle_patch_edit(
             edited_patch = generate_openai_image_edit(
                 api_key=openai_key,
                 model="chatgpt",
-                prompt=payload["prompt"],
+                prompt=model_prompt,
                 input_image_bytes=patch_bytes,
                 mask_image_bytes=openai_mask_bytes,
             )
@@ -895,7 +908,7 @@ def _handle_patch_edit(
             edited_patch = generate_gemini_image_edit(
                 api_key=gemini_key,
                 model="nano_banana_pro",
-                prompt=payload["prompt"],
+                prompt=model_prompt,
                 input_image_bytes=patch_bytes,
                 mask_image_bytes=refined_mask_bytes,
             )
