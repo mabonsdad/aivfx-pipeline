@@ -64,6 +64,18 @@ QC_ANALYSIS_MAX_FRAMES = 90
 QC_DIFF_THRESHOLD = 32
 QC_OUTSIDE_LEAK_BUDGET_PCT = 0.50
 QC_BOUNDARY_RING_PX = 8
+LUMA_VIDEO_MODELS = {"ray-2", "ray-flash-2"}
+LUMA_ALLOWED_MODES = {
+    "adhere_1",
+    "adhere_2",
+    "adhere_3",
+    "flex_1",
+    "flex_2",
+    "flex_3",
+    "reimagine_1",
+    "reimagine_2",
+    "reimagine_3",
+}
 RUNWARE_WAN22_ALLOWED_RESOLUTIONS: tuple[tuple[int, int], ...] = (
     (848, 480),
     (1024, 576),
@@ -999,6 +1011,7 @@ def _handle_segment_generate(
     s3 = boto3.client("s3")
     model_name = payload["lumaModel"]
     requested_mode = payload["mode"]
+    luma_mode = requested_mode if requested_mode in LUMA_ALLOWED_MODES else "flex_1"
     uses_end_keyframe = requested_mode in {"kling_start_end", "veo_start_end"}
     segment_key: str | None = None
     if model_name in {"ray-2", "ray-flash-2", "wan2.2-animate"}:
@@ -1057,7 +1070,8 @@ def _handle_segment_generate(
             segment_src_width = int(segment_source_probe.get("width") or src_width)
             segment_src_height = int(segment_source_probe.get("height") or src_height)
             source_size = local_segment_source.stat().st_size
-            if source_size > FULL_VIDEO_MAX_BYTES:
+            force_luma_provider_transcode = model_name in LUMA_VIDEO_MODELS
+            if force_luma_provider_transcode or source_size > FULL_VIDEO_MAX_BYTES:
                 _job_progress(job, store, 20, "running", "Optimizing segment clip to provider size limits")
                 local_provider_segment = td_path / "segment_luma.mp4"
                 luma_w, luma_h, _ = _transcode_with_size_limit(
@@ -1091,6 +1105,8 @@ def _handle_segment_generate(
                 landscape=(1280, 720),
                 portrait=(720, 1280),
             )
+        elif model_name in LUMA_VIDEO_MODELS and provider_media_width and provider_media_height:
+            first_target_w, first_target_h = provider_media_width, provider_media_height
         else:
             first_target_w, first_target_h = _target_by_orientation(
                 first_source_width,
@@ -1282,7 +1298,7 @@ def _handle_segment_generate(
             api_key=luma_key,
             media_url=media_url,
             first_frame_url=first_frame_url,
-            mode=payload["mode"],
+            mode=luma_mode,
             model=model_name,
             prompt=payload.get("prompt"),
         )
@@ -1330,6 +1346,7 @@ def _handle_segment_generate(
                 "requestedModel": model_name,
                 "model": used_provider_model or model_name,
                 "mode": requested_mode,
+                "providerMode": luma_mode if provider_name == "luma" else requested_mode,
                 "firstFrameResolution": {"width": first_target_w, "height": first_target_h},
                 "firstFrameContentType": first_frame_content_type,
                 "lastFrameContentType": last_frame_content_type,

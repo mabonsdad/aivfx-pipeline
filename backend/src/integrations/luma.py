@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import requests
@@ -17,8 +18,19 @@ def _request(method: str, url: str, *, token: str, payload: dict[str, Any] | Non
         "Content-Type": "application/json",
     }
     response = requests.request(method, url, headers=headers, json=payload, timeout=90)
-    response.raise_for_status()
-    return response.json()
+    if response.status_code >= 400:
+        body = response.text
+        try:
+            body = json.dumps(response.json())
+        except ValueError:
+            pass
+        raise LumaError(
+            f"Luma API {method} {url} failed ({response.status_code}): {body[:1200]}"
+        )
+    try:
+        return response.json()
+    except ValueError as exc:
+        raise LumaError(f"Luma API {method} {url} returned non-JSON response") from exc
 
 
 def create_modify_generation(
