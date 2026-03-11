@@ -891,24 +891,19 @@ def _handle_patch_edit(
                 mask_image_bytes=refined_mask_bytes,
             )
 
+    _job_progress(job, store, 70, "running", "Finalizing patch output")
+    final_variant_bytes = edited_patch
+    final_variant_image = ImageOps.exif_transpose(Image.open(BytesIO(final_variant_bytes))).convert("RGBA")
+    if final_variant_image.size != source_image.size:
+        final_variant_image = final_variant_image.resize(source_image.size, Image.Resampling.LANCZOS)
+        resized = BytesIO()
+        final_variant_image.save(resized, format="PNG")
+        final_variant_bytes = resized.getvalue()
+
     variant_id = new_id("var")
     paths = _asset_paths(task)
-    patch_only_key = paths.frame_patch(frame_id, variant_id)
-    asset_store.put_bytes(patch_only_key, edited_patch, content_type="image/png")
-
-    _job_progress(job, store, 70, "running", "Compositing patch output")
-    composited = _composite_patch(
-        base_bytes=source_bytes,
-        patch_bytes=edited_patch,
-        rect=patch_rect,
-        bleed_px=payload["bleedPx"],
-        feather_px=payload["featherPx"],
-        mask_bytes=refined_mask_bytes,
-    )
-    composited_image = ImageOps.exif_transpose(Image.open(BytesIO(composited))).convert("RGBA")
-
     output_key = paths.frame_variant(frame_id, variant_id)
-    asset_store.put_bytes(output_key, composited, content_type="image/png")
+    asset_store.put_bytes(output_key, final_variant_bytes, content_type="image/png")
 
     generation_settings: dict[str, Any] = {
         "provider": provider_name,
@@ -917,8 +912,8 @@ def _handle_patch_edit(
         "sourceKey": source_key,
         "sourceVariantId": source_variant_id,
         "inputResolution": {"width": patch_source_image.width, "height": patch_source_image.height},
-        "outputResolution": {"width": composited_image.width, "height": composited_image.height},
-        "compositedResolution": {"width": source_image.width, "height": source_image.height},
+        "outputResolution": {"width": final_variant_image.width, "height": final_variant_image.height},
+        "compositedResolution": {"width": final_variant_image.width, "height": final_variant_image.height},
         "featherPx": int(payload["featherPx"]),
         "bleedPx": int(payload["bleedPx"]),
         "hasMask": bool(payload.get("maskKey")),
@@ -945,7 +940,7 @@ def _handle_patch_edit(
             "featherPx": payload["featherPx"],
             "bleedPx": payload["bleedPx"],
             "maskKey": payload.get("maskKey"),
-            "patchOnlyKey": patch_only_key,
+            "patchOnlyKey": output_key,
             "referenceImageKey": payload.get("referenceImageKey"),
             "edgeAwareRefine": edge_refine_enabled,
             "edgeAwareStrength": edge_refine_strength,
