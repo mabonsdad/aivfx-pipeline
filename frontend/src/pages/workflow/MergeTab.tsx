@@ -63,6 +63,7 @@ export type MergeTabCtx = {
   humanizeFilename: (value: string) => string;
   keyBasenameFromS3Key: (key: string) => string;
   formatCompactTimestamp: (iso: string | undefined) => string;
+  openMotionSyncModal: (exportId: string) => void;
 };
 
 type MergeTabProps = {
@@ -107,6 +108,7 @@ export default function MergeTab({ ctx }: MergeTabProps) {
     humanizeFilename,
     keyBasenameFromS3Key,
     formatCompactTimestamp,
+    openMotionSyncModal,
   } = ctx;
 
   return (
@@ -268,11 +270,33 @@ export default function MergeTab({ ctx }: MergeTabProps) {
             <p className="text-xs text-ink/60">
               {exp.exportId} · {formatCompactTimestamp(exp.createdAt)}
             </p>
-            {exp.downloadUrl ? (
-              <a className="text-sm text-accent underline" href={exp.downloadUrl}>
-                Download merged video
-              </a>
+            {exp.motionSyncQc?.status ? (
+              <p
+                className={`text-xs ${
+                  exp.motionSyncQc.status === "failed"
+                    ? "text-red-700"
+                    : exp.motionSyncQc.status === "complete"
+                      ? "text-teal-700"
+                      : "text-amber-700"
+                }`}
+              >
+                Motion QA: {exp.motionSyncQc.status}
+              </p>
             ) : null}
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              {exp.downloadUrl ? (
+                <a className="rounded border border-ink/20 bg-white px-3 py-1.5 text-sm text-ink" href={exp.downloadUrl}>
+                  Download merged video
+                </a>
+              ) : null}
+              <button
+                type="button"
+                className="rounded bg-accent px-3 py-1.5 text-sm text-white"
+                onClick={() => openMotionSyncModal(exp.exportId)}
+              >
+                Motion QA
+              </button>
+            </div>
           </div>
         ))}
       </div>

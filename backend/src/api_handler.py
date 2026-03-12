@@ -33,6 +33,7 @@ from src.models.schemas import (
     FrameCaptureRequest,
     FullEditRequest,
     MergeRequest,
+    MotionSyncQcRunRequest,
     QualityMatchAnalyseRequest,
     QualityMatchApplyRequest,
     QualityMatchMaskUploadRequest,
@@ -784,7 +785,12 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             if generation.get("qc"):
                 _decorate_embedded_s3_keys(generation["qc"], asset_store)
         for export in decorated.get("exports", []):
-            export["downloadUrl"] = asset_store.presign_get(export["outputKey"], expires=PRESIGNED_GET_TTL_SECONDS)
+            output_key = export.get("outputKey")
+            if output_key:
+                export["downloadUrl"] = asset_store.presign_get(output_key, expires=PRESIGNED_GET_TTL_SECONDS)
+            motion_qc = export.get("motionSyncQc")
+            if isinstance(motion_qc, dict):
+                _decorate_embedded_s3_keys(motion_qc, asset_store)
         return response(200, decorated, origin=origin)
 
     if path.startswith("/tasks/"):
@@ -976,6 +982,40 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 return error_response(404, "Report not found", origin=origin)
             store.save_task(task)
             return response(200, {"ok": True}, origin=origin)
+
+        if method == "POST" and len(parts) == 5 and parts[2] == "exports" and parts[4] == "motion-qc":
+            export_id = parts[3]
+            exports = task.get("exports", [])
+            export_item = next((entry for entry in exports if entry.get("exportId") == export_id), None)
+            if not export_item:
+                return error_response(404, "Export not found", origin=origin)
+            if not export_item.get("outputKey"):
+                return error_response(400, "Export output unavailable", origin=origin)
+            req = _json_model(MotionSyncQcRunRequest, event)
+            motion_qc = export_item.get("motionSyncQc") if isinstance(export_item.get("motionSyncQc"), dict) else {}
+            existing_job_id = motion_qc.get("jobId")
+            if (
+                not req.force
+                and isinstance(existing_job_id, str)
+                and motion_qc.get("status") in {"queued", "running"}
+            ):
+                return response(202, {"jobId": existing_job_id, "alreadyRunning": True}, origin=origin)
+
+            job_id = _queue_job(
+                store=store,
+                queue=queue,
+                user_id=user_id,
+                task_id=task_id,
+                job_type="motion_sync_qc",
+                payload={"exportId": export_id, "force": req.force},
+            )
+            export_item["motionSyncQc"] = {
+                "status": "queued",
+                "updatedAt": now_iso(),
+                "jobId": job_id,
+            }
+            store.save_task(task)
+            return response(202, {"jobId": job_id}, origin=origin)
 
         if method == "POST" and len(parts) == 3 and parts[2] == "ingest":
             original = task.get("video", {}).get("original")

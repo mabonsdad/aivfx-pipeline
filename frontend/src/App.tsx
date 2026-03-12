@@ -6,6 +6,7 @@ import { apiClient } from "./api/client";
 import PreviewModals from "./components/layout/PreviewModals";
 import TaskSidebar from "./components/layout/TaskSidebar";
 import WorkflowTabs from "./components/layout/WorkflowTabs";
+import MotionSyncModal from "./components/quality/MotionSyncModal";
 import QualityMatchModal from "./components/quality/QualityMatchModal";
 import NewTaskModal from "./components/tasks/NewTaskModal";
 import {
@@ -29,6 +30,7 @@ import { useUiStore } from "./store/uiStore";
 import type {
   CustomReportOutputRef,
   CustomReportRecord,
+  ExportRecord,
   FrameVariant,
   SegmentGeneration,
   SegmentRecord,
@@ -711,6 +713,7 @@ export default function App() {
   const [imagePreviewModal, setImagePreviewModal] = useState<{ url: string; label: string } | null>(null);
   const [videoPreviewModal, setVideoPreviewModal] = useState<{ url: string; label: string } | null>(null);
   const [reportGraphModal, setReportGraphModal] = useState<{ url: string; label: string } | null>(null);
+  const [motionSyncModalExportId, setMotionSyncModalExportId] = useState<string | null>(null);
   const [qualityMatchModal, setQualityMatchModal] = useState<QualityMatchModalState>({
     isOpen: false,
     frameId: null,
@@ -910,6 +913,10 @@ export default function App() {
 
   const task = taskQuery.data;
   const reportTask = reportTaskQuery.data;
+  const selectedMotionSyncExport = useMemo<ExportRecord | null>(() => {
+    if (!motionSyncModalExportId) return null;
+    return (task?.exports ?? []).find((item) => item.exportId === motionSyncModalExportId) ?? null;
+  }, [motionSyncModalExportId, task?.exports]);
   const assetTasks = useMemo(
     () => assetTaskQueries.map((query) => query.data).filter((item): item is TaskDetail => Boolean(item)),
     [assetTaskQueries],
@@ -1458,6 +1465,20 @@ export default function App() {
     onSuccess: (result) => {
       setJobIds((prev) => appendTrackedJobId(prev, result.jobId));
       setTab("merge");
+    },
+  });
+
+  const runMotionSyncMutation = useMutation({
+    mutationFn: async ({ exportId, force }: { exportId: string; force?: boolean }) => {
+      if (!selectedTaskId) throw new Error("Select a task");
+      return apiClient.runMotionSyncQc(selectedTaskId, exportId, { force });
+    },
+    onSuccess: async (result) => {
+      setJobIds((prev) => appendTrackedJobId(prev, result.jobId));
+      if (selectedTaskId) {
+        await queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
+        await queryClient.invalidateQueries({ queryKey: ["task", "report", selectedTaskId] });
+      }
     },
   });
 
@@ -2743,6 +2764,10 @@ export default function App() {
     });
   }
 
+  const openMotionSyncModal = useCallback((exportId: string) => {
+    setMotionSyncModalExportId(exportId);
+  }, []);
+
   async function handleDeleteAsset(item: LibraryAsset) {
     const ok = window.confirm(`Delete this asset?\n\n${item.title}`);
     if (!ok) return;
@@ -3092,6 +3117,7 @@ export default function App() {
       humanizeFilename,
       keyBasenameFromS3Key,
       formatCompactTimestamp,
+      openMotionSyncModal,
     }),
     [
       mergeTargetGeneration,
@@ -3119,6 +3145,7 @@ export default function App() {
       endBoundaryOriginalThumbs,
       mergeMutation,
       sortedExports,
+      openMotionSyncModal,
     ],
   );
 
@@ -3457,6 +3484,13 @@ export default function App() {
           </div>
         </div>
       ) : null}
+      <MotionSyncModal
+        isOpen={Boolean(motionSyncModalExportId && selectedMotionSyncExport)}
+        exportRecord={selectedMotionSyncExport}
+        isRunPending={runMotionSyncMutation.isPending}
+        onClose={() => setMotionSyncModalExportId(null)}
+        onRun={(exportId) => runMotionSyncMutation.mutate({ exportId })}
+      />
       <QualityMatchModal
         isOpen={qualityMatchModal.isOpen}
         taskId={selectedTaskId}

@@ -137,6 +137,10 @@ class QcRunRequest(BaseModel):
     generationIds: list[str] | None = Field(default=None, max_length=20)
 
 
+class MotionSyncQcRunRequest(BaseModel):
+    force: bool = False
+
+
 class QualityMatchSettingsRequest(BaseModel):
     diffThreshold: float = Field(default=0.12, ge=0.01, le=0.99)
     minRegionAreaPct: float = Field(default=0.0005, ge=0.0, le=0.1)

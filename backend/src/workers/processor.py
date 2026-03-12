@@ -64,6 +64,8 @@ QC_ANALYSIS_MAX_FRAMES = 90
 QC_DIFF_THRESHOLD = 32
 QC_OUTSIDE_LEAK_BUDGET_PCT = 0.50
 QC_BOUNDARY_RING_PX = 8
+MOTION_SYNC_SAMPLE_FPS = 6
+MOTION_SYNC_MAX_LAG_SEC = 3.0
 LUMA_ALLOWED_MODES = {
     "adhere_1",
     "adhere_2",
@@ -1773,6 +1775,139 @@ def _build_timeline_graph_png(rows: list[dict[str, Any]]) -> bytes:
     return output.getvalue()
 
 
+def _motion_energy_series(frame_paths: list[Path]) -> list[float]:
+    energies: list[float] = []
+    previous_gray: Image.Image | None = None
+    for frame_path in frame_paths:
+        with Image.open(frame_path) as frame_image:
+            current_gray = ImageOps.exif_transpose(frame_image).convert("L")
+            if previous_gray is None:
+                energies.append(0.0)
+            else:
+                diff = ImageChops.difference(previous_gray, current_gray)
+                mean_diff = float(ImageStat.Stat(diff).mean[0]) / 255.0
+                energies.append(round(mean_diff, 6))
+            previous_gray = current_gray.copy()
+    return energies
+
+
+def _normalized_correlation(first: list[float], second: list[float]) -> float:
+    sample_count = min(len(first), len(second))
+    if sample_count < 8:
+        return 0.0
+    first_values = first[:sample_count]
+    second_values = second[:sample_count]
+    mean_first = sum(first_values) / sample_count
+    mean_second = sum(second_values) / sample_count
+    centered_first = [value - mean_first for value in first_values]
+    centered_second = [value - mean_second for value in second_values]
+    var_first = sum(value * value for value in centered_first)
+    var_second = sum(value * value for value in centered_second)
+    if var_first <= 1e-12 or var_second <= 1e-12:
+        return 0.0
+    covariance = sum(a * b for a, b in zip(centered_first, centered_second))
+    return float(covariance / math.sqrt(var_first * var_second))
+
+
+def _best_motion_lag(
+    original: list[float],
+    merged: list[float],
+    *,
+    max_lag_samples: int,
+) -> dict[str, Any]:
+    baseline = _normalized_correlation(original, merged)
+    max_lag = max(0, min(max_lag_samples, max(0, min(len(original), len(merged)) - 8)))
+    best_lag = 0
+    best_corr = baseline
+    for lag in range(-max_lag, max_lag + 1):
+        if lag >= 0:
+            original_slice = original[lag:]
+            merged_slice = merged[: len(original_slice)]
+        else:
+            original_slice = original[: len(original) + lag]
+            merged_slice = merged[-lag:]
+        overlap = min(len(original_slice), len(merged_slice))
+        if overlap < 8:
+            continue
+        corr = _normalized_correlation(original_slice[:overlap], merged_slice[:overlap])
+        if corr > best_corr:
+            best_corr = corr
+            best_lag = lag
+
+    improvement = best_corr - baseline
+    confidence = max(0.0, min(1.0, (improvement + 0.04) / 0.2))
+    return {
+        "baselineCorrelation": round(baseline, 6),
+        "bestCorrelation": round(best_corr, 6),
+        "bestLagSamples": int(best_lag),
+        "improvement": round(improvement, 6),
+        "confidence": round(confidence, 4),
+    }
+
+
+def _build_motion_sync_graph_png(rows: list[dict[str, Any]], *, max_time: float) -> bytes:
+    width, height = 1280, 720
+    chart = Image.new("RGB", (width, height), (244, 247, 249))
+    draw = ImageDraw.Draw(chart)
+    left, top, right, bottom = 84, 36, width - 40, height - 72
+    draw.rectangle((left, top, right, bottom), fill=(255, 255, 255), outline=(206, 214, 222), width=2)
+
+    if not rows:
+        draw.text((left + 24, top + 20), "No motion sync timeline data", fill=(90, 105, 120))
+        output = BytesIO()
+        chart.save(output, format="PNG")
+        return output.getvalue()
+
+    energy_values: list[float] = []
+    for item in rows:
+        for key in ("originalEnergy", "mergedEnergy", "shiftedMergedEnergy"):
+            value = item.get(key)
+            if isinstance(value, (float, int)):
+                energy_values.append(max(0.0, float(value)))
+    y_max = max(0.05, max(energy_values) if energy_values else 0.05)
+    max_time = max(0.1, max_time)
+
+    def _point(time_sec: float, value: float) -> tuple[float, float]:
+        x = left + ((time_sec / max_time) * (right - left))
+        y = bottom - ((max(0.0, value) / y_max) * (bottom - top))
+        return x, y
+
+    for tick in range(6):
+        y = top + ((bottom - top) * tick / 5.0)
+        value = y_max * (1.0 - tick / 5.0)
+        draw.line((left, y, right, y), fill=(232, 236, 241), width=1)
+        draw.text((18, y - 8), f"{value:.3f}", fill=(96, 110, 124))
+
+    for tick in range(6):
+        x = left + ((right - left) * tick / 5.0)
+        value = max_time * tick / 5.0
+        draw.line((x, top, x, bottom), fill=(236, 240, 244), width=1)
+        draw.text((x - 12, bottom + 10), f"{value:.1f}s", fill=(96, 110, 124))
+
+    original_points = [_point(float(item.get("timeSec") or 0.0), float(item.get("originalEnergy") or 0.0)) for item in rows]
+    merged_points = [_point(float(item.get("timeSec") or 0.0), float(item.get("mergedEnergy") or 0.0)) for item in rows]
+    shifted_points = [
+        _point(float(item.get("timeSec") or 0.0), float(item.get("shiftedMergedEnergy") or 0.0))
+        for item in rows
+        if item.get("shiftedMergedEnergy") is not None
+    ]
+
+    if len(original_points) >= 2:
+        draw.line(original_points, fill=(46, 113, 204), width=3, joint="curve")
+    if len(merged_points) >= 2:
+        draw.line(merged_points, fill=(235, 139, 51), width=3, joint="curve")
+    if len(shifted_points) >= 2:
+        draw.line(shifted_points, fill=(37, 173, 127), width=3, joint="curve")
+
+    draw.text((left + 14, top + 10), "Original motion", fill=(46, 113, 204))
+    draw.text((left + 160, top + 10), "Merged motion", fill=(235, 139, 51))
+    draw.text((left + 300, top + 10), "Merged motion (shifted)", fill=(37, 173, 127))
+
+    output = BytesIO()
+    chart.save(output, format="PNG")
+    return output.getvalue()
+
+
 def _parse_metric_log(log_path: Path, pattern: re.Pattern[str], group_name: str) -> list[float]:
     values: list[float] = []
     if not log_path.exists():
@@ -2429,6 +2564,219 @@ def _handle_qc_analysis(
     return job
 
 
+def _handle_motion_sync_qc(
+    *,
+    job: dict[str, Any],
+    store: S3JsonStore,
+    asset_store: AssetStore,
+    task: dict[str, Any],
+    settings: Any,
+) -> dict[str, Any]:
+    payload = job.get("payload") or {}
+    export_id = payload.get("exportId")
+    if not isinstance(export_id, str) or not export_id:
+        raise RuntimeError("Missing exportId for motion sync QC")
+
+    export_record = next((item for item in task.get("exports", []) if item.get("exportId") == export_id), None)
+    if not export_record:
+        raise RuntimeError(f"Export {export_id} not found")
+    output_key = export_record.get("outputKey")
+    if not isinstance(output_key, str) or not output_key:
+        raise RuntimeError("Export output missing")
+
+    motion_qc = export_record.setdefault("motionSyncQc", {})
+    motion_qc.update(
+        {
+            "status": "running",
+            "updatedAt": now_iso(),
+            "jobId": job.get("jobId"),
+        }
+    )
+    store.save_task(task)
+
+    fps_info = task.get("video", {}).get("editSource", {}).get("fps", {})
+    source_fps = Fraction(int(fps_info.get("num") or 30), int(fps_info.get("den") or 1))
+    source_width = int(task.get("video", {}).get("editSource", {}).get("width") or 1920)
+    source_height = int(task.get("video", {}).get("editSource", {}).get("height") or 1080)
+    analysis_width, analysis_height = _target_by_orientation(
+        source_width,
+        source_height,
+        landscape=(640, 360),
+        portrait=(360, 640),
+    )
+
+    s3 = boto3.client("s3")
+    paths = _asset_paths(task)
+    _job_progress(job, store, 10, "running", "Preparing videos for motion sync analysis")
+
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            original_path = td_path / "original.mp4"
+            export_path = td_path / "merged.mp4"
+            original_standard_path = td_path / "original_sync.mp4"
+            export_standard_path = td_path / "merged_sync.mp4"
+            edit_source_key = task.get("video", {}).get("editSource", {}).get("s3Key")
+            if not edit_source_key:
+                raise RuntimeError("Edit source is missing for motion sync analysis")
+
+            _download_s3(s3, settings.assets_bucket, edit_source_key, original_path)
+            _download_s3(s3, settings.assets_bucket, output_key, export_path)
+
+            transcode_to_cfr(
+                str(original_path),
+                str(original_standard_path),
+                source_fps,
+                target_width=analysis_width,
+                target_height=analysis_height,
+                crf=22,
+                preset="veryfast",
+                audio_bitrate="96k",
+            )
+            transcode_to_cfr(
+                str(export_path),
+                str(export_standard_path),
+                source_fps,
+                target_width=analysis_width,
+                target_height=analysis_height,
+                crf=22,
+                preset="veryfast",
+                audio_bitrate="96k",
+            )
+
+            original_probe = ffprobe_video(str(original_standard_path))
+            export_probe = ffprobe_video(str(export_standard_path))
+            common_duration_sec = max(
+                0.1,
+                min(float(original_probe.get("duration_sec") or 0.0), float(export_probe.get("duration_sec") or 0.0)),
+            )
+            _job_progress(job, store, 35, "running", "Sampling frames for motion signatures")
+
+            original_frames = _extract_sampled_frames(
+                original_standard_path,
+                td_path / "orig_motion_frames",
+                sample_fps=MOTION_SYNC_SAMPLE_FPS,
+                duration_sec=common_duration_sec,
+            )
+            export_frames = _extract_sampled_frames(
+                export_standard_path,
+                td_path / "merged_motion_frames",
+                sample_fps=MOTION_SYNC_SAMPLE_FPS,
+                duration_sec=common_duration_sec,
+            )
+
+            original_energy = _motion_energy_series(original_frames)
+            merged_energy = _motion_energy_series(export_frames)
+            sample_count = min(len(original_energy), len(merged_energy))
+            if sample_count < 8:
+                raise RuntimeError("Not enough sampled motion data for sync analysis")
+            original_energy = original_energy[:sample_count]
+            merged_energy = merged_energy[:sample_count]
+
+            max_lag_samples = max(1, min(int(MOTION_SYNC_MAX_LAG_SEC * MOTION_SYNC_SAMPLE_FPS), sample_count // 3))
+            lag_result = _best_motion_lag(original_energy, merged_energy, max_lag_samples=max_lag_samples)
+            best_lag_samples = int(lag_result["bestLagSamples"])
+            shift_seconds = float(best_lag_samples) / float(MOTION_SYNC_SAMPLE_FPS)
+            source_fps_float = float(source_fps.numerator) / float(source_fps.denominator)
+            recommended_shift_frames = int(round(shift_seconds * source_fps_float))
+
+            def _shifted_value(index: int) -> float | None:
+                shifted_index = index - best_lag_samples
+                if 0 <= shifted_index < sample_count:
+                    return merged_energy[shifted_index]
+                return None
+
+            rows: list[dict[str, Any]] = []
+            for idx in range(sample_count):
+                rows.append(
+                    {
+                        "index": idx,
+                        "timeSec": round(idx / float(MOTION_SYNC_SAMPLE_FPS), 4),
+                        "originalEnergy": original_energy[idx],
+                        "mergedEnergy": merged_energy[idx],
+                        "shiftedMergedEnergy": _shifted_value(idx),
+                    }
+                )
+
+            timeline_csv = "index,timeSec,originalEnergy,mergedEnergy,shiftedMergedEnergy\n" + "\n".join(
+                f"{row['index']},{row['timeSec']},{row['originalEnergy']},{row['mergedEnergy']},{row['shiftedMergedEnergy'] if row['shiftedMergedEnergy'] is not None else ''}"
+                for row in rows
+            )
+            timeline_csv_key = paths.export_motion_qc_artifact(export_id, "motion_timeline", ".csv")
+            timeline_graph_key = paths.export_motion_qc_artifact(export_id, "motion_timeline_graph", ".png")
+            report_json_key = paths.export_motion_qc_artifact(export_id, "motion_sync_report", ".json")
+            asset_store.put_bytes(timeline_csv_key, timeline_csv.encode("utf-8"), content_type="text/csv")
+            asset_store.put_bytes(
+                timeline_graph_key,
+                _build_motion_sync_graph_png(rows, max_time=max(0.1, rows[-1]["timeSec"] if rows else 0.1)),
+                content_type="image/png",
+            )
+
+            recommendation = (
+                "no_shift"
+                if recommended_shift_frames == 0
+                else ("shift_later" if recommended_shift_frames > 0 else "shift_earlier")
+            )
+            metrics = {
+                "sampleFps": MOTION_SYNC_SAMPLE_FPS,
+                "maxLagSec": MOTION_SYNC_MAX_LAG_SEC,
+                "analysisResolution": {"width": analysis_width, "height": analysis_height},
+                "analyzedDurationSec": round(common_duration_sec, 4),
+                "sampleCount": sample_count,
+                "baselineCorrelation": lag_result["baselineCorrelation"],
+                "bestCorrelation": lag_result["bestCorrelation"],
+                "correlationGain": lag_result["improvement"],
+                "confidence": lag_result["confidence"],
+                "bestOffsetSamples": best_lag_samples,
+                "bestOffsetSec": round(shift_seconds, 4),
+                "recommendedShiftFrames": recommended_shift_frames,
+                "recommendedShiftSec": round(recommended_shift_frames / max(1e-6, source_fps_float), 4),
+                "recommendation": recommendation,
+            }
+
+            report_payload = {
+                "exportId": export_id,
+                "analyzedAt": now_iso(),
+                "metrics": metrics,
+                "rows": rows,
+                "artifacts": {
+                    "timelineCsvKey": timeline_csv_key,
+                    "timelineGraphKey": timeline_graph_key,
+                },
+            }
+            asset_store.put_bytes(report_json_key, json.dumps(report_payload).encode("utf-8"), content_type="application/json")
+
+            motion_qc.update(
+                {
+                    "status": "complete",
+                    "updatedAt": now_iso(),
+                    "analyzedAt": now_iso(),
+                    "metrics": metrics,
+                    "artifacts": {
+                        "timelineCsvKey": timeline_csv_key,
+                        "timelineGraphKey": timeline_graph_key,
+                        "reportJsonKey": report_json_key,
+                    },
+                }
+            )
+    except Exception as exc:
+        motion_qc.update(
+            {
+                "status": "failed",
+                "updatedAt": now_iso(),
+                "error": str(exc),
+            }
+        )
+        store.save_task(task)
+        raise
+
+    store.save_task(task)
+    _job_progress(job, store, 100, "complete", "Motion sync QC complete")
+    job["resultRefs"] = {"exportId": export_id}
+    store.save_job(job)
+    return job
+
+
 def process_job_record(record: dict[str, Any], *, settings: Any) -> None:
     body = json.loads(record["body"])
     user_id = body["userId"]
@@ -2465,6 +2813,8 @@ def process_job_record(record: dict[str, Any], *, settings: Any) -> None:
             _handle_merge(job=job, store=store, asset_store=asset_store, task=task, settings=settings)
         elif job["type"] == "qc_analysis":
             _handle_qc_analysis(job=job, store=store, asset_store=asset_store, task=task, settings=settings)
+        elif job["type"] == "motion_sync_qc":
+            _handle_motion_sync_qc(job=job, store=store, asset_store=asset_store, task=task, settings=settings)
         else:
             raise RuntimeError(f"Unsupported job type: {job['type']}")
     except Exception as exc:

@@ -264,6 +264,11 @@ export const apiClient = {
     },
   ) =>
     api<{ jobId: string }>(`/tasks/${taskId}/merge`, { method: "POST", body: JSON.stringify(payload) }),
+  runMotionSyncQc: (taskId: string, exportId: string, payload?: { force?: boolean }) =>
+    api<{ jobId: string; alreadyRunning?: boolean }>(`/tasks/${taskId}/exports/${exportId}/motion-qc`, {
+      method: "POST",
+      body: JSON.stringify(payload ?? {}),
+    }),
   runQc: (taskId: string, payload?: { generationIds?: string[] }) =>
     api<{ jobId: string; generationCount: number }>(`/tasks/${taskId}/qc/run`, {
       method: "POST",

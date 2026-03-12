@@ -282,6 +282,38 @@ export type ExportRecord = {
   outputKey: string;
   createdAt: string;
   downloadUrl?: string;
+  motionSyncQc?: {
+    status: "queued" | "running" | "complete" | "failed";
+    updatedAt?: string;
+    analyzedAt?: string;
+    jobId?: string;
+    error?: string;
+    metrics?: {
+      sampleFps?: number;
+      maxLagSec?: number;
+      analyzedDurationSec?: number;
+      sampleCount?: number;
+      baselineCorrelation?: number;
+      bestCorrelation?: number;
+      correlationGain?: number;
+      confidence?: number;
+      bestOffsetSamples?: number;
+      bestOffsetSec?: number;
+      recommendedShiftFrames?: number;
+      recommendedShiftSec?: number;
+      recommendation?: "no_shift" | "shift_later" | "shift_earlier" | string;
+      [key: string]: unknown;
+    };
+    artifacts?: {
+      timelineCsvKey?: string;
+      timelineCsvUrl?: string;
+      timelineGraphKey?: string;
+      timelineGraphUrl?: string;
+      reportJsonKey?: string;
+      reportJsonUrl?: string;
+      [key: string]: unknown;
+    };
+  };
 };
 
 export type CustomReportOutputRef =
