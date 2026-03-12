@@ -1528,13 +1528,20 @@ export default function App() {
     void queryClient.invalidateQueries({ queryKey: ["tasks"] });
     if (selectedTaskId) {
       void queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
+      void queryClient.invalidateQueries({ queryKey: ["task", "report", selectedTaskId] });
+      void queryClient.invalidateQueries({ queryKey: ["task", "assets", selectedTaskId] });
+    }
+    if (reportTaskId && reportTaskId !== selectedTaskId) {
+      void queryClient.invalidateQueries({ queryKey: ["task", reportTaskId] });
+      void queryClient.invalidateQueries({ queryKey: ["task", "report", reportTaskId] });
+      void queryClient.invalidateQueries({ queryKey: ["task", "assets", reportTaskId] });
     }
     while (seenDoneRef.current.size > MAX_TRACKED_JOB_IDS * 5) {
       const oldest = seenDoneRef.current.values().next().value as string | undefined;
       if (!oldest) break;
       seenDoneRef.current.delete(oldest);
     }
-  }, [jobQueries, queryClient, selectedTaskId]);
+  }, [jobQueries, queryClient, reportTaskId, selectedTaskId]);
 
   useEffect(() => {
     if (jobIds.length <= MAX_TRACKED_JOB_IDS) return;

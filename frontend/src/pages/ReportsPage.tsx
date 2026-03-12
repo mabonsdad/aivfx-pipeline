@@ -502,6 +502,20 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
     }
     return [...ids];
   }, [qcFrameRows, reportTask, reportView, scopedVideoRows]);
+  const isQcView = reportView === "qc_frame" || reportView === "qc_video";
+  const hasMissingQc = scopedQcGenerationIdsNeedingRun.length > 0;
+
+  async function runMissingQcNow() {
+    if (!reportTask || !hasMissingQc) return;
+    const generationIds = [...scopedQcGenerationIdsNeedingRun].sort();
+    for (let index = 0; index < generationIds.length; index += 20) {
+      const batch = generationIds.slice(index, index + 20);
+      await runQcMutation.mutateAsync({ taskId: reportTask.taskId, generationIds: batch });
+    }
+  }
+
+  const latestQcJob =
+    sortedJobs.find((job) => job.type === "qc_analysis" && (!reportTaskId || job.taskId === reportTaskId)) ?? null;
 
   useEffect(() => {
     if (!activeCustomReportId) return;
@@ -536,9 +550,16 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
     })();
   }, [activeCustomReportId, reportTask, reportView, runQcMutation, scopedQcGenerationIdsNeedingRun]);
 
+  useEffect(() => {
+    const status = latestQcJob?.status;
+    if (status !== "queued" && status !== "running") return;
+    const timer = window.setInterval(() => {
+      void reportTaskQuery.refetch();
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [latestQcJob?.jobId, latestQcJob?.status, reportTaskQuery]);
+
   const reportPlaybackUrl = reportTask?.video?.editSource?.downloadUrl ?? reportTask?.video?.original?.downloadUrl ?? null;
-  const latestQcJob =
-    sortedJobs.find((job) => job.type === "qc_analysis" && (!reportTaskId || job.taskId === reportTaskId)) ?? null;
   const selectedRefKeys = new Set(
     reportTaskId ? (selectedOutputRefsByTask[reportTaskId] ?? []).map((ref) => reportOutputRefKey(ref)) : [],
   );
@@ -619,6 +640,27 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
           >
             Custom Reports
           </button>
+          <button
+            type="button"
+            className="rounded border border-ink/20 bg-white px-3 py-2 text-sm"
+            onClick={() => {
+              void reportTaskQuery.refetch();
+            }}
+          >
+            Refresh Report Data
+          </button>
+          {isQcView ? (
+            <button
+              type="button"
+              className="rounded border border-ink/20 bg-white px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={!reportTask || !hasMissingQc || runQcMutation.isPending}
+              onClick={() => {
+                void runMissingQcNow();
+              }}
+            >
+              {runQcMutation.isPending ? "Running QC..." : hasMissingQc ? "Run Missing QC Now" : "QC Up To Date"}
+            </button>
+          ) : null}
         </div>
         {latestQcJob ? (
           <p className="text-xs text-ink/70">
