@@ -151,6 +151,7 @@ const JobsPanel = lazy(() => import("./pages/workflow/JobsPanel"));
 const VIDEO_FRAME_THUMBNAIL_CACHE = new Map<string, string | null>();
 const MAX_TRACKED_JOB_IDS = 40;
 const TASK_URL_REFRESH_MS = 15 * 60 * 1000;
+const URL_REFRESH_IDLE_MS = 2 * 60 * 1000;
 const AUTOMATION_CANCELLED = "__automation_cancelled__";
 const SEGMENT_SELECTION_STORAGE_KEY = "aivfx:lastSegmentByTask:v1";
 
@@ -747,6 +748,7 @@ export default function App() {
   const patchMaskCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const patchDrawStateRef = useRef<{ tool: PatchToolMode; points: MaskPoint[]; last: MaskPoint | null } | null>(null);
   const signedUrlRefreshRef = useRef<Map<string, number>>(new Map());
+  const pageHiddenAtRef = useRef<number | null>(null);
   const automationCancelRef = useRef(false);
   const automationSelectionResolverRef = useRef<
     ((choice: { startVariantId: string; endVariantId: string | null; cancelled: boolean }) => void) | null
@@ -2256,11 +2258,20 @@ export default function App() {
 
   useEffect(() => {
     if (!isPageVisible) return;
+    const hiddenAt = pageHiddenAtRef.current;
+    if (hiddenAt && Date.now() - hiddenAt < URL_REFRESH_IDLE_MS) return;
     refreshSignedUrlsForTask(selectedTaskId);
     if (reportTaskId && reportTaskId !== selectedTaskId) {
       refreshSignedUrlsForTask(reportTaskId);
     }
   }, [isPageVisible, refreshSignedUrlsForTask, reportTaskId, selectedTaskId]);
+
+  useEffect(() => {
+    if (isPageVisible) {
+      return;
+    }
+    pageHiddenAtRef.current = Date.now();
+  }, [isPageVisible]);
 
   const openNewTaskWithAutomationDefaults = useCallback(() => {
     setAutomationEnabled(false);
@@ -2687,7 +2698,6 @@ export default function App() {
         return;
       }
     }
-    refreshSignedUrlsForTask(selectedTaskId);
     setTab(nextTab);
   }
 
