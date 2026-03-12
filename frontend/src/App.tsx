@@ -84,6 +84,7 @@ type AutomationRunState = {
   detail: string;
   cancelRequested: boolean;
   terminal: boolean;
+  logs: string[];
 };
 
 type LibraryAsset = {
@@ -274,6 +275,16 @@ function formatCompactTimestamp(iso: string | undefined): string {
     second: "2-digit",
     hour12: false,
   });
+}
+
+function formatAutomationLogEntry(message: string): string {
+  const stamp = new Date().toLocaleTimeString(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+  return `[${stamp}] ${message}`;
 }
 
 function frameCount(task: TaskDetail | undefined): number {
@@ -739,6 +750,7 @@ export default function App() {
     detail: "",
     cancelRequested: false,
     terminal: false,
+    logs: [],
   });
   const [automationSelectionState, setAutomationSelectionState] = useState<AutomationSelectionState | null>(null);
   const [firstFrameId, setFirstFrameId] = useState<string | null>(null);
@@ -2318,35 +2330,53 @@ export default function App() {
       ...previous,
       cancelRequested: true,
       detail: "Cancel requested. Started generations continue in the background.",
+      logs: [...previous.logs, formatAutomationLogEntry("User requested automation cancel.")].slice(-200),
+    }));
+  }, []);
+
+  const appendAutomationLog = useCallback((message: string) => {
+    setAutomationRunState((previous) => ({
+      ...previous,
+      logs: [...previous.logs, formatAutomationLogEntry(message)].slice(-200),
     }));
   }, []);
 
   const waitForAutomationJob = useCallback(
     async (jobId: string, label: string, timeoutMs = 25 * 60 * 1000) => {
       const startedAt = Date.now();
+      let lastStatus = "";
       while (true) {
         if (automationCancelRef.current) {
           throw new Error(AUTOMATION_CANCELLED);
         }
         const job = await apiClient.getJob(jobId);
+        const statusLine = `${job.status.toUpperCase()} (${job.progress ?? 0}%)`;
+        if (statusLine !== lastStatus) {
+          appendAutomationLog(`${label}: ${statusLine}`);
+          lastStatus = statusLine;
+        }
         setAutomationRunState((previous) =>
           previous.isOpen
-            ? { ...previous, phase: label, detail: `${job.status.toUpperCase()} (${job.progress ?? 0}%)` }
+            ? { ...previous, phase: label, detail: statusLine }
             : previous,
         );
         if (job.status === "complete") {
+          appendAutomationLog(`${label}: completed`);
           return job;
         }
         if (job.status === "failed") {
-          throw new Error(job.error || `${label} failed`);
+          const errorMessage = job.error || `${label} failed`;
+          appendAutomationLog(`${label}: failed - ${errorMessage}`);
+          throw new Error(errorMessage);
         }
         if (Date.now() - startedAt > timeoutMs) {
+          appendAutomationLog(`${label}: timed out`);
           throw new Error(`${label} timed out`);
         }
         await sleep(2000);
       }
     },
-    [],
+    [appendAutomationLog],
   );
 
   const requestAutomationSelection = useCallback(
@@ -2400,6 +2430,7 @@ export default function App() {
         detail: "Loading ingested task metadata...",
         cancelRequested: false,
         terminal: false,
+        logs: [formatAutomationLogEntry("Automation started.")],
       });
 
       const imageModels: Array<{ model: "nano_banana_pro" | "nano_banana" | "chatgpt"; label: string }> = [
@@ -2483,6 +2514,7 @@ export default function App() {
             });
             editJobs.push({ model: modelEntry.model, jobId: created.jobId });
             setJobIds((previous) => appendTrackedJobId(previous, created.jobId));
+            appendAutomationLog(`Queued ${frameLabel} frame edit: ${modelEntry.label} (job ${created.jobId}).`);
           }
           const settled = await Promise.allSettled(
             editJobs.map((job) => waitForAutomationJob(job.jobId, `Editing ${frameLabel} frame (${job.model})`)),
@@ -2491,10 +2523,15 @@ export default function App() {
           const variants: Array<{ variantId: string; model: string }> = [];
           for (let index = 0; index < settled.length; index += 1) {
             const result = settled[index];
-            if (result.status !== "fulfilled") continue;
+            if (result.status !== "fulfilled") {
+              const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
+              appendAutomationLog(`Failed ${frameLabel} frame edit (${editJobs[index].model}): ${reason}`);
+              continue;
+            }
             const variantId = result.value.resultRefs?.variantId;
             if (typeof variantId === "string") {
               variants.push({ variantId, model: editJobs[index].model });
+              appendAutomationLog(`Produced ${frameLabel} frame variant ${variantId} (${editJobs[index].model}).`);
             }
           }
           return variants;
@@ -2552,14 +2589,16 @@ export default function App() {
           throw new Error("Select a start-frame variant to continue automation.");
         }
 
-        setAutomationRunState({
+        setAutomationRunState((previous) => ({
+          ...previous,
           isOpen: true,
           taskId,
           phase: "Video generation",
           detail: "Queueing model runs...",
           cancelRequested: false,
           terminal: false,
-        });
+          logs: [...previous.logs, formatAutomationLogEntry("Frame selection confirmed. Starting video generation queue.")].slice(-200),
+        }));
 
         try {
           await apiClient.selectVariant(taskId, startCapture.frameId, choice.startVariantId);
@@ -2579,6 +2618,7 @@ export default function App() {
         });
 
         const generationJobs: Array<{ option: AutomationVideoRunOption; jobId: string }> = [];
+        const queueFailures: string[] = [];
         for (let index = 0; index < selectedVideoOptions.length; index += 1) {
           throwIfCancelled();
           const option = selectedVideoOptions[index];
@@ -2597,12 +2637,15 @@ export default function App() {
             });
             generationJobs.push({ option, jobId: created.jobId });
             setJobIds((previous) => appendTrackedJobId(previous, created.jobId));
+            appendAutomationLog(`Queued ${option.label} (job ${created.jobId}).`);
           } catch (error) {
             const message = error instanceof Error ? error.message : "Unknown generation queue error";
+            queueFailures.push(`${option.label}: ${message}`);
             setAutomationRunState((previous) => ({
               ...previous,
               detail: `Failed to queue ${option.label}: ${message}`,
             }));
+            appendAutomationLog(`Failed to queue ${option.label}: ${message}`);
           }
         }
 
@@ -2615,6 +2658,13 @@ export default function App() {
         );
         throwIfCancelled();
         const succeededCount = generationResults.filter((result) => result.status === "fulfilled").length;
+        const failedRuns: string[] = [...queueFailures];
+        generationResults.forEach((result, index) => {
+          if (result.status === "fulfilled") return;
+          const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
+          failedRuns.push(`${generationJobs[index].option.label}: ${reason}`);
+          appendAutomationLog(`Generation failed for ${generationJobs[index].option.label}: ${reason}`);
+        });
         if (!succeededCount) {
           throw new Error("All automated video generations failed.");
         }
@@ -2624,14 +2674,23 @@ export default function App() {
         setSelectedTaskId(taskId);
         setSelectedSegmentId(segment.segmentId);
         goToReport(taskId, "outputs", null, true);
-        setAutomationRunState({
+        setAutomationRunState((previous) => ({
+          ...previous,
           isOpen: true,
           taskId,
           phase: "Completed",
-          detail: `Automation complete. ${succeededCount} of ${generationJobs.length} video generations succeeded.`,
+          detail:
+            failedRuns.length > 0
+              ? `Automation complete. ${succeededCount} of ${generationJobs.length + queueFailures.length} models succeeded.`
+              : `Automation complete. ${succeededCount} of ${generationJobs.length} video generations succeeded.`,
           cancelRequested: false,
           terminal: true,
-        });
+          logs: [
+            ...previous.logs,
+            ...failedRuns.map((item) => formatAutomationLogEntry(`Model failed: ${item}`)),
+            formatAutomationLogEntry(`Automation completed with ${succeededCount} successful video generations.`),
+          ].slice(-200),
+        }));
       } catch (error) {
         const message = error instanceof Error ? error.message : "Automation failed";
         const cancelled = message === AUTOMATION_CANCELLED;
@@ -2643,10 +2702,22 @@ export default function App() {
             ? "Automation stopped. Already-started jobs continue in the background."
             : message,
           terminal: true,
+          logs: [...previous.logs, formatAutomationLogEntry(cancelled ? "Automation cancelled." : `Automation failed: ${message}`)].slice(-200),
         }));
       }
     },
-    [fpsValue, goToReport, queryClient, requestAutomationSelection, setSelectedFrameId, setSelectedSegmentId, setSelectedTaskId, setTab, waitForAutomationJob],
+    [
+      appendAutomationLog,
+      fpsValue,
+      goToReport,
+      queryClient,
+      requestAutomationSelection,
+      setSelectedFrameId,
+      setSelectedSegmentId,
+      setSelectedTaskId,
+      setTab,
+      waitForAutomationJob,
+    ],
   );
 
   const handleNewTaskSubmit = useCallback(() => {
@@ -3317,9 +3388,23 @@ export default function App() {
       />
       {automationRunState.isOpen ? (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/55 p-4">
-          <div className="w-full max-w-lg rounded-2xl border border-ink/15 bg-card p-5 shadow-xl">
+          <div className="w-full max-w-2xl rounded-2xl border border-ink/15 bg-card p-5 shadow-xl">
             <h3 className="text-lg font-semibold">{automationRunState.phase || "Running automation"}</h3>
             <p className="mt-2 text-sm text-ink/75">{automationRunState.detail || "Working..."}</p>
+            <div className="mt-3 rounded-lg border border-ink/10 bg-white/80 p-2">
+              <p className="text-xs font-semibold uppercase tracking-wide text-ink/60">Automation log</p>
+              <div className="mt-2 max-h-52 space-y-1 overflow-y-auto rounded border border-ink/10 bg-bg/60 p-2">
+                {automationRunState.logs.length ? (
+                  automationRunState.logs.map((entry, index) => (
+                    <p key={`automation-log-${index}`} className="font-mono text-[11px] text-ink/80">
+                      {entry}
+                    </p>
+                  ))
+                ) : (
+                  <p className="text-xs text-ink/50">No events logged yet.</p>
+                )}
+              </div>
+            </div>
             <div className="mt-4 flex items-center justify-end gap-2">
               {automationRunState.terminal ? (
                 <button

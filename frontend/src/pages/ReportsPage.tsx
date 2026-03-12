@@ -107,6 +107,25 @@ type ReportsPageProps = {
   ctx: ReportsPageCtx;
 };
 
+function EyeIcon({ className = "h-4 w-4" }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z" />
+      <circle cx="12" cy="12" r="3" />
+    </svg>
+  );
+}
+
+function DownloadIcon({ className = "h-4 w-4" }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <path d="M12 3v11" />
+      <path d="m8 10 4 4 4-4" />
+      <path d="M4 21h16" />
+    </svg>
+  );
+}
+
 function safeTimestamp(iso: string | undefined): number {
   if (!iso) return 0;
   const timestamp = new Date(iso).getTime();
@@ -702,14 +721,55 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
                         {section.items.map((card: ReportOutputCard) => (
                           <article key={card.id} className="space-y-2 rounded-lg border border-ink/10 bg-white p-3">
-                            <label className="flex items-center gap-2 text-xs text-ink/70">
-                              <input
-                                type="checkbox"
-                                checked={selectedRefKeys.has(reportOutputRefKey(card.selectionRef))}
-                                onChange={() => toggleCustomReportOutput(card.taskId, card.selectionRef)}
-                              />
-                              QC
-                            </label>
+                            <div className="flex items-center justify-between gap-2">
+                              <label className="flex items-center gap-2 text-xs text-ink/70">
+                                <input
+                                  type="checkbox"
+                                  checked={selectedRefKeys.has(reportOutputRefKey(card.selectionRef))}
+                                  onChange={() => toggleCustomReportOutput(card.taskId, card.selectionRef)}
+                                />
+                                QC
+                              </label>
+                              <div className="flex items-center gap-1">
+                                <button
+                                  type="button"
+                                  className="rounded border border-ink/20 bg-white p-1 text-ink/70 transition hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
+                                  title="Preview"
+                                  disabled={!card.imageUrl && !card.videoUrl}
+                                  onClick={() => {
+                                    if (card.videoUrl) {
+                                      setVideoPreviewModal({ url: card.videoUrl, label: card.title });
+                                      return;
+                                    }
+                                    if (card.imageUrl) {
+                                      setImagePreviewModal({ url: card.imageUrl, label: card.title });
+                                    }
+                                  }}
+                                >
+                                  <EyeIcon />
+                                </button>
+                                {card.videoUrl || card.imageUrl ? (
+                                  <a
+                                    href={card.videoUrl ?? card.imageUrl ?? "#"}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="rounded border border-ink/20 bg-white p-1 text-ink/70 transition hover:text-ink"
+                                    title="Download"
+                                  >
+                                    <DownloadIcon />
+                                  </a>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    disabled
+                                    className="rounded border border-ink/20 bg-white p-1 text-ink/40"
+                                    title="Download unavailable"
+                                  >
+                                    <DownloadIcon />
+                                  </button>
+                                )}
+                              </div>
+                            </div>
                             {card.imageUrl ? (
                               <button
                                 type="button"
