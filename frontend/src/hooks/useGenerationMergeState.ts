@@ -39,17 +39,30 @@ export function useGenerationMergeState({ task, selectedSegmentId, segmentsById 
     [segmentGenerations, selectedSegmentId],
   );
 
+  const selectedSegmentCompleteGenerations = useMemo(
+    () =>
+      selectedSegmentGenerations.filter(
+        (generation) => generation.status === "complete" && Boolean(generation.outputKey),
+      ),
+    [selectedSegmentGenerations],
+  );
+
   const selectedMergeGenerations = useMemo(
     () =>
       selectedGenIds
         .map((genId) => task?.segmentGenerations?.[genId])
-        .filter((generation): generation is SegmentGeneration => Boolean(generation))
+        .filter((generation): generation is SegmentGeneration => {
+          if (!generation) return false;
+          return generation.status === "complete" && Boolean(generation.outputKey);
+        })
         .sort((a, b) => safeTimestamp(b.createdAt) - safeTimestamp(a.createdAt)),
     [selectedGenIds, task?.segmentGenerations],
   );
 
   const selectedPreviewGeneration =
-    selectedSegmentGenerations.find((gen) => gen.genId === selectedPreviewGenId) ?? selectedSegmentGenerations[0] ?? null;
+    selectedSegmentCompleteGenerations.find((gen) => gen.genId === selectedPreviewGenId) ??
+    selectedSegmentCompleteGenerations[0] ??
+    null;
 
   const sortedExports = useMemo(
     () => [...(task?.exports ?? [])].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
@@ -74,11 +87,11 @@ export function useGenerationMergeState({ task, selectedSegmentId, segmentsById 
       setSelectedPreviewGenId("");
       return;
     }
-    const stillValid = selectedSegmentGenerations.some((gen) => gen.genId === selectedPreviewGenId);
+    const stillValid = selectedSegmentCompleteGenerations.some((gen) => gen.genId === selectedPreviewGenId);
     if (!stillValid) {
-      setSelectedPreviewGenId(selectedSegmentGenerations[0].genId);
+      setSelectedPreviewGenId(selectedSegmentCompleteGenerations[0]?.genId ?? "");
     }
-  }, [selectedPreviewGenId, selectedSegmentGenerations]);
+  }, [selectedPreviewGenId, selectedSegmentCompleteGenerations, selectedSegmentGenerations]);
 
   useEffect(() => {
     const selectedId = selectedPreviewGeneration?.genId;
@@ -105,8 +118,14 @@ export function useGenerationMergeState({ task, selectedSegmentId, segmentsById 
   function selectSegmentGeneration(genId: string) {
     const selectedGeneration = task?.segmentGenerations?.[genId];
     if (!selectedGeneration || selectedGeneration.status === "failed") return;
-    setSelectedPreviewGenId(genId);
+    const canUseForMerge = selectedGeneration.status === "complete" && Boolean(selectedGeneration.outputKey);
+    if (canUseForMerge) {
+      setSelectedPreviewGenId(genId);
+    }
     setSelectedGenIds((previous) => {
+      if (!canUseForMerge) {
+        return previous;
+      }
       const targetSegmentId = selectedGeneration?.segmentId;
       const filtered = previous.filter((existingGenId) => {
         if (existingGenId === genId) return false;
