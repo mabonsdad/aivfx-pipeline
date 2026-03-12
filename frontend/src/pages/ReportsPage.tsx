@@ -801,7 +801,7 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                               QC
                             </label>
                           </div>
-                          <div className="grid gap-3 md:grid-cols-4">
+                          <div className="grid gap-3 md:grid-cols-3">
                             <div>
                               <p className="text-xs font-medium text-ink/70">Original frame</p>
                               {row.frame.imageUrl ? (
@@ -809,8 +809,6 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                               ) : (
                                 <p className="text-xs text-ink/50">Unavailable</p>
                               )}
-                              <p className="mt-1 text-[11px] text-ink/70">Model: {row.variant.model} ({row.variant.type})</p>
-                              <p className="text-[11px] text-ink/70">Prompt: {variantPrompt}</p>
                             </div>
                             <div>
                               <p className="text-xs font-medium text-ink/70">Mask edit</p>
@@ -828,6 +826,13 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                                 <p className="text-xs text-ink/50">Unavailable</p>
                               )}
                             </div>
+                          </div>
+                          <div className="grid gap-3 md:grid-cols-3">
+                            <div className="rounded border border-ink/10 bg-bg/20 p-2 text-xs text-ink/70 md:col-span-2">
+                              <p className="font-semibold text-ink/90">Edit metadata</p>
+                              <p>Model: {row.variant.model} ({row.variant.type})</p>
+                              <p>Prompt: {variantPrompt}</p>
+                            </div>
                             <div className="rounded border border-ink/10 bg-bg/40 p-2 text-xs text-ink/70">
                               <p className="font-semibold text-ink/90">Frame QC analysis</p>
                               {hasFrameQc ? (
@@ -835,15 +840,6 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                                   <p>Changed: {asNumber(frameMetrics?.changedPctTotal)?.toFixed(2) ?? "n/a"}%</p>
                                   <p>Outside leakage: {asNumber(frameMetrics?.outsideLeakagePct)?.toFixed(2) ?? "n/a"}%</p>
                                   <p>Boundary spill: {asNumber(frameMetrics?.boundarySpillPct)?.toFixed(2) ?? "n/a"}%</p>
-                                  {boundaryOverlayUrl ? (
-                                    <button
-                                      type="button"
-                                      className="mt-2 underline"
-                                      onClick={() => setImagePreviewModal({ url: boundaryOverlayUrl, label: "Frame QC boundary overlay" })}
-                                    >
-                                      Open boundary overlay
-                                    </button>
-                                  ) : null}
                                 </>
                               ) : (
                                 <p>
@@ -856,61 +852,59 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                               )}
                             </div>
                           </div>
-                          {hasFrameQc ? (
-                            <div className="grid gap-3 md:grid-cols-3">
-                              <div className="space-y-1">
-                                <p className="text-xs font-medium text-ink/70">Frame diff heatmap</p>
-                                {frameHeatmapUrl ? (
-                                  <button
-                                    type="button"
-                                    className="block w-full"
-                                    onClick={() => setImagePreviewModal({ url: frameHeatmapUrl, label: "Frame QC heatmap" })}
-                                  >
-                                    <img src={frameHeatmapUrl} alt="Frame diff heatmap" className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain" />
-                                  </button>
-                                ) : (
-                                  <p className="text-xs text-ink/50">No heatmap</p>
-                                )}
-                              </div>
-                              <div className="space-y-1">
-                                <p className="text-xs font-medium text-ink/70">Frame diff overlay</p>
-                                {frameOverlayUrl ? (
-                                  <button
-                                    type="button"
-                                    className="block w-full"
-                                    onClick={() => setImagePreviewModal({ url: frameOverlayUrl, label: "Frame QC overlay" })}
-                                  >
-                                    <img src={frameOverlayUrl} alt="Frame diff overlay" className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain" />
-                                  </button>
-                                ) : (
-                                  <p className="text-xs text-ink/50">No overlay</p>
-                                )}
-                              </div>
-                              <div className="space-y-1">
-                                <p className="text-xs font-medium text-ink/70">Boundary/Binary map</p>
-                                {boundaryOverlayUrl || frameBinaryUrl ? (
-                                  <button
-                                    type="button"
-                                    className="block w-full"
-                                    onClick={() =>
-                                      setImagePreviewModal({
-                                        url: (boundaryOverlayUrl ?? frameBinaryUrl) as string,
-                                        label: "Frame QC boundary/binary map",
-                                      })
-                                    }
-                                  >
-                                    <img
-                                      src={(boundaryOverlayUrl ?? frameBinaryUrl) as string}
-                                      alt="Frame QC boundary or binary map"
-                                      className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain"
-                                    />
-                                  </button>
-                                ) : (
-                                  <p className="text-xs text-ink/50">No boundary or binary map</p>
-                                )}
-                              </div>
+                          <div className="grid gap-3 md:grid-cols-3">
+                            <div className="space-y-1">
+                              <p className="text-xs font-medium text-ink/70">Frame diff heatmap</p>
+                              {frameHeatmapUrl ? (
+                                <button
+                                  type="button"
+                                  className="block w-full"
+                                  onClick={() => setImagePreviewModal({ url: frameHeatmapUrl, label: "Frame QC heatmap" })}
+                                >
+                                  <img src={frameHeatmapUrl} alt="Frame diff heatmap" className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain" />
+                                </button>
+                              ) : (
+                                <p className="text-xs text-ink/50">No heatmap</p>
+                              )}
                             </div>
-                          ) : null}
+                            <div className="space-y-1">
+                              <p className="text-xs font-medium text-ink/70">Frame diff overlay</p>
+                              {frameOverlayUrl ? (
+                                <button
+                                  type="button"
+                                  className="block w-full"
+                                  onClick={() => setImagePreviewModal({ url: frameOverlayUrl, label: "Frame QC overlay" })}
+                                >
+                                  <img src={frameOverlayUrl} alt="Frame diff overlay" className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain" />
+                                </button>
+                              ) : (
+                                <p className="text-xs text-ink/50">No overlay</p>
+                              )}
+                            </div>
+                            <div className="space-y-1">
+                              <p className="text-xs font-medium text-ink/70">Boundary/Binary map</p>
+                              {boundaryOverlayUrl || frameBinaryUrl ? (
+                                <button
+                                  type="button"
+                                  className="block w-full"
+                                  onClick={() =>
+                                    setImagePreviewModal({
+                                      url: (boundaryOverlayUrl ?? frameBinaryUrl) as string,
+                                      label: "Frame QC boundary/binary map",
+                                    })
+                                  }
+                                >
+                                  <img
+                                    src={(boundaryOverlayUrl ?? frameBinaryUrl) as string}
+                                    alt="Frame QC boundary or binary map"
+                                    className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain"
+                                  />
+                                </button>
+                              ) : (
+                                <p className="text-xs text-ink/50">No boundary or binary map</p>
+                              )}
+                            </div>
+                          </div>
                         </article>
                       );
                     })}
