@@ -64,7 +64,6 @@ QC_ANALYSIS_MAX_FRAMES = 90
 QC_DIFF_THRESHOLD = 32
 QC_OUTSIDE_LEAK_BUDGET_PCT = 0.50
 QC_BOUNDARY_RING_PX = 8
-LUMA_VIDEO_MODELS = {"ray-2", "ray-flash-2"}
 LUMA_ALLOWED_MODES = {
     "adhere_1",
     "adhere_2",
@@ -1070,8 +1069,7 @@ def _handle_segment_generate(
             segment_src_width = int(segment_source_probe.get("width") or src_width)
             segment_src_height = int(segment_source_probe.get("height") or src_height)
             source_size = local_segment_source.stat().st_size
-            force_luma_provider_transcode = model_name in LUMA_VIDEO_MODELS
-            if force_luma_provider_transcode or source_size > FULL_VIDEO_MAX_BYTES:
+            if source_size > FULL_VIDEO_MAX_BYTES:
                 _job_progress(job, store, 20, "running", "Optimizing segment clip to provider size limits")
                 local_provider_segment = td_path / "segment_luma.mp4"
                 luma_w, luma_h, _ = _transcode_with_size_limit(
@@ -1105,8 +1103,6 @@ def _handle_segment_generate(
                 landscape=(1280, 720),
                 portrait=(720, 1280),
             )
-        elif model_name in LUMA_VIDEO_MODELS and provider_media_width and provider_media_height:
-            first_target_w, first_target_h = provider_media_width, provider_media_height
         else:
             first_target_w, first_target_h = _target_by_orientation(
                 first_source_width,
