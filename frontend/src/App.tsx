@@ -724,6 +724,7 @@ export default function App() {
   const [automationEnabled, setAutomationEnabled] = useState(false);
   const [automationStartPrompt, setAutomationStartPrompt] = useState("");
   const [automationEndPrompt, setAutomationEndPrompt] = useState("");
+  const [automationVideoPrompt, setAutomationVideoPrompt] = useState("");
   const [automationSelectedVideoOptionIds, setAutomationSelectedVideoOptionIds] = useState<string[]>(
     AUTOMATION_VIDEO_OPTIONS.map((option) => option.id),
   );
@@ -2284,6 +2285,7 @@ export default function App() {
     setAutomationEnabled(false);
     setAutomationStartPrompt("");
     setAutomationEndPrompt("");
+    setAutomationVideoPrompt("");
     setAutomationSelectedVideoOptionIds(AUTOMATION_VIDEO_OPTIONS.map((option) => option.id));
     setAutomationUiError(null);
     openNewTaskModal();
@@ -2359,11 +2361,13 @@ export default function App() {
       taskId,
       startPrompt,
       endPrompt,
+      videoPrompt,
       selectedVideoOptions,
     }: {
       taskId: string;
       startPrompt: string;
       endPrompt: string;
+      videoPrompt: string;
       selectedVideoOptions: AutomationVideoRunOption[];
     }) => {
       automationCancelRef.current = false;
@@ -2566,6 +2570,7 @@ export default function App() {
             const created = await apiClient.generateSegment(taskId, segment.segmentId, {
               lumaModel: option.lumaModel,
               mode: option.mode,
+              prompt: videoPrompt || undefined,
               firstFrameVariantId: choice.startVariantId,
               lastFrameVariantId: option.inputMode === "start_end" ? choice.endVariantId ?? undefined : undefined,
             });
@@ -2637,12 +2642,13 @@ export default function App() {
     }
     const startPrompt = automationStartPrompt.trim();
     const endPrompt = automationEndPrompt.trim();
+    const videoPrompt = automationVideoPrompt.trim();
     const selectedVideoOptions = [...selectedAutomationVideoOptions];
     void handleCreateTaskWithUpload(
       automationEnabled
         ? {
             onIngestComplete: async (taskId) => {
-              await runAutomatedPipeline({ taskId, startPrompt, endPrompt, selectedVideoOptions });
+              await runAutomatedPipeline({ taskId, startPrompt, endPrompt, videoPrompt, selectedVideoOptions });
             },
           }
         : undefined,
@@ -2651,6 +2657,7 @@ export default function App() {
     automationEnabled,
     automationEndPrompt,
     automationStartPrompt,
+    automationVideoPrompt,
     handleCreateTaskWithUpload,
     runAutomatedPipeline,
     selectedAutomationVideoOptions,
@@ -3492,6 +3499,7 @@ export default function App() {
         automationEnabled={automationEnabled}
         automationStartPrompt={automationStartPrompt}
         automationEndPrompt={automationEndPrompt}
+        automationVideoPrompt={automationVideoPrompt}
         automationVideoOptions={automationVideoOptions}
         automationSelectedVideoOptionIds={automationSelectedVideoOptionIds}
         onClose={() => {
@@ -3511,6 +3519,7 @@ export default function App() {
           if (automationUiError) setAutomationUiError(null);
         }}
         onAutomationEndPromptChange={setAutomationEndPrompt}
+        onAutomationVideoPromptChange={setAutomationVideoPrompt}
         onAutomationVideoSelectionChange={(selectedIds) => {
           setAutomationSelectedVideoOptionIds(selectedIds);
           if (automationUiError) setAutomationUiError(null);

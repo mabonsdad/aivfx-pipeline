@@ -17,6 +17,7 @@ type NewTaskModalProps = {
   automationEnabled: boolean;
   automationStartPrompt: string;
   automationEndPrompt: string;
+  automationVideoPrompt: string;
   automationVideoOptions: Array<{ id: string; label: string }>;
   automationSelectedVideoOptionIds: string[];
   onClose: () => void;
@@ -25,6 +26,7 @@ type NewTaskModalProps = {
   onAutomationEnabledChange: (value: boolean) => void;
   onAutomationStartPromptChange: (value: string) => void;
   onAutomationEndPromptChange: (value: string) => void;
+  onAutomationVideoPromptChange: (value: string) => void;
   onAutomationVideoSelectionChange: (selectedIds: string[]) => void;
   onSubmit: () => void;
 };
@@ -44,6 +46,7 @@ export default function NewTaskModal({
   automationEnabled,
   automationStartPrompt,
   automationEndPrompt,
+  automationVideoPrompt,
   automationVideoOptions,
   automationSelectedVideoOptionIds,
   onClose,
@@ -52,6 +55,7 @@ export default function NewTaskModal({
   onAutomationEnabledChange,
   onAutomationStartPromptChange,
   onAutomationEndPromptChange,
+  onAutomationVideoPromptChange,
   onAutomationVideoSelectionChange,
   onSubmit,
 }: NewTaskModalProps) {
@@ -137,6 +141,16 @@ export default function NewTaskModal({
                   onChange={(event: ChangeEvent<HTMLTextAreaElement>) => onAutomationEndPromptChange(event.target.value)}
                   className="h-16 w-full rounded-md border border-ink/20 bg-white p-2 text-sm"
                   placeholder="If set, automation also edits end frame across all image models"
+                  disabled={isBusy}
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-medium text-ink/80">Video prompt</label>
+                <textarea
+                  value={automationVideoPrompt}
+                  onChange={(event: ChangeEvent<HTMLTextAreaElement>) => onAutomationVideoPromptChange(event.target.value)}
+                  className="h-16 w-full rounded-md border border-ink/20 bg-white p-2 text-sm"
+                  placeholder="Prompt used for automated video generation runs"
                   disabled={isBusy}
                 />
               </div>
