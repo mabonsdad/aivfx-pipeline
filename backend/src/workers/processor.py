@@ -1891,17 +1891,26 @@ def _build_motion_sync_graph_png(rows: list[dict[str, Any]], *, max_time: float)
         for item in rows
         if item.get("shiftedMergedEnergy") is not None
     ]
+    shifted_distinct = any(
+        item.get("shiftedMergedEnergy") is not None
+        and abs(float(item.get("shiftedMergedEnergy") or 0.0) - float(item.get("mergedEnergy") or 0.0)) > 1e-6
+        for item in rows
+    )
 
     if len(original_points) >= 2:
         draw.line(original_points, fill=(46, 113, 204), width=3, joint="curve")
+    if shifted_distinct and len(shifted_points) >= 2:
+        # Draw shifted first (thinner) so merged remains visible where paths overlap.
+        draw.line(shifted_points, fill=(37, 173, 127), width=2, joint="curve")
     if len(merged_points) >= 2:
         draw.line(merged_points, fill=(235, 139, 51), width=3, joint="curve")
-    if len(shifted_points) >= 2:
-        draw.line(shifted_points, fill=(37, 173, 127), width=3, joint="curve")
 
     draw.text((left + 14, top + 10), "Original motion", fill=(46, 113, 204))
     draw.text((left + 160, top + 10), "Merged motion", fill=(235, 139, 51))
-    draw.text((left + 300, top + 10), "Merged motion (shifted)", fill=(37, 173, 127))
+    if shifted_distinct:
+        draw.text((left + 300, top + 10), "Merged motion (shifted)", fill=(37, 173, 127))
+    else:
+        draw.text((left + 300, top + 10), "Shifted trace not shown (best lag 0)", fill=(120, 130, 140))
 
     output = BytesIO()
     chart.save(output, format="PNG")
