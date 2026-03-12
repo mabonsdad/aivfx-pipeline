@@ -23,6 +23,10 @@ type DragState = {
   sourcePerClientY: number;
 };
 
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
 function maxAspectRect(sourceW: number, sourceH: number, aspect: CropAspect): Pick<CropDraft, "x" | "y" | "width" | "height"> {
   const ratio = aspect === "16:9" ? 16 / 9 : 9 / 16;
   let width = sourceW;
@@ -218,6 +222,7 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
   const [isCropModalOpen, setIsCropModalOpen] = useState(false);
   const [cropDraft, setCropDraft] = useState<CropDraft | null>(null);
   const [modalLayoutTick, setModalLayoutTick] = useState(0);
+  const [modalScrubSec, setModalScrubSec] = useState(0);
   const modalVideoRef = useRef<HTMLVideoElement | null>(null);
   const modalVideoWrapRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<DragState | null>(null);
@@ -284,6 +289,8 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
     if (!video || !previewWindow) return;
     const onLoaded = () => {
       video.currentTime = previewWindow.startSec;
+      video.pause();
+      setModalScrubSec(previewWindow.startSec);
     };
     video.addEventListener("loadedmetadata", onLoaded);
     return () => video.removeEventListener("loadedmetadata", onLoaded);
@@ -304,13 +311,22 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
     if (!previewWindow) return;
     const video = modalVideoRef.current;
     if (!video) return;
-    if (video.currentTime < previewWindow.startSec) {
-      video.currentTime = previewWindow.startSec;
-    } else if (video.currentTime > previewWindow.endSec) {
-      video.currentTime = previewWindow.startSec;
-      void video.play().catch(() => undefined);
+    const clamped = clamp(video.currentTime, previewWindow.startSec, previewWindow.endSec);
+    if (Math.abs(video.currentTime - clamped) > 0.001) {
+      video.currentTime = clamped;
     }
+    setModalScrubSec(clamped);
   }, [previewWindow]);
+
+  useEffect(() => {
+    if (!isCropModalOpen || !previewWindow) return;
+    const video = modalVideoRef.current;
+    if (!video) return;
+    const clamped = clamp(modalScrubSec, previewWindow.startSec, previewWindow.endSec);
+    if (Math.abs(video.currentTime - clamped) > 0.001) {
+      video.currentTime = clamped;
+    }
+  }, [isCropModalOpen, modalScrubSec, previewWindow]);
 
   const setAspect = useCallback(
     (aspect: CropAspect) => {
@@ -358,9 +374,9 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
 
   const startDrag = useCallback(
     (handle: CropHandle, event: PointerEvent<HTMLDivElement>) => {
-      if (!cropDraft || sourceWidth <= 0 || sourceHeight <= 0 || !modalVideoWrapRef.current) return;
+      if (!cropDraft || sourceWidth <= 0 || sourceHeight <= 0 || !modalVideoRef.current) return;
       event.preventDefault();
-      const rect = modalVideoWrapRef.current.getBoundingClientRect();
+      const rect = modalVideoRef.current.getBoundingClientRect();
       if (rect.width <= 0 || rect.height <= 0) return;
       dragRef.current = {
         handle,
@@ -398,10 +414,14 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
         window.removeEventListener("pointermove", onMove);
         window.removeEventListener("pointerup", onUp);
         window.removeEventListener("pointercancel", onUp);
+        window.removeEventListener("mouseup", onUp);
+        window.removeEventListener("touchend", onUp);
       };
       window.addEventListener("pointermove", onMove);
       window.addEventListener("pointerup", onUp);
       window.addEventListener("pointercancel", onUp);
+      window.addEventListener("mouseup", onUp);
+      window.addEventListener("touchend", onUp);
     },
     [cropDraft, sourceHeight, sourceWidth],
   );
@@ -628,10 +648,12 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
               <video
                 ref={modalVideoRef}
                 src={timelinePlaybackUrl}
-                controls
                 preload="metadata"
-                className="block h-auto max-h-[60vh] w-auto max-w-[92vw] rounded-md border border-ink/15 bg-black"
+                className="block h-auto max-h-[60vh] w-auto max-w-[92vw] rounded-md bg-black"
                 onTimeUpdate={onModalVideoTimeUpdate}
+                onPlay={(event) => {
+                  event.currentTarget.pause();
+                }}
               />
               {cropStyle ? (
                 <div
@@ -681,6 +703,22 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
                 </div>
               ) : null}
             </div>
+            {previewWindow ? (
+              <div className="mt-3 space-y-1">
+                <label className="block text-xs font-medium text-ink/70">
+                  Preview frame position: {modalScrubSec.toFixed(2)}s
+                </label>
+                <input
+                  type="range"
+                  min={previewWindow.startSec}
+                  max={previewWindow.endSec}
+                  step={Math.max(0.01, 1 / Math.max(1, fpsValue(task)))}
+                  value={modalScrubSec}
+                  onChange={(event) => setModalScrubSec(Number(event.target.value))}
+                  className="w-full"
+                />
+              </div>
+            ) : null}
             <p className="mt-2 text-xs text-amber-700">
               Do not crop too tight as the AI needs context. Overcropping can lead to output that has unrealistic detail.
             </p>
