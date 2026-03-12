@@ -2433,9 +2433,8 @@ export default function App() {
         logs: [formatAutomationLogEntry("Automation started.")],
       });
 
-      const imageModels: Array<{ model: "nano_banana_pro" | "nano_banana" | "chatgpt"; label: string }> = [
+      const imageModels: Array<{ model: "nano_banana_pro" | "chatgpt"; label: string }> = [
         { model: "nano_banana_pro", label: "Nano Banana Pro" },
-        { model: "nano_banana", label: "Nano Banana Std" },
         { model: "chatgpt", label: "ChatGPT-image" },
       ];
 
@@ -2498,46 +2497,75 @@ export default function App() {
 
         const runFullEditsForFrame = async (frameId: string, promptValue: string, frameLabel: string) => {
           if (!promptValue.trim()) return [] as Array<{ variantId: string; model: string }>;
-          const editJobs: Array<{ model: "nano_banana_pro" | "nano_banana" | "chatgpt"; jobId: string }> = [];
+          const variants: Array<{ variantId: string; model: string }> = [];
+          const maxAttemptsPerModel = 3;
           for (let index = 0; index < imageModels.length; index += 1) {
             throwIfCancelled();
             const modelEntry = imageModels[index];
-            setAutomationRunState((previous) => ({
-              ...previous,
-              phase: `Editing ${frameLabel} frame`,
-              detail: `Queueing ${modelEntry.label} (${index + 1}/${imageModels.length})...`,
-            }));
-            const created = await apiClient.fullEdit(taskId, frameId, {
-              model: modelEntry.model,
-              prompt: promptValue,
-              sourceVariantId: "original",
-            });
-            editJobs.push({ model: modelEntry.model, jobId: created.jobId });
-            setJobIds((previous) => appendTrackedJobId(previous, created.jobId));
-            appendAutomationLog(`Queued ${frameLabel} frame edit: ${modelEntry.label} (job ${created.jobId}).`);
-          }
-          const settled = await Promise.allSettled(
-            editJobs.map((job) => waitForAutomationJob(job.jobId, `Editing ${frameLabel} frame (${job.model})`)),
-          );
-          throwIfCancelled();
-          const variants: Array<{ variantId: string; model: string }> = [];
-          for (let index = 0; index < settled.length; index += 1) {
-            const result = settled[index];
-            if (result.status !== "fulfilled") {
-              const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
-              appendAutomationLog(`Failed ${frameLabel} frame edit (${editJobs[index].model}): ${reason}`);
-              continue;
+            let modelSucceeded = false;
+            for (let attempt = 1; attempt <= maxAttemptsPerModel; attempt += 1) {
+              throwIfCancelled();
+              setAutomationRunState((previous) => ({
+                ...previous,
+                phase: `Editing ${frameLabel} frame`,
+                detail: `Queueing ${modelEntry.label} (${index + 1}/${imageModels.length}) attempt ${attempt}/${maxAttemptsPerModel}...`,
+              }));
+              try {
+                const created = await apiClient.fullEdit(taskId, frameId, {
+                  model: modelEntry.model,
+                  prompt: promptValue,
+                  sourceVariantId: "original",
+                });
+                setJobIds((previous) => appendTrackedJobId(previous, created.jobId));
+                appendAutomationLog(`Queued ${frameLabel} frame edit: ${modelEntry.label} (job ${created.jobId}).`);
+                const completed = await waitForAutomationJob(
+                  created.jobId,
+                  `Editing ${frameLabel} frame (${modelEntry.model})`,
+                );
+                const variantId = completed.resultRefs?.variantId;
+                if (typeof variantId === "string" && variantId) {
+                  variants.push({ variantId, model: modelEntry.model });
+                  appendAutomationLog(`Produced ${frameLabel} frame variant ${variantId} (${modelEntry.model}).`);
+                } else {
+                  appendAutomationLog(`Completed ${frameLabel} frame edit (${modelEntry.model}) but no variantId was returned.`);
+                }
+                modelSucceeded = true;
+                break;
+              } catch (error) {
+                const reason = error instanceof Error ? error.message : String(error);
+                const retryable = /(429|too many|rate|throttl|timeout|temporar|5\d\d)/i.test(reason);
+                if (attempt < maxAttemptsPerModel && retryable && reason !== AUTOMATION_CANCELLED) {
+                  const backoffMs = 1500 * attempt;
+                  appendAutomationLog(
+                    `${modelEntry.label} ${frameLabel} edit failed (attempt ${attempt}): ${reason}. Retrying in ${(
+                      backoffMs / 1000
+                    ).toFixed(1)}s.`,
+                  );
+                  await sleep(backoffMs);
+                  continue;
+                }
+                appendAutomationLog(`Failed ${frameLabel} frame edit (${modelEntry.model}): ${reason}`);
+                break;
+              }
             }
-            const variantId = result.value.resultRefs?.variantId;
-            if (typeof variantId === "string") {
-              variants.push({ variantId, model: editJobs[index].model });
-              appendAutomationLog(`Produced ${frameLabel} frame variant ${variantId} (${editJobs[index].model}).`);
+            if (index < imageModels.length - 1) {
+              await sleep(750);
+            }
+            if (!modelSucceeded) {
+              setAutomationRunState((previous) => ({
+                ...previous,
+                phase: `Editing ${frameLabel} frame`,
+                detail: `${modelEntry.label} did not produce a variant. Continuing...`,
+              }));
             }
           }
           return variants;
         };
 
         const trimmedEndPrompt = endPrompt.trim();
+        if (!trimmedEndPrompt) {
+          appendAutomationLog("No end-frame prompt provided, skipping end-frame model edits.");
+        }
         const startEdits = await runFullEditsForFrame(startCapture.frameId, startPrompt, "start");
         const endEdits = trimmedEndPrompt ? await runFullEditsForFrame(endCapture.frameId, trimmedEndPrompt, "end") : [];
         if (!startEdits.length) {
