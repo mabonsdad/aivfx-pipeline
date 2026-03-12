@@ -481,7 +481,7 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
         <div className="space-y-3">
           <div className="rounded-lg border border-ink/15 bg-bg p-3 text-xs text-ink/70 whitespace-pre-line">
             {
-              "Select the segment of video that you want AI to edit or add effects by selecting a start and end frame.\nPlay and pause the video or use the slider to pick the frames.\nMoving to the next step saves the segment."
+              "Select a start and end frame to define the segment of video you want the AI to edit or add effects to.\n\nUse the slider to pick the frames.\n\nMoving to the next step saves the segment."
             }
           </div>
           <div className={`rounded-lg border p-3 ${canOpenCropTool ? "border-ink/15 bg-white" : "border-ink/10 bg-bg opacity-60"}`}>
