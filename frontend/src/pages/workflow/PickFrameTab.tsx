@@ -722,6 +722,9 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
             <p className="mt-2 text-xs text-amber-700">
               Do not crop too tight as the AI needs context. Overcropping can lead to output that has unrealistic detail.
             </p>
+            <p className="mt-1 text-xs font-medium text-red-700">
+              Only use with fixed camera and 'adhere' setting in Luma AI.
+            </p>
             <div className="mt-4 flex items-center justify-end gap-2">
               <button type="button" onClick={clearCrop} className="rounded border border-ink/20 bg-white px-3 py-2 text-sm">
                 Clear
