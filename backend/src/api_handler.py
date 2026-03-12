@@ -164,6 +164,24 @@ def _normalize_segment_crop(task: dict[str, Any], raw_crop: dict[str, Any] | Non
     x = max(0, min(source_w - width, x))
     y = max(0, min(source_h - height, y))
 
+    # libx264+yuv420p requires even geometry. Snap crop box to even coords/sizes.
+    if width % 2 != 0:
+        width = max(2, width - 1)
+    if height % 2 != 0:
+        height = max(2, height - 1)
+    if x % 2 != 0:
+        x = max(0, x - 1)
+    if y % 2 != 0:
+        y = max(0, y - 1)
+    if x + width > source_w:
+        x = max(0, source_w - width)
+    if y + height > source_h:
+        y = max(0, source_h - height)
+    if x % 2 != 0:
+        x = max(0, x - 1)
+    if y % 2 != 0:
+        y = max(0, y - 1)
+
     is_full_frame = x == 0 and y == 0 and width == source_w and height == source_h
     output_w, output_h = _segment_crop_output_size(width, height, aspect)
     return {
