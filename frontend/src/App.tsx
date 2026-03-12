@@ -152,6 +152,7 @@ const VIDEO_FRAME_THUMBNAIL_CACHE = new Map<string, string | null>();
 const MAX_TRACKED_JOB_IDS = 40;
 const TASK_URL_REFRESH_MS = 15 * 60 * 1000;
 const AUTOMATION_CANCELLED = "__automation_cancelled__";
+const SEGMENT_SELECTION_STORAGE_KEY = "aivfx:lastSegmentByTask:v1";
 
 type VideoFrameStripItem = {
   frameIndex: number;
@@ -207,6 +208,34 @@ function appendTrackedJobId(previous: string[], jobId: string): string[] {
   if (!jobId) return previous;
   const deduped = [...previous.filter((item) => item !== jobId), jobId];
   return deduped.slice(-MAX_TRACKED_JOB_IDS);
+}
+
+function readSegmentSelectionMap(): Record<string, string> {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = window.localStorage.getItem(SEGMENT_SELECTION_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object") return {};
+    const output: Record<string, string> = {};
+    for (const [taskId, segmentId] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof taskId === "string" && typeof segmentId === "string" && taskId && segmentId) {
+        output[taskId] = segmentId;
+      }
+    }
+    return output;
+  } catch {
+    return {};
+  }
+}
+
+function writeSegmentSelectionMap(value: Record<string, string>): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(SEGMENT_SELECTION_STORAGE_KEY, JSON.stringify(value));
+  } catch {
+    // Ignore storage errors (private mode/quota) without breaking app flow.
+  }
 }
 
 function humanizeFilename(value: string): string {
@@ -1014,6 +1043,28 @@ export default function App() {
       return { first: null, last: null };
     });
   }, [selectedTaskId]);
+
+  useEffect(() => {
+    if (!selectedTaskId || selectedSegmentId || !task?.segments?.length) return;
+    const rememberedByTask = readSegmentSelectionMap();
+    const rememberedSegmentId = rememberedByTask[selectedTaskId];
+    if (!rememberedSegmentId) return;
+    const exists = task.segments.some((segment) => segment.segmentId === rememberedSegmentId);
+    if (!exists) {
+      delete rememberedByTask[selectedTaskId];
+      writeSegmentSelectionMap(rememberedByTask);
+      return;
+    }
+    setSelectedSegmentId(rememberedSegmentId);
+  }, [selectedSegmentId, selectedTaskId, setSelectedSegmentId, task?.segments]);
+
+  useEffect(() => {
+    if (!selectedTaskId || !selectedSegmentId) return;
+    const rememberedByTask = readSegmentSelectionMap();
+    if (rememberedByTask[selectedTaskId] === selectedSegmentId) return;
+    rememberedByTask[selectedTaskId] = selectedSegmentId;
+    writeSegmentSelectionMap(rememberedByTask);
+  }, [selectedSegmentId, selectedTaskId]);
 
   useEffect(() => {
     setEditSourceVariantIds((previous) => {
@@ -2203,6 +2254,14 @@ export default function App() {
     [queryClient],
   );
 
+  useEffect(() => {
+    if (!isPageVisible) return;
+    refreshSignedUrlsForTask(selectedTaskId);
+    if (reportTaskId && reportTaskId !== selectedTaskId) {
+      refreshSignedUrlsForTask(reportTaskId);
+    }
+  }, [isPageVisible, refreshSignedUrlsForTask, reportTaskId, selectedTaskId]);
+
   const openNewTaskWithAutomationDefaults = useCallback(() => {
     setAutomationEnabled(false);
     setAutomationStartPrompt("");
@@ -2628,6 +2687,7 @@ export default function App() {
         return;
       }
     }
+    refreshSignedUrlsForTask(selectedTaskId);
     setTab(nextTab);
   }
 
