@@ -44,7 +44,7 @@ class AssetPaths:
 
     def frame_variant(self, frame_id: str, variant_id: str) -> str:
         short_frame = re.sub(r"[^a-zA-Z0-9]+", "", frame_id)[-6:]
-        short_var = re.sub(r"[^a-zA-Z0-9]+", "", variant_id)[-6:]
+        short_var = re.sub(r"[^a-zA-Z0-9]+", "", variant_id)[-12:]
         return f"{self.task_prefix()}/frames/{frame_id}/variants/{self._filename(f'frame{short_frame}_edit{short_var}', '.png')}"
 
     def frame_patch(self, frame_id: str, variant_id: str) -> str:

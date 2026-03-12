@@ -216,6 +216,20 @@ def _asset_paths(task: dict[str, Any]) -> AssetPaths:
     return AssetPaths(user_id=task["userId"], task_id=task["taskId"], file_prefix=task.get("filePrefix", ""))
 
 
+def _allocate_variant_storage(frame: dict[str, Any], paths: AssetPaths, frame_id: str) -> tuple[str, str]:
+    existing_output_keys = {
+        str(item.get("outputKey"))
+        for item in frame.get("variants", [])
+        if isinstance(item, dict) and item.get("outputKey")
+    }
+    for _ in range(16):
+        variant_id = new_id("var")
+        output_key = paths.frame_variant(frame_id, variant_id)
+        if output_key not in existing_output_keys:
+            return variant_id, output_key
+    raise RuntimeError("Unable to allocate unique frame variant storage key after multiple attempts")
+
+
 def _download_s3(s3, bucket: str, key: str, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     s3.download_file(bucket, key, str(path))
@@ -766,9 +780,8 @@ def _handle_full_edit(
     normalized_bytes = _align_variant_to_source(source_bytes=src_bytes, variant_bytes=normalized_bytes)
     normalized_image = ImageOps.exif_transpose(Image.open(BytesIO(normalized_bytes))).convert("RGBA")
 
-    variant_id = new_id("var")
     paths = _asset_paths(task)
-    output_key = paths.frame_variant(frame_id, variant_id)
+    variant_id, output_key = _allocate_variant_storage(frame, paths, frame_id)
     asset_store.put_bytes(output_key, normalized_bytes, content_type="image/png")
 
     variant = {
@@ -933,9 +946,8 @@ def _handle_patch_edit(
         final_variant_image.save(resized, format="PNG")
         final_variant_bytes = resized.getvalue()
 
-    variant_id = new_id("var")
     paths = _asset_paths(task)
-    output_key = paths.frame_variant(frame_id, variant_id)
+    variant_id, output_key = _allocate_variant_storage(frame, paths, frame_id)
     asset_store.put_bytes(output_key, final_variant_bytes, content_type="image/png")
 
     generation_settings: dict[str, Any] = {
