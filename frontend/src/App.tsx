@@ -3341,37 +3341,46 @@ export default function App() {
 
   if (tab === "report") {
     return (
-      <Suspense fallback={<main className="min-h-screen bg-bg p-8 text-ink">Loading report...</main>}>
-        <ReportsPage
-          ctx={{
-            reportTask,
-            reportTaskId,
-            sortedJobs,
-            selectedOutputRefsByTask,
-            reportOutputRefKey,
-            reportView,
-            setReportView,
-            setActiveCustomReportId,
-            activeCustomReportId,
-            goToTaskTimeline: (taskId: string) => setTab("timeline", taskId),
-            logout,
-            formatAssetDate,
-            truncateIdentifier,
-            reportTaskQuery,
-            runQcMutation,
-            renderCustomReportBox,
-            toggleCustomReportOutput,
-            setVideoPreviewModal,
-            setImagePreviewModal,
-            formatCompactTimestamp,
-            asNumber,
-            describeSegment,
-            fpsValue,
-            reportGraphModal,
-            setReportGraphModal,
-          }}
+      <>
+        <Suspense fallback={<main className="min-h-screen bg-bg p-8 text-ink">Loading report...</main>}>
+          <ReportsPage
+            ctx={{
+              reportTask,
+              reportTaskId,
+              sortedJobs,
+              selectedOutputRefsByTask,
+              reportOutputRefKey,
+              reportView,
+              setReportView,
+              setActiveCustomReportId,
+              activeCustomReportId,
+              goToTaskTimeline: (taskId: string) => setTab("timeline", taskId),
+              logout,
+              formatAssetDate,
+              truncateIdentifier,
+              reportTaskQuery,
+              runQcMutation,
+              renderCustomReportBox,
+              toggleCustomReportOutput,
+              setVideoPreviewModal,
+              setImagePreviewModal,
+              formatCompactTimestamp,
+              asNumber,
+              describeSegment,
+              fpsValue,
+              reportGraphModal,
+              setReportGraphModal,
+            }}
+          />
+        </Suspense>
+        <PreviewModals
+          imagePreview={imagePreviewModal}
+          videoPreview={videoPreviewModal}
+          onCloseImage={() => setImagePreviewModal(null)}
+          onCloseVideo={() => setVideoPreviewModal(null)}
+          onMediaError={() => refreshSignedUrlsForTask(reportTaskId ?? selectedTaskId)}
         />
-      </Suspense>
+      </>
     );
   }
 
