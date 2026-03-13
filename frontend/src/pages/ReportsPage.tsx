@@ -142,6 +142,12 @@ function generationThumbnailUrl(generation: SegmentGeneration): string | null {
   );
 }
 
+function describeVideoInputModeLabel(group: VideoGenerationGroup): string {
+  if (group === "start_video") return "Start frame + video";
+  if (group === "start_end") return "Start frame + end frame";
+  return "Start frame only";
+}
+
 function classifyVideoGeneration(row: ReportGenerationRow): VideoGenerationGroup {
   const model = row.generation.luma.model;
   if (model === "ray-2" || model === "ray-flash-2" || model === "wan2.2-animate") {
@@ -331,21 +337,24 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
     const endFrameIds = new Set((reportTask.segments ?? []).map((segment) => segment.endFrameId));
     const videoCards: ReportOutputCard[] = reportRows.rows
       .filter((row) => Boolean(row.generatedVideoUrl))
-      .map((row) => ({
-        id: `report-card:gen:${row.generation.genId}`,
-        taskId: reportTask.taskId,
-        group: "video_generations",
-        title: row.segment ? `Segment ${row.segment.segmentId}` : row.generation.genId,
-        subtitle: row.segment
-          ? `${row.segment.startFrame}-${Math.max(row.segment.startFrame, row.segment.endFrameExclusive - 1)} · ${row.segment.durationSec.toFixed(2)}s`
-          : row.generation.segmentId,
-        createdAt: row.generation.createdAt,
-        modelLabel: row.generation.luma.model,
-        promptLabel: row.generation.luma.prompt?.trim() || "No prompt provided",
-        imageUrl: row.editedUrl ?? row.originalUrl ?? generationThumbnailUrl(row.generation),
-        videoUrl: row.generatedVideoUrl,
-        selectionRef: { assetType: "segment_generation", genId: row.generation.genId },
-      }));
+      .map((row) => {
+        const modeLabel = describeVideoInputModeLabel(classifyVideoGeneration(row));
+        return {
+          id: `report-card:gen:${row.generation.genId}`,
+          taskId: reportTask.taskId,
+          group: "video_generations",
+          title: row.segment ? `Segment ${row.segment.segmentId}` : row.generation.genId,
+          subtitle: row.segment
+            ? `${row.segment.startFrame}-${Math.max(row.segment.startFrame, row.segment.endFrameExclusive - 1)} · ${row.segment.durationSec.toFixed(2)}s`
+            : row.generation.segmentId,
+          createdAt: row.generation.createdAt,
+          modelLabel: `${row.generation.luma.model} · ${modeLabel}`,
+          promptLabel: row.generation.luma.prompt?.trim() || "No prompt provided",
+          imageUrl: row.editedUrl ?? row.originalUrl ?? generationThumbnailUrl(row.generation),
+          videoUrl: row.generatedVideoUrl,
+          selectionRef: { assetType: "segment_generation", genId: row.generation.genId },
+        };
+      });
     const startCards: ReportOutputCard[] = [];
     const endCards: ReportOutputCard[] = [];
     for (const frame of Object.values(reportTask.frames ?? {})) {
@@ -363,7 +372,9 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
               : "Unlinked frame edit",
           createdAt: variant.createdAt,
           modelLabel: `${variant.model} (${variant.type})`,
-          promptLabel: `Prompt hash ${truncateIdentifier(variant.promptHash, 16)}`,
+          promptLabel:
+            (variant.generationSettings?.prompt as string | undefined)?.trim() ||
+            `Prompt hash ${truncateIdentifier(variant.promptHash, 16)}`,
           imageUrl: variant.imageUrl,
           videoUrl: null,
           selectionRef: { assetType: "frame_variant", frameId: frame.frameId, variantId: variant.variantId },
@@ -803,6 +814,34 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                               <p className="text-xs text-ink/70">Model: {card.modelLabel}</p>
                               <p className="text-xs text-ink/70">Prompt: {card.promptLabel}</p>
                               <p className="text-[11px] text-ink/50">{formatCompactTimestamp(card.createdAt)}</p>
+                            </div>
+                            <div className="flex items-center gap-2 pt-1">
+                              <button
+                                type="button"
+                                className="rounded border border-ink/20 bg-white px-2 py-1 text-xs text-ink/80 transition hover:bg-ink/5 disabled:cursor-not-allowed disabled:opacity-40"
+                                disabled={!card.imageUrl && !card.videoUrl}
+                                onClick={() => {
+                                  if (card.videoUrl) {
+                                    setVideoPreviewModal({ url: card.videoUrl, label: card.title });
+                                    return;
+                                  }
+                                  if (card.imageUrl) {
+                                    setImagePreviewModal({ url: card.imageUrl, label: card.title });
+                                  }
+                                }}
+                              >
+                                Preview
+                              </button>
+                              {card.videoUrl || card.imageUrl ? (
+                                <a
+                                  href={card.videoUrl ?? card.imageUrl ?? "#"}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="rounded border border-ink/20 bg-white px-2 py-1 text-xs text-ink/80 transition hover:bg-ink/5"
+                                >
+                                  Download
+                                </a>
+                              ) : null}
                             </div>
                           </article>
                         ))}

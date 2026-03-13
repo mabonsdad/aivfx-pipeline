@@ -2423,15 +2423,20 @@ export default function App() {
     }) => {
       automationCancelRef.current = false;
       setAutomationUiError(null);
-      setAutomationRunState({
-        isOpen: true,
-        taskId,
-        phase: "Preparing automation",
-        detail: "Loading ingested task metadata...",
-        cancelRequested: false,
-        terminal: false,
-        logs: [formatAutomationLogEntry("Automation started.")],
-      });
+        setAutomationRunState({
+          isOpen: true,
+          taskId,
+          phase: "Preparing automation",
+          detail: "Loading ingested task metadata...",
+          cancelRequested: false,
+          terminal: false,
+          logs: [
+            formatAutomationLogEntry("Automation started."),
+            formatAutomationLogEntry(
+              `Selected video model runs: ${selectedVideoOptions.length ? selectedVideoOptions.map((option) => option.label).join(" | ") : "none"}`,
+            ),
+          ],
+        });
 
       const imageModels: Array<{ model: "nano_banana_pro" | "chatgpt"; label: string }> = [
         { model: "nano_banana_pro", label: "Nano Banana Pro" },
@@ -2685,20 +2690,47 @@ export default function App() {
           generationJobs.map((entry) => waitForAutomationJob(entry.jobId, `Generating ${entry.option.label}`, 35 * 60 * 1000)),
         );
         throwIfCancelled();
-        const succeededCount = generationResults.filter((result) => result.status === "fulfilled").length;
         const failedRuns: string[] = [...queueFailures];
+        const fulfilledGenerationIds: Array<{ option: AutomationVideoRunOption; genId: string }> = [];
         generationResults.forEach((result, index) => {
-          if (result.status === "fulfilled") return;
+          if (result.status === "fulfilled") {
+            const genId = result.value.resultRefs?.genId;
+            if (typeof genId === "string" && genId) {
+              fulfilledGenerationIds.push({ option: generationJobs[index].option, genId });
+            } else {
+              const noGenMessage = `${generationJobs[index].option.label}: job completed but no generation ID was returned`;
+              failedRuns.push(noGenMessage);
+              appendAutomationLog(`Generation verification failed for ${noGenMessage}`);
+            }
+            return;
+          }
           const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
           failedRuns.push(`${generationJobs[index].option.label}: ${reason}`);
           appendAutomationLog(`Generation failed for ${generationJobs[index].option.label}: ${reason}`);
         });
-        if (!succeededCount) {
-          throw new Error("All automated video generations failed.");
-        }
 
         await queryClient.invalidateQueries({ queryKey: ["task", taskId] });
         await queryClient.invalidateQueries({ queryKey: ["task", "report", taskId] });
+        const refreshedTask = await apiClient.getTask(taskId);
+        const confirmedSuccesses = fulfilledGenerationIds.filter((entry) => {
+          const generation = refreshedTask.segmentGenerations?.[entry.genId];
+          const valid = Boolean(generation && generation.status === "complete" && generation.outputKey);
+          if (!valid) {
+            const reason = `${entry.option.label}: job completed but output asset is missing`;
+            failedRuns.push(reason);
+            appendAutomationLog(`Generation verification failed for ${reason}`);
+          }
+          return valid;
+        });
+        const succeededCount = confirmedSuccesses.length;
+        if (!succeededCount) {
+          throw new Error(
+            failedRuns.length
+              ? `All automated video generations failed. ${failedRuns.join(" | ")}`
+              : "All automated video generations failed.",
+          );
+        }
+
         setSelectedTaskId(taskId);
         setSelectedSegmentId(segment.segmentId);
         goToReport(taskId, "outputs", null, true);
@@ -2709,7 +2741,7 @@ export default function App() {
           phase: "Completed",
           detail:
             failedRuns.length > 0
-              ? `Automation complete. ${succeededCount} of ${generationJobs.length + queueFailures.length} models succeeded.`
+              ? `Automation complete. ${succeededCount} of ${selectedVideoOptions.length} selected model runs produced saved outputs.`
               : `Automation complete. ${succeededCount} of ${generationJobs.length} video generations succeeded.`,
           cancelRequested: false,
           terminal: true,
