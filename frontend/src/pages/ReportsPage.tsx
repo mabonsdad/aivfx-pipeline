@@ -50,6 +50,20 @@ type ReportOutputCard = {
 type QcFrameResult = {
   metrics?: Record<string, unknown>;
   artifacts?: Record<string, unknown>;
+  advanced?: {
+    status?: "pass" | "warn" | "fail" | string;
+    metrics?: Record<string, unknown>;
+    topRegions?: Array<{
+      x?: number;
+      y?: number;
+      width?: number;
+      height?: number;
+      score?: number;
+      coveragePct?: number;
+    }>;
+    tooltips?: Record<string, string>;
+    artifacts?: Record<string, unknown>;
+  };
 };
 
 type QcFrameRow = {
@@ -88,7 +102,7 @@ type ReportsPageCtx = {
   runQcMutation: UseMutationResult<
     { jobId: string },
     Error,
-    { taskId: string; generationIds?: string[] },
+    { taskId: string; generationIds?: string[]; mode?: "standard" | "advanced_frame" },
     unknown
   >;
   renderCustomReportBox: (taskId: string | null, reports: CustomReportRecord[] | undefined) => React.ReactNode;
@@ -192,6 +206,22 @@ function hasFrameQcArtifacts(frameQc: QcFrameResult | null): boolean {
       artifacts.binaryChangeKey ||
       artifacts.boundaryOverlayUrl ||
       artifacts.boundaryOverlayKey,
+  );
+}
+
+function hasAdvancedFrameQcArtifacts(frameQc: QcFrameResult | null): boolean {
+  const advanced = frameQc?.advanced;
+  const artifacts = (advanced?.artifacts as Record<string, unknown> | undefined) ?? undefined;
+  if (!artifacts) return false;
+  return Boolean(
+    artifacts.compositeMapUrl ||
+      artifacts.compositeMapKey ||
+      artifacts.compositeOverlayUrl ||
+      artifacts.compositeOverlayKey ||
+      artifacts.lpipsMapUrl ||
+      artifacts.lpipsMapKey ||
+      artifacts.boundaryMapUrl ||
+      artifacts.boundaryMapKey,
   );
 }
 
@@ -534,6 +564,16 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
   }, [qcFrameRows, reportTask, reportView, scopedVideoRows]);
   const isQcView = reportView === "qc_frame" || reportView === "qc_video";
   const hasMissingQc = scopedQcGenerationIdsNeedingRun.length > 0;
+  const scopedFrameGenerationIds = useMemo(() => {
+    if (!reportTask || reportView !== "qc_frame") return [] as string[];
+    const ids = new Set<string>();
+    for (const row of qcFrameRows) {
+      for (const linked of row.linkedGenerations) {
+        ids.add(linked.generation.genId);
+      }
+    }
+    return [...ids].sort();
+  }, [qcFrameRows, reportTask, reportView]);
 
   async function runMissingQcNow() {
     if (!reportTask || !hasMissingQc) return;
@@ -541,6 +581,14 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
     for (let index = 0; index < generationIds.length; index += 20) {
       const batch = generationIds.slice(index, index + 20);
       await runQcMutation.mutateAsync({ taskId: reportTask.taskId, generationIds: batch });
+    }
+  }
+
+  async function runAdvancedFrameQcNow() {
+    if (!reportTask || reportView !== "qc_frame" || !scopedFrameGenerationIds.length) return;
+    for (let index = 0; index < scopedFrameGenerationIds.length; index += 20) {
+      const batch = scopedFrameGenerationIds.slice(index, index + 20);
+      await runQcMutation.mutateAsync({ taskId: reportTask.taskId, generationIds: batch, mode: "advanced_frame" });
     }
   }
 
@@ -689,6 +737,18 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
               }}
             >
               {runQcMutation.isPending ? "Running QC..." : hasMissingQc ? "Run Missing QC Now" : "QC Up To Date"}
+            </button>
+          ) : null}
+          {reportView === "qc_frame" ? (
+            <button
+              type="button"
+              className="rounded border border-accent/30 bg-accent/10 px-3 py-2 text-sm text-ink disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={!reportTask || !scopedFrameGenerationIds.length || runQcMutation.isPending}
+              onClick={() => {
+                void runAdvancedFrameQcNow();
+              }}
+            >
+              {runQcMutation.isPending ? "Running Advanced QC..." : "Advanced QC Report"}
             </button>
           ) : null}
         </div>
@@ -877,6 +937,105 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                         `Prompt hash ${truncateIdentifier(row.variant.promptHash, 16)}`;
                       const qcStatus = row.qcGeneration?.generation.qc?.status ?? "not_run";
                       const hasFrameQc = qcStatus === "complete" && hasFrameQcArtifacts(frameQc);
+                      const advanced = frameQc?.advanced;
+                      const advancedMetrics = (advanced?.metrics as Record<string, unknown> | undefined) ?? undefined;
+                      const advancedArtifacts = (advanced?.artifacts as Record<string, unknown> | undefined) ?? undefined;
+                      const advancedTopRegions = Array.isArray(advanced?.topRegions) ? advanced.topRegions : [];
+                      const hasAdvancedQc = qcStatus === "complete" && hasAdvancedFrameQcArtifacts(frameQc);
+                      const advancedStatusRaw = (advanced?.status ?? "n/a").toString().toLowerCase();
+                      const advancedStatusClass =
+                        advancedStatusRaw === "fail"
+                          ? "text-red-700"
+                          : advancedStatusRaw === "warn"
+                            ? "text-amber-700"
+                            : advancedStatusRaw === "pass"
+                              ? "text-emerald-700"
+                              : "text-ink/70";
+                      const advancedSummaryCards: Array<{
+                        key: string;
+                        title: string;
+                        mainLabel: string;
+                        mainValue: number | null;
+                        maskLabel: string;
+                        maskValue: number | null;
+                        ringLabel: string;
+                        ringValue: number | null;
+                        imageUrl?: string;
+                        tooltip?: string;
+                      }> = [
+                        {
+                          key: "composite",
+                          title: "Composite anomaly map",
+                          mainLabel: "Global",
+                          mainValue: asNumber(advancedMetrics?.compositeImpactGlobal),
+                          maskLabel: "Mask",
+                          maskValue: asNumber(advancedMetrics?.compositeImpactMask),
+                          ringLabel: "Outer ring",
+                          ringValue: asNumber(advancedMetrics?.compositeImpactOuterRing),
+                          imageUrl: (advancedArtifacts?.compositeMapUrl as string | undefined) ?? undefined,
+                          tooltip: advanced?.tooltips?.composite,
+                        },
+                        {
+                          key: "lpips",
+                          title: "LPIPS patch map",
+                          mainLabel: "Global",
+                          mainValue: asNumber(advancedMetrics?.lpips_global_mean),
+                          maskLabel: "Mask",
+                          maskValue: asNumber(advancedMetrics?.lpips_mask_mean),
+                          ringLabel: "Outer ring",
+                          ringValue: asNumber(advancedMetrics?.lpips_outer_ring_mean),
+                          imageUrl: (advancedArtifacts?.lpipsMapUrl as string | undefined) ?? undefined,
+                          tooltip: advanced?.tooltips?.lpips,
+                        },
+                        {
+                          key: "boundary",
+                          title: "Boundary spill analysis",
+                          mainLabel: "Spill",
+                          mainValue: asNumber(advancedMetrics?.boundary_spill_score),
+                          maskLabel: "Inside",
+                          maskValue: asNumber(advancedMetrics?.inside_boundary_mean),
+                          ringLabel: "Outside",
+                          ringValue: asNumber(advancedMetrics?.outside_boundary_mean),
+                          imageUrl: (advancedArtifacts?.boundaryMapUrl as string | undefined) ?? undefined,
+                          tooltip: advanced?.tooltips?.boundary,
+                        },
+                        {
+                          key: "sharpness",
+                          title: "Focus / sharpness consistency",
+                          mainLabel: "Mask",
+                          mainValue: asNumber(advancedMetrics?.sharpness_mask_mean),
+                          maskLabel: "Outer ring",
+                          maskValue: asNumber(advancedMetrics?.sharpness_outer_ring_mean),
+                          ringLabel: "n/a",
+                          ringValue: null,
+                          imageUrl: (advancedArtifacts?.sharpnessMapUrl as string | undefined) ?? undefined,
+                          tooltip: advanced?.tooltips?.sharpness,
+                        },
+                        {
+                          key: "naturalness",
+                          title: "Naturalness map",
+                          mainLabel: "Mask",
+                          mainValue: asNumber(advancedMetrics?.naturalness_mask_mean),
+                          maskLabel: "Outer ring",
+                          maskValue: asNumber(advancedMetrics?.naturalness_outer_ring_mean),
+                          ringLabel: "n/a",
+                          ringValue: null,
+                          imageUrl: (advancedArtifacts?.naturalnessMapUrl as string | undefined) ?? undefined,
+                          tooltip: advanced?.tooltips?.naturalness,
+                        },
+                        {
+                          key: "texture",
+                          title: "Noise / microtexture map",
+                          mainLabel: "Mask",
+                          mainValue: asNumber(advancedMetrics?.texture_mask_mean),
+                          maskLabel: "Outer ring",
+                          maskValue: asNumber(advancedMetrics?.texture_outer_ring_mean),
+                          ringLabel: "n/a",
+                          ringValue: null,
+                          imageUrl: (advancedArtifacts?.textureMapUrl as string | undefined) ?? undefined,
+                          tooltip: advanced?.tooltips?.texture,
+                        },
+                      ];
                       return (
                         <article key={row.id} className="space-y-2 rounded-lg border border-ink/10 bg-white p-3">
                           <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1003,6 +1162,83 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                                 <p className="text-xs text-ink/50">No boundary or binary map</p>
                               )}
                             </div>
+                          </div>
+                          <div className="space-y-2 rounded-lg border border-ink/10 bg-bg/20 p-3">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <p className="text-sm font-semibold text-ink/90">Advanced QC analysis</p>
+                              <p className={`text-xs font-semibold uppercase tracking-wide ${advancedStatusClass}`}>
+                                {advancedStatusRaw}
+                              </p>
+                            </div>
+                            {hasAdvancedQc ? (
+                              <>
+                                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                                  {advancedSummaryCards.map((card) => (
+                                    <div key={card.key} className="space-y-2 rounded border border-ink/10 bg-white p-2">
+                                      <div className="space-y-1">
+                                        <p className="text-xs font-semibold text-ink/90">{card.title}</p>
+                                        {card.tooltip ? <p className="text-[11px] text-ink/60">{card.tooltip}</p> : null}
+                                        <p className="text-[11px] text-ink/70">
+                                          {card.mainLabel}: {card.mainValue !== null ? card.mainValue.toFixed(4) : "n/a"}
+                                        </p>
+                                        <p className="text-[11px] text-ink/70">
+                                          {card.maskLabel}: {card.maskValue !== null ? card.maskValue.toFixed(4) : "n/a"}
+                                        </p>
+                                        <p className="text-[11px] text-ink/70">
+                                          {card.ringLabel}: {card.ringValue !== null ? card.ringValue.toFixed(4) : "n/a"}
+                                        </p>
+                                      </div>
+                                      {card.imageUrl ? (
+                                        <button
+                                          type="button"
+                                          className="block w-full"
+                                          onClick={() => setImagePreviewModal({ url: card.imageUrl as string, label: `Advanced QC ${card.title}` })}
+                                        >
+                                          <img
+                                            src={card.imageUrl}
+                                            alt={`Advanced QC ${card.title}`}
+                                            className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain"
+                                          />
+                                        </button>
+                                      ) : (
+                                        <p className="text-xs text-ink/50">No map generated</p>
+                                      )}
+                                    </div>
+                                  ))}
+                                </div>
+                                <div className="grid gap-3 md:grid-cols-2">
+                                  <div className="rounded border border-ink/10 bg-white p-2 text-xs text-ink/70">
+                                    <p className="font-semibold text-ink/90">Top anomalous regions</p>
+                                    {advancedTopRegions.length ? (
+                                      <ul className="mt-1 space-y-1">
+                                        {advancedTopRegions.slice(0, 8).map((region, idx) => (
+                                          <li key={`${row.id}:advanced:${idx}`}>
+                                            #{idx + 1} x:{Math.round(asNumber(region.x) ?? 0)} y:{Math.round(asNumber(region.y) ?? 0)} w:
+                                            {Math.round(asNumber(region.width) ?? 0)} h:{Math.round(asNumber(region.height) ?? 0)} score:
+                                            {(asNumber(region.score) ?? 0).toFixed(3)} cover:{(asNumber(region.coveragePct) ?? 0).toFixed(3)}%
+                                          </li>
+                                        ))}
+                                      </ul>
+                                    ) : (
+                                      <p className="mt-1 text-xs text-ink/50">No anomalous regions above threshold.</p>
+                                    )}
+                                  </div>
+                                  <div className="rounded border border-ink/10 bg-white p-2 text-xs text-ink/70">
+                                    <p className="font-semibold text-ink/90">Advanced spill summary</p>
+                                    <p>Outer ring anomaly ratio: {asNumber(advancedMetrics?.outer_ring_anomaly_ratio)?.toFixed(4) ?? "n/a"}</p>
+                                    <p>Boundary spill score: {asNumber(advancedMetrics?.boundary_spill_score)?.toFixed(4) ?? "n/a"}</p>
+                                    <p>Composite (mask): {asNumber(advancedMetrics?.compositeImpactMask)?.toFixed(4) ?? "n/a"}</p>
+                                    <p>Composite (outer ring): {asNumber(advancedMetrics?.compositeImpactOuterRing)?.toFixed(4) ?? "n/a"}</p>
+                                  </div>
+                                </div>
+                              </>
+                            ) : (
+                              <p className="text-xs text-ink/60">
+                                {qcStatus === "running"
+                                  ? "QC is running..."
+                                  : "No advanced QC evidence for this edit frame yet. Click “Advanced QC Report” to generate it."}
+                              </p>
+                            )}
                           </div>
                         </article>
                       );

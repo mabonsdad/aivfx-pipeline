@@ -230,6 +230,40 @@ export type SegmentGeneration = {
         boundaryOverlayUrl?: string;
         [key: string]: unknown;
       };
+      advanced?: {
+        status?: "pass" | "warn" | "fail" | string;
+        metrics?: Record<string, number | string | null>;
+        topRegions?: Array<{
+          x: number;
+          y: number;
+          width: number;
+          height: number;
+          score: number;
+          coveragePct: number;
+        }>;
+        tooltips?: Record<string, string>;
+        artifacts?: {
+          compositeMapKey?: string;
+          compositeMapUrl?: string;
+          compositeOverlayKey?: string;
+          compositeOverlayUrl?: string;
+          lpipsMapKey?: string;
+          lpipsMapUrl?: string;
+          lpipsOverlayKey?: string;
+          lpipsOverlayUrl?: string;
+          sharpnessMapKey?: string;
+          sharpnessMapUrl?: string;
+          naturalnessMapKey?: string;
+          naturalnessMapUrl?: string;
+          textureMapKey?: string;
+          textureMapUrl?: string;
+          boundaryMapKey?: string;
+          boundaryMapUrl?: string;
+          maskUsedKey?: string;
+          maskUsedUrl?: string;
+          [key: string]: unknown;
+        };
+      };
     };
     frameByVariant?: Record<
       string,
@@ -246,8 +280,54 @@ export type SegmentGeneration = {
           boundaryOverlayUrl?: string;
           [key: string]: unknown;
         };
+        advanced?: {
+          status?: "pass" | "warn" | "fail" | string;
+          metrics?: Record<string, number | string | null>;
+          topRegions?: Array<{
+            x: number;
+            y: number;
+            width: number;
+            height: number;
+            score: number;
+            coveragePct: number;
+          }>;
+          tooltips?: Record<string, string>;
+          artifacts?: {
+            compositeMapKey?: string;
+            compositeMapUrl?: string;
+            compositeOverlayKey?: string;
+            compositeOverlayUrl?: string;
+            lpipsMapKey?: string;
+            lpipsMapUrl?: string;
+            lpipsOverlayKey?: string;
+            lpipsOverlayUrl?: string;
+            sharpnessMapKey?: string;
+            sharpnessMapUrl?: string;
+            naturalnessMapKey?: string;
+            naturalnessMapUrl?: string;
+            textureMapKey?: string;
+            textureMapUrl?: string;
+            boundaryMapKey?: string;
+            boundaryMapUrl?: string;
+            maskUsedKey?: string;
+            maskUsedUrl?: string;
+            [key: string]: unknown;
+          };
+        };
       }
     >;
+    advancedFrame?: {
+      status?: "running" | "complete" | "failed" | string;
+      updatedAt?: string;
+      analyzedAt?: string;
+      variantCount?: number;
+      config?: {
+        patchSize?: number;
+        stride?: number;
+        outerRingPx?: number;
+        [key: string]: unknown;
+      };
+    };
     video?: {
       aggregates?: Record<string, number | string | boolean | null | Record<string, number | null>>;
       selectedFrames?: Array<{

@@ -135,6 +135,7 @@ class MergeRequest(BaseModel):
 
 class QcRunRequest(BaseModel):
     generationIds: list[str] | None = Field(default=None, max_length=20)
+    mode: Literal["standard", "advanced_frame"] = "standard"
 
 
 class MotionSyncQcRunRequest(BaseModel):

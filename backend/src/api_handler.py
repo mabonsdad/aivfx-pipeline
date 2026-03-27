@@ -1742,7 +1742,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 user_id=user_id,
                 task_id=task_id,
                 job_type="qc_analysis",
-                payload={"generationIds": generation_ids},
+                payload={"generationIds": generation_ids, "mode": req.mode},
             )
             return response(202, {"jobId": job_id, "generationCount": len(generation_ids)}, origin=origin)
 

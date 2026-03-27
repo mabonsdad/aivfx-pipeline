@@ -10,6 +10,7 @@ import time
 from fractions import Fraction
 from io import BytesIO
 from pathlib import Path
+from statistics import median
 from typing import Any
 
 import boto3
@@ -64,6 +65,10 @@ QC_ANALYSIS_MAX_FRAMES = 90
 QC_DIFF_THRESHOLD = 32
 QC_OUTSIDE_LEAK_BUDGET_PCT = 0.50
 QC_BOUNDARY_RING_PX = 8
+ADV_QC_PATCH_SIZE = 64
+ADV_QC_STRIDE = 24
+ADV_QC_OUTER_RING_PX = 24
+ADV_QC_TOP_REGION_COUNT = 8
 MOTION_SYNC_SAMPLE_FPS = 6
 MOTION_SYNC_MAX_LAG_SEC = 3.0
 LUMA_ALLOWED_MODES = {
@@ -1709,6 +1714,344 @@ def _create_mask_boundary_overlay(
     return output.getvalue()
 
 
+def _median_abs_deviation(values: list[float], center: float | None = None) -> float:
+    if not values:
+        return 0.0
+    pivot = center if center is not None else float(median(values))
+    return float(median([abs(value - pivot) for value in values]))
+
+
+def _robust_score(value: float, center: float, spread: float) -> float:
+    safe_spread = max(1e-6, spread)
+    return abs(value - center) / safe_spread
+
+
+def _normalize_scores(values: list[float]) -> list[float]:
+    if not values:
+        return []
+    low = min(values)
+    high = max(values)
+    span = high - low
+    if span <= 1e-9:
+        return [0.0 for _ in values]
+    return [max(0.0, min(1.0, (value - low) / span)) for value in values]
+
+
+def _build_patch_boxes(width: int, height: int, patch_size: int, stride: int) -> tuple[list[tuple[int, int, int, int]], int, int]:
+    patch = max(8, min(patch_size, width, height))
+    step = max(4, stride)
+    xs = list(range(0, max(1, width - patch + 1), step))
+    ys = list(range(0, max(1, height - patch + 1), step))
+    if not xs:
+        xs = [0]
+    if not ys:
+        ys = [0]
+    if xs[-1] != width - patch:
+        xs.append(max(0, width - patch))
+    if ys[-1] != height - patch:
+        ys.append(max(0, height - patch))
+    boxes = [(x, y, min(width, x + patch), min(height, y + patch)) for y in ys for x in xs]
+    return boxes, len(xs), len(ys)
+
+
+def _scores_to_map(scores: list[float], *, cols: int, rows: int, target_size: tuple[int, int]) -> tuple[Image.Image, list[float]]:
+    normalized = _normalize_scores(scores)
+    map_image = Image.new("L", (max(1, cols), max(1, rows)))
+    map_image.putdata([int(round(value * 255.0)) for value in normalized])
+    return map_image.resize(target_size, Image.Resampling.BICUBIC), normalized
+
+
+def _score_map_mean(map_image: Image.Image, region_mask: Image.Image | None) -> float:
+    score_l = map_image.convert("L")
+    if region_mask is None:
+        return float(ImageStat.Stat(score_l).mean[0]) / 255.0
+    mask = region_mask.convert("L").point(lambda value: 255 if value >= 128 else 0)
+    pixels = max(1, _count_binary_pixels(mask))
+    masked_sum = float(ImageStat.Stat(ImageChops.multiply(score_l, mask)).sum[0])
+    return masked_sum / (pixels * 255.0)
+
+
+def _patch_entropy(gray_patch: Image.Image) -> float:
+    hist = gray_patch.histogram()
+    total = float(sum(hist))
+    if total <= 0:
+        return 0.0
+    entropy = 0.0
+    for count in hist:
+        if count <= 0:
+            continue
+        p = count / total
+        entropy -= p * math.log2(p)
+    return entropy
+
+
+def _heatmap_png(map_image: Image.Image) -> bytes:
+    heatmap = ImageOps.colorize(map_image.convert("L"), black="#1e4fba", mid="#ffd84d", white="#e22626")
+    output = BytesIO()
+    heatmap.save(output, format="PNG")
+    return output.getvalue()
+
+
+def _heatmap_overlay_png(base_image: Image.Image, map_image: Image.Image) -> bytes:
+    base = base_image.convert("RGBA")
+    heatmap = ImageOps.colorize(map_image.convert("L"), black="#1e4fba", mid="#ffd84d", white="#e22626").convert("RGBA")
+    alpha = map_image.convert("L").point(lambda value: min(190, int(value * 1.5)))
+    heatmap.putalpha(alpha)
+    base.alpha_composite(heatmap)
+    output = BytesIO()
+    base.save(output, format="PNG")
+    return output.getvalue()
+
+
+def _build_boundary_regions(mask_bin: Image.Image) -> tuple[Image.Image, Image.Image, Image.Image]:
+    clean_mask = mask_bin.convert("L").point(lambda value: 255 if value >= 128 else 0)
+    inner_kernel = max(3, (QC_BOUNDARY_RING_PX * 2) + 1)
+    outer_kernel = max(3, (ADV_QC_OUTER_RING_PX * 2) + 1)
+    inner_core = clean_mask.filter(ImageFilter.MinFilter(inner_kernel)).point(lambda value: 255 if value >= 128 else 0)
+    inside_band = ImageChops.subtract(clean_mask, inner_core).point(lambda value: 255 if value >= 128 else 0)
+    outside_ring = ImageChops.subtract(clean_mask.filter(ImageFilter.MaxFilter(outer_kernel)), clean_mask).point(
+        lambda value: 255 if value >= 128 else 0
+    )
+    return inner_core, inside_band, outside_ring
+
+
+def _derive_provisional_mask(original_image: Image.Image, edited_image: Image.Image) -> Image.Image:
+    diff_gray = ImageChops.difference(original_image.convert("RGB"), edited_image.convert("RGB")).convert("L")
+    return _threshold_change_mask(diff_gray, QC_DIFF_THRESHOLD)
+
+
+def _box_iou(box_a: tuple[int, int, int, int], box_b: tuple[int, int, int, int]) -> float:
+    ax1, ay1, ax2, ay2 = box_a
+    bx1, by1, bx2, by2 = box_b
+    inter_x1, inter_y1 = max(ax1, bx1), max(ay1, by1)
+    inter_x2, inter_y2 = min(ax2, bx2), min(ay2, by2)
+    if inter_x2 <= inter_x1 or inter_y2 <= inter_y1:
+        return 0.0
+    inter_area = float((inter_x2 - inter_x1) * (inter_y2 - inter_y1))
+    area_a = float(max(1, (ax2 - ax1) * (ay2 - ay1)))
+    area_b = float(max(1, (bx2 - bx1) * (by2 - by1)))
+    return inter_area / max(1e-6, area_a + area_b - inter_area)
+
+
+def _select_top_regions(
+    boxes: list[tuple[int, int, int, int]],
+    normalized_scores: list[float],
+    *,
+    image_width: int,
+    image_height: int,
+    limit: int,
+) -> list[dict[str, Any]]:
+    ranked = sorted(range(len(normalized_scores)), key=lambda idx: normalized_scores[idx], reverse=True)
+    output: list[dict[str, Any]] = []
+    for idx in ranked:
+        score = float(normalized_scores[idx])
+        if score < 0.55:
+            break
+        box = boxes[idx]
+        if any(_box_iou(box, (item["x"], item["y"], item["x"] + item["width"], item["y"] + item["height"])) > 0.45 for item in output):
+            continue
+        x1, y1, x2, y2 = box
+        width = max(1, x2 - x1)
+        height = max(1, y2 - y1)
+        output.append(
+            {
+                "x": int(x1),
+                "y": int(y1),
+                "width": int(width),
+                "height": int(height),
+                "score": round(score, 4),
+                "coveragePct": round((width * height * 100.0) / max(1, image_width * image_height), 3),
+            }
+        )
+        if len(output) >= limit:
+            break
+    return output
+
+
+def _qc_pass_warn_fail(mask_mean: float, outer_ring_mean: float, boundary_score: float) -> str:
+    if outer_ring_mean > max(0.30, mask_mean * 0.7) or boundary_score > 0.60:
+        return "fail"
+    if outer_ring_mean > max(0.18, mask_mean * 0.45) or boundary_score > 0.35:
+        return "warn"
+    return "pass"
+
+
+def _run_advanced_frame_qc(
+    *,
+    original_image: Image.Image,
+    edited_image: Image.Image,
+    mask_bin: Image.Image | None,
+) -> dict[str, Any]:
+    source_rgb = original_image.convert("RGB")
+    edited_rgb = edited_image.convert("RGB")
+    if source_rgb.size != edited_rgb.size:
+        edited_rgb = ImageOps.contain(edited_rgb, source_rgb.size, Image.Resampling.LANCZOS)
+        fitted = Image.new("RGB", source_rgb.size, (0, 0, 0))
+        fitted.paste(edited_rgb, ((source_rgb.width - edited_rgb.width) // 2, (source_rgb.height - edited_rgb.height) // 2))
+        edited_rgb = fitted
+
+    mask = mask_bin.convert("L").point(lambda value: 255 if value >= 128 else 0) if mask_bin is not None else _derive_provisional_mask(source_rgb, edited_rgb)
+    inner_core_mask, inside_band_mask, outer_ring_mask = _build_boundary_regions(mask)
+
+    source_gray = source_rgb.convert("L")
+    edited_gray = edited_rgb.convert("L")
+    source_edges = source_gray.filter(ImageFilter.FIND_EDGES)
+    edited_edges = edited_gray.filter(ImageFilter.FIND_EDGES)
+    source_residual = ImageChops.difference(source_gray, source_gray.filter(ImageFilter.GaussianBlur(radius=1.2)))
+    edited_residual = ImageChops.difference(edited_gray, edited_gray.filter(ImageFilter.GaussianBlur(radius=1.2)))
+
+    boxes, cols, rows = _build_patch_boxes(source_rgb.width, source_rgb.height, ADV_QC_PATCH_SIZE, ADV_QC_STRIDE)
+    lpips_scores: list[float] = []
+    sharp_raw_scores: list[float] = []
+    entropy_values: list[float] = []
+    noise_values: list[float] = []
+    texture_raw_scores: list[float] = []
+    sharp_edit_values: list[float] = []
+
+    for box in boxes:
+        source_patch_rgb = source_rgb.crop(box)
+        edited_patch_rgb = edited_rgb.crop(box)
+        source_patch_gray = source_gray.crop(box)
+        edited_patch_gray = edited_gray.crop(box)
+        diff_patch = ImageChops.difference(source_patch_rgb, edited_patch_rgb)
+        diff_mean = sum(ImageStat.Stat(diff_patch).mean) / (3.0 * 255.0)
+
+        edge_diff_patch = ImageChops.difference(source_edges.crop(box), edited_edges.crop(box))
+        edge_diff_mean = float(ImageStat.Stat(edge_diff_patch).mean[0]) / 255.0
+        lpips_scores.append(min(1.0, (0.65 * diff_mean) + (0.35 * edge_diff_mean)))
+
+        sharp_source = float(ImageStat.Stat(source_edges.crop(box)).mean[0]) / 255.0
+        sharp_edit = float(ImageStat.Stat(edited_edges.crop(box)).mean[0]) / 255.0
+        sharp_edit_values.append(sharp_edit)
+        sharp_raw_scores.append(abs(sharp_edit - sharp_source))
+
+        entropy_values.append(_patch_entropy(edited_patch_gray))
+        noise_patch = ImageChops.difference(edited_patch_gray, edited_patch_gray.filter(ImageFilter.MedianFilter(size=3)))
+        noise_values.append(float(ImageStat.Stat(noise_patch).mean[0]) / 255.0)
+
+        source_texture = float(ImageStat.Stat(source_residual.crop(box)).mean[0]) / 255.0
+        edited_texture = float(ImageStat.Stat(edited_residual.crop(box)).mean[0]) / 255.0
+        texture_raw_scores.append(abs(edited_texture - source_texture))
+
+    sharp_center = float(median(sharp_edit_values)) if sharp_edit_values else 0.0
+    sharp_spread = _median_abs_deviation(sharp_edit_values, sharp_center)
+    sharp_scores = [
+        min(1.0, score + (_robust_score(sharp_edit_values[idx], sharp_center, sharp_spread) / 3.0))
+        for idx, score in enumerate(sharp_raw_scores)
+    ]
+
+    entropy_center = float(median(entropy_values)) if entropy_values else 0.0
+    entropy_spread = _median_abs_deviation(entropy_values, entropy_center)
+    noise_center = float(median(noise_values)) if noise_values else 0.0
+    noise_spread = _median_abs_deviation(noise_values, noise_center)
+    naturalness_scores = [
+        min(
+            1.0,
+            (_robust_score(entropy_values[idx], entropy_center, entropy_spread) * 0.6)
+            + (_robust_score(noise_values[idx], noise_center, noise_spread) * 0.4),
+        )
+        for idx in range(len(entropy_values))
+    ]
+
+    texture_center = float(median(texture_raw_scores)) if texture_raw_scores else 0.0
+    texture_spread = _median_abs_deviation(texture_raw_scores, texture_center)
+    texture_scores = [
+        min(1.0, score + (_robust_score(score, texture_center, texture_spread) / 4.0)) for score in texture_raw_scores
+    ]
+
+    lpips_map, lpips_norm = _scores_to_map(lpips_scores, cols=cols, rows=rows, target_size=source_rgb.size)
+    sharp_map, sharp_norm = _scores_to_map(sharp_scores, cols=cols, rows=rows, target_size=source_rgb.size)
+    natural_map, natural_norm = _scores_to_map(naturalness_scores, cols=cols, rows=rows, target_size=source_rgb.size)
+    texture_map, texture_norm = _scores_to_map(texture_scores, cols=cols, rows=rows, target_size=source_rgb.size)
+
+    composite_scores = [
+        (lpips_norm[idx] * 0.35)
+        + (sharp_norm[idx] * 0.25)
+        + (natural_norm[idx] * 0.20)
+        + (texture_norm[idx] * 0.20)
+        for idx in range(len(lpips_norm))
+    ]
+    composite_map, composite_norm = _scores_to_map(composite_scores, cols=cols, rows=rows, target_size=source_rgb.size)
+    composite_binary = composite_map.point(lambda value: 255 if value >= 153 else 0)
+    boundary_map_bytes = _create_mask_boundary_overlay(
+        original_image=edited_rgb,
+        binary_change=composite_binary,
+        mask_bin=mask,
+    )
+
+    lpips_global_mean = _score_map_mean(lpips_map, None)
+    lpips_mask_mean = _score_map_mean(lpips_map, mask)
+    lpips_outer_ring_mean = _score_map_mean(lpips_map, outer_ring_mask)
+    sharp_mask_mean = _score_map_mean(sharp_map, mask)
+    sharp_outer_ring_mean = _score_map_mean(sharp_map, outer_ring_mask)
+    natural_mask_mean = _score_map_mean(natural_map, mask)
+    natural_outer_ring_mean = _score_map_mean(natural_map, outer_ring_mask)
+    texture_mask_mean = _score_map_mean(texture_map, mask)
+    texture_outer_ring_mean = _score_map_mean(texture_map, outer_ring_mask)
+    composite_mask_mean = _score_map_mean(composite_map, mask)
+    composite_outer_ring_mean = _score_map_mean(composite_map, outer_ring_mask)
+
+    outside_anomaly_pixels = _count_binary_pixels(ImageChops.multiply(composite_binary, outer_ring_mask))
+    outside_ring_pixels = max(1, _count_binary_pixels(outer_ring_mask))
+    outer_ring_anomaly_ratio = outside_anomaly_pixels / outside_ring_pixels
+    boundary_spill_score = lpips_outer_ring_mean / max(1e-6, _score_map_mean(lpips_map, inside_band_mask))
+
+    top_regions = _select_top_regions(
+        boxes,
+        composite_norm,
+        image_width=source_rgb.width,
+        image_height=source_rgb.height,
+        limit=ADV_QC_TOP_REGION_COUNT,
+    )
+    advanced_status = _qc_pass_warn_fail(composite_mask_mean, composite_outer_ring_mean, boundary_spill_score)
+
+    return {
+        "status": advanced_status,
+        "metrics": {
+            "compositeImpactGlobal": round(_score_map_mean(composite_map, None), 6),
+            "compositeImpactMask": round(composite_mask_mean, 6),
+            "compositeImpactOuterRing": round(composite_outer_ring_mean, 6),
+            "lpips_global_mean": round(lpips_global_mean, 6),
+            "lpips_mask_mean": round(lpips_mask_mean, 6),
+            "lpips_outer_ring_mean": round(lpips_outer_ring_mean, 6),
+            "sharpness_mask_mean": round(sharp_mask_mean, 6),
+            "sharpness_outer_ring_mean": round(sharp_outer_ring_mean, 6),
+            "naturalness_mask_mean": round(natural_mask_mean, 6),
+            "naturalness_outer_ring_mean": round(natural_outer_ring_mean, 6),
+            "texture_mask_mean": round(texture_mask_mean, 6),
+            "texture_outer_ring_mean": round(texture_outer_ring_mean, 6),
+            "boundary_spill_score": round(boundary_spill_score, 6),
+            "outer_ring_anomaly_ratio": round(outer_ring_anomaly_ratio, 6),
+            "inside_boundary_mean": round(_score_map_mean(composite_map, inside_band_mask), 6),
+            "outside_boundary_mean": round(_score_map_mean(composite_map, outer_ring_mask), 6),
+        },
+        "topRegions": top_regions,
+        "tooltips": {
+            "composite": "Weighted summary of perceptual change, sharpness mismatch, naturalness, and microtexture consistency.",
+            "lpips": "Perceptual change proxy map highlighting visually significant differences from the source frame.",
+            "sharpness": "Detects local focus or edge sharpness mismatch between edited and source frame content.",
+            "boundary": "Compares anomaly intensity immediately inside and outside the intended edit boundary.",
+            "naturalness": "No-reference naturalness proxy highlighting statistically unusual local patches.",
+            "texture": "Microtexture / noise consistency proxy to flag over-smoothed or over-sharpened regions.",
+        },
+        "artifacts": {
+            "compositeMap": _heatmap_png(composite_map),
+            "compositeOverlay": _heatmap_overlay_png(edited_rgb, composite_map),
+            "lpipsMap": _heatmap_png(lpips_map),
+            "lpipsOverlay": _heatmap_overlay_png(edited_rgb, lpips_map),
+            "sharpnessMap": _heatmap_png(sharp_map),
+            "naturalnessMap": _heatmap_png(natural_map),
+            "textureMap": _heatmap_png(texture_map),
+            "boundaryMap": boundary_map_bytes,
+            "maskUsed": _create_mask_boundary_overlay(
+                original_image=source_rgb,
+                binary_change=mask,
+                mask_bin=mask,
+            ),
+        },
+    }
+
+
 def _build_timeline_graph_png(rows: list[dict[str, Any]]) -> bytes:
     width, height = 1280, 720
     chart = Image.new("RGB", (width, height), (244, 247, 249))
@@ -2006,6 +2349,8 @@ def _handle_qc_analysis(
     settings: Any,
 ) -> dict[str, Any]:
     generation_ids = list(dict.fromkeys(job.get("payload", {}).get("generationIds") or []))
+    analysis_mode = str(job.get("payload", {}).get("mode") or "standard")
+    advanced_frame_only = analysis_mode == "advanced_frame"
     if not generation_ids:
         generation_ids = [
             gen_id
@@ -2117,7 +2462,15 @@ def _handle_qc_analysis(
                 [generation.get("sourceLastFrameResolvedKey"), generation.get("inputLastFrameKey")],
             )
 
-        generation["qc"] = {"status": "running", "updatedAt": now_iso()}
+        if advanced_frame_only:
+            qc_state = generation.setdefault("qc", {})
+            if not isinstance(qc_state, dict):
+                qc_state = {}
+            qc_state["advancedFrame"] = {"status": "running", "updatedAt": now_iso()}
+            qc_state["updatedAt"] = now_iso()
+            generation["qc"] = qc_state
+        else:
+            generation["qc"] = {"status": "running", "updatedAt": now_iso()}
         store.save_task(task)
 
         try:
@@ -2135,6 +2488,7 @@ def _handle_qc_analysis(
                     frame_record: dict[str, Any],
                     variant_record: dict[str, Any],
                     artifact_prefix: str,
+                    include_advanced: bool,
                 ) -> dict[str, Any]:
                     original_frame_bytes = asset_store.read_bytes(frame_record["captureKey"])
                     edited_frame_bytes = asset_store.read_bytes(variant_record["outputKey"])
@@ -2176,7 +2530,7 @@ def _handle_qc_analysis(
                     asset_store.put_bytes(frame_overlay_key, frame_overlay_bytes, content_type="image/png")
                     asset_store.put_bytes(frame_binary_key, frame_binary_bytes, content_type="image/png")
                     asset_store.put_bytes(frame_boundary_overlay_key, frame_boundary_overlay_bytes, content_type="image/png")
-                    return {
+                    result: dict[str, Any] = {
                         "metrics": frame_metrics,
                         "artifacts": {
                             "heatmapKey": frame_heatmap_key,
@@ -2185,6 +2539,31 @@ def _handle_qc_analysis(
                             "boundaryOverlayKey": frame_boundary_overlay_key,
                         },
                     }
+                    if include_advanced:
+                        advanced_result = _run_advanced_frame_qc(
+                            original_image=original_frame_image,
+                            edited_image=edited_frame_image,
+                            mask_bin=frame_mask_bin,
+                        )
+                        advanced_artifact_keys: dict[str, str] = {}
+                        for artifact_name, artifact_bytes in (advanced_result.get("artifacts") or {}).items():
+                            advanced_key_name = str(artifact_name)
+                            advanced_key = paths.qc_artifact(
+                                segment["segmentId"],
+                                gen_id,
+                                f"{artifact_prefix}_advanced_{advanced_key_name}",
+                                ".png",
+                            )
+                            asset_store.put_bytes(advanced_key, artifact_bytes, content_type="image/png")
+                            advanced_artifact_keys[f"{advanced_key_name}Key"] = advanced_key
+                        result["advanced"] = {
+                            "status": advanced_result.get("status") or "pass",
+                            "metrics": advanced_result.get("metrics") or {},
+                            "topRegions": advanced_result.get("topRegions") or [],
+                            "tooltips": advanced_result.get("tooltips") or {},
+                            "artifacts": advanced_artifact_keys,
+                        }
+                    return result
 
                 frame_by_variant: dict[str, dict[str, Any]] = {}
 
@@ -2202,6 +2581,7 @@ def _handle_qc_analysis(
                         frame_record=start_frame,
                         variant_record=variant_record,
                         artifact_prefix=f"frame_start_{variant_index:03d}",
+                        include_advanced=advanced_frame_only,
                     )
                     frame_by_variant[variant_id] = variant_qc
                     if variant_id == source_first_variant_id:
@@ -2212,6 +2592,7 @@ def _handle_qc_analysis(
                         frame_record=start_frame,
                         variant_record=source_first_variant,
                         artifact_prefix="frame",
+                        include_advanced=advanced_frame_only,
                     )
                     if isinstance(source_first_variant_id, str) and source_first_variant_id:
                         frame_by_variant[source_first_variant_id] = first_frame_qc
@@ -2226,6 +2607,7 @@ def _handle_qc_analysis(
                             frame_record=end_frame,
                             variant_record=variant_record,
                             artifact_prefix=f"frame_end_{variant_index:03d}",
+                            include_advanced=advanced_frame_only,
                         )
                         frame_by_variant[variant_id] = variant_qc
 
@@ -2240,6 +2622,7 @@ def _handle_qc_analysis(
                             frame_record=end_frame,
                             variant_record=source_last_variant,
                             artifact_prefix="frame_last",
+                            include_advanced=advanced_frame_only,
                         )
                         frame_by_variant[source_last_variant_id] = last_frame_qc
 
@@ -2248,6 +2631,40 @@ def _handle_qc_analysis(
                 frame_overlay_key = first_frame_qc["artifacts"]["overlayKey"]
                 frame_binary_key = first_frame_qc["artifacts"]["binaryChangeKey"]
                 frame_boundary_overlay_key = first_frame_qc["artifacts"]["boundaryOverlayKey"]
+
+                if advanced_frame_only:
+                    existing_qc = generation.get("qc") if isinstance(generation.get("qc"), dict) else {}
+                    existing_frame_by_variant = existing_qc.get("frameByVariant") if isinstance(existing_qc.get("frameByVariant"), dict) else {}
+                    merged_frame_by_variant = {**existing_frame_by_variant, **frame_by_variant}
+                    advanced_variant_count = sum(
+                        1
+                        for value in merged_frame_by_variant.values()
+                        if isinstance(value, dict) and isinstance(value.get("advanced"), dict)
+                    )
+                    generation["qc"] = {
+                        **existing_qc,
+                        "status": "complete",
+                        "updatedAt": now_iso(),
+                        "analyzedAt": now_iso(),
+                        "frame": first_frame_qc,
+                        "frameByVariant": merged_frame_by_variant,
+                        "advancedFrame": {
+                            "status": "complete",
+                            "updatedAt": now_iso(),
+                            "analyzedAt": now_iso(),
+                            "variantCount": advanced_variant_count,
+                            "config": {
+                                "patchSize": ADV_QC_PATCH_SIZE,
+                                "stride": ADV_QC_STRIDE,
+                                "outerRingPx": ADV_QC_OUTER_RING_PX,
+                            },
+                        },
+                    }
+                    analyzed_ids.append(gen_id)
+                    store.save_task(task)
+                    progress = 10 + math.floor(85 * (index + 1) / max(1, len(generation_ids)))
+                    _job_progress(job, store, progress, "running", f"Advanced frame QC analyzed {index + 1}/{len(generation_ids)} generations")
+                    continue
 
                 original_segment_key = _ensure_segment_clip(
                     s3=s3,
@@ -2562,6 +2979,7 @@ def _handle_qc_analysis(
             "at": now_iso(),
             "event": "task.qc.complete",
             "jobId": job["jobId"],
+            "mode": analysis_mode,
             "analyzed": analyzed_ids,
             "failed": failed_ids,
         }

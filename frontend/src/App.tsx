@@ -1495,8 +1495,16 @@ export default function App() {
   });
 
   const runQcMutation = useMutation({
-    mutationFn: async ({ taskId, generationIds }: { taskId: string; generationIds?: string[] }) =>
-      apiClient.runQc(taskId, generationIds?.length ? { generationIds } : undefined),
+    mutationFn: async ({
+      taskId,
+      generationIds,
+      mode,
+    }: {
+      taskId: string;
+      generationIds?: string[];
+      mode?: "standard" | "advanced_frame";
+    }) =>
+      apiClient.runQc(taskId, generationIds?.length || mode ? { generationIds, mode } : undefined),
     onSuccess: async (result, variables) => {
       setJobIds((previous) => appendTrackedJobId(previous, result.jobId));
       await queryClient.invalidateQueries({ queryKey: ["task", variables.taskId] });

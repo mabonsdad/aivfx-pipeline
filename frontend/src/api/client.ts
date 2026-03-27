@@ -269,7 +269,7 @@ export const apiClient = {
       method: "POST",
       body: JSON.stringify(payload ?? {}),
     }),
-  runQc: (taskId: string, payload?: { generationIds?: string[] }) =>
+  runQc: (taskId: string, payload?: { generationIds?: string[]; mode?: "standard" | "advanced_frame" }) =>
     api<{ jobId: string; generationCount: number }>(`/tasks/${taskId}/qc/run`, {
       method: "POST",
       body: JSON.stringify(payload ?? {}),
