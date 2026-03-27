@@ -462,6 +462,7 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
     const startFrameIds = new Set((reportTask.segments ?? []).map((segment) => segment.startFrameId));
     const endFrameIds = new Set((reportTask.segments ?? []).map((segment) => segment.endFrameId));
     const generationRowsByVariant = new Map<string, ReportGenerationRow[]>();
+    const generationRowsByFrameId = new Map<string, ReportGenerationRow[]>();
     const variantIdsByOutputKey = new Map<string, string[]>();
     for (const frame of Object.values(reportTask.frames ?? {})) {
       for (const variant of frame.variants ?? []) {
@@ -473,6 +474,11 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
       }
     }
     for (const row of reportRows.rows) {
+      for (const frameId of [row.startFrame?.frameId, row.endFrame?.frameId]) {
+        if (!frameId) continue;
+        const existing = generationRowsByFrameId.get(frameId) ?? [];
+        generationRowsByFrameId.set(frameId, [...existing, row]);
+      }
       const linkedIds = new Set<string>();
       for (const variantId of [row.generation.sourceFirstFrameVariantId, row.generation.sourceLastFrameVariantId]) {
         if (!variantId) continue;
@@ -510,7 +516,14 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
       for (const variant of frame.variants ?? []) {
         if (!variant.imageUrl) continue;
         const refKey = `${frame.frameId}:${variant.variantId}`;
-        const linkedGenerations = generationRowsByVariant.get(variant.variantId) ?? [];
+        const directLinkedGenerations = generationRowsByVariant.get(variant.variantId) ?? [];
+        const frameLinkedGenerations = generationRowsByFrameId.get(frame.frameId) ?? [];
+        const linkedGenerations =
+          directLinkedGenerations.length > 0
+            ? directLinkedGenerations
+            : frameLinkedGenerations.filter(
+                (row, index, items) => items.findIndex((candidate) => candidate.generation.genId === row.generation.genId) === index,
+              );
         if (activeCustomReport) {
           const includedByRef = activeReportFrameVariantKeys.has(refKey);
           const includedByGeneration = linkedGenerations.some((row) => activeReportGenerationIds.has(row.generation.genId));
