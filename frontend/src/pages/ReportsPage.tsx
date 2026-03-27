@@ -183,6 +183,10 @@ function hasGraphEvidence(row: VideoReportRow): boolean {
   return Boolean(artifacts?.timelineGraphUrl || artifacts?.timelineCsvUrl || artifacts?.diffVideoUrl);
 }
 
+function selectionMarker(checked: boolean): string {
+  return checked ? "✓" : "";
+}
+
 function summarizeReport(report: CustomReportRecord, task: TaskDetail | undefined): string {
   const asset_refs = report.assetRefs ?? [];
   if (!task || !asset_refs.length) {
@@ -555,9 +559,17 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                           {row.role === "start" ? "Start" : row.role === "end" ? "End" : "Unlinked"} frame edit - frame {row.frame.frameIndex}
                         </p>
                         <label className="flex items-center gap-2 text-xs text-ink/70">
+                          <span
+                            aria-hidden="true"
+                            className={`flex h-4 w-4 items-center justify-center rounded border text-[11px] font-semibold ${
+                              checked ? "border-teal-600 bg-teal-600 text-white" : "border-ink/30 bg-white text-transparent"
+                            }`}
+                          >
+                            {selectionMarker(checked)}
+                          </span>
                           <input
                             type="checkbox"
-                            className="h-4 w-4 accent-teal-600"
+                            className="sr-only"
                             checked={checked}
                             onChange={() => reportTaskId && toggleCustomReportOutput(reportTaskId, ref)}
                           />
@@ -624,9 +636,17 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <p className="text-sm font-semibold">Generated segment - {row.segment ? describeSegment(row.segment) : row.generation.genId}</p>
                         <label className="flex items-center gap-2 text-xs text-ink/70">
+                          <span
+                            aria-hidden="true"
+                            className={`flex h-4 w-4 items-center justify-center rounded border text-[11px] font-semibold ${
+                              checked ? "border-teal-600 bg-teal-600 text-white" : "border-ink/30 bg-white text-transparent"
+                            }`}
+                          >
+                            {selectionMarker(checked)}
+                          </span>
                           <input
                             type="checkbox"
-                            className="h-4 w-4 accent-teal-600"
+                            className="sr-only"
                             checked={checked}
                             onChange={() => reportTaskId && toggleCustomReportOutput(reportTaskId, ref)}
                           />
@@ -815,7 +835,7 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                             </div>
                             <div>
                               <p className="text-xs font-medium text-ink/70">Mask edit</p>
-                              {row.maskUrl ? <img src={row.maskUrl} alt="Mask" className="aspect-video w-full rounded border border-ink/10 bg-white object-contain" /> : <p className="text-xs text-ink/50">No mask</p>}
+                              {row.maskUrl ? <img src={row.maskUrl} alt="Mask" className="aspect-video w-full rounded border border-ink/10 bg-black object-contain" /> : <p className="text-xs text-ink/50">No mask</p>}
                             </div>
                             <div>
                               <p className="text-xs font-medium text-ink/70">Edited frame</p>
@@ -830,6 +850,9 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                             </div>
                             <div className="rounded border border-ink/10 bg-white p-2 text-xs text-ink/70">
                               <p className="font-semibold text-ink/90">Frame QC analysis</p>
+                              <p className="mb-1 text-[11px] text-ink/55">
+                                Comparison: source frame vs edited frame. Region basis: {row.maskUrl ? "user mask" : "full-frame comparison"}.
+                              </p>
                               {row.standard ? (
                                 <>
                                   <p>Changed: {asNumber(frameMetrics?.changedPctTotal)?.toFixed(2) ?? "n/a"}%</p>
@@ -897,10 +920,20 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                                   QC classification: {advanced.status ?? "n/a"}
                                 </p>
                               </div>
+                              <p className="text-[11px] text-ink/55">
+                                Region basis: {row.maskUrl ? "user mask with outer-ring spill checks" : "inferred edit area derived from source vs edited differences"}.
+                              </p>
                               <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
                                 {advancedCards.map((card) => (
                                   <div key={card.key} className="space-y-2 rounded border border-ink/10 bg-bg/20 p-2">
                                     <p className="text-xs font-semibold text-ink/90">{card.title}</p>
+                                    <p className="text-[11px] text-ink/60">
+                                      {card.key === "naturalness"
+                                        ? "Edited frame only"
+                                        : "Source frame vs edited frame"}
+                                      {" · "}
+                                      {row.maskUrl ? "User mask aware" : "Inferred edit area"}
+                                    </p>
                                     <p className="text-[11px] text-ink/70">Main: {card.main !== null ? card.main.toFixed(4) : "n/a"}</p>
                                     <p className="text-[11px] text-ink/70">Mask: {card.mask !== null ? card.mask.toFixed(4) : "n/a"}</p>
                                     <p className="text-[11px] text-ink/70">Outer ring: {card.ring !== null ? card.ring.toFixed(4) : "n/a"}</p>
@@ -944,7 +977,7 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                             </div>
                             <div>
                               <p className="text-xs font-medium text-ink/70">Mask edit</p>
-                              {row.maskUrl ? <img src={row.maskUrl} alt="Mask" className="aspect-video w-full rounded border border-ink/10 bg-white object-contain" /> : <p className="text-xs text-ink/50">No mask</p>}
+                              {row.maskUrl ? <img src={row.maskUrl} alt="Mask" className="aspect-video w-full rounded border border-ink/10 bg-black object-contain" /> : <p className="text-xs text-ink/50">No mask</p>}
                               <p className="mt-2 text-xs text-ink/70">{row.prompt}</p>
                             </div>
                             <div>
@@ -967,6 +1000,9 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                           <div className="grid gap-3 md:grid-cols-5">
                             <div className="rounded border border-ink/10 bg-white p-2 text-xs text-ink/70">
                               <p className="font-semibold text-ink/90">Video QC analysis</p>
+                              <p className="mb-1 text-[11px] text-ink/55">
+                                Comparison: original segment vs generated segment. Region basis: {row.maskUrl ? "start-frame user mask carried into frame evidence" : "full-frame video comparison"}.
+                              </p>
                               {row.standard ? (
                                 <>
                                   <p>Changed mean: {asNumber(videoAggregates?.changedPctTotalMean)?.toFixed(2) ?? "n/a"}%</p>
