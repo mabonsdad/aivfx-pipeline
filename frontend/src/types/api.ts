@@ -404,9 +404,28 @@ export type CustomReportRecord = {
   reportId: string;
   reportType: "qc_frame" | "qc_video";
   name: string;
-  outputRefs: CustomReportOutputRef[];
+  assetRefs: CustomReportOutputRef[];
+  tests: string[];
+  status: "queued" | "running" | "complete" | "failed";
+  jobId?: string;
+  resultKey?: string;
+  error?: string;
   createdAt: string;
   updatedAt: string;
+};
+
+export type QcReportResult = {
+  reportId: string;
+  taskId: string;
+  reportType: "qc_frame" | "qc_video";
+  name: string;
+  tests: string[];
+  createdAt: string;
+  builtAt: string;
+  rowCount: number;
+  failureCount: number;
+  rows: Array<Record<string, unknown>>;
+  failures?: Array<{ assetRef: CustomReportOutputRef; error: string }>;
 };
 
 export type TaskDetail = {

@@ -288,6 +288,7 @@ export const apiClient = {
     taskId: string,
     payload: {
       reportType: "qc_frame" | "qc_video";
+      tests: string[];
       outputRefs: Array<
         | { assetType: "frame_variant"; frameId: string; variantId: string }
         | { assetType: "segment_generation"; genId: string }
@@ -295,6 +296,10 @@ export const apiClient = {
       name?: string;
     },
   ) => api<{ reportId: string }>(`/tasks/${taskId}/reports`, { method: "POST", body: JSON.stringify(payload) }),
+  getCustomReport: (taskId: string, reportId: string) =>
+    api<{ report: import("../types/api").CustomReportRecord; result?: import("../types/api").QcReportResult }>(
+      `/tasks/${taskId}/reports/${reportId}`,
+    ),
   deleteCustomReport: (taskId: string, reportId: string) =>
     api<{ ok: true }>(`/tasks/${taskId}/reports/${reportId}`, { method: "DELETE" }),
   getJob: (jobId: string) => api<JobStatus>(`/jobs/${jobId}`),

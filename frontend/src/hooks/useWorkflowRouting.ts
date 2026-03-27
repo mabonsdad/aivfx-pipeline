@@ -2,7 +2,7 @@ import { useEffect, useMemo } from "react";
 import type { NavigateFunction } from "react-router-dom";
 
 export type TabId = "timeline" | "frames" | "generate" | "merge" | "assets" | "report";
-export type ReportView = "outputs" | "qc_frame" | "qc_video";
+export type ReportView = "frames" | "videos" | "reports";
 
 export type WorkflowRouteState = {
   taskId: string | null;
@@ -53,9 +53,13 @@ export function useReportRouteState(search: string): {
   const routeSearch = useMemo(() => new URLSearchParams(search), [search]);
   const reportViewParam = routeSearch.get("view");
   const reportView: ReportView =
-    reportViewParam === "qc_frame" || reportViewParam === "qc_video" || reportViewParam === "outputs"
+    reportViewParam === "frames" || reportViewParam === "videos" || reportViewParam === "reports"
       ? reportViewParam
-      : "outputs";
+      : reportViewParam === "qc_frame"
+        ? "frames"
+        : reportViewParam === "qc_video"
+          ? "videos"
+          : "frames";
   const activeCustomReportId = routeSearch.get("reportId");
   return { routeSearch, reportView, activeCustomReportId };
 }

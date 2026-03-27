@@ -37,6 +37,10 @@ class S3JsonStore:
     def job_key(user_id: str, job_id: str) -> str:
         return f"users/{user_id}/jobs/{job_id}.json"
 
+    @staticmethod
+    def report_result_key(user_id: str, task_id: str, report_id: str) -> str:
+        return f"users/{user_id}/tasks/{task_id}/reports/{report_id}.json"
+
     def get_json(self, key: str) -> dict[str, Any] | None:
         try:
             data = self.s3.get_object(Bucket=self.metadata_bucket, Key=key)["Body"].read()
@@ -54,6 +58,9 @@ class S3JsonStore:
             ContentType="application/json",
             ServerSideEncryption="AES256",
         )
+
+    def delete_json(self, key: str) -> None:
+        self.s3.delete_object(Bucket=self.metadata_bucket, Key=key)
 
     def load_task(self, user_id: str, task_id: str) -> dict[str, Any] | None:
         return self.get_json(self.task_key(user_id, task_id))

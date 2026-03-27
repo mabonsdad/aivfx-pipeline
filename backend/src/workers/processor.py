@@ -71,6 +71,14 @@ ADV_QC_OUTER_RING_PX = 24
 ADV_QC_TOP_REGION_COUNT = 8
 MOTION_SYNC_SAMPLE_FPS = 6
 MOTION_SYNC_MAX_LAG_SEC = 3.0
+FRAME_REPORT_ADVANCED_TESTS = {
+    "frame_composite",
+    "frame_perceptual",
+    "frame_boundary",
+    "frame_sharpness",
+    "frame_naturalness",
+    "frame_texture",
+}
 LUMA_ALLOWED_MODES = {
     "adhere_1",
     "adhere_2",
@@ -2052,6 +2060,501 @@ def _run_advanced_frame_qc(
     }
 
 
+def _report_safe_stem(*parts: str) -> str:
+    joined = "_".join(part for part in parts if part)
+    return re.sub(r"[^a-zA-Z0-9_-]+", "", joined)[:80] or "artifact"
+
+
+def _frame_role(task: dict[str, Any], frame_id: str) -> str:
+    for segment in task.get("segments", []):
+        if segment.get("startFrameId") == frame_id:
+            return "start"
+        if segment.get("endFrameId") == frame_id:
+            return "end"
+    return "unlinked"
+
+
+def _frame_variant_prompt(variant: dict[str, Any]) -> str:
+    prompt_value = variant.get("generationSettings", {}).get("prompt") if isinstance(variant.get("generationSettings"), dict) else None
+    if isinstance(prompt_value, str) and prompt_value.strip():
+        return prompt_value.strip()
+    return f"Prompt hash {variant.get('promptHash') or 'unknown'}"
+
+
+def _build_frame_report_row(
+    *,
+    task: dict[str, Any],
+    asset_store: AssetStore,
+    paths: AssetPaths,
+    report_id: str,
+    frame_id: str,
+    variant_id: str,
+    tests: set[str],
+) -> dict[str, Any]:
+    frames = task.get("frames", {})
+    frame = frames.get(frame_id)
+    if not isinstance(frame, dict):
+        raise RuntimeError(f"Frame {frame_id} not found")
+    variant = next((item for item in frame.get("variants", []) if item.get("variantId") == variant_id), None)
+    if not isinstance(variant, dict) or not variant.get("outputKey"):
+        raise RuntimeError(f"Variant {variant_id} not found for frame {frame_id}")
+
+    original_frame_bytes = asset_store.read_bytes(frame["captureKey"])
+    edited_frame_bytes = asset_store.read_bytes(variant["outputKey"])
+    mask_key = variant.get("patchMeta", {}).get("maskKey") if isinstance(variant.get("patchMeta"), dict) else None
+    mask_bytes = asset_store.read_bytes(mask_key) if isinstance(mask_key, str) else None
+
+    original_frame_image = ImageOps.exif_transpose(Image.open(BytesIO(original_frame_bytes))).convert("RGB")
+    edited_frame_image = ImageOps.exif_transpose(Image.open(BytesIO(edited_frame_bytes))).convert("RGB")
+    frame_mask = _load_optional_mask(mask_bytes, original_frame_image.size)
+
+    standard_payload: dict[str, Any] | None = None
+    if "frame_diff" in tests:
+        frame_metrics, frame_diff, frame_binary, frame_mask_bin = _analyze_image_pair(
+            original_frame_image,
+            edited_frame_image,
+            mask_image=frame_mask,
+            threshold=QC_DIFF_THRESHOLD,
+            boundary_ring_px=QC_BOUNDARY_RING_PX,
+        )
+        frame_heatmap_bytes, frame_overlay_bytes, frame_binary_bytes = _create_overlay_artifacts(
+            edited_image=edited_frame_image,
+            diff_gray=frame_diff,
+            binary_change=frame_binary,
+            mask_bin=frame_mask_bin,
+        )
+        frame_boundary_overlay_bytes = _create_mask_boundary_overlay(
+            original_image=original_frame_image,
+            binary_change=frame_binary,
+            mask_bin=frame_mask_bin,
+        )
+        stem_base = _report_safe_stem("frame", frame_id[-8:], variant_id[-8:])
+        frame_heatmap_key = paths.report_artifact(report_id, f"{stem_base}_heatmap", ".png")
+        frame_overlay_key = paths.report_artifact(report_id, f"{stem_base}_overlay", ".png")
+        frame_binary_key = paths.report_artifact(report_id, f"{stem_base}_binary", ".png")
+        frame_boundary_overlay_key = paths.report_artifact(report_id, f"{stem_base}_boundary", ".png")
+        asset_store.put_bytes(frame_heatmap_key, frame_heatmap_bytes, content_type="image/png")
+        asset_store.put_bytes(frame_overlay_key, frame_overlay_bytes, content_type="image/png")
+        asset_store.put_bytes(frame_binary_key, frame_binary_bytes, content_type="image/png")
+        asset_store.put_bytes(frame_boundary_overlay_key, frame_boundary_overlay_bytes, content_type="image/png")
+        standard_payload = {
+            "metrics": frame_metrics,
+            "artifacts": {
+                "heatmapKey": frame_heatmap_key,
+                "overlayKey": frame_overlay_key,
+                "binaryChangeKey": frame_binary_key,
+                "boundaryOverlayKey": frame_boundary_overlay_key,
+            },
+        }
+    else:
+        frame_mask_bin = frame_mask.convert("L").point(lambda value: 255 if value >= 128 else 0) if frame_mask else None
+
+    advanced_payload: dict[str, Any] | None = None
+    selected_advanced_tests = sorted(test_name for test_name in tests if test_name in FRAME_REPORT_ADVANCED_TESTS)
+    if selected_advanced_tests:
+        advanced_result = _run_advanced_frame_qc(
+            original_image=original_frame_image,
+            edited_image=edited_frame_image,
+            mask_bin=frame_mask_bin,
+        )
+        advanced_artifact_keys: dict[str, str] = {}
+        stem_base = _report_safe_stem("frame", frame_id[-8:], variant_id[-8:], "advanced")
+        for artifact_name, artifact_bytes in (advanced_result.get("artifacts") or {}).items():
+            artifact_key = paths.report_artifact(report_id, f"{stem_base}_{artifact_name}", ".png")
+            asset_store.put_bytes(artifact_key, artifact_bytes, content_type="image/png")
+            advanced_artifact_keys[f"{artifact_name}Key"] = artifact_key
+        advanced_payload = {
+            "status": advanced_result.get("status") or "pass",
+            "selectedTests": selected_advanced_tests,
+            "metrics": advanced_result.get("metrics") or {},
+            "topRegions": advanced_result.get("topRegions") or [],
+            "tooltips": advanced_result.get("tooltips") or {},
+            "artifacts": advanced_artifact_keys,
+        }
+
+    return {
+        "assetType": "frame_variant",
+        "frameId": frame_id,
+        "variantId": variant_id,
+        "role": _frame_role(task, frame_id),
+        "frameIndex": frame.get("frameIndex"),
+        "timecode": frame.get("timecode"),
+        "createdAt": variant.get("createdAt"),
+        "model": variant.get("model"),
+        "variantType": variant.get("type"),
+        "prompt": _frame_variant_prompt(variant),
+        "originalFrameKey": frame.get("captureKey"),
+        "editedFrameKey": variant.get("outputKey"),
+        "maskKey": mask_key if isinstance(mask_key, str) else None,
+        "standard": standard_payload,
+        "advanced": advanced_payload,
+    }
+
+
+def _build_video_report_row(
+    *,
+    task: dict[str, Any],
+    asset_store: AssetStore,
+    store: S3JsonStore,
+    paths: AssetPaths,
+    report_id: str,
+    gen_id: str,
+    tests: set[str],
+    settings: Any,
+) -> dict[str, Any]:
+    generation = task.get("segmentGenerations", {}).get(gen_id)
+    if not isinstance(generation, dict):
+        raise RuntimeError(f"Generation {gen_id} not found")
+    if generation.get("status") != "complete" or not generation.get("outputKey"):
+        raise RuntimeError(f"Generation {gen_id} is not complete")
+    segment_id = generation.get("segmentId")
+    segment = next((item for item in task.get("segments", []) if item.get("segmentId") == segment_id), None)
+    if not isinstance(segment, dict):
+        raise RuntimeError(f"Segment missing for generation {gen_id}")
+
+    start_frame = task.get("frames", {}).get(segment["startFrameId"])
+    end_frame = task.get("frames", {}).get(segment.get("endFrameId")) if segment.get("endFrameId") else None
+    if not isinstance(start_frame, dict):
+        raise RuntimeError("Start frame metadata missing for report build")
+
+    def _resolve_variant(frame_record: dict[str, Any], preferred_variant_id: Any, preferred_output_keys: list[Any] | None = None) -> tuple[str | None, dict[str, Any]]:
+        resolved_variant_id = preferred_variant_id if isinstance(preferred_variant_id, str) and preferred_variant_id else None
+        variants = frame_record.get("variants", [])
+        resolved_variant = (
+            next((item for item in variants if item.get("variantId") == resolved_variant_id), None)
+            if resolved_variant_id
+            else None
+        )
+        if resolved_variant and resolved_variant.get("outputKey"):
+            return resolved_variant_id, resolved_variant
+        if preferred_output_keys:
+            for key in preferred_output_keys:
+                if not isinstance(key, str) or not key:
+                    continue
+                by_output = next((item for item in variants if item.get("outputKey") == key), None)
+                if by_output and by_output.get("outputKey"):
+                    return str(by_output.get("variantId")), by_output
+        selected_variant_id = frame_record.get("selectedVariantId")
+        if isinstance(selected_variant_id, str) and selected_variant_id:
+            selected_variant = next((item for item in variants if item.get("variantId") == selected_variant_id), None)
+            if selected_variant and selected_variant.get("outputKey"):
+                return selected_variant_id, selected_variant
+        return None, {"outputKey": frame_record["captureKey"], "patchMeta": {}}
+
+    source_first_variant_id, source_first_variant = _resolve_variant(
+        start_frame,
+        generation.get("sourceFirstFrameVariantId"),
+        [generation.get("sourceFirstFrameResolvedKey"), generation.get("inputFirstFrameKey")],
+    )
+    source_last_variant_id = None
+    source_last_variant = None
+    if isinstance(end_frame, dict) and end_frame.get("captureKey"):
+        source_last_variant_id, source_last_variant = _resolve_variant(
+            end_frame,
+            generation.get("sourceLastFrameVariantId"),
+            [generation.get("sourceLastFrameResolvedKey"), generation.get("inputLastFrameKey")],
+        )
+
+    run_standard_video = bool({"video_diff", "video_frame_evidence"} & tests)
+    standard_payload: dict[str, Any] | None = None
+    if run_standard_video:
+        fps_info = task["video"]["editSource"]["fps"]
+        target_fps = Fraction(int(fps_info["num"]), int(fps_info["den"]))
+        source_width = int(task["video"]["editSource"]["width"])
+        source_height = int(task["video"]["editSource"]["height"])
+        analysis_width, analysis_height = _target_by_orientation(
+            source_width,
+            source_height,
+            landscape=(960, 540),
+            portrait=(540, 960),
+        )
+
+        s3 = boto3.client("s3")
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            original_segment_key = _ensure_segment_clip(
+                s3=s3,
+                asset_store=asset_store,
+                asset_paths=paths,
+                task=task,
+                segment=segment,
+                assets_bucket=settings.assets_bucket,
+            )
+            original_segment_path = td_path / "segment_original.mp4"
+            generated_segment_path = td_path / "segment_generated.mp4"
+            original_standard_path = td_path / "segment_original_qc.mp4"
+            generated_standard_path = td_path / "segment_generated_qc.mp4"
+            _download_s3(s3, settings.assets_bucket, original_segment_key, original_segment_path)
+            _download_s3(s3, settings.assets_bucket, generation["outputKey"], generated_segment_path)
+
+            transcode_to_cfr(
+                str(original_segment_path),
+                str(original_standard_path),
+                target_fps,
+                target_width=analysis_width,
+                target_height=analysis_height,
+                crf=20,
+                preset="veryfast",
+                audio_bitrate="96k",
+            )
+            transcode_to_cfr(
+                str(generated_segment_path),
+                str(generated_standard_path),
+                target_fps,
+                target_width=analysis_width,
+                target_height=analysis_height,
+                crf=20,
+                preset="veryfast",
+                audio_bitrate="96k",
+            )
+            original_probe = ffprobe_video(str(original_standard_path))
+            generated_probe = ffprobe_video(str(generated_standard_path))
+            common_duration_sec = max(
+                0.1,
+                min(float(original_probe.get("duration_sec") or 0.0), float(generated_probe.get("duration_sec") or 0.0)),
+            )
+
+            original_frames = _extract_sampled_frames(
+                original_standard_path,
+                td_path / "orig_frames",
+                sample_fps=QC_SAMPLE_FPS,
+                duration_sec=common_duration_sec,
+            )
+            generated_frames = _extract_sampled_frames(
+                generated_standard_path,
+                td_path / "gen_frames",
+                sample_fps=QC_SAMPLE_FPS,
+                duration_sec=common_duration_sec,
+            )
+            paired_count = min(len(original_frames), len(generated_frames))
+            if paired_count == 0:
+                raise RuntimeError("No sampled frames available for QC analysis")
+
+            video_mask_key = (
+                source_first_variant.get("patchMeta", {}).get("maskKey")
+                if isinstance(source_first_variant.get("patchMeta"), dict)
+                else None
+            )
+            video_mask_bytes = asset_store.read_bytes(video_mask_key) if isinstance(video_mask_key, str) else None
+            video_mask = _load_optional_mask(video_mask_bytes, (analysis_width, analysis_height))
+            per_frame_rows: list[dict[str, Any]] = []
+            for frame_idx in range(paired_count):
+                orig_image = Image.open(original_frames[frame_idx]).convert("RGB")
+                gen_image = Image.open(generated_frames[frame_idx]).convert("RGB")
+                row_metrics, row_diff, row_binary, _ = _analyze_image_pair(
+                    orig_image,
+                    gen_image,
+                    mask_image=video_mask,
+                    threshold=QC_DIFF_THRESHOLD,
+                    boundary_ring_px=QC_BOUNDARY_RING_PX,
+                )
+                per_frame_rows.append(
+                    {
+                        "index": frame_idx,
+                        "timeSec": round(frame_idx / float(QC_SAMPLE_FPS), 4),
+                        **row_metrics,
+                        "_original": orig_image,
+                        "_diff": row_diff,
+                        "_binary": row_binary,
+                        "_edited": gen_image,
+                    }
+                )
+
+            changed_total_values = [float(item.get("changedPctTotal") or 0.0) for item in per_frame_rows]
+            outside_values = [float(item.get("outsideLeakagePct") or 0.0) for item in per_frame_rows if item.get("outsideLeakagePct") is not None]
+            mean_diff_values = [float(item.get("meanDiffTotal") or 0.0) for item in per_frame_rows]
+            first_frame_metrics = (
+                {key: value for key, value in per_frame_rows[0].items() if not key.startswith("_")}
+                if per_frame_rows
+                else None
+            )
+            last_frame_metrics = (
+                {key: value for key, value in per_frame_rows[-1].items() if not key.startswith("_")}
+                if per_frame_rows
+                else None
+            )
+
+            ssim_log = td_path / "ssim.log"
+            psnr_log = td_path / "psnr.log"
+            _run_command(
+                [
+                    FFMPEG_BIN,
+                    "-y",
+                    "-t",
+                    f"{common_duration_sec:.6f}",
+                    "-i",
+                    str(original_standard_path),
+                    "-t",
+                    f"{common_duration_sec:.6f}",
+                    "-i",
+                    str(generated_standard_path),
+                    "-lavfi",
+                    f"ssim=stats_file={ssim_log}",
+                    "-shortest",
+                    "-f",
+                    "null",
+                    "-",
+                ]
+            )
+            _run_command(
+                [
+                    FFMPEG_BIN,
+                    "-y",
+                    "-t",
+                    f"{common_duration_sec:.6f}",
+                    "-i",
+                    str(original_standard_path),
+                    "-t",
+                    f"{common_duration_sec:.6f}",
+                    "-i",
+                    str(generated_standard_path),
+                    "-lavfi",
+                    f"psnr=stats_file={psnr_log}",
+                    "-shortest",
+                    "-f",
+                    "null",
+                    "-",
+                ]
+            )
+            ssim_values = _parse_metric_log(ssim_log, re.compile(r"All:(?P<value>[0-9.]+)"), "value")
+            psnr_values = _parse_metric_log(psnr_log, re.compile(r"psnr_avg:(?P<value>[0-9.]+)"), "value")
+            vmaf_metrics = _run_optional_vmaf(original_standard_path, generated_standard_path, td_path / "vmaf.json")
+
+            rank_key = (
+                (lambda row: float(row.get("outsideLeakagePct") or 0.0))
+                if video_mask is not None
+                else (lambda row: float(row.get("changedPctTotal") or 0.0))
+            )
+            ranked_rows = sorted(per_frame_rows, key=rank_key, reverse=True)
+            selected_rows = ranked_rows[:5]
+            if per_frame_rows:
+                selected_rows.append(per_frame_rows[len(per_frame_rows) // 2])
+            dedup_selected = {int(row["index"]): row for row in selected_rows}
+
+            selected_frame_artifacts: list[dict[str, Any]] = []
+            for frame_idx in sorted(dedup_selected):
+                row = dedup_selected[frame_idx]
+                heatmap_bytes, overlay_bytes, binary_bytes = _create_overlay_artifacts(
+                    edited_image=row["_edited"],
+                    diff_gray=row["_diff"],
+                    binary_change=row["_binary"],
+                    mask_bin=None,
+                )
+                stem_base = _report_safe_stem("video", gen_id[-8:], f"frame{frame_idx:03d}")
+                heatmap_key = paths.report_artifact(report_id, f"{stem_base}_heatmap", ".png")
+                overlay_key = paths.report_artifact(report_id, f"{stem_base}_overlay", ".png")
+                binary_key = paths.report_artifact(report_id, f"{stem_base}_binary", ".png")
+                asset_store.put_bytes(heatmap_key, heatmap_bytes, content_type="image/png")
+                asset_store.put_bytes(overlay_key, overlay_bytes, content_type="image/png")
+                asset_store.put_bytes(binary_key, binary_bytes, content_type="image/png")
+                selected_frame_artifacts.append(
+                    {
+                        "index": frame_idx,
+                        "timeSec": row["timeSec"],
+                        "changedPctTotal": row["changedPctTotal"],
+                        "outsideLeakagePct": row.get("outsideLeakagePct"),
+                        "heatmapKey": heatmap_key,
+                        "overlayKey": overlay_key,
+                        "binaryChangeKey": binary_key,
+                    }
+                )
+
+            diff_video_path = td_path / "diff_map.mp4"
+            _run_command(
+                [
+                    FFMPEG_BIN,
+                    "-y",
+                    "-i",
+                    str(original_standard_path),
+                    "-i",
+                    str(generated_standard_path),
+                    "-filter_complex",
+                    "[0:v][1:v]blend=all_mode=difference,eq=contrast=2.0:brightness=0.02:saturation=1.5[v]",
+                    "-map",
+                    "[v]",
+                    "-an",
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "veryfast",
+                    "-crf",
+                    "18",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-shortest",
+                    str(diff_video_path),
+                ]
+            )
+            diff_video_key = paths.report_artifact(report_id, _report_safe_stem("video", gen_id[-8:], "diff_map"), ".mp4")
+            _upload_s3(s3, settings.assets_bucket, diff_video_key, diff_video_path, "video/mp4")
+
+            timeline_rows = [{key: value for key, value in row.items() if not key.startswith("_")} for row in per_frame_rows]
+            timeline_csv = "index,timeSec,changedPctTotal,outsideLeakagePct,meanDiffTotal,psnr\n" + "\n".join(
+                f"{item.get('index')},{item.get('timeSec')},{item.get('changedPctTotal')},{item.get('outsideLeakagePct')},{item.get('meanDiffTotal')},{item.get('psnr')}"
+                for item in timeline_rows
+            )
+            timeline_csv_key = paths.report_artifact(report_id, _report_safe_stem("video", gen_id[-8:], "timeline"), ".csv")
+            timeline_graph_key = paths.report_artifact(report_id, _report_safe_stem("video", gen_id[-8:], "timeline_graph"), ".png")
+            asset_store.put_bytes(timeline_csv_key, timeline_csv.encode("utf-8"), content_type="text/csv")
+            asset_store.put_bytes(timeline_graph_key, _build_timeline_graph_png(timeline_rows), content_type="image/png")
+
+            video_aggregates = {
+                "sampledFrameCount": paired_count,
+                "sampleFps": QC_SAMPLE_FPS,
+                "analysisResolution": {"width": analysis_width, "height": analysis_height},
+                "durationSec": round(common_duration_sec, 4),
+                "changedPctTotalMean": round(sum(changed_total_values) / max(1, len(changed_total_values)), 4),
+                "changedPctTotalP95": round(
+                    sorted(changed_total_values)[max(0, math.ceil(len(changed_total_values) * 0.95) - 1)],
+                    4,
+                ),
+                "meanDiffTotalMean": round(sum(mean_diff_values) / max(1, len(mean_diff_values)), 6),
+                "outsideLeakagePctMean": round(sum(outside_values) / len(outside_values), 4) if outside_values else None,
+                "outsideLeakagePctP95": round(
+                    sorted(outside_values)[max(0, math.ceil(len(outside_values) * 0.95) - 1)],
+                    4,
+                )
+                if outside_values
+                else None,
+                "outsideLeakBudgetPct": QC_OUTSIDE_LEAK_BUDGET_PCT if outside_values else None,
+                "outsideLeakPass": (sum(outside_values) / len(outside_values)) <= QC_OUTSIDE_LEAK_BUDGET_PCT if outside_values else None,
+                "ssimMean": round(sum(ssim_values) / len(ssim_values), 6) if ssim_values else None,
+                "ssimMin": round(min(ssim_values), 6) if ssim_values else None,
+                "psnrMean": round(sum(psnr_values) / len(psnr_values), 4) if psnr_values else None,
+                "psnrMin": round(min(psnr_values), 4) if psnr_values else None,
+                "firstFrame": first_frame_metrics,
+                "lastFrame": last_frame_metrics,
+                "vmaf": vmaf_metrics,
+            }
+
+            standard_payload = {
+                "selectedTests": sorted(test_name for test_name in tests if test_name in {"video_diff", "video_frame_evidence"}),
+                "aggregates": video_aggregates,
+                "selectedFrames": selected_frame_artifacts,
+                "artifacts": {
+                    "diffVideoKey": diff_video_key,
+                    "timelineCsvKey": timeline_csv_key,
+                    "timelineGraphKey": timeline_graph_key,
+                },
+            }
+
+    return {
+        "assetType": "segment_generation",
+        "genId": gen_id,
+        "segmentId": segment_id,
+        "createdAt": generation.get("createdAt"),
+        "model": generation.get("luma", {}).get("model"),
+        "mode": generation.get("luma", {}).get("mode"),
+        "prompt": generation.get("luma", {}).get("prompt") or "No prompt provided",
+        "originalFrameKey": start_frame.get("captureKey"),
+        "editedStartFrameKey": source_first_variant.get("outputKey"),
+        "maskKey": source_first_variant.get("patchMeta", {}).get("maskKey") if isinstance(source_first_variant.get("patchMeta"), dict) else None,
+        "endFrameKey": source_last_variant.get("outputKey") if isinstance(source_last_variant, dict) else (end_frame.get("captureKey") if isinstance(end_frame, dict) else None),
+        "generatedVideoKey": generation.get("outputKey"),
+        "standard": standard_payload,
+    }
+
+
 def _build_timeline_graph_png(rows: list[dict[str, Any]]) -> bytes:
     width, height = 1280, 720
     chart = Image.new("RGB", (width, height), (244, 247, 249))
@@ -2991,6 +3494,104 @@ def _handle_qc_analysis(
     return job
 
 
+def _handle_qc_report_build(
+    *,
+    job: dict[str, Any],
+    store: S3JsonStore,
+    asset_store: AssetStore,
+    task: dict[str, Any],
+    settings: Any,
+) -> dict[str, Any]:
+    report_id = str((job.get("payload") or {}).get("reportId") or "")
+    if not report_id:
+        raise RuntimeError("Missing reportId for QC report build")
+
+    reports = task.get("customReports", [])
+    report = next((item for item in reports if isinstance(item, dict) and item.get("reportId") == report_id), None)
+    if not isinstance(report, dict):
+        raise RuntimeError(f"Report {report_id} not found")
+
+    report["status"] = "running"
+    report["updatedAt"] = now_iso()
+    report["jobId"] = job.get("jobId")
+    report.pop("error", None)
+    store.save_task(task)
+    _job_progress(job, store, 10, "running", f"Building report {report_id}")
+
+    report_type = str(report.get("reportType") or "")
+    tests = {str(item) for item in list(report.get("tests") or [])}
+    asset_refs = list(report.get("assetRefs") or [])
+    paths = _asset_paths(task)
+    rows: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+
+    for index, asset_ref in enumerate(asset_refs):
+        try:
+            if not isinstance(asset_ref, dict):
+                raise RuntimeError("Invalid report asset reference")
+            asset_type = asset_ref.get("assetType")
+            if asset_type == "frame_variant":
+                row = _build_frame_report_row(
+                    task=task,
+                    asset_store=asset_store,
+                    paths=paths,
+                    report_id=report_id,
+                    frame_id=str(asset_ref.get("frameId") or ""),
+                    variant_id=str(asset_ref.get("variantId") or ""),
+                    tests=tests,
+                )
+            elif asset_type == "segment_generation":
+                row = _build_video_report_row(
+                    task=task,
+                    asset_store=asset_store,
+                    store=store,
+                    paths=paths,
+                    report_id=report_id,
+                    gen_id=str(asset_ref.get("genId") or ""),
+                    tests=tests,
+                    settings=settings,
+                )
+            else:
+                raise RuntimeError(f"Unsupported report asset type: {asset_type}")
+            rows.append(row)
+        except Exception as exc:
+            failures.append(
+                {
+                    "assetRef": asset_ref,
+                    "error": str(exc),
+                }
+            )
+        progress = 10 + math.floor(80 * (index + 1) / max(1, len(asset_refs)))
+        _job_progress(job, store, progress, "running", f"Built {index + 1}/{len(asset_refs)} report rows")
+
+    result_key = str(report.get("resultKey") or S3JsonStore.report_result_key(task["userId"], task["taskId"], report_id))
+    result_payload = {
+        "reportId": report_id,
+        "taskId": task["taskId"],
+        "reportType": report_type,
+        "name": report.get("name"),
+        "tests": sorted(tests),
+        "createdAt": report.get("createdAt"),
+        "builtAt": now_iso(),
+        "rowCount": len(rows),
+        "failureCount": len(failures),
+        "rows": rows,
+        "failures": failures,
+    }
+    store.put_json(result_key, result_payload)
+
+    report["status"] = "failed" if rows == [] and failures else "complete"
+    report["updatedAt"] = now_iso()
+    report["resultKey"] = result_key
+    if failures:
+        report["error"] = f"{len(failures)} asset(s) failed during report build"
+    store.save_task(task)
+    _job_progress(job, store, 100, "complete", "QC report build complete")
+    job["resultRefs"] = {"reportId": report_id, "resultKey": result_key}
+    store.save_job(job)
+    return job
+
+
 def _handle_motion_sync_qc(
     *,
     job: dict[str, Any],
@@ -3240,6 +3841,8 @@ def process_job_record(record: dict[str, Any], *, settings: Any) -> None:
             _handle_merge(job=job, store=store, asset_store=asset_store, task=task, settings=settings)
         elif job["type"] == "qc_analysis":
             _handle_qc_analysis(job=job, store=store, asset_store=asset_store, task=task, settings=settings)
+        elif job["type"] == "qc_report_build":
+            _handle_qc_report_build(job=job, store=store, asset_store=asset_store, task=task, settings=settings)
         elif job["type"] == "motion_sync_qc":
             _handle_motion_sync_qc(job=job, store=store, asset_store=asset_store, task=task, settings=settings)
         else:
@@ -3267,6 +3870,15 @@ def process_job_record(record: dict[str, Any], *, settings: Any) -> None:
                         "genId": gen_id,
                     }
                 )
+        elif job.get("type") == "qc_report_build":
+            report_id = str((job.get("payload") or {}).get("reportId") or "")
+            reports = latest_task.get("customReports", [])
+            report_record = next((item for item in reports if isinstance(item, dict) and item.get("reportId") == report_id), None)
+            if isinstance(report_record, dict):
+                report_record["status"] = "failed"
+                report_record["updatedAt"] = now_iso()
+                report_record["error"] = str(exc)
+                store.save_task(latest_task)
         latest_task["status"] = "error"
         latest_task.setdefault("history", []).append({"at": now_iso(), "event": "job.failed", "jobId": job_id})
         store.save_task(latest_task)

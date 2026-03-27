@@ -192,6 +192,7 @@ class CustomReportOutputRef(BaseModel):
 class CustomReportCreateRequest(BaseModel):
     reportType: Literal["qc_frame", "qc_video"]
     outputRefs: list[CustomReportOutputRef] = Field(min_length=1, max_length=400)
+    tests: list[str] = Field(min_length=1, max_length=20)
     name: str | None = Field(default=None, min_length=1, max_length=80)
 
 

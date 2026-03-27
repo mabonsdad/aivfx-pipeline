@@ -65,6 +65,19 @@ PRESIGNED_GET_TTL_SECONDS = 3600
 STALE_GENERATION_MAX_AGE_SECONDS = 30 * 60
 CROP_LANDSCAPE_TARGET = (1920, 1080)
 CROP_PORTRAIT_TARGET = (1080, 1920)
+FRAME_REPORT_TESTS = {
+    "frame_diff",
+    "frame_composite",
+    "frame_perceptual",
+    "frame_boundary",
+    "frame_sharpness",
+    "frame_naturalness",
+    "frame_texture",
+}
+VIDEO_REPORT_TESTS = {
+    "video_diff",
+    "video_frame_evidence",
+}
 
 
 def _normalize_task_name(raw: str) -> str:
@@ -387,6 +400,19 @@ def _normalize_custom_report_refs(task: dict[str, Any], raw_refs: list[dict[str,
     return normalized
 
 
+def _normalize_custom_report_tests(report_type: str, raw_tests: list[Any]) -> list[str]:
+    allowed = FRAME_REPORT_TESTS if report_type == "qc_frame" else VIDEO_REPORT_TESTS
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in raw_tests:
+        test_name = str(item or "").strip()
+        if test_name not in allowed or test_name in seen:
+            continue
+        seen.add(test_name)
+        normalized.append(test_name)
+    return normalized
+
+
 def _cleanup_custom_reports(task: dict[str, Any]) -> bool:
     reports = task.get("customReports")
     if not isinstance(reports, list):
@@ -403,21 +429,36 @@ def _cleanup_custom_reports(task: dict[str, Any]) -> bool:
         if not report_id or report_type not in {"qc_frame", "qc_video"}:
             changed = True
             continue
-        output_refs = _normalize_custom_report_refs(task, list(report.get("outputRefs") or []))
-        if not output_refs:
+        asset_refs = _normalize_custom_report_refs(task, list(report.get("assetRefs") or report.get("outputRefs") or []))
+        tests = _normalize_custom_report_tests(report_type, list(report.get("tests") or []))
+        if not asset_refs or not tests:
             changed = True
             continue
         created_at = str(report.get("createdAt") or now_iso())
         updated_at = str(report.get("updatedAt") or created_at)
         name = str(report.get("name") or "").strip() or f"{'QC Frame' if report_type == 'qc_frame' else 'QC Video'} Report"
+        status = str(report.get("status") or "queued").strip().lower()
+        if status not in {"queued", "running", "complete", "failed"}:
+            status = "queued"
+        result_key = str(report.get("resultKey") or "").strip() or None
+        job_id = str(report.get("jobId") or "").strip() or None
+        error_value = str(report.get("error") or "").strip() or None
         cleaned = {
             "reportId": report_id,
             "reportType": report_type,
             "name": name[:80],
-            "outputRefs": output_refs,
+            "assetRefs": asset_refs,
+            "tests": tests,
+            "status": status,
             "createdAt": created_at,
             "updatedAt": updated_at,
         }
+        if result_key:
+            cleaned["resultKey"] = result_key
+        if job_id:
+            cleaned["jobId"] = job_id
+        if error_value:
+            cleaned["error"] = error_value[:500]
         if cleaned != report:
             changed = True
         cleaned_reports.append(cleaned)
@@ -945,33 +986,66 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
         if method == "POST" and len(parts) == 3 and parts[2] == "reports":
             req = _json_model(CustomReportCreateRequest, event)
             raw_refs = [item.model_dump(exclude_none=True) for item in req.outputRefs]
-            output_refs = _normalize_custom_report_refs(task, raw_refs)
-            if not output_refs:
+            asset_refs = _normalize_custom_report_refs(task, raw_refs)
+            if not asset_refs:
                 return error_response(400, "No valid report outputs selected", origin=origin)
+            tests = _normalize_custom_report_tests(req.reportType, req.tests)
+            if not tests:
+                return error_response(400, "No valid QC tests selected", origin=origin)
             custom_reports = task.setdefault("customReports", [])
             report_type_label = "QC Frame" if req.reportType == "qc_frame" else "QC Video"
             report_name = (req.name or "").strip()
             if not report_name:
                 report_name = f"{report_type_label} Report {len(custom_reports) + 1}"
             now = now_iso()
+            report_id = new_id("report")
+            result_key = S3JsonStore.report_result_key(user_id, task_id, report_id)
+            job_id = _queue_job(
+                store=store,
+                queue=queue,
+                user_id=user_id,
+                task_id=task_id,
+                job_type="qc_report_build",
+                payload={"reportId": report_id},
+            )
             report = {
-                "reportId": new_id("report"),
+                "reportId": report_id,
                 "reportType": req.reportType,
                 "name": report_name[:80],
-                "outputRefs": output_refs,
+                "assetRefs": asset_refs,
+                "tests": tests,
+                "status": "queued",
+                "jobId": job_id,
+                "resultKey": result_key,
                 "createdAt": now,
                 "updatedAt": now,
             }
             custom_reports.append(report)
             _cleanup_custom_reports(task)
             store.save_task(task)
-            return response(201, {"reportId": report["reportId"], "report": report}, origin=origin)
+            return response(201, {"reportId": report["reportId"], "report": report, "jobId": job_id}, origin=origin)
+
+        if method == "GET" and len(parts) == 4 and parts[2] == "reports":
+            report_id = parts[3]
+            reports = task.get("customReports", [])
+            report = next((item for item in reports if isinstance(item, dict) and item.get("reportId") == report_id), None)
+            if not report:
+                return error_response(404, "Report not found", origin=origin)
+            result_key = report.get("resultKey")
+            payload: dict[str, Any] = {"report": report}
+            if isinstance(result_key, str) and result_key:
+                result_payload = store.get_json(result_key)
+                if isinstance(result_payload, dict):
+                    _decorate_embedded_s3_keys(result_payload, asset_store)
+                    payload["result"] = result_payload
+            return response(200, payload, origin=origin)
 
         if method == "DELETE" and len(parts) == 4 and parts[2] == "reports":
             report_id = parts[3]
             reports = task.get("customReports", [])
             if not isinstance(reports, list):
                 return error_response(404, "Report not found", origin=origin)
+            report = next((item for item in reports if isinstance(item, dict) and item.get("reportId") == report_id), None)
             before = len(reports)
             task["customReports"] = [
                 report
@@ -980,6 +1054,12 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             ]
             if len(task["customReports"]) == before:
                 return error_response(404, "Report not found", origin=origin)
+            result_key = report.get("resultKey") if isinstance(report, dict) else None
+            if isinstance(result_key, str) and result_key:
+                try:
+                    store.delete_json(result_key)
+                except Exception:
+                    logger.warning("Failed to delete report result", extra={"reportId": report_id, "resultKey": result_key})
             store.save_task(task)
             return response(200, {"ok": True}, origin=origin)
 

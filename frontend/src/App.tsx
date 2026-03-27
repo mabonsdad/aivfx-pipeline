@@ -830,7 +830,7 @@ export default function App() {
   const setReportView = useCallback(
     (nextView: ReportView) => {
       if (!selectedTaskId) return;
-      goToReport(selectedTaskId, nextView, nextView === "outputs" ? null : activeCustomReportId);
+      goToReport(selectedTaskId, nextView, nextView === "reports" ? activeCustomReportId : null);
     },
     [activeCustomReportId, goToReport, selectedTaskId],
   );
@@ -1516,14 +1516,16 @@ export default function App() {
     mutationFn: ({
       taskId,
       reportType,
+      tests,
       outputRefs,
       name,
     }: {
       taskId: string;
       reportType: "qc_frame" | "qc_video";
+      tests: string[];
       outputRefs: CustomReportOutputRef[];
       name?: string;
-    }) => apiClient.createCustomReport(taskId, { reportType, outputRefs, name }),
+    }) => apiClient.createCustomReport(taskId, { reportType, tests, outputRefs, name }),
     onSuccess: async (_result, variables) => {
       await queryClient.invalidateQueries({ queryKey: ["task", variables.taskId] });
       await queryClient.invalidateQueries({ queryKey: ["task", "report", variables.taskId] });
@@ -2243,40 +2245,13 @@ export default function App() {
     });
   }
 
-  async function createCustomReportFromSelection(taskId: string, reportType: "qc_frame" | "qc_video") {
-    const refsForTask = selectedOutputRefsByTask[taskId] ?? [];
-    if (!refsForTask.length) {
-      setCustomReportNotice("Select one or more outputs using the QC checkboxes first.");
-      return;
-    }
-    const scopedRefs =
-      reportType === "qc_video"
-        ? refsForTask.filter((ref) => ref.assetType === "segment_generation")
-        : refsForTask;
-    if (!scopedRefs.length) {
-      setCustomReportNotice(
-        reportType === "qc_video"
-          ? "QC Video reports require at least one selected video generation."
-          : "No valid outputs selected for this report type.",
-      );
-      return;
-    }
-    try {
-      const result = await createCustomReportMutation.mutateAsync({ taskId, reportType, outputRefs: scopedRefs });
-      setCustomReportNotice("Custom report created.");
-      goToReport(taskId, reportType, result.reportId);
-    } catch (error) {
-      setCustomReportNotice(error instanceof Error ? error.message : "Failed to create custom report.");
-    }
-  }
-
   async function deleteCustomReport(taskId: string, report: CustomReportRecord) {
     const ok = window.confirm(`Delete custom report "${report.name}"?`);
     if (!ok) return;
     try {
       await deleteCustomReportMutation.mutateAsync({ taskId, reportId: report.reportId });
       if (activeCustomReportId === report.reportId) {
-        goToReport(taskId, "outputs", null, true);
+        goToReport(taskId, "reports", null, true);
       }
     } catch (error) {
       window.alert(error instanceof Error ? error.message : "Failed to delete report.");
@@ -2284,11 +2259,11 @@ export default function App() {
   }
 
   function openCustomReport(taskId: string, report: CustomReportRecord) {
-    goToReport(taskId, report.reportType, report.reportId);
+    goToReport(taskId, "reports", report.reportId);
   }
 
   function openTaskReport(taskId: string) {
-    goToReport(taskId, "outputs", null);
+    goToReport(taskId, "frames", null);
   }
 
   const refreshSignedUrlsForTask = useCallback(
@@ -2741,7 +2716,7 @@ export default function App() {
 
         setSelectedTaskId(taskId);
         setSelectedSegmentId(segment.segmentId);
-        goToReport(taskId, "outputs", null, true);
+        goToReport(taskId, "reports", null, true);
         setAutomationRunState((previous) => ({
           ...previous,
           isOpen: true,
@@ -2946,36 +2921,22 @@ export default function App() {
   ];
 
   function renderCustomReportBox(taskId: string | null, reports: CustomReportRecord[] | undefined) {
-    const selectedCount = taskId ? (selectedOutputRefsByTask[taskId]?.length ?? 0) : 0;
     return (
       <section className="space-y-3 rounded-2xl border border-ink/10 bg-card p-4">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
-            <h3 className="text-lg font-semibold">Create Custom Report</h3>
-            <p className="text-xs text-ink/60">Selected outputs: {selectedCount}</p>
+            <h3 className="text-lg font-semibold">QC Reports</h3>
+            <p className="text-xs text-ink/60">Report creation now lives on the Reports page.</p>
           </div>
-          <div className="flex flex-wrap gap-2">
-            <button
-              type="button"
-              className="rounded border border-ink/20 bg-white px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50"
-              disabled={!taskId || createCustomReportMutation.isPending || selectedCount === 0}
-              onClick={() => taskId && createCustomReportFromSelection(taskId, "qc_frame")}
-            >
-              Create QC Frame report
-            </button>
-            <button
-              type="button"
-              className="rounded border border-ink/20 bg-white px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50"
-              disabled={!taskId || createCustomReportMutation.isPending || selectedCount === 0}
-              onClick={() => taskId && createCustomReportFromSelection(taskId, "qc_video")}
-            >
-              Create QC Video report
-            </button>
-          </div>
+          <button
+            type="button"
+            className="rounded border border-ink/20 bg-white px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={!taskId}
+            onClick={() => taskId && goToReport(taskId, "frames", null)}
+          >
+            Open Reports
+          </button>
         </div>
-        {selectedCount === 0 ? (
-          <p className="text-xs text-ink/60">Select outputs with checkboxes in this page to enable custom report creation.</p>
-        ) : null}
         {customReportNotice ? <p className="text-xs text-ink/70">{customReportNotice}</p> : null}
         {!reports?.length ? (
           <p className="text-sm text-ink/60">No custom reports yet.</p>
@@ -2985,7 +2946,7 @@ export default function App() {
               <div key={report.reportId} className="flex items-center justify-between rounded border border-ink/10 bg-white p-2 text-sm">
                 <a
                   className="text-left text-ink underline"
-                  href={taskId ? `${taskRoute(taskId, "report")}?view=${report.reportType}&reportId=${encodeURIComponent(report.reportId)}` : "#"}
+                  href={taskId ? `${taskRoute(taskId, "report")}?view=reports&reportId=${encodeURIComponent(report.reportId)}` : "#"}
                   onClick={(event) => {
                     event.preventDefault();
                     if (taskId) {
@@ -2993,7 +2954,7 @@ export default function App() {
                     }
                   }}
                 >
-                  {report.name} ({report.reportType === "qc_frame" ? "QC Frame" : "QC Video"})
+                  {report.name} ({report.reportType === "qc_frame" ? "QC Frame" : "QC Video"}) - {report.status}
                 </a>
                 <button
                   type="button"
@@ -3367,16 +3328,14 @@ export default function App() {
               formatAssetDate,
               truncateIdentifier,
               reportTaskQuery,
-              runQcMutation,
-              renderCustomReportBox,
+              createCustomReportMutation,
+              deleteCustomReportMutation,
               toggleCustomReportOutput,
               setVideoPreviewModal,
               setImagePreviewModal,
               formatCompactTimestamp,
               asNumber,
               describeSegment,
-              fpsValue,
-              reportGraphModal,
               setReportGraphModal,
             }}
           />

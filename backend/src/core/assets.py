@@ -103,6 +103,14 @@ class AssetPaths:
         safe_ext = ext if ext.startswith(".") else f".{ext}"
         return f"{self.qc_prefix(segment_id, generation_id)}/{self._filename(safe_stem, safe_ext)}"
 
+    def report_prefix(self, report_id: str) -> str:
+        return f"{self.task_prefix()}/reports/{report_id}"
+
+    def report_artifact(self, report_id: str, stem: str, ext: str) -> str:
+        safe_stem = re.sub(r"[^a-zA-Z0-9_-]+", "", stem)[:80] or "artifact"
+        safe_ext = ext if ext.startswith(".") else f".{ext}"
+        return f"{self.report_prefix(report_id)}/{self._filename(safe_stem, safe_ext)}"
+
     def quality_match_prefix(self, frame_id: str, analysis_id: str) -> str:
         return f"{self.task_prefix()}/frames/{frame_id}/quality_match/{analysis_id}"
 
