@@ -253,6 +253,16 @@ function generationNeedsQcForFrameVariant(generation: SegmentGeneration, variant
   return !hasFrameQcArtifacts(frameQcForVariant(generation, variant.variantId, variant.outputKey));
 }
 
+function generationNeedsAdvancedQcForFrameVariant(generation: SegmentGeneration, variant: FrameVariant): boolean {
+  if (generation.status !== "complete" || !generation.outputKey) return false;
+  const qc = generation.qc;
+  if (!qc) return true;
+  if (qc.status === "running") return false;
+  if (qc.status !== "complete") return true;
+  const frameQc = frameQcForVariant(generation, variant.variantId, variant.outputKey);
+  return !hasAdvancedFrameQcArtifacts(frameQc);
+}
+
 export default function ReportsPage({ ctx }: ReportsPageProps) {
   const {
     reportTask,
@@ -510,6 +520,11 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
           linkedGenerations.find(
             (row) =>
               row.generation.qc?.status === "complete" &&
+              hasAdvancedFrameQcArtifacts(frameQcForVariant(row.generation, variant.variantId, variant.outputKey)),
+          ) ??
+          linkedGenerations.find(
+            (row) =>
+              row.generation.qc?.status === "complete" &&
               hasFrameQcArtifacts(frameQcForVariant(row.generation, variant.variantId, variant.outputKey)),
           ) ??
           linkedGenerations.find((row) => row.generation.qc?.status === "running") ??
@@ -564,12 +579,14 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
   }, [qcFrameRows, reportTask, reportView, scopedVideoRows]);
   const isQcView = reportView === "qc_frame" || reportView === "qc_video";
   const hasMissingQc = scopedQcGenerationIdsNeedingRun.length > 0;
-  const scopedFrameGenerationIds = useMemo(() => {
+  const scopedAdvancedQcGenerationIdsNeedingRun = useMemo(() => {
     if (!reportTask || reportView !== "qc_frame") return [] as string[];
     const ids = new Set<string>();
     for (const row of qcFrameRows) {
       for (const linked of row.linkedGenerations) {
-        ids.add(linked.generation.genId);
+        if (generationNeedsAdvancedQcForFrameVariant(linked.generation, row.variant)) {
+          ids.add(linked.generation.genId);
+        }
       }
     }
     return [...ids].sort();
@@ -585,9 +602,9 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
   }
 
   async function runAdvancedFrameQcNow() {
-    if (!reportTask || reportView !== "qc_frame" || !scopedFrameGenerationIds.length) return;
-    for (let index = 0; index < scopedFrameGenerationIds.length; index += 20) {
-      const batch = scopedFrameGenerationIds.slice(index, index + 20);
+    if (!reportTask || reportView !== "qc_frame" || !scopedAdvancedQcGenerationIdsNeedingRun.length) return;
+    for (let index = 0; index < scopedAdvancedQcGenerationIdsNeedingRun.length; index += 20) {
+      const batch = scopedAdvancedQcGenerationIdsNeedingRun.slice(index, index + 20);
       await runQcMutation.mutateAsync({ taskId: reportTask.taskId, generationIds: batch, mode: "advanced_frame" });
     }
   }
@@ -629,13 +646,14 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
   }, [activeCustomReportId, reportTask, reportView, runQcMutation, scopedQcGenerationIdsNeedingRun]);
 
   useEffect(() => {
+    if (!isQcView) return;
     const status = latestQcJob?.status;
     if (status !== "queued" && status !== "running") return;
     const timer = window.setInterval(() => {
       void reportTaskQuery.refetch();
-    }, 5000);
+    }, 15000);
     return () => window.clearInterval(timer);
-  }, [latestQcJob?.jobId, latestQcJob?.status, reportTaskQuery]);
+  }, [isQcView, latestQcJob?.jobId, latestQcJob?.status, reportTaskQuery]);
 
   const reportPlaybackUrl = reportTask?.video?.editSource?.downloadUrl ?? reportTask?.video?.original?.downloadUrl ?? null;
   const selectedRefKeys = new Set(
@@ -743,12 +761,16 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
             <button
               type="button"
               className="rounded border border-accent/30 bg-accent/10 px-3 py-2 text-sm text-ink disabled:cursor-not-allowed disabled:opacity-50"
-              disabled={!reportTask || !scopedFrameGenerationIds.length || runQcMutation.isPending}
+              disabled={!reportTask || !scopedAdvancedQcGenerationIdsNeedingRun.length || runQcMutation.isPending}
               onClick={() => {
                 void runAdvancedFrameQcNow();
               }}
             >
-              {runQcMutation.isPending ? "Running Advanced QC..." : "Advanced QC Report"}
+              {runQcMutation.isPending
+                ? "Running Advanced QC..."
+                : scopedAdvancedQcGenerationIdsNeedingRun.length
+                  ? "Advanced QC Report"
+                  : "Advanced QC Up To Date"}
             </button>
           ) : null}
         </div>
@@ -1063,7 +1085,12 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                             <div>
                               <p className="text-xs font-medium text-ink/70">Original frame</p>
                               {row.frame.imageUrl ? (
-                                <img src={row.frame.imageUrl} alt="Original frame" className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain" />
+                                <img
+                                  src={row.frame.imageUrl}
+                                  alt="Original frame"
+                                  loading="lazy"
+                                  className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain"
+                                />
                               ) : (
                                 <p className="text-xs text-ink/50">Unavailable</p>
                               )}
@@ -1071,7 +1098,12 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                             <div>
                               <p className="text-xs font-medium text-ink/70">Mask edit</p>
                               {(row.variant.patchMeta?.maskUrl as string | undefined) ? (
-                                <img src={row.variant.patchMeta?.maskUrl as string} alt="Mask" className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain" />
+                                <img
+                                  src={row.variant.patchMeta?.maskUrl as string}
+                                  alt="Mask"
+                                  loading="lazy"
+                                  className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain"
+                                />
                               ) : (
                                 <p className="text-xs text-ink/50">No mask</p>
                               )}
@@ -1079,7 +1111,12 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                             <div>
                               <p className="text-xs font-medium text-ink/70">Edited frame</p>
                               {row.variant.imageUrl ? (
-                                <img src={row.variant.imageUrl} alt="Edited frame" className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain" />
+                                <img
+                                  src={row.variant.imageUrl}
+                                  alt="Edited frame"
+                                  loading="lazy"
+                                  className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain"
+                                />
                               ) : (
                                 <p className="text-xs text-ink/50">Unavailable</p>
                               )}
@@ -1119,7 +1156,12 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                                   className="block w-full"
                                   onClick={() => setImagePreviewModal({ url: frameHeatmapUrl, label: "Frame QC heatmap" })}
                                 >
-                                  <img src={frameHeatmapUrl} alt="Frame diff heatmap" className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain" />
+                                  <img
+                                    src={frameHeatmapUrl}
+                                    alt="Frame diff heatmap"
+                                    loading="lazy"
+                                    className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain"
+                                  />
                                 </button>
                               ) : (
                                 <p className="text-xs text-ink/50">No heatmap</p>
@@ -1133,7 +1175,12 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                                   className="block w-full"
                                   onClick={() => setImagePreviewModal({ url: frameOverlayUrl, label: "Frame QC overlay" })}
                                 >
-                                  <img src={frameOverlayUrl} alt="Frame diff overlay" className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain" />
+                                  <img
+                                    src={frameOverlayUrl}
+                                    alt="Frame diff overlay"
+                                    loading="lazy"
+                                    className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain"
+                                  />
                                 </button>
                               ) : (
                                 <p className="text-xs text-ink/50">No overlay</p>
@@ -1155,6 +1202,7 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                                   <img
                                     src={(boundaryOverlayUrl ?? frameBinaryUrl) as string}
                                     alt="Frame QC boundary or binary map"
+                                    loading="lazy"
                                     className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain"
                                   />
                                 </button>
@@ -1197,6 +1245,7 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                                           <img
                                             src={card.imageUrl}
                                             alt={`Advanced QC ${card.title}`}
+                                            loading="lazy"
                                             className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain"
                                           />
                                         </button>
