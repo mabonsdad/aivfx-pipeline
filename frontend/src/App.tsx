@@ -838,9 +838,9 @@ export default function App() {
   const setActiveCustomReportId = useCallback(
     (reportId: string | null) => {
       if (!selectedTaskId) return;
-      goToReport(selectedTaskId, reportView, reportId);
+      goToReport(selectedTaskId, "reports", reportId);
     },
-    [goToReport, reportView, selectedTaskId],
+    [goToReport, selectedTaskId],
   );
 
   useCanonicalTaskRoute({

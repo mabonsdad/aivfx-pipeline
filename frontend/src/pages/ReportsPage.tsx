@@ -402,9 +402,9 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
       outputRefs,
       name: reportName.trim() || undefined,
     });
-    closeCreateModal();
     setReportView("reports");
     setActiveCustomReportId(result.reportId);
+    closeCreateModal();
     await reportTaskQuery.refetch();
   }
 
@@ -512,13 +512,23 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                   const ref: CustomReportOutputRef = { assetType: "frame_variant", frameId: row.frame.frameId, variantId: row.variant.variantId };
                   const checked = Boolean(selectedOutputRefsByTask[`${reportTaskId}:${reportOutputRefKey(ref)}`]);
                   return (
-                    <article key={`${row.frame.frameId}:${row.variant.variantId}`} className="space-y-2 rounded-lg border border-ink/10 bg-white p-3">
+                    <article
+                      key={`${row.frame.frameId}:${row.variant.variantId}`}
+                      className={`space-y-2 rounded-lg border p-3 transition-colors ${
+                        checked ? "border-teal-500 bg-teal-50/50" : "border-ink/10 bg-white"
+                      }`}
+                    >
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <p className="text-sm font-semibold">
                           {row.role === "start" ? "Start" : row.role === "end" ? "End" : "Unlinked"} frame edit - frame {row.frame.frameIndex}
                         </p>
                         <label className="flex items-center gap-2 text-xs text-ink/70">
-                          <input type="checkbox" checked={checked} onChange={() => reportTaskId && toggleCustomReportOutput(reportTaskId, ref)} />
+                          <input
+                            type="checkbox"
+                            className="h-4 w-4 accent-teal-600"
+                            checked={checked}
+                            onChange={() => reportTaskId && toggleCustomReportOutput(reportTaskId, ref)}
+                          />
                           Include in report
                         </label>
                       </div>
@@ -571,11 +581,21 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                   const ref: CustomReportOutputRef = { assetType: "segment_generation", genId: row.generation.genId };
                   const checked = Boolean(selectedOutputRefsByTask[`${reportTaskId}:${reportOutputRefKey(ref)}`]);
                   return (
-                    <article key={row.generation.genId} className="space-y-2 rounded-lg border border-ink/10 bg-white p-3">
+                    <article
+                      key={row.generation.genId}
+                      className={`space-y-2 rounded-lg border p-3 transition-colors ${
+                        checked ? "border-teal-500 bg-teal-50/50" : "border-ink/10 bg-white"
+                      }`}
+                    >
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <p className="text-sm font-semibold">Generated segment - {row.segment ? describeSegment(row.segment) : row.generation.genId}</p>
                         <label className="flex items-center gap-2 text-xs text-ink/70">
-                          <input type="checkbox" checked={checked} onChange={() => reportTaskId && toggleCustomReportOutput(reportTaskId, ref)} />
+                          <input
+                            type="checkbox"
+                            className="h-4 w-4 accent-teal-600"
+                            checked={checked}
+                            onChange={() => reportTaskId && toggleCustomReportOutput(reportTaskId, ref)}
+                          />
                           Include in report
                         </label>
                       </div>
@@ -821,10 +841,22 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                             </div>
                           ) : null}
                           {advanced ? (
-                            <div className="space-y-2 rounded-lg border border-ink/10 bg-white p-3">
-                              <div className="flex items-center justify-between gap-2">
+                            <div className="space-y-2">
+                              <div className="flex items-center justify-between gap-2 border-t border-ink/10 pt-2">
                                 <p className="text-sm font-semibold text-ink/90">Advanced QC analysis</p>
-                                <p className="text-xs uppercase tracking-wide text-ink/60">{advanced.status}</p>
+                                <p
+                                  className={`text-xs uppercase tracking-wide ${
+                                    advanced.status === "pass"
+                                      ? "text-emerald-700"
+                                      : advanced.status === "warn"
+                                        ? "text-amber-700"
+                                        : advanced.status === "fail"
+                                          ? "text-red-700"
+                                          : "text-ink/60"
+                                  }`}
+                                >
+                                  Overall status: {advanced.status ?? "n/a"}
+                                </p>
                               </div>
                               <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
                                 {advancedCards.map((card) => (
