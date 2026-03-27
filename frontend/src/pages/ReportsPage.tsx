@@ -58,6 +58,11 @@ type ReportsPageProps = {
   ctx: ReportsPageCtx;
 };
 
+type InfoModalState = {
+  title: string;
+  lines: string[];
+} | null;
+
 type FrameOutputRow = {
   frame: FrameRecord;
   variant: FrameVariant;
@@ -291,6 +296,45 @@ function ReportCreateModal(props: {
   );
 }
 
+function InfoButton(props: { onClick: () => void; label: string }) {
+  const { onClick, label } = props;
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      title={label}
+      onClick={onClick}
+      className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-ink/20 bg-white text-[10px] font-semibold text-ink/70"
+    >
+      i
+    </button>
+  );
+}
+
+function InfoModal(props: { state: InfoModalState; onClose: () => void }) {
+  const { state, onClose } = props;
+  if (!state) return null;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+      <div className="w-full max-w-2xl rounded-2xl border border-ink/10 bg-card p-5 shadow-xl">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h3 className="text-xl font-semibold">{state.title}</h3>
+          </div>
+          <button type="button" className="text-sm text-ink/60 underline" onClick={onClose}>
+            Close
+          </button>
+        </div>
+        <div className="mt-4 space-y-2 text-sm text-ink/75">
+          {state.lines.map((line, index) => (
+            <p key={`${state.title}-${index}`}>{line}</p>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function ReportsPage({ ctx }: ReportsPageProps) {
   const {
     reportTask,
@@ -321,6 +365,7 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
   const [createModalMode, setCreateModalMode] = useState<"qc_frame" | "qc_video" | null>(null);
   const [reportName, setReportName] = useState("");
   const [selectedTests, setSelectedTests] = useState<string[]>([]);
+  const [infoModal, setInfoModal] = useState<InfoModalState>(null);
 
   const frameOutputRows = useMemo(() => {
     if (!reportTask) return [] as FrameOutputRow[];
@@ -421,6 +466,10 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
     setCreateModalMode(null);
     setReportName("");
     setSelectedTests([]);
+  }
+
+  function openInfo(title: string, lines: string[]) {
+    setInfoModal({ title, lines });
   }
 
   function toggleTest(id: string) {
@@ -857,10 +906,21 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                               <p>Prompt: {row.prompt}</p>
                             </div>
                             <div className="rounded border border-ink/10 bg-white p-2 text-xs text-ink/70">
-                              <p className="font-semibold text-ink/90">Frame QC analysis</p>
-                              <p className="mb-1 text-[11px] text-ink/55">
-                                Comparison: source frame vs edited frame. Region basis: {row.maskUrl ? "user mask" : "full-frame comparison"}.
-                              </p>
+                              <div className="mb-1 flex items-center gap-2">
+                                <p className="font-semibold text-ink/90">Frame QC analysis</p>
+                                <InfoButton
+                                  label="Explain frame QC analysis"
+                                  onClick={() =>
+                                    openInfo("Frame QC analysis", [
+                                      "This is a source-frame versus edited-frame comparison.",
+                                      row.maskUrl
+                                        ? "Region basis: user mask. Outside-leakage and boundary-spill are measured relative to that mask."
+                                        : "Region basis: full-frame comparison. There is no user mask for this frame, so the percentages describe whole-image change only.",
+                                      "Changed, Outside leakage, and Boundary spill are shown as percentages because they describe the percentage of pixels affected in those regions.",
+                                    ])
+                                  }
+                                />
+                              </div>
                               {row.standard ? (
                                 <>
                                   <p>Changed: {asNumber(frameMetrics?.changedPctTotal)?.toFixed(2) ?? "n/a"}%</p>
@@ -875,7 +935,19 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                           {row.standard ? (
                             <div className="grid gap-3 md:grid-cols-3">
                               <div className="space-y-1">
-                                <p className="text-xs font-medium text-ink/70">Frame diff heatmap</p>
+                                <div className="flex items-center gap-2">
+                                  <p className="text-xs font-medium text-ink/70">Frame diff heatmap</p>
+                                  <InfoButton
+                                    label="Explain frame diff heatmap"
+                                    onClick={() =>
+                                      openInfo("Frame diff heatmap", [
+                                        "This is a source-frame versus edited-frame comparison heatmap.",
+                                        "Color interpretation: cooler blue means lower difference, yellow means moderate change, and red means stronger change.",
+                                        "This view is for locating where the edit changed pixels. It does not by itself judge whether those changes are acceptable.",
+                                      ])
+                                    }
+                                  />
+                                </div>
                                 {frameHeatmapUrl ? (
                                   <button type="button" className="block w-full" onClick={() => setImagePreviewModal({ url: frameHeatmapUrl, label: "Frame QC heatmap" })}>
                                     <img src={frameHeatmapUrl} alt="Frame diff heatmap" className="aspect-video w-full rounded border border-ink/10 bg-white object-contain" />
@@ -885,7 +957,19 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                                 )}
                               </div>
                               <div className="space-y-1">
-                                <p className="text-xs font-medium text-ink/70">Frame diff overlay</p>
+                                <div className="flex items-center gap-2">
+                                  <p className="text-xs font-medium text-ink/70">Frame diff overlay</p>
+                                  <InfoButton
+                                    label="Explain frame diff overlay"
+                                    onClick={() =>
+                                      openInfo("Frame diff overlay", [
+                                        "This overlays the frame-difference signal on top of the edited frame.",
+                                        "Use it to see whether anomaly hotspots sit on the intended edit region or whether they spill onto surrounding content.",
+                                        "Colors follow the same heatmap logic: low change is subdued, stronger change trends toward yellow/red.",
+                                      ])
+                                    }
+                                  />
+                                </div>
                                 {frameOverlayUrl ? (
                                   <button type="button" className="block w-full" onClick={() => setImagePreviewModal({ url: frameOverlayUrl, label: "Frame QC overlay" })}>
                                     <img src={frameOverlayUrl} alt="Frame diff overlay" className="aspect-video w-full rounded border border-ink/10 bg-white object-contain" />
@@ -895,7 +979,21 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                                 )}
                               </div>
                               <div className="space-y-1">
-                                <p className="text-xs font-medium text-ink/70">Boundary/Binary map</p>
+                                <div className="flex items-center gap-2">
+                                  <p className="text-xs font-medium text-ink/70">Boundary/Binary map</p>
+                                  <InfoButton
+                                    label="Explain boundary and binary map"
+                                    onClick={() =>
+                                      openInfo("Boundary/Binary map", [
+                                        row.maskUrl
+                                          ? "This map shows thresholded change against the user mask and helps reveal spill just outside the intended edit boundary."
+                                          : "This map shows thresholded change against the inferred edit area because there is no user mask for this frame.",
+                                        "It is useful for spotting hard edge transitions, haloing, or unintended change just beyond the edit region.",
+                                        "This is a binary or boundary-focused diagnostic, so it is best read as changed-versus-not-changed rather than by intensity.",
+                                      ])
+                                    }
+                                  />
+                                </div>
                                 {boundaryOverlayUrl || frameBinaryUrl ? (
                                   <button
                                     type="button"
@@ -913,9 +1011,24 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                           {advanced ? (
                             <div className="space-y-2">
                               <div className="flex items-center justify-between gap-2 border-t border-ink/10 pt-2">
-                                <p className="text-sm font-semibold text-ink/90">Advanced QC analysis</p>
-                                <p
-                                  className={`text-xs tracking-wide ${
+                                <div className="flex items-center gap-2">
+                                  <p className="text-sm font-semibold text-ink/90">Advanced QC analysis</p>
+                                  <InfoButton
+                                    label="Explain advanced QC analysis"
+                                    onClick={() =>
+                                      openInfo("Advanced QC analysis", [
+                                        "Advanced QC combines several signals to judge whether the edit stayed contained and visually coherent.",
+                                        row.maskUrl
+                                          ? "Region basis: user mask with outer-ring spill checks."
+                                          : "Region basis: inferred edit area derived from source versus edited differences.",
+                                        "Most advanced metrics are shown on a 0.0 to 1.0 normalized scale because they are proxy anomaly scores rather than direct pixel percentages.",
+                                      ])
+                                    }
+                                  />
+                                </div>
+                                <div className="flex items-center gap-2">
+                                  <p
+                                    className={`text-xs tracking-wide ${
                                     advanced.status === "pass"
                                       ? "text-emerald-700"
                                       : advanced.status === "warn"
@@ -924,47 +1037,58 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                                           ? "text-red-700"
                                           : "text-ink/60"
                                   }`}
-                                >
-                                  QC classification: {advanced.status ?? "n/a"}
-                                </p>
-                              </div>
-                              <p className="text-[11px] text-ink/55">
-                                Region basis: {row.maskUrl ? "user mask with outer-ring spill checks" : "inferred edit area derived from source vs edited differences"}.
-                              </p>
-                              <div className="rounded border border-ink/10 bg-white p-2 text-[11px] text-ink/70">
-                                <p className="font-medium text-ink/90">
-                                  Driver:{" "}
-                                  {dominantDriver === "outer_ring"
-                                    ? "Outer-ring spill"
-                                    : dominantDriver === "boundary_spill"
-                                      ? "Boundary spill"
-                                      : "Balanced"}
-                                </p>
-                                <p>
-                                  Observed outer ring: {asNumber(advancedObserved.outerRingMean)?.toFixed(4) ?? "n/a"} · fail at{" "}
-                                  {asNumber(advancedThresholds.outerRingFail)?.toFixed(4) ?? "n/a"} · warn at{" "}
-                                  {asNumber(advancedThresholds.outerRingWarn)?.toFixed(4) ?? "n/a"}
-                                </p>
-                                <p>
-                                  Observed boundary spill: {asNumber(advancedObserved.boundarySpill)?.toFixed(4) ?? "n/a"} · fail at{" "}
-                                  {asNumber(advancedThresholds.boundaryFail)?.toFixed(4) ?? "n/a"} · warn at{" "}
-                                  {asNumber(advancedThresholds.boundaryWarn)?.toFixed(4) ?? "n/a"}
-                                </p>
-                                <p className="mt-1">
-                                  {advancedReasons.length ? advancedReasons.join("; ") : "No classification explanation available."}
-                                </p>
+                                  >
+                                    QC classification: {advanced.status ?? "n/a"}
+                                  </p>
+                                  <InfoButton
+                                    label="Explain advanced QC classification"
+                                    onClick={() =>
+                                      openInfo("Advanced QC classification", [
+                                        `Driver: ${
+                                          dominantDriver === "outer_ring"
+                                            ? "Outer-ring spill"
+                                            : dominantDriver === "boundary_spill"
+                                              ? "Boundary spill"
+                                              : "Balanced"
+                                        }.`,
+                                        `Observed outer ring = ${asNumber(advancedObserved.outerRingMean)?.toFixed(4) ?? "n/a"} · fail at >${asNumber(advancedThresholds.outerRingFail)?.toFixed(4) ?? "n/a"} · warn at >${asNumber(advancedThresholds.outerRingWarn)?.toFixed(4) ?? "n/a"}`,
+                                        `Observed boundary spill = ${asNumber(advancedObserved.boundarySpill)?.toFixed(4) ?? "n/a"} · fail at >${asNumber(advancedThresholds.boundaryFail)?.toFixed(4) ?? "n/a"} · warn at >${asNumber(advancedThresholds.boundaryWarn)?.toFixed(4) ?? "n/a"}`,
+                                        advancedReasons.length ? advancedReasons.join("; ") : "No classification explanation available.",
+                                        "Warn and fail are threshold bands. Crossing the warning threshold suggests the edit is starting to leak or mismatch; crossing the fail threshold means the spill is strong enough to merit correction or closer review.",
+                                      ])
+                                    }
+                                  />
+                                </div>
                               </div>
                               <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
                                 {advancedCards.map((card) => (
                                   <div key={card.key} className="space-y-2 rounded border border-ink/10 bg-bg/20 p-2">
-                                    <p className="text-xs font-semibold text-ink/90">{card.title}</p>
-                                    <p className="text-[11px] text-ink/60">
-                                      {card.key === "naturalness"
-                                        ? "Edited frame only"
-                                        : "Source frame vs edited frame"}
-                                      {" · "}
-                                      {row.maskUrl ? "User mask aware" : "Inferred edit area"}
-                                    </p>
+                                    <div className="flex items-center gap-2">
+                                      <p className="text-xs font-semibold text-ink/90">{card.title}</p>
+                                      <InfoButton
+                                        label={`Explain ${card.title}`}
+                                        onClick={() =>
+                                          openInfo(card.title, [
+                                            card.key === "naturalness"
+                                              ? "This test is edited-frame only. It looks for patches whose local image statistics look less natural than the rest of the edited frame."
+                                              : "This test compares the source frame against the edited frame to locate change or inconsistency.",
+                                            row.maskUrl ? "Region basis: user mask aware." : "Region basis: inferred edit area.",
+                                            "Scores are on a normalized 0.0 to 1.0 scale. Higher values indicate a stronger anomaly or a less consistent result.",
+                                            card.key === "composite"
+                                              ? "Composite combines perceptual change, sharpness mismatch, naturalness, and microtexture into one summary map."
+                                              : card.key === "lpips"
+                                                ? "LPIPS patch map is a perceptual-difference proxy. Higher scores indicate more visually meaningful change."
+                                                : card.key === "boundary"
+                                                  ? "Boundary spill analysis compares anomaly strength just inside and just outside the edit boundary."
+                                                  : card.key === "sharpness"
+                                                    ? "Sharpness consistency checks whether the edited region is too sharp or too soft relative to the surrounding scene."
+                                                    : card.key === "naturalness"
+                                                      ? "Naturalness map looks for patches with unusual local statistics that can indicate synthetic artifacts."
+                                                      : "Microtexture map looks for noise or fine-detail inconsistencies such as over-smoothing or over-sharpening.",
+                                          ])
+                                        }
+                                      />
+                                    </div>
                                     <p className="text-[11px] text-ink/70">Main: {card.main !== null ? card.main.toFixed(4) : "n/a"}</p>
                                     <p className="text-[11px] text-ink/70">Mask: {card.mask !== null ? card.mask.toFixed(4) : "n/a"}</p>
                                     <p className="text-[11px] text-ink/70">Outer ring: {card.ring !== null ? card.ring.toFixed(4) : "n/a"}</p>
@@ -1030,10 +1154,22 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                           </div>
                           <div className="grid gap-3 md:grid-cols-5">
                             <div className="rounded border border-ink/10 bg-white p-2 text-xs text-ink/70">
-                              <p className="font-semibold text-ink/90">Video QC analysis</p>
-                              <p className="mb-1 text-[11px] text-ink/55">
-                                Comparison: original segment vs generated segment. Region basis: {row.maskUrl ? "start-frame user mask carried into frame evidence" : "full-frame video comparison"}.
-                              </p>
+                              <div className="mb-1 flex items-center gap-2">
+                                <p className="font-semibold text-ink/90">Video QC analysis</p>
+                                <InfoButton
+                                  label="Explain video QC analysis"
+                                  onClick={() =>
+                                    openInfo("Video QC analysis", [
+                                      "This is an original-segment versus generated-segment comparison.",
+                                      row.maskUrl
+                                        ? "Region basis: full-frame video comparison, with the start-frame user mask also used for frame-evidence spill checks where applicable."
+                                        : "Region basis: full-frame video comparison.",
+                                      "Changed mean and Outside leak mean are percentages because they describe the percentage of changed pixels across sampled frames.",
+                                      "SSIM and PSNR are similarity metrics. Higher SSIM generally means closer structural match; higher PSNR means lower pixel error.",
+                                    ])
+                                  }
+                                />
+                              </div>
                               {row.standard ? (
                                 <>
                                   <p>Changed mean: {asNumber(videoAggregates?.changedPctTotalMean)?.toFixed(2) ?? "n/a"}%</p>
@@ -1046,7 +1182,19 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                               )}
                             </div>
                             <div className="md:col-span-2">
-                              <p className="text-xs font-medium text-ink/70">Timeline graph</p>
+                              <div className="flex items-center gap-2">
+                                <p className="text-xs font-medium text-ink/70">Timeline graph</p>
+                                <InfoButton
+                                  label="Explain timeline graph"
+                                  onClick={() =>
+                                    openInfo("Timeline graph", [
+                                      "This graph plots sampled QC values through time for the original versus generated segment comparison.",
+                                      "Use it to spot moments where the generation drifts, leaks, or otherwise diverges more strongly from the original clip.",
+                                      "Unlike the percentage summaries, this is a temporal diagnostic: spikes matter more than the average when checking continuity.",
+                                    ])
+                                  }
+                                />
+                              </div>
                               {timelineGraphUrl ? (
                                 <button type="button" className="block w-full" onClick={() => setReportGraphModal({ url: timelineGraphUrl, label: "Video QC timeline graph" })}>
                                   <img src={timelineGraphUrl} alt="Timeline graph" className="aspect-video w-full rounded border border-ink/10 bg-white object-contain" />
@@ -1061,7 +1209,19 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                               ) : null}
                             </div>
                             <div className="md:col-span-2">
-                              <p className="text-xs font-medium text-ink/70">Diff video map</p>
+                              <div className="flex items-center gap-2">
+                                <p className="text-xs font-medium text-ink/70">Diff video map</p>
+                                <InfoButton
+                                  label="Explain diff video map"
+                                  onClick={() =>
+                                    openInfo("Diff video map", [
+                                      "This is a video visualization of frame-by-frame difference between the original segment and the generated segment.",
+                                      "Brighter or hotter areas indicate stronger divergence. It helps reveal motion mismatch, spill, or changes to untouched areas over time.",
+                                      "Use it together with the timeline graph: the graph tells you when the divergence spikes, and the diff video shows where it happens in the frame.",
+                                    ])
+                                  }
+                                />
+                              </div>
                               {diffVideoUrl ? (
                                 <button type="button" className="block w-full" onClick={() => setVideoPreviewModal({ url: diffVideoUrl, label: "Video diff map" })}>
                                   <img src={diffVideoPosterUrl ?? row.editedStartFrameUrl ?? row.originalFrameUrl ?? ""} alt="Diff video map" className="aspect-video w-full rounded border border-ink/10 bg-white object-contain" />
@@ -1075,7 +1235,19 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                             <div className="grid gap-3 md:grid-cols-3">
                               {selectedFrames.slice(0, 3).map((frame) => (
                                 <div key={`video-frame-${row.genId}-${frame.index}`} className="space-y-1">
-                                  <p className="text-xs font-medium text-ink/70">Evidence frame {String(frame.index)}</p>
+                                  <div className="flex items-center gap-2">
+                                    <p className="text-xs font-medium text-ink/70">Evidence frame {String(frame.index)}</p>
+                                    <InfoButton
+                                      label={`Explain evidence frame ${String(frame.index)}`}
+                                      onClick={() =>
+                                        openInfo(`Evidence frame ${String(frame.index)}`, [
+                                          "This is a representative sampled frame from the video QC run.",
+                                          "It uses the same source-versus-generated comparison logic as the still-frame QC views, but only for selected moments in the clip.",
+                                          "Use evidence frames to inspect where a spike in the timeline or diff video comes from visually.",
+                                        ])
+                                      }
+                                    />
+                                  </div>
                                   {frame.overlayUrl ? (
                                     <button type="button" className="block w-full" onClick={() => setImagePreviewModal({ url: frame.overlayUrl as string, label: `Video evidence frame ${String(frame.index)}` })}>
                                       <img src={frame.overlayUrl as string} alt="Video evidence frame" className="aspect-video w-full rounded border border-ink/10 bg-white object-contain" />
@@ -1116,6 +1288,7 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
         onCreate={() => void createReport()}
         isPending={createCustomReportMutation.isPending}
       />
+      <InfoModal state={infoModal} onClose={() => setInfoModal(null)} />
     </main>
   );
 }
