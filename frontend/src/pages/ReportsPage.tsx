@@ -93,6 +93,7 @@ type FrameReportRow = {
   } | null;
   advanced?: {
     status?: string;
+    classification?: Record<string, unknown>;
     selectedTests?: string[];
     metrics?: Record<string, unknown>;
     topRegions?: Array<Record<string, unknown>>;
@@ -762,8 +763,15 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                       const frameMetrics = row.standard?.metrics;
                       const frameArtifacts = row.standard?.artifacts;
                       const advanced = row.advanced;
+                      const advancedClassification = (advanced?.classification ?? {}) as Record<string, unknown>;
                       const advancedArtifacts = advanced?.artifacts;
                       const advancedMetrics = advanced?.metrics;
+                      const advancedReasons = Array.isArray(advancedClassification.reasons)
+                        ? advancedClassification.reasons.filter((reason): reason is string => typeof reason === "string")
+                        : [];
+                      const advancedThresholds = (advancedClassification.thresholds ?? {}) as Record<string, unknown>;
+                      const advancedObserved = (advancedClassification.observed ?? {}) as Record<string, unknown>;
+                      const dominantDriver = typeof advancedClassification.dominantDriver === "string" ? advancedClassification.dominantDriver : null;
                       const boundaryOverlayUrl =
                         (frameArtifacts?.boundaryOverlayUrl as string | undefined) ??
                         (frameArtifacts?.binaryChangeUrl as string | undefined);
@@ -923,6 +931,29 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                               <p className="text-[11px] text-ink/55">
                                 Region basis: {row.maskUrl ? "user mask with outer-ring spill checks" : "inferred edit area derived from source vs edited differences"}.
                               </p>
+                              <div className="rounded border border-ink/10 bg-white p-2 text-[11px] text-ink/70">
+                                <p className="font-medium text-ink/90">
+                                  Driver:{" "}
+                                  {dominantDriver === "outer_ring"
+                                    ? "Outer-ring spill"
+                                    : dominantDriver === "boundary_spill"
+                                      ? "Boundary spill"
+                                      : "Balanced"}
+                                </p>
+                                <p>
+                                  Observed outer ring: {asNumber(advancedObserved.outerRingMean)?.toFixed(4) ?? "n/a"} · fail at{" "}
+                                  {asNumber(advancedThresholds.outerRingFail)?.toFixed(4) ?? "n/a"} · warn at{" "}
+                                  {asNumber(advancedThresholds.outerRingWarn)?.toFixed(4) ?? "n/a"}
+                                </p>
+                                <p>
+                                  Observed boundary spill: {asNumber(advancedObserved.boundarySpill)?.toFixed(4) ?? "n/a"} · fail at{" "}
+                                  {asNumber(advancedThresholds.boundaryFail)?.toFixed(4) ?? "n/a"} · warn at{" "}
+                                  {asNumber(advancedThresholds.boundaryWarn)?.toFixed(4) ?? "n/a"}
+                                </p>
+                                <p className="mt-1">
+                                  {advancedReasons.length ? advancedReasons.join("; ") : "No classification explanation available."}
+                                </p>
+                              </div>
                               <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
                                 {advancedCards.map((card) => (
                                   <div key={card.key} className="space-y-2 rounded border border-ink/10 bg-bg/20 p-2">

@@ -1876,12 +1876,60 @@ def _select_top_regions(
     return output
 
 
-def _qc_pass_warn_fail(mask_mean: float, outer_ring_mean: float, boundary_score: float) -> str:
-    if outer_ring_mean > max(0.30, mask_mean * 0.7) or boundary_score > 0.60:
-        return "fail"
-    if outer_ring_mean > max(0.18, mask_mean * 0.45) or boundary_score > 0.35:
-        return "warn"
-    return "pass"
+def _advanced_qc_classification(mask_mean: float, outer_ring_mean: float, boundary_score: float) -> dict[str, Any]:
+    fail_outer_threshold = max(0.30, mask_mean * 0.7)
+    warn_outer_threshold = max(0.18, mask_mean * 0.45)
+    fail_boundary_threshold = 0.60
+    warn_boundary_threshold = 0.35
+
+    outer_fail = outer_ring_mean > fail_outer_threshold
+    boundary_fail = boundary_score > fail_boundary_threshold
+    outer_warn = outer_ring_mean > warn_outer_threshold
+    boundary_warn = boundary_score > warn_boundary_threshold
+
+    if outer_fail or boundary_fail:
+        status = "fail"
+    elif outer_warn or boundary_warn:
+        status = "warn"
+    else:
+        status = "pass"
+
+    reasons: list[str] = []
+    if outer_fail:
+        reasons.append("outer-ring spill is above fail threshold")
+    elif outer_warn:
+        reasons.append("outer-ring spill is above warning threshold")
+    if boundary_fail:
+        reasons.append("boundary spill is above fail threshold")
+    elif boundary_warn:
+        reasons.append("boundary spill is above warning threshold")
+    if not reasons:
+        reasons.append("spill metrics are within thresholds")
+
+    dominant_driver = max(
+        [
+            ("outer_ring", outer_ring_mean / max(fail_outer_threshold, 1e-6)),
+            ("boundary_spill", boundary_score / max(fail_boundary_threshold, 1e-6)),
+        ],
+        key=lambda item: item[1],
+    )[0]
+
+    return {
+        "status": status,
+        "reasons": reasons,
+        "dominantDriver": dominant_driver,
+        "thresholds": {
+            "outerRingWarn": round(warn_outer_threshold, 6),
+            "outerRingFail": round(fail_outer_threshold, 6),
+            "boundaryWarn": round(warn_boundary_threshold, 6),
+            "boundaryFail": round(fail_boundary_threshold, 6),
+        },
+        "observed": {
+            "maskMean": round(mask_mean, 6),
+            "outerRingMean": round(outer_ring_mean, 6),
+            "boundarySpill": round(boundary_score, 6),
+        },
+    }
 
 
 def _run_advanced_frame_qc(
@@ -2011,10 +2059,11 @@ def _run_advanced_frame_qc(
         image_height=source_rgb.height,
         limit=ADV_QC_TOP_REGION_COUNT,
     )
-    advanced_status = _qc_pass_warn_fail(composite_mask_mean, composite_outer_ring_mean, boundary_spill_score)
+    classification = _advanced_qc_classification(composite_mask_mean, composite_outer_ring_mean, boundary_spill_score)
 
     return {
-        "status": advanced_status,
+        "status": classification["status"],
+        "classification": classification,
         "metrics": {
             "compositeImpactGlobal": round(_score_map_mean(composite_map, None), 6),
             "compositeImpactMask": round(composite_mask_mean, 6),
@@ -2165,6 +2214,7 @@ def _build_frame_report_row(
             advanced_artifact_keys[f"{artifact_name}Key"] = artifact_key
         advanced_payload = {
             "status": advanced_result.get("status") or "pass",
+            "classification": advanced_result.get("classification") or {},
             "selectedTests": selected_advanced_tests,
             "metrics": advanced_result.get("metrics") or {},
             "topRegions": advanced_result.get("topRegions") or [],
