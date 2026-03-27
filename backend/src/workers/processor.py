@@ -2487,6 +2487,20 @@ def _build_video_report_row(
             )
             diff_video_key = paths.report_artifact(report_id, _report_safe_stem("video", gen_id[-8:], "diff_map"), ".mp4")
             _upload_s3(s3, settings.assets_bucket, diff_video_key, diff_video_path, "video/mp4")
+            diff_video_poster_path = td_path / "diff_map_poster.png"
+            _run_command(
+                [
+                    FFMPEG_BIN,
+                    "-y",
+                    "-i",
+                    str(diff_video_path),
+                    "-frames:v",
+                    "1",
+                    str(diff_video_poster_path),
+                ]
+            )
+            diff_video_poster_key = paths.report_artifact(report_id, _report_safe_stem("video", gen_id[-8:], "diff_map_poster"), ".png")
+            _upload_s3(s3, settings.assets_bucket, diff_video_poster_key, diff_video_poster_path, "image/png")
 
             timeline_rows = [{key: value for key, value in row.items() if not key.startswith("_")} for row in per_frame_rows]
             timeline_csv = "index,timeSec,changedPctTotal,outsideLeakagePct,meanDiffTotal,psnr\n" + "\n".join(
@@ -2533,6 +2547,7 @@ def _build_video_report_row(
                 "selectedFrames": selected_frame_artifacts,
                 "artifacts": {
                     "diffVideoKey": diff_video_key,
+                    "diffVideoPosterKey": diff_video_poster_key,
                     "timelineCsvKey": timeline_csv_key,
                     "timelineGraphKey": timeline_graph_key,
                 },
