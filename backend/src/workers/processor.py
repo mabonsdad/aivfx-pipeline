@@ -1722,6 +1722,53 @@ def _create_mask_boundary_overlay(
     return output.getvalue()
 
 
+def _create_boundary_spill_overlay(
+    *,
+    base_image: Image.Image,
+    lpips_map: Image.Image,
+    inside_band_mask: Image.Image,
+    outer_ring_mask: Image.Image,
+) -> bytes:
+    base = base_image.convert("RGBA")
+    heatmap = ImageOps.colorize(lpips_map.convert("L"), black="#1e4fba", mid="#ffd84d", white="#e22626").convert("RGBA")
+    alpha = lpips_map.convert("L").point(lambda value: min(180, int(value * 1.35)))
+    heatmap.putalpha(alpha)
+    base.alpha_composite(heatmap)
+
+    inside_fill = Image.new("RGBA", base.size, (26, 188, 156, 80))
+    inside_overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    inside_overlay.paste(inside_fill, (0, 0), inside_band_mask.convert("L"))
+    base = Image.alpha_composite(base, inside_overlay)
+
+    outer_fill = Image.new("RGBA", base.size, (214, 76, 196, 80))
+    outer_overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    outer_overlay.paste(outer_fill, (0, 0), outer_ring_mask.convert("L"))
+    base = Image.alpha_composite(base, outer_overlay)
+
+    inner_edge = ImageChops.subtract(
+        inside_band_mask.filter(ImageFilter.MaxFilter(5)),
+        inside_band_mask.filter(ImageFilter.MinFilter(5)),
+    ).point(lambda value: 255 if value >= 128 else 0)
+    outer_edge = ImageChops.subtract(
+        outer_ring_mask.filter(ImageFilter.MaxFilter(5)),
+        outer_ring_mask.filter(ImageFilter.MinFilter(5)),
+    ).point(lambda value: 255 if value >= 128 else 0)
+
+    inner_edge_layer = Image.new("RGBA", base.size, (26, 188, 156, 210))
+    inner_overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    inner_overlay.paste(inner_edge_layer, (0, 0), inner_edge)
+    base = Image.alpha_composite(base, inner_overlay)
+
+    outer_edge_layer = Image.new("RGBA", base.size, (214, 76, 196, 210))
+    outer_edge_overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    outer_edge_overlay.paste(outer_edge_layer, (0, 0), outer_edge)
+    base = Image.alpha_composite(base, outer_edge_overlay)
+
+    output = BytesIO()
+    base.save(output, format="PNG")
+    return output.getvalue()
+
+
 def _median_abs_deviation(values: list[float], center: float | None = None) -> float:
     if not values:
         return 0.0
@@ -2034,6 +2081,12 @@ def _run_advanced_frame_qc(
         binary_change=composite_binary,
         mask_bin=mask,
     )
+    boundary_spill_map_bytes = _create_boundary_spill_overlay(
+        base_image=edited_rgb,
+        lpips_map=lpips_map,
+        inside_band_mask=inside_band_mask,
+        outer_ring_mask=outer_ring_mask,
+    )
 
     lpips_global_mean = _score_map_mean(lpips_map, None)
     lpips_mask_mean = _score_map_mean(lpips_map, mask)
@@ -2100,6 +2153,7 @@ def _run_advanced_frame_qc(
             "naturalnessMap": _heatmap_png(natural_map),
             "textureMap": _heatmap_png(texture_map),
             "boundaryMap": boundary_map_bytes,
+            "boundarySpillMap": boundary_spill_map_bytes,
             "maskUsed": _create_mask_boundary_overlay(
                 original_image=source_rgb,
                 binary_change=mask,

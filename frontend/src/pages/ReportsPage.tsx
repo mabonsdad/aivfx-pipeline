@@ -168,7 +168,7 @@ const QC_INFO_TEXT = {
     "This is a combined review map that blends several patch-level checks into one image, so you can quickly see which regions deserve closer attention. It highlights areas that look locally inconsistent based on multiple signals rather than just raw pixel change.",
     "Read this as a where should I look first map, not a literal truth score. Higher values inside the intended edit area may simply reflect the intended change. Higher values outside the intended area are more concerning, especially if they also show up in the Frame diff overlay or Boundary spill analysis. This is the best single artifact for prioritizing manual review, while the individual advanced maps help explain why an area was highlighted.",
   ],
-  lpipsPatchMap: [
+  perceptualDifferenceMap: [
     "This view highlights patches where the edited frame differs most strongly from the original frame in overall appearance. It is designed to reflect visually meaningful local change rather than only binary changed pixels.",
     "Use this to judge where the edit changed the look of the image most noticeably. Strong activity inside the intended edit area is often expected. Strong activity outside that area suggests visible spill or collateral change. Compare it with the Frame diff heatmap to see whether those changes are also large at the pixel level, and with the Composite anomaly map to see whether the changed areas also look locally inconsistent.",
   ],
@@ -180,13 +180,13 @@ const QC_INFO_TEXT = {
     "This map shows where the edited image has a different local sharpness or edge strength pattern from the original image, or where a patch stands out from the overall sharpness pattern of the edited frame.",
     "Use this when you want to see whether the edited area looks too sharp, too soft, or uneven compared with the rest of the image. High values inside the intended edit area may be acceptable if the edit adds or removes detail. High values outside the intended area are more concerning. Compare this with the Noise or microtexture map to separate edge crispness issues from fine-detail texture changes, and with the Composite anomaly map to see whether sharpness inconsistency is a major driver of the overall anomaly.",
   ],
-  naturalnessMap: [
+  naturalnessProxy: [
     "This map highlights areas in the edited frame that look statistically unusual compared with the rest of that same edited frame. Unlike most of the other artifacts, it does not compare against the original frame.",
     "Use this as an edited-frame-only anomaly check. It is best for spotting patches that stand out from their surroundings because they look unusually flat, noisy, or otherwise atypical within the final image. High values inside the intended edit region may simply reflect the changed content, so this view is strongest when used as supporting evidence. Compare it with the comparison-based artifacts, especially the Composite anomaly map and Noise or microtexture map, before drawing conclusions.",
   ],
   microtextureMap: [
     "This map highlights where the fine detail, grain, or local texture pattern changed between the original frame and the edited frame. It is useful for spotting areas that have become over-smoothed, over-sharpened, or texturally inconsistent.",
-    "Use this when the overall structure looks plausible but the surface detail feels wrong. High values inside the intended edit region may be expected for a strong edit, but high values outside it are a stronger warning sign. Compare it with Focus or sharpness consistency to separate texture shifts from edge sharpness changes, and with the LPIPS patch map to see whether the textural change also corresponds to a more visible overall appearance change.",
+    "Use this when the overall structure looks plausible but the surface detail feels wrong. High values inside the intended edit region may be expected for a strong edit, but high values outside it are a stronger warning sign. Compare it with Focus or sharpness consistency to separate texture shifts from edge sharpness changes, and with the Perceptual difference map to see whether the textural change also corresponds to a more visible overall appearance change.",
   ],
   qcClassification: [
     "This is the overall pass, warn, or fail summary for the advanced QC checks. It is a rule-based result that gives a quick triage view of whether the edit appears contained and visually consistent enough to pass review.",
@@ -379,6 +379,19 @@ function InfoButton(props: { onClick: () => void; label: string }) {
     >
       i
     </button>
+  );
+}
+
+function HeatmapLegend(props: { label: string }) {
+  const { label } = props;
+  return (
+    <div className="flex flex-wrap items-center gap-2 rounded border border-ink/10 bg-white px-2 py-1 text-[11px] text-ink/65">
+      <span className="font-medium text-ink/80">{label}</span>
+      <span>Blue = lower</span>
+      <span className="h-2 w-8 rounded bg-gradient-to-r from-[#1e4fba] via-[#ffd84d] to-[#e22626]" />
+      <span>Yellow = moderate</span>
+      <span>Red = stronger</span>
+    </div>
   );
 }
 
@@ -909,8 +922,8 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                         },
                         {
                           key: "lpips",
-                          title: "LPIPS patch map",
-                          imageUrl: advancedArtifacts?.lpipsMapUrl as string | undefined,
+                          title: "Perceptual difference map",
+                          imageUrl: (advancedArtifacts?.lpipsOverlayUrl as string | undefined) ?? (advancedArtifacts?.lpipsMapUrl as string | undefined),
                           main: asNumber(advancedMetrics?.lpips_global_mean),
                           mask: asNumber(advancedMetrics?.lpips_mask_mean),
                           ring: asNumber(advancedMetrics?.lpips_outer_ring_mean),
@@ -918,7 +931,7 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                         {
                           key: "boundary",
                           title: "Boundary spill analysis",
-                          imageUrl: advancedArtifacts?.boundaryMapUrl as string | undefined,
+                          imageUrl: (advancedArtifacts?.boundarySpillMapUrl as string | undefined) ?? (advancedArtifacts?.boundaryMapUrl as string | undefined),
                           main: asNumber(advancedMetrics?.boundary_spill_score),
                           mask: asNumber(advancedMetrics?.inside_boundary_mean),
                           ring: asNumber(advancedMetrics?.outside_boundary_mean),
@@ -933,7 +946,7 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                         },
                         {
                           key: "naturalness",
-                          title: "Naturalness map",
+                          title: "Naturalness proxy",
                           imageUrl: advancedArtifacts?.naturalnessMapUrl as string | undefined,
                           main: asNumber(advancedMetrics?.naturalness_mask_mean),
                           mask: asNumber(advancedMetrics?.naturalness_outer_ring_mean),
@@ -963,7 +976,11 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                             </div>
                             <div>
                               <p className="text-xs font-medium text-ink/70">Mask edit</p>
-                              {row.maskUrl ? <img src={row.maskUrl} alt="Mask" className="aspect-video w-full rounded border border-ink/10 bg-black object-contain" /> : <p className="text-xs text-ink/50">No mask</p>}
+                              {row.maskUrl ? (
+                                <img src={row.maskUrl} alt="Mask" className="aspect-video w-full rounded border border-ink/10 bg-black object-contain" />
+                              ) : (
+                                <p className="text-xs text-ink/50">No user mask was used. QC will infer a provisional mask from the frame difference.</p>
+                              )}
                             </div>
                             <div>
                               <p className="text-xs font-medium text-ink/70">Edited frame</p>
@@ -996,7 +1013,10 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                             </div>
                           </div>
                           {row.standard ? (
-                            <div className="grid gap-3 md:grid-cols-3">
+                            <div className="space-y-2">
+                              <p className="text-[11px] text-ink/55">Standard diff views are thresholded pixel-change diagnostics.</p>
+                              <HeatmapLegend label="Standard diff legend" />
+                              <div className="grid gap-3 md:grid-cols-3">
                               <div className="space-y-1">
                                 <div className="flex items-center gap-2">
                                   <p className="text-xs font-medium text-ink/70">Frame diff heatmap</p>
@@ -1049,6 +1069,7 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                                   <p className="text-xs text-ink/50">No boundary or binary map</p>
                                 )}
                               </div>
+                              </div>
                             </div>
                           ) : null}
                           {advanced ? (
@@ -1075,6 +1096,14 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                                   >
                                     QC classification: {advanced.status ?? "n/a"}
                                   </p>
+                                  <p className="text-xs text-ink/65">
+                                    Driver:{" "}
+                                    {dominantDriver === "outer_ring"
+                                      ? "Outer-ring spill"
+                                      : dominantDriver === "boundary_spill"
+                                        ? "Boundary spill"
+                                        : "Balanced"}
+                                  </p>
                                   <InfoButton
                                   label="Explain advanced QC classification"
                                     onClick={() =>
@@ -1095,6 +1124,8 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                                   />
                                 </div>
                               </div>
+                              <p className="text-[11px] text-ink/55">Advanced views are normalized patchwise anomaly maps.</p>
+                              <HeatmapLegend label="Advanced anomaly legend" />
                               <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
                                 {advancedCards.map((card) => (
                                   <div key={card.key} className="space-y-2 rounded border border-ink/10 bg-bg/20 p-2">
@@ -1108,13 +1139,13 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                                             card.key === "composite"
                                               ? [...QC_INFO_TEXT.compositeAnomalyMap]
                                               : card.key === "lpips"
-                                                ? [...QC_INFO_TEXT.lpipsPatchMap]
+                                                ? [...QC_INFO_TEXT.perceptualDifferenceMap]
                                                 : card.key === "boundary"
                                                   ? [...QC_INFO_TEXT.boundarySpillAnalysis]
                                                   : card.key === "sharpness"
                                                     ? [...QC_INFO_TEXT.sharpnessConsistency]
                                                     : card.key === "naturalness"
-                                                      ? [...QC_INFO_TEXT.naturalnessMap]
+                                                      ? [...QC_INFO_TEXT.naturalnessProxy]
                                                       : [...QC_INFO_TEXT.microtextureMap],
                                           )
                                         }
@@ -1163,7 +1194,11 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                             </div>
                             <div>
                               <p className="text-xs font-medium text-ink/70">Mask edit</p>
-                              {row.maskUrl ? <img src={row.maskUrl} alt="Mask" className="aspect-video w-full rounded border border-ink/10 bg-black object-contain" /> : <p className="text-xs text-ink/50">No mask</p>}
+                              {row.maskUrl ? (
+                                <img src={row.maskUrl} alt="Mask" className="aspect-video w-full rounded border border-ink/10 bg-black object-contain" />
+                              ) : (
+                                <p className="text-xs text-ink/50">No user mask was used. QC will infer a provisional mask from frame differences where needed.</p>
+                              )}
                               <p className="mt-2 text-xs text-ink/70">{row.prompt}</p>
                             </div>
                             <div>
@@ -1249,7 +1284,9 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                               {selectedFrames.slice(0, 3).map((frame) => (
                                 <div key={`video-frame-${row.genId}-${frame.index}`} className="space-y-1">
                                   <div className="flex items-center gap-2">
-                                    <p className="text-xs font-medium text-ink/70">Evidence frame {String(frame.index)}</p>
+                                    <p className="text-xs font-medium text-ink/70">
+                                      Evidence frame {String(frame.index)}{typeof frame.timeSec === "number" ? ` · ${Number(frame.timeSec).toFixed(2)}s` : ""}
+                                    </p>
                                     <InfoButton
                                       label={`Explain evidence frame ${String(frame.index)}`}
                                       onClick={() => openInfo("Video frame evidence", [...QC_INFO_TEXT.videoFrameEvidence])}
