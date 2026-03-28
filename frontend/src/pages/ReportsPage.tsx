@@ -143,6 +143,73 @@ const VIDEO_TEST_OPTIONS = [
   { id: "video_frame_evidence", label: "Video frame evidence", description: "Representative extracted frame QC evidence from the generated segment." },
 ] as const;
 
+const QC_INFO_TEXT = {
+  frameQcAnalysis: [
+    "This summary shows how much the edited frame differs from the original frame, and if a mask is present, how much of that change falls outside the intended edit area. It is the clearest high-level check for edit containment.",
+    "Use Changed to understand how much of the frame was altered at all, Outside leakage to see how much change happened outside the intended region, and Boundary spill to check whether change is clustering just beyond the mask edge. Read this together with the Frame diff overlay, Boundary/Binary map, and Boundary spill analysis to see whether the numbers reflect harmless global change or problematic spread beyond the edit.",
+  ],
+  frameDiffHeatmap: [
+    "This view shows the strength of pixel-level change between the original frame and the edited frame. Cooler colors indicate little change, while warmer colors indicate stronger visible difference.",
+    "Read this as a direct where did the frame change map. Strong activity inside the intended edit area is usually expected. Strong activity outside the intended area is more concerning, especially if it lines up with high values in the Composite anomaly map or Boundary spill analysis. Use this together with the Frame diff overlay when you want to relate the heatmap back to the actual image content.",
+  ],
+  frameDiffOverlay: [
+    "This overlays the frame difference heatmap on top of the edited image, making it easier to see exactly which parts of the picture changed. If a mask is present, the intended edit boundary is also shown.",
+    "Use this when you want the most intuitive answer to what changed, and where did it happen in the final image. This is often the fastest artifact for checking whether the edit stayed on the intended subject. If you see strong change outside the mask here, compare it with the Boundary/Binary map for a simpler changed or not changed view and with the Boundary spill analysis to judge how serious the spill is.",
+  ],
+  boundaryBinaryMap: [
+    "This is a simplified changed or not changed view of the frame. Instead of showing change strength, it highlights only the pixels that crossed the change threshold, so it acts like a clean containment map.",
+    "Use this when you want a simple answer to whether the edit stayed inside the intended region. It is less nuanced than the heatmap, but often easier to interpret quickly. Compare it with the Frame diff heatmap if you want more detail on change strength, and with the Boundary spill analysis if you want a boundary-specific measure of how much change extended beyond the mask.",
+  ],
+  compositeAnomalyMap: [
+    "This is a combined review map that blends several patch-level checks into one image, so you can quickly see which regions deserve closer attention. It highlights areas that look locally inconsistent based on multiple signals rather than just raw pixel change.",
+    "Read this as a where should I look first map, not a literal truth score. Higher values inside the intended edit area may simply reflect the intended change. Higher values outside the intended area are more concerning, especially if they also show up in the Frame diff overlay or Boundary spill analysis. This is the best single artifact for prioritizing manual review, while the individual advanced maps help explain why an area was highlighted.",
+  ],
+  lpipsPatchMap: [
+    "This view highlights patches where the edited frame differs most strongly from the original frame in overall appearance. It is designed to reflect visually meaningful local change rather than only binary changed pixels.",
+    "Use this to judge where the edit changed the look of the image most noticeably. Strong activity inside the intended edit area is often expected. Strong activity outside that area suggests visible spill or collateral change. Compare it with the Frame diff heatmap to see whether those changes are also large at the pixel level, and with the Composite anomaly map to see whether the changed areas also look locally inconsistent.",
+  ],
+  boundarySpillAnalysis: [
+    "This view focuses specifically on the area around the intended edit boundary. It helps show whether the edit remained concentrated inside the masked region or whether significant change and anomaly extend into the surrounding area.",
+    "Use this as the most targeted containment check in the advanced QC set. A lower score usually means the edit is staying more cleanly inside the intended boundary. Higher outside activity means the surrounding pixels are being altered more than expected. Compare it with the Boundary/Binary map for a stricter changed or not changed view, and with the Composite anomaly map when you want to know whether the spill also looks locally inconsistent.",
+  ],
+  sharpnessConsistency: [
+    "This map shows where the edited image has a different local sharpness or edge strength pattern from the original image, or where a patch stands out from the overall sharpness pattern of the edited frame.",
+    "Use this when you want to see whether the edited area looks too sharp, too soft, or uneven compared with the rest of the image. High values inside the intended edit area may be acceptable if the edit adds or removes detail. High values outside the intended area are more concerning. Compare this with the Noise or microtexture map to separate edge crispness issues from fine-detail texture changes, and with the Composite anomaly map to see whether sharpness inconsistency is a major driver of the overall anomaly.",
+  ],
+  naturalnessMap: [
+    "This map highlights areas in the edited frame that look statistically unusual compared with the rest of that same edited frame. Unlike most of the other artifacts, it does not compare against the original frame.",
+    "Use this as an edited-frame-only anomaly check. It is best for spotting patches that stand out from their surroundings because they look unusually flat, noisy, or otherwise atypical within the final image. High values inside the intended edit region may simply reflect the changed content, so this view is strongest when used as supporting evidence. Compare it with the comparison-based artifacts, especially the Composite anomaly map and Noise or microtexture map, before drawing conclusions.",
+  ],
+  microtextureMap: [
+    "This map highlights where the fine detail, grain, or local texture pattern changed between the original frame and the edited frame. It is useful for spotting areas that have become over-smoothed, over-sharpened, or texturally inconsistent.",
+    "Use this when the overall structure looks plausible but the surface detail feels wrong. High values inside the intended edit region may be expected for a strong edit, but high values outside it are a stronger warning sign. Compare it with Focus or sharpness consistency to separate texture shifts from edge sharpness changes, and with the LPIPS patch map to see whether the textural change also corresponds to a more visible overall appearance change.",
+  ],
+  qcClassification: [
+    "This is the overall pass, warn, or fail summary for the advanced QC checks. It is a rule-based result that gives a quick triage view of whether the edit appears contained and visually consistent enough to pass review.",
+    "Use this as a summary, not as the only thing you rely on. When a frame is flagged, look at the Composite anomaly map first for the overall pattern, then use Boundary spill analysis and the standard diff artifacts to understand whether the issue is mainly leakage outside the intended edit area or broader local inconsistency. The classification is most useful for ranking and filtering, while the artifacts explain why the frame was flagged.",
+  ],
+  diffVideoMap: [
+    "This video shows the moving difference between the original clip and the edited clip over time. It makes temporal change easy to spot, including drift, flicker, and any change appearing outside the intended edit region.",
+    "Use this when a still frame is not enough and you want to see whether the edit remains stable throughout the shot. Bright or persistent activity outside the intended area is more concerning. Compare what you see here with the Timeline graph to find the specific moments where change or leakage spikes.",
+  ],
+  videoQcAnalysis: [
+    "This summary shows how much the generated segment differs from the original segment over time, and if a start-frame mask exists, how much of that change appears to leak outside the intended edit region. It is the clearest high-level check for temporal edit containment.",
+    "Use Changed mean to understand how much of the clip differs overall, Outside leak mean to see how much of that change falls beyond the intended region, and the similarity metrics to judge how close the generated segment stays to the original over time. Read this together with the Diff video map, Timeline graph, and Video frame evidence to decide whether the differences are acceptable or indicate drift, flicker, or spill.",
+  ],
+  timelineGraph: [
+    "This graph shows how frame-level change and outside leakage vary over time across the clip. It helps identify whether problems are isolated to a few moments or persist throughout the segment.",
+    "Use this as the fastest way to spot unstable edits. Peaks in total change show moments where the frame differs most from the original, while peaks in outside leakage suggest containment problems. If you see spikes, check the corresponding Video frame evidence and Diff video map to understand what happened visually at those times.",
+  ],
+  timelineCsv: [
+    "This file contains the timeline data behind the video QC report in machine-readable form. It is useful for deeper inspection, debugging, filtering, or plotting outside the report UI.",
+    "Use this when you want exact values rather than the summarized graph. It is especially helpful for correlating spikes in change or leakage with timestamps, or for comparing segments programmatically. Read it together with the Timeline graph and Video frame evidence for the clearest interpretation.",
+  ],
+  videoFrameEvidence: [
+    "These are selected frames from the clip that best illustrate the strongest anomalies or the most representative midpoint. Each evidence frame includes the same still-frame diff artifacts used in frame QC.",
+    "Use these as the bridge between the timeline-level summary and actual visible content. When the timeline shows spikes, these frames help explain what the clip looked like at those moments. Compare them with the Diff video map for temporal context and with the still-frame advanced maps when you want a more detailed local explanation of the issue.",
+  ],
+} as const;
+
 function safeTimestamp(iso: string | undefined): number {
   if (!iso) return 0;
   const timestamp = new Date(iso).getTime();
@@ -316,16 +383,16 @@ function InfoModal(props: { state: InfoModalState; onClose: () => void }) {
   if (!state) return null;
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="w-full max-w-2xl rounded-2xl border border-ink/10 bg-card p-5 shadow-xl">
+      <div className="w-full max-w-4xl rounded-2xl border border-ink/10 bg-card p-6 shadow-xl">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <h3 className="text-xl font-semibold">{state.title}</h3>
+            <h3 className="text-2xl font-semibold">{state.title}</h3>
           </div>
           <button type="button" className="text-sm text-ink/60 underline" onClick={onClose}>
             Close
           </button>
         </div>
-        <div className="mt-4 space-y-2 text-sm text-ink/75">
+        <div className="mt-5 space-y-4 text-base leading-7 text-ink/75">
           {state.lines.map((line, index) => (
             <p key={`${state.title}-${index}`}>{line}</p>
           ))}
@@ -910,15 +977,7 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                                 <p className="font-semibold text-ink/90">Frame QC analysis</p>
                                 <InfoButton
                                   label="Explain frame QC analysis"
-                                  onClick={() =>
-                                    openInfo("Frame QC analysis", [
-                                      "This is a source-frame versus edited-frame comparison.",
-                                      row.maskUrl
-                                        ? "Region basis: user mask. Outside-leakage and boundary-spill are measured relative to that mask."
-                                        : "Region basis: full-frame comparison. There is no user mask for this frame, so the percentages describe whole-image change only.",
-                                      "Changed, Outside leakage, and Boundary spill are shown as percentages because they describe the percentage of pixels affected in those regions.",
-                                    ])
-                                  }
+                                  onClick={() => openInfo("Frame QC analysis", [...QC_INFO_TEXT.frameQcAnalysis])}
                                 />
                               </div>
                               {row.standard ? (
@@ -938,14 +997,8 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                                 <div className="flex items-center gap-2">
                                   <p className="text-xs font-medium text-ink/70">Frame diff heatmap</p>
                                   <InfoButton
-                                    label="Explain frame diff heatmap"
-                                    onClick={() =>
-                                      openInfo("Frame diff heatmap", [
-                                        "This is a source-frame versus edited-frame comparison heatmap.",
-                                        "Color interpretation: cooler blue means lower difference, yellow means moderate change, and red means stronger change.",
-                                        "This view is for locating where the edit changed pixels. It does not by itself judge whether those changes are acceptable.",
-                                      ])
-                                    }
+                                  label="Explain frame diff heatmap"
+                                  onClick={() => openInfo("Frame diff heatmap", [...QC_INFO_TEXT.frameDiffHeatmap])}
                                   />
                                 </div>
                                 {frameHeatmapUrl ? (
@@ -960,14 +1013,8 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                                 <div className="flex items-center gap-2">
                                   <p className="text-xs font-medium text-ink/70">Frame diff overlay</p>
                                   <InfoButton
-                                    label="Explain frame diff overlay"
-                                    onClick={() =>
-                                      openInfo("Frame diff overlay", [
-                                        "This overlays the frame-difference signal on top of the edited frame.",
-                                        "Use it to see whether anomaly hotspots sit on the intended edit region or whether they spill onto surrounding content.",
-                                        "Colors follow the same heatmap logic: low change is subdued, stronger change trends toward yellow/red.",
-                                      ])
-                                    }
+                                  label="Explain frame diff overlay"
+                                  onClick={() => openInfo("Frame diff overlay", [...QC_INFO_TEXT.frameDiffOverlay])}
                                   />
                                 </div>
                                 {frameOverlayUrl ? (
@@ -982,16 +1029,8 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                                 <div className="flex items-center gap-2">
                                   <p className="text-xs font-medium text-ink/70">Boundary/Binary map</p>
                                   <InfoButton
-                                    label="Explain boundary and binary map"
-                                    onClick={() =>
-                                      openInfo("Boundary/Binary map", [
-                                        row.maskUrl
-                                          ? "This map shows thresholded change against the user mask and helps reveal spill just outside the intended edit boundary."
-                                          : "This map shows thresholded change against the inferred edit area because there is no user mask for this frame.",
-                                        "It is useful for spotting hard edge transitions, haloing, or unintended change just beyond the edit region.",
-                                        "This is a binary or boundary-focused diagnostic, so it is best read as changed-versus-not-changed rather than by intensity.",
-                                      ])
-                                    }
+                                  label="Explain boundary and binary map"
+                                  onClick={() => openInfo("Boundary/Binary map", [...QC_INFO_TEXT.boundaryBinaryMap])}
                                   />
                                 </div>
                                 {boundaryOverlayUrl || frameBinaryUrl ? (
@@ -1014,16 +1053,8 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                                 <div className="flex items-center gap-2">
                                   <p className="text-sm font-semibold text-ink/90">Advanced QC analysis</p>
                                   <InfoButton
-                                    label="Explain advanced QC analysis"
-                                    onClick={() =>
-                                      openInfo("Advanced QC analysis", [
-                                        "Advanced QC combines several signals to judge whether the edit stayed contained and visually coherent.",
-                                        row.maskUrl
-                                          ? "Region basis: user mask with outer-ring spill checks."
-                                          : "Region basis: inferred edit area derived from source versus edited differences.",
-                                        "Most advanced metrics are shown on a 0.0 to 1.0 normalized scale because they are proxy anomaly scores rather than direct pixel percentages.",
-                                      ])
-                                    }
+                                  label="Explain advanced QC analysis"
+                                    onClick={() => openInfo("Composite anomaly map", [...QC_INFO_TEXT.compositeAnomalyMap])}
                                   />
                                 </div>
                                 <div className="flex items-center gap-2">
@@ -1041,9 +1072,10 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                                     QC classification: {advanced.status ?? "n/a"}
                                   </p>
                                   <InfoButton
-                                    label="Explain advanced QC classification"
+                                  label="Explain advanced QC classification"
                                     onClick={() =>
-                                      openInfo("Advanced QC classification", [
+                                      openInfo("QC classification", [
+                                        ...QC_INFO_TEXT.qcClassification,
                                         `Driver: ${
                                           dominantDriver === "outer_ring"
                                             ? "Outer-ring spill"
@@ -1054,7 +1086,6 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                                         `Observed outer ring = ${asNumber(advancedObserved.outerRingMean)?.toFixed(4) ?? "n/a"} · fail at >${asNumber(advancedThresholds.outerRingFail)?.toFixed(4) ?? "n/a"} · warn at >${asNumber(advancedThresholds.outerRingWarn)?.toFixed(4) ?? "n/a"}`,
                                         `Observed boundary spill = ${asNumber(advancedObserved.boundarySpill)?.toFixed(4) ?? "n/a"} · fail at >${asNumber(advancedThresholds.boundaryFail)?.toFixed(4) ?? "n/a"} · warn at >${asNumber(advancedThresholds.boundaryWarn)?.toFixed(4) ?? "n/a"}`,
                                         advancedReasons.length ? advancedReasons.join("; ") : "No classification explanation available.",
-                                        "Warn and fail are threshold bands. Crossing the warning threshold suggests the edit is starting to leak or mismatch; crossing the fail threshold means the spill is strong enough to merit correction or closer review.",
                                       ])
                                     }
                                   />
@@ -1068,24 +1099,20 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                                       <InfoButton
                                         label={`Explain ${card.title}`}
                                         onClick={() =>
-                                          openInfo(card.title, [
-                                            card.key === "naturalness"
-                                              ? "This test is edited-frame only. It looks for patches whose local image statistics look less natural than the rest of the edited frame."
-                                              : "This test compares the source frame against the edited frame to locate change or inconsistency.",
-                                            row.maskUrl ? "Region basis: user mask aware." : "Region basis: inferred edit area.",
-                                            "Scores are on a normalized 0.0 to 1.0 scale. Higher values indicate a stronger anomaly or a less consistent result.",
+                                          openInfo(
+                                            card.title,
                                             card.key === "composite"
-                                              ? "Composite combines perceptual change, sharpness mismatch, naturalness, and microtexture into one summary map."
+                                              ? [...QC_INFO_TEXT.compositeAnomalyMap]
                                               : card.key === "lpips"
-                                                ? "LPIPS patch map is a perceptual-difference proxy. Higher scores indicate more visually meaningful change."
+                                                ? [...QC_INFO_TEXT.lpipsPatchMap]
                                                 : card.key === "boundary"
-                                                  ? "Boundary spill analysis compares anomaly strength just inside and just outside the edit boundary."
+                                                  ? [...QC_INFO_TEXT.boundarySpillAnalysis]
                                                   : card.key === "sharpness"
-                                                    ? "Sharpness consistency checks whether the edited region is too sharp or too soft relative to the surrounding scene."
+                                                    ? [...QC_INFO_TEXT.sharpnessConsistency]
                                                     : card.key === "naturalness"
-                                                      ? "Naturalness map looks for patches with unusual local statistics that can indicate synthetic artifacts."
-                                                      : "Microtexture map looks for noise or fine-detail inconsistencies such as over-smoothing or over-sharpening.",
-                                          ])
+                                                      ? [...QC_INFO_TEXT.naturalnessMap]
+                                                      : [...QC_INFO_TEXT.microtextureMap],
+                                          )
                                         }
                                       />
                                     </div>
@@ -1158,16 +1185,7 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                                 <p className="font-semibold text-ink/90">Video QC analysis</p>
                                 <InfoButton
                                   label="Explain video QC analysis"
-                                  onClick={() =>
-                                    openInfo("Video QC analysis", [
-                                      "This is an original-segment versus generated-segment comparison.",
-                                      row.maskUrl
-                                        ? "Region basis: full-frame video comparison, with the start-frame user mask also used for frame-evidence spill checks where applicable."
-                                        : "Region basis: full-frame video comparison.",
-                                      "Changed mean and Outside leak mean are percentages because they describe the percentage of changed pixels across sampled frames.",
-                                      "SSIM and PSNR are similarity metrics. Higher SSIM generally means closer structural match; higher PSNR means lower pixel error.",
-                                    ])
-                                  }
+                                  onClick={() => openInfo("Video QC analysis", [...QC_INFO_TEXT.videoQcAnalysis])}
                                 />
                               </div>
                               {row.standard ? (
@@ -1186,13 +1204,7 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                                 <p className="text-xs font-medium text-ink/70">Timeline graph</p>
                                 <InfoButton
                                   label="Explain timeline graph"
-                                  onClick={() =>
-                                    openInfo("Timeline graph", [
-                                      "This graph plots sampled QC values through time for the original versus generated segment comparison.",
-                                      "Use it to spot moments where the generation drifts, leaks, or otherwise diverges more strongly from the original clip.",
-                                      "Unlike the percentage summaries, this is a temporal diagnostic: spikes matter more than the average when checking continuity.",
-                                    ])
-                                  }
+                                  onClick={() => openInfo("Timeline graph", [...QC_INFO_TEXT.timelineGraph])}
                                 />
                               </div>
                               {timelineGraphUrl ? (
@@ -1203,9 +1215,12 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                                 <p className="text-xs text-ink/50">No timeline graph</p>
                               )}
                               {timelineCsvUrl ? (
-                                <a href={timelineCsvUrl} target="_blank" rel="noreferrer" className="mt-1 inline-block text-xs text-ink underline">
-                                  Download CSV
-                                </a>
+                                <div className="mt-1 flex items-center gap-2">
+                                  <a href={timelineCsvUrl} target="_blank" rel="noreferrer" className="inline-block text-xs text-ink underline">
+                                    Download CSV
+                                  </a>
+                                  <InfoButton label="Explain timeline CSV" onClick={() => openInfo("Timeline CSV", [...QC_INFO_TEXT.timelineCsv])} />
+                                </div>
                               ) : null}
                             </div>
                             <div className="md:col-span-2">
@@ -1213,13 +1228,7 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                                 <p className="text-xs font-medium text-ink/70">Diff video map</p>
                                 <InfoButton
                                   label="Explain diff video map"
-                                  onClick={() =>
-                                    openInfo("Diff video map", [
-                                      "This is a video visualization of frame-by-frame difference between the original segment and the generated segment.",
-                                      "Brighter or hotter areas indicate stronger divergence. It helps reveal motion mismatch, spill, or changes to untouched areas over time.",
-                                      "Use it together with the timeline graph: the graph tells you when the divergence spikes, and the diff video shows where it happens in the frame.",
-                                    ])
-                                  }
+                                  onClick={() => openInfo("Diff video map", [...QC_INFO_TEXT.diffVideoMap])}
                                 />
                               </div>
                               {diffVideoUrl ? (
@@ -1239,13 +1248,7 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                                     <p className="text-xs font-medium text-ink/70">Evidence frame {String(frame.index)}</p>
                                     <InfoButton
                                       label={`Explain evidence frame ${String(frame.index)}`}
-                                      onClick={() =>
-                                        openInfo(`Evidence frame ${String(frame.index)}`, [
-                                          "This is a representative sampled frame from the video QC run.",
-                                          "It uses the same source-versus-generated comparison logic as the still-frame QC views, but only for selected moments in the clip.",
-                                          "Use evidence frames to inspect where a spike in the timeline or diff video comes from visually.",
-                                        ])
-                                      }
+                                      onClick={() => openInfo("Video frame evidence", [...QC_INFO_TEXT.videoFrameEvidence])}
                                     />
                                   </div>
                                   {frame.overlayUrl ? (
