@@ -92,6 +92,12 @@ type FrameReportRow = {
   originalFrameUrl?: string;
   maskUrl?: string;
   editedFrameUrl?: string;
+  comparisonPreprocess?: {
+    sizeAdjusted?: boolean;
+    mode?: string;
+    originalSize?: { width: number; height: number };
+    editedSize?: { width: number; height: number };
+  } | null;
   standard?: {
     metrics?: Record<string, unknown>;
     artifacts?: Record<string, unknown>;
@@ -130,11 +136,11 @@ type VideoReportRow = {
 
 const FRAME_TEST_OPTIONS = [
   { id: "frame_diff", label: "Frame diff set", description: "Diff heatmap, overlay, binary/boundary map and standard still metrics." },
-  { id: "frame_composite", label: "Composite anomaly summary", description: "Combined anomaly heatmap with top anomalous regions." },
-  { id: "frame_perceptual", label: "Frame perceptual impact", description: "LPIPS-style patch difference map and perceptual change scores." },
-  { id: "frame_boundary", label: "Frame boundary spill", description: "Inside/outside ring analysis for spill beyond the intended edit region." },
+  { id: "frame_composite", label: "Composite anomaly map", description: "Combined anomaly overlay with top anomalous regions." },
+  { id: "frame_perceptual", label: "Perceptual difference map", description: "Patchwise perceptual-difference proxy and local change scores." },
+  { id: "frame_boundary", label: "Boundary spill analysis", description: "Inside/outside ring analysis for spill beyond the intended edit region." },
   { id: "frame_sharpness", label: "Frame sharpness consistency", description: "Focus and sharpness mismatch maps across the edited frame." },
-  { id: "frame_naturalness", label: "Frame naturalness", description: "Naturalness anomaly map highlighting statistically unusual patches." },
+  { id: "frame_naturalness", label: "Naturalness proxy", description: "Edited-frame anomaly proxy highlighting statistically unusual patches." },
   { id: "frame_texture", label: "Frame microtexture", description: "Noise and microtexture consistency map for over-smoothed or over-sharpened areas." },
 ] as const;
 
@@ -915,7 +921,7 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                         {
                           key: "composite",
                           title: "Composite anomaly map",
-                          imageUrl: advancedArtifacts?.compositeMapUrl as string | undefined,
+                          imageUrl: (advancedArtifacts?.compositeOverlayUrl as string | undefined) ?? (advancedArtifacts?.compositeMapUrl as string | undefined),
                           main: asNumber(advancedMetrics?.compositeImpactGlobal),
                           mask: asNumber(advancedMetrics?.compositeImpactMask),
                           ring: asNumber(advancedMetrics?.compositeImpactOuterRing),
@@ -1012,6 +1018,11 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                               )}
                             </div>
                           </div>
+                          {row.comparisonPreprocess?.sizeAdjusted ? (
+                            <div className="rounded border border-amber-200 bg-amber-50 p-2 text-[11px] text-amber-800">
+                              Comparison caution: the edited frame was resized and padded to match the original before QC. Edge differences can be exaggerated when aspect ratios or dimensions differ.
+                            </div>
+                          ) : null}
                           {row.standard ? (
                             <div className="space-y-2">
                               <p className="text-[11px] text-ink/55">Standard diff views are thresholded pixel-change diagnostics.</p>

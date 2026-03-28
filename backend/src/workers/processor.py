@@ -2209,6 +2209,18 @@ def _build_frame_report_row(
 
     original_frame_image = ImageOps.exif_transpose(Image.open(BytesIO(original_frame_bytes))).convert("RGB")
     edited_frame_image = ImageOps.exif_transpose(Image.open(BytesIO(edited_frame_bytes))).convert("RGB")
+    original_size = original_frame_image.size
+    edited_size = edited_frame_image.size
+    comparison_preprocess = (
+        {
+            "sizeAdjusted": True,
+            "mode": "contain_and_pad",
+            "originalSize": {"width": original_size[0], "height": original_size[1]},
+            "editedSize": {"width": edited_size[0], "height": edited_size[1]},
+        }
+        if edited_size != original_size
+        else None
+    )
     frame_mask = _load_optional_mask(mask_bytes, original_frame_image.size)
 
     standard_payload: dict[str, Any] | None = None
@@ -2290,6 +2302,7 @@ def _build_frame_report_row(
         "originalFrameKey": frame.get("captureKey"),
         "editedFrameKey": variant.get("outputKey"),
         "maskKey": mask_key if isinstance(mask_key, str) else None,
+        "comparisonPreprocess": comparison_preprocess,
         "standard": standard_payload,
         "advanced": advanced_payload,
     }
