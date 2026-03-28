@@ -160,6 +160,10 @@ const QC_INFO_TEXT = {
     "This is a simplified changed or not changed view of the frame. Instead of showing change strength, it highlights only the pixels that crossed the change threshold, so it acts like a clean containment map.",
     "Use this when you want a simple answer to whether the edit stayed inside the intended region. It is less nuanced than the heatmap, but often easier to interpret quickly. Compare it with the Frame diff heatmap if you want more detail on change strength, and with the Boundary spill analysis if you want a boundary-specific measure of how much change extended beyond the mask.",
   ],
+  advancedQcAnalysis: [
+    "This section groups the advanced QC artifacts, which are designed to highlight local inconsistency rather than just raw pixel change. These checks are stronger for prioritizing review than the standard diff outputs, but they should still be interpreted alongside the original and edited images.",
+    "Use this section when the standard frame diff outputs show that change occurred, but you need more help understanding whether the changed regions look visually coherent, contained, and plausible. Start with the Composite anomaly map for the overall pattern, then use the more specific advanced artifacts to understand what kind of issue is being detected.",
+  ],
   compositeAnomalyMap: [
     "This is a combined review map that blends several patch-level checks into one image, so you can quickly see which regions deserve closer attention. It highlights areas that look locally inconsistent based on multiple signals rather than just raw pixel change.",
     "Read this as a where should I look first map, not a literal truth score. Higher values inside the intended edit area may simply reflect the intended change. Higher values outside the intended area are more concerning, especially if they also show up in the Frame diff overlay or Boundary spill analysis. This is the best single artifact for prioritizing manual review, while the individual advanced maps help explain why an area was highlighted.",
@@ -1054,7 +1058,7 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                                   <p className="text-sm font-semibold text-ink/90">Advanced QC analysis</p>
                                   <InfoButton
                                   label="Explain advanced QC analysis"
-                                    onClick={() => openInfo("Composite anomaly map", [...QC_INFO_TEXT.compositeAnomalyMap])}
+                                    onClick={() => openInfo("Advanced QC analysis", [...QC_INFO_TEXT.advancedQcAnalysis])}
                                   />
                                 </div>
                                 <div className="flex items-center gap-2">
