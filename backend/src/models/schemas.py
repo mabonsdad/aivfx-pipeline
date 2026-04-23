@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class TaskCreateRequest(BaseModel):
@@ -16,9 +16,23 @@ class UploadVideoRequest(BaseModel):
     sizeBytes: int = Field(gt=0)
 
 
+class ExternalQcPairUploadRequest(BaseModel):
+    originalFilename: str = Field(min_length=1, max_length=255)
+    originalContentType: str = Field(min_length=1, max_length=120)
+    editedFilename: str = Field(min_length=1, max_length=255)
+    editedContentType: str = Field(min_length=1, max_length=120)
+
+
 class SegmentCreateRequest(BaseModel):
     startFrameIndex: int = Field(ge=0)
-    durationSeconds: int = Field(ge=1, le=120)
+    durationSeconds: int | None = Field(default=None, ge=1, le=120)
+    endFrameExclusive: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def _validate_segment_bounds(self):
+        if self.durationSeconds is None and self.endFrameExclusive is None:
+            raise ValueError("Provide durationSeconds or endFrameExclusive")
+        return self
 
 
 class SegmentCropRequest(BaseModel):
@@ -93,10 +107,14 @@ class SegmentGenerateRequest(BaseModel):
         "ray-flash-2",
         "runway-gen4.5",
         "kling-2.6",
+        "kling-o1",
+        "kling-v3-omni-video",
+        "seedance-2.0-reference-to-video",
         "veo-3.1",
         "veo-3.1-fast",
         "wan2.2-a14b",
         "wan2.2-animate",
+        "wan2.7-videoedit",
     ] = "ray-2"
     mode: Literal[
         "adhere_1",
@@ -115,10 +133,92 @@ class SegmentGenerateRequest(BaseModel):
         "veo_start_only",
         "wan_a14b_i2v",
         "wan_animate_replace",
+        "kling_o1_video_edit",
+        "kling_v3_omni_video_edit",
+        "seedance_reference_to_video",
+        "wan27_video_edit",
     ]
     prompt: str | None = Field(default=None)
     firstFrameVariantId: str | None = None
     lastFrameVariantId: str | None = None
+    replicateKlingMode: Literal["std", "pro"] | None = None
+    replicateKlingV3Mode: Literal["standard", "pro"] | None = None
+    wan27Resolution: Literal["720p", "1080p"] | None = None
+
+
+class ApiAssetUploadInitRequest(BaseModel):
+    filename: str = Field(min_length=1, max_length=255)
+    contentType: str = Field(min_length=1, max_length=120)
+    assetType: Literal["image", "video"] = "image"
+
+
+class ApiImageEditFullRequest(BaseModel):
+    model: Literal["nano_banana", "nano_banana_pro", "chatgpt"]
+    prompt: str = Field(min_length=1)
+    inputAssetKey: str = Field(min_length=1)
+
+
+class ApiImageEditPatchRequest(BaseModel):
+    model: Literal["nano_banana_pro", "chatgpt", "runware_flux_fill", "runware_ace_pp"]
+    prompt: str = Field(min_length=1)
+    inputAssetKey: str = Field(min_length=1)
+    patchAssetKey: str = Field(min_length=1)
+    patchRect: PatchRect
+    maskAssetKey: str | None = None
+    referenceAssetKey: str | None = None
+    featherPx: int = Field(ge=0, le=200)
+    bleedPx: int = Field(ge=0, le=300, default=32)
+    runwareRepaintingScale: float = Field(ge=0, le=1, default=0.7)
+    edgeAwareRefine: bool = False
+    edgeAwareStrength: float = Field(ge=0, le=1, default=0.45)
+    edgeAwareRadiusPx: int = Field(ge=0, le=24, default=6)
+    maskGrowPx: int = Field(ge=-64, le=64, default=0)
+
+
+class ApiReferenceVideoGenerateRequest(BaseModel):
+    model: Literal[
+        "ray-2",
+        "ray-flash-2",
+        "runway-gen4.5",
+        "kling-2.6",
+        "kling-o1",
+        "kling-v3-omni-video",
+        "seedance-2.0-reference-to-video",
+        "veo-3.1",
+        "veo-3.1-fast",
+        "wan2.2-a14b",
+        "wan2.2-animate",
+        "wan2.7-videoedit",
+    ]
+    mode: Literal[
+        "adhere_1",
+        "adhere_2",
+        "adhere_3",
+        "flex_1",
+        "flex_2",
+        "flex_3",
+        "reimagine_1",
+        "reimagine_2",
+        "reimagine_3",
+        "runway_i2v",
+        "kling_start_end",
+        "kling_start_only",
+        "veo_start_end",
+        "veo_start_only",
+        "wan_a14b_i2v",
+        "wan_animate_replace",
+        "kling_o1_video_edit",
+        "kling_v3_omni_video_edit",
+        "seedance_reference_to_video",
+        "wan27_video_edit",
+    ]
+    prompt: str | None = None
+    videoAssetKey: str = Field(min_length=1)
+    firstFrameAssetKey: str = Field(min_length=1)
+    lastFrameAssetKey: str | None = None
+    replicateKlingMode: Literal["std", "pro"] | None = None
+    replicateKlingV3Mode: Literal["standard", "pro"] | None = None
+    wan27Resolution: Literal["720p", "1080p"] | None = None
 
 
 class MergeGenerationAdjustment(BaseModel):
@@ -133,6 +233,13 @@ class MergeRequest(BaseModel):
     generationAdjustments: dict[str, MergeGenerationAdjustment] | None = None
 
 
+class SegmentGenerationExtendRequest(BaseModel):
+    alignmentFrameIndex: int = Field(ge=0)
+    anchorFramesFromEnd: int = Field(default=5, ge=1, le=60)
+    durationSeconds: int | None = Field(default=None, ge=1, le=15)
+    prompt: str | None = None
+
+
 class QcRunRequest(BaseModel):
     generationIds: list[str] | None = Field(default=None, max_length=20)
     mode: Literal["standard", "advanced_frame"] = "standard"
@@ -143,7 +250,7 @@ class MotionSyncQcRunRequest(BaseModel):
 
 
 class QualityMatchSettingsRequest(BaseModel):
-    diffThreshold: float = Field(default=0.12, ge=0.01, le=0.99)
+    diffThreshold: float = Field(default=0.08, ge=0.01, le=0.99)
     minRegionAreaPct: float = Field(default=0.0005, ge=0.0, le=0.1)
     featherWidthPx: int = Field(default=6, ge=0, le=64)
     boundaryProtectionWidthPx: int = Field(default=8, ge=0, le=128)
@@ -163,11 +270,58 @@ class QualityMatchMaskUploadRequest(BaseModel):
     analysisId: str | None = None
 
 
+class QualityMatchPreviewRequest(BaseModel):
+    analysisId: str = Field(min_length=1)
+    maskKey: str = Field(min_length=1)
+    settings: QualityMatchSettingsRequest | None = None
+
+
+class QualityMatchSamPoint(BaseModel):
+    x: float = Field(ge=0)
+    y: float = Field(ge=0)
+
+
+class QualityMatchSamBox(BaseModel):
+    x: float = Field(ge=0)
+    y: float = Field(ge=0)
+    w: float = Field(gt=0)
+    h: float = Field(gt=0)
+
+
+class QualityMatchSamRequest(BaseModel):
+    variantId: str = Field(min_length=1)
+    analysisId: str | None = None
+    promptType: Literal["points", "box"]
+    positivePoints: list[QualityMatchSamPoint] = Field(default_factory=list, max_length=32)
+    negativePoints: list[QualityMatchSamPoint] = Field(default_factory=list, max_length=32)
+    box: QualityMatchSamBox | None = None
+    restrictToMaskBounds: bool = True
+    existingMaskKey: str | None = None
+    edgeBias: Literal["conservative", "balanced", "inclusive"] = "balanced"
+
+
 class QualityMatchApplyRequest(BaseModel):
     analysisId: str = Field(min_length=1)
     finalMaskKey: str | None = None
     settings: QualityMatchSettingsRequest | None = None
     overwriteGeneratedFrame: bool = True
+
+
+class ManualRefineExportRequest(BaseModel):
+    sourceVariantId: str = Field(min_length=1)
+    format: Literal["psd", "png_zip"] = "psd"
+
+
+class ManualRefineUploadInitRequest(BaseModel):
+    sourceVariantId: str = Field(min_length=1)
+    filename: str = Field(min_length=1, max_length=255)
+    contentType: str = Field(min_length=1, max_length=120)
+
+
+class ManualRefineUploadCompleteRequest(BaseModel):
+    sourceVariantId: str = Field(min_length=1)
+    uploadKey: str = Field(min_length=1)
+    filename: str = Field(min_length=1, max_length=255)
 
 
 class VariantSelectRequest(BaseModel):
@@ -183,14 +337,15 @@ class AssetDeleteRequest(BaseModel):
 
 
 class CustomReportOutputRef(BaseModel):
-    assetType: Literal["frame_variant", "segment_generation"]
+    assetType: Literal["frame_variant", "segment_generation", "external_frame_pair"]
     frameId: str | None = None
     variantId: str | None = None
     genId: str | None = None
+    pairId: str | None = None
 
 
 class CustomReportCreateRequest(BaseModel):
-    reportType: Literal["qc_frame", "qc_video"]
+    reportType: Literal["qc_frame", "qc_video", "video_compare"]
     outputRefs: list[CustomReportOutputRef] = Field(min_length=1, max_length=400)
     tests: list[str] = Field(min_length=1, max_length=20)
     name: str | None = Field(default=None, min_length=1, max_length=80)
@@ -198,11 +353,20 @@ class CustomReportCreateRequest(BaseModel):
 
 class TaskFrameVariant(BaseModel):
     variantId: str
-    type: Literal["full", "patch"]
-    model: Literal["nano_banana", "nano_banana_pro", "chatgpt", "runware_flux_fill", "runware_ace_pp"]
+    type: Literal["full", "patch", "extension_anchor"]
+    model: Literal["nano_banana", "nano_banana_pro", "chatgpt", "runware_flux_fill", "runware_ace_pp", "generated_extension_anchor"]
     promptHash: str
     createdAt: datetime
+    jobId: str | None = None
+    startedAt: datetime | None = None
+    finishedAt: datetime | None = None
+    processingDurationSec: float | None = None
     outputKey: str
+    variantKind: Literal["edited", "refined"] | None = None
+    sourceVariantId: str | None = None
+    refinedVariantIds: list[str] = Field(default_factory=list)
+    generationSettings: dict[str, Any] | None = None
+    qualityMatch: dict[str, Any] | None = None
     patchMeta: dict[str, Any] | None = None
 
 
@@ -231,7 +395,9 @@ class TaskMetadata(BaseModel):
     segments: list[dict[str, Any]] = Field(default_factory=list)
     frames: dict[str, TaskFrame] = Field(default_factory=dict)
     segmentGenerations: dict[str, Any] = Field(default_factory=dict)
+    externalQcPairs: list[dict[str, Any]] = Field(default_factory=list)
     qualityMatchAnalyses: dict[str, Any] = Field(default_factory=dict)
+    videoCleanupTracks: list[dict[str, Any]] = Field(default_factory=list)
     exports: list[dict[str, Any]] = Field(default_factory=list)
     customReports: list[dict[str, Any]] = Field(default_factory=list)
     history: list[dict[str, Any]] = Field(default_factory=list)

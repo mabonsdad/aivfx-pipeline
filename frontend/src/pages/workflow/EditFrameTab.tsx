@@ -87,7 +87,6 @@ export type EditFrameTabCtx = {
   maskHasPaint: boolean;
   refreshPatchOverlay: () => void;
   formatCompactTimestamp: (iso: string | undefined) => string;
-  openQualityMatchModal: (candidate: EditFrameCandidate) => void;
 };
 
 type EditFrameTabProps = {
@@ -146,7 +145,6 @@ export default function EditFrameTab({ ctx }: EditFrameTabProps) {
     maskHasPaint,
     refreshPatchOverlay,
     formatCompactTimestamp,
-    openQualityMatchModal,
   } = ctx;
   const [isPatchModalOpen, setPatchModalOpen] = useState(false);
 
@@ -160,7 +158,7 @@ export default function EditFrameTab({ ctx }: EditFrameTabProps) {
 
   return (
               <div className="space-y-4">
-                <h3 className="text-lg font-semibold">Edit Frame</h3>
+                <h3 className="text-lg font-semibold">Edit frames</h3>
 
                 <div className="flex gap-2">
                   <button
@@ -185,7 +183,7 @@ export default function EditFrameTab({ ctx }: EditFrameTabProps) {
 
                   {!activeEditFrame ? (
                     <div className="rounded-md border border-dashed border-ink/20 bg-bg p-6 text-sm text-ink/60">
-                      Select frames in the Timeline tab first, then return here to edit.
+                      Select frames in Select Frames first, then return here to edit.
                     </div>
                   ) : null}
                   <div className="space-y-3">
@@ -260,7 +258,7 @@ export default function EditFrameTab({ ctx }: EditFrameTabProps) {
                     </div>
                   ) : (
                     <div className="rounded-md border border-dashed border-ink/20 bg-bg p-6 text-sm text-ink/60">
-                      Select a frame in the Timeline tab to start comparing edits.
+                      Select a frame in Select Frames to start comparing edits.
                     </div>
                   )}
                   <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
@@ -308,26 +306,6 @@ export default function EditFrameTab({ ctx }: EditFrameTabProps) {
                               <path d="M12 20h9" />
                               <path d="m16.5 3.5 4 4L8 20H4v-4L16.5 3.5Z" />
                             </svg>
-                          </button>
-                          <button
-                            type="button"
-                            className={`rounded border px-2 py-1 text-xs font-semibold ${
-                              candidate.kind === "variant"
-                                ? "border-teal-300 bg-teal-50 text-teal-800 hover:bg-teal-100"
-                                : "border-ink/20 bg-white text-ink/40"
-                            } disabled:cursor-not-allowed disabled:opacity-60`}
-                            title={
-                              candidate.kind === "variant"
-                                ? "Quality Match Generated Frame"
-                                : "Quality Match is available for generated variants"
-                            }
-                            disabled={candidate.kind !== "variant"}
-                            onClick={() => {
-                              if (candidate.kind !== "variant") return;
-                              openQualityMatchModal(candidate);
-                            }}
-                          >
-                            QA
                           </button>
                           <a
                             href={candidate.imageUrl}

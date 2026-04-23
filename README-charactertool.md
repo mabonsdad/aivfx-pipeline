@@ -1,23 +1,31 @@
-# Character Tool Notes (Planned Separate Workflow)
+# Character Tool Notes
 
-This document captures integration lessons from Wan2.2 Animate errors and outlines a clean structure for a future character-animation variant of this app.
+This document records the current Wan Animate integration behavior and the recommended structure for a future dedicated Character Animation workflow.
 
-## Current decision
+## Current State
 
-- Keep the main `Generate Video` workflow focused on general VFX segment replacement.
-- Use `wan2.2-a14b` only in the `start frame only` tab for now.
-- Do not expose `wan2.2-animate` in the current main UI flow.
+The main `Generate Video` workflow is still focused on general VFX segment replacement.
 
-## Wan2.2 Animate integration lessons
+Wan2.2 Animate is now available as one of the first-frame + video generation options, but it is treated as a constrained provider lane rather than a complete character-animation product surface.
 
-### 1) `inputs.referenceImages` / `inputs.referenceVideos` format
+Current behavior:
 
-Observed API error:
-- `invalidInputsImage`
+- The app sends reference image and reference video inputs.
+- Prompt text is omitted for Wan Animate unless LoRA support is added, because the provider rejects `positivePrompt` without LoRA.
+- Input dimensions are conformed to one of the provider-supported Wan2.2 sizes.
+- The output is handled like other generated segment variants and can be compared, cleaned, and merged.
 
-Fix:
-- Use arrays of string values, not nested objects.
-- Valid values: public URL, UUID v4, data URI, or base64 image/video value (per Runware docs).
+The app does not yet expose a dedicated character setup, identity-locking, wardrobe reference, or performance-transfer workflow.
+
+## Wan2.2 Animate Integration Lessons
+
+### 1. Reference Input Shape
+
+Observed provider error:
+
+```text
+invalidInputsImage
+```
 
 Working shape:
 
@@ -30,24 +38,35 @@ Working shape:
 }
 ```
 
-### 2) `positivePrompt` restriction on Wan Animate
+Use arrays of string values, not nested objects.
 
-Observed API error:
-- `wanAnimatePositivePromptRequiresLora`
+### 2. Prompt Restriction
+
+Observed provider error:
+
+```text
+wanAnimatePositivePromptRequiresLora
+```
 
 Implication:
+
 - `positivePrompt` cannot be sent unless at least one LoRA is provided.
 
 Current handling:
-- Omit `positivePrompt` in Wan Animate requests.
-- In UI, hide prompt input when Wan Animate is active (for this workflow).
 
-### 3) Strict width/height constraints
+- The worker omits `positivePrompt` for Wan Animate.
+- UI help should make clear that this route is reference-driven, not prompt-driven, until LoRA support is implemented.
 
-Observed API error:
-- `unsupportedDimensions`
+### 3. Strict Dimensions
 
-Supported dimensions include:
+Observed provider error:
+
+```text
+unsupportedDimensions
+```
+
+Supported dimension families include:
+
 - `1280x720`, `1024x576`, `848x480`
 - `720x1280`, `576x1024`, `480x848`
 - `960x960`, `768x768`, `640x640`
@@ -55,54 +74,44 @@ Supported dimensions include:
 - `832x1104`, `672x896`, `560x736`
 
 Current handling:
-- Pick nearest supported Wan2.2 resolution by aspect ratio from source media.
 
-### 4) Behavior expectations
+- The app picks the nearest supported Wan2.2 resolution by source aspect ratio.
+- Returned output is probed and conformed for timeline merge where needed.
 
-- Wan Animate behaves like a character motion/replace model driven by references.
+### 4. Behavior Expectations
+
+- Wan Animate behaves like a reference-guided character motion/replace model.
 - It is not a strict first-frame lock model.
-- Edited start frames are guidance, not guaranteed exact first-frame adherence.
+- The edited first frame is guidance, not a guaranteed exact first output frame.
+- Output timing may need offset/trim handling during merge.
 
-## Current code structure for video providers
+## Current Provider Code Locations
 
 - UI model routing: `frontend/src/App.tsx`
-  - `GENERATION_MODELS_BY_INPUT`
-  - `generateSegmentMutation`
+- Generate Video UI: `frontend/src/pages/workflow/GenerateTab.tsx`
 - API validation/routing: `backend/src/api_handler.py`
 - Worker orchestration: `backend/src/workers/processor.py`
-  - `_handle_segment_generate`
-  - frame/segment preparation
-  - provider dispatch
 - Provider adapters:
-  - Runware video: `backend/src/integrations/runware_video.py`
-  - Kling via Runware: `backend/src/integrations/kling.py`
-  - Runway: `backend/src/integrations/runway.py`
-  - Luma: `backend/src/integrations/luma.py`
+  - `backend/src/integrations/runware_video.py`
+  - `backend/src/integrations/kling.py`
+  - `backend/src/integrations/runway.py`
+  - `backend/src/integrations/luma.py`
+  - `backend/src/integrations/fal.py`
+  - `backend/src/integrations/replicate.py`
 
-## Recommended architecture for a separate Character Animation workflow
+## Recommended Dedicated Character Animation Workflow
 
-## 1) Separate UI workflow
+A future Character Animation workflow should be separate from the current segment-replacement UI.
 
-Add a dedicated top-level tab, for example:
-- `Character Animate`
+Suggested top-level flow:
 
-Do not mix this with the current segment-replacement controls.
-
-Suggested sub-steps:
 1. Character Setup
 2. Motion Source
 3. Provider + Controls
 4. Generate + Compare
-5. Insert/Merge
+5. Insert / Merge
 
-## 2) Separate request contract
-
-Add a dedicated generation mode, for example:
-- `character_wan_animate`
-- `character_runway_act_two`
-- `character_kling_motion_control`
-
-Use a normalized payload shape:
+Suggested normalized request:
 
 ```json
 {
@@ -122,55 +131,40 @@ Use a normalized payload shape:
 }
 ```
 
-## 3) Provider adapters with capability matrix
+Recommended capability matrix:
 
-Create a small capability table to drive UI and validation:
-- accepts prompt?
-- requires LoRA for prompt?
-- supports start/end images?
-- supports driving video?
+- accepts prompt
+- requires LoRA for prompt
+- supports start image
+- supports end image
+- supports driving video
+- supports identity/reference image
 - allowed resolutions
 - max duration
+- expected output fps
+- whether source-frame offset estimation is required
 
-This avoids provider-specific errors appearing late in the job.
+Candidate provider lanes:
 
-## 4) Metadata and asset separation
+- Runware Wan2.2 Animate
+- Runway Act-Two
+- Kling Motion Control
 
-Store character-run metadata separately from standard segment generations:
-- separate keys in task JSON (for example `characterGenerations`)
-- separate asset folders (for example `segments/{id}/character/{genId}/...`)
+Recommended storage separation:
 
-This keeps merge/export logic clean and avoids confusion in report views.
+```text
+users/{userId}/tasks/{taskId}/character_generations/{characterGenerationId}/...
+```
 
-## 5) Merge strategy
+This keeps standard segment generations, cleanup tracks, and future character-specific metadata from colliding.
 
-Character results often drift in timing and composition.
-Use the advanced merge controls already implemented (trim/offset/feather) and default to:
-- explicit preview of entry/exit boundaries
-- conservative feather defaults
-- optional hard-cut mode for QC
+## Future Checklist
 
-## 6) Candidate provider lanes
-
-- Runware Wan2.2 Animate:
-  - reference image + driving video
-  - strict dimension constraints
-  - prompt only with LoRA
-
-- Runway Act-Two:
-  - character-performance lane
-  - model-specific input constraints and motion semantics
-
-- Kling Motion Control:
-  - controlled motion from source guidance
-  - provider-specific control strength and duration constraints
-
-## Implementation checklist (future)
-
-- [ ] Add `Character Animate` tab and state store
-- [ ] Add backend request schema for character modes
-- [ ] Implement capability matrix and preflight validation
-- [ ] Add Runway Act-Two adapter
-- [ ] Add Kling Motion Control adapter
-- [ ] Add character-specific report block (identity retention + temporal stability metrics)
-- [ ] Add dedicated QA presets for character replacement shots
+- Add a `Character Animate` page or workflow tab.
+- Add backend schemas for character-specific generation requests.
+- Add provider capability preflight validation.
+- Add LoRA support for Wan Animate prompt control.
+- Add Runway Act-Two adapter if selected.
+- Add Kling Motion Control adapter if selected.
+- Add character QC metrics for identity retention, motion transfer, and temporal stability.
+- Add merge defaults tuned for performance-transfer outputs.

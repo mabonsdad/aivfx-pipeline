@@ -6,6 +6,7 @@ import type { TabId } from "./useWorkflowRouting";
 
 export type NewTaskStage = "idle" | "creating" | "uploading" | "ingesting" | "error";
 type IngestCompleteHook = (taskId: string) => void | Promise<void>;
+const MAX_SOURCE_VIDEO_DURATION_SECONDS = 120;
 
 type UseTaskLifecycleParams = {
   isAuthed: boolean;
@@ -52,6 +53,35 @@ function uploadFileWithProgress(
     };
     xhr.onerror = () => reject(new Error("Upload failed due to network error"));
     xhr.send(file);
+  });
+}
+
+function readLocalVideoDuration(file: File): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const objectUrl = URL.createObjectURL(file);
+    const video = document.createElement("video");
+    const cleanup = () => {
+      video.removeEventListener("loadedmetadata", handleLoaded);
+      video.removeEventListener("error", handleError);
+      URL.revokeObjectURL(objectUrl);
+    };
+    const handleLoaded = () => {
+      const duration = Number.isFinite(video.duration) ? Math.max(0, video.duration) : NaN;
+      cleanup();
+      if (!Number.isFinite(duration) || duration <= 0) {
+        reject(new Error("Could not read video duration"));
+        return;
+      }
+      resolve(duration);
+    };
+    const handleError = () => {
+      cleanup();
+      reject(new Error("Could not read video metadata"));
+    };
+    video.preload = "metadata";
+    video.src = objectUrl;
+    video.addEventListener("loadedmetadata", handleLoaded);
+    video.addEventListener("error", handleError);
   });
 }
 
@@ -187,6 +217,30 @@ export function useTaskLifecycle({
     }
   }
 
+  async function handleNewTaskFileSelect(file: File | null) {
+    setNewTaskError(null);
+    if (!file) {
+      setNewTaskFile(null);
+      setNewTaskStage("idle");
+      return;
+    }
+    try {
+      const durationSec = await readLocalVideoDuration(file);
+      if (durationSec > MAX_SOURCE_VIDEO_DURATION_SECONDS + 1e-3) {
+        setNewTaskFile(null);
+        setNewTaskStage("idle");
+        setNewTaskError(`Source video is ${durationSec.toFixed(2)}s. Uploaded source videos must be 120.00s or shorter.`);
+        return;
+      }
+      setNewTaskFile(file);
+      setNewTaskStage("idle");
+    } catch (error) {
+      setNewTaskFile(null);
+      setNewTaskStage("idle");
+      setNewTaskError(error instanceof Error ? error.message : "Could not validate the selected video file");
+    }
+  }
+
   return {
     isNewTaskModalOpen,
     setIsNewTaskModalOpen,
@@ -203,5 +257,6 @@ export function useTaskLifecycle({
     showTaskNameExistsWarning,
     openNewTaskModal,
     handleCreateTaskWithUpload,
+    handleNewTaskFileSelect,
   };
 }

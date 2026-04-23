@@ -60,6 +60,14 @@ class AssetPaths:
         ext = Path(filename).suffix or ".png"
         return f"{self.task_prefix()}/frames/{frame_id}/references/{self._filename(f'ref{short_ref}', ext)}"
 
+    def external_qc_original(self, pair_id: str, filename: str) -> str:
+        ext = Path(filename).suffix or ".png"
+        return f"{self.task_prefix()}/external_qc/{pair_id}/{self._filename('original', ext)}"
+
+    def external_qc_edited(self, pair_id: str, filename: str) -> str:
+        ext = Path(filename).suffix or ".png"
+        return f"{self.task_prefix()}/external_qc/{pair_id}/{self._filename('edited', ext)}"
+
     def segment_original(self, segment_id: str) -> str:
         short_seg = re.sub(r"[^a-zA-Z0-9]+", "", segment_id)[-8:]
         return f"{self.task_prefix()}/segments/{segment_id}/{self._filename(f'seg{short_seg}_orig', '.mp4')}"
@@ -123,6 +131,110 @@ class AssetPaths:
         safe_suffix = re.sub(r"[^a-zA-Z0-9_-]+", "", suffix)[:32] or "mask"
         return f"{self.quality_match_prefix(frame_id, analysis_id)}/{self._filename(f'{safe_suffix}', '.png')}"
 
+    def manual_refine_export(self, frame_id: str, source_variant_id: str, export_id: str, ext: str = ".psd") -> str:
+        short_var = re.sub(r"[^a-zA-Z0-9]+", "", source_variant_id)[-12:]
+        short_export = re.sub(r"[^a-zA-Z0-9]+", "", export_id)[-8:]
+        safe_ext = ext if ext.startswith(".") else f".{ext}"
+        return (
+            f"{self.task_prefix()}/frames/{frame_id}/manual_refine/"
+            f"{self._filename(f'frameexport{short_var}_{short_export}', safe_ext)}"
+        )
+
+    def manual_refine_upload(self, frame_id: str, upload_id: str, filename: str) -> str:
+        short_upload = re.sub(r"[^a-zA-Z0-9]+", "", upload_id)[-12:]
+        ext = Path(filename).suffix or ".png"
+        return (
+            f"{self.task_prefix()}/frames/{frame_id}/manual_refine/uploads/"
+            f"{self._filename(f'upload{short_upload}', ext)}"
+        )
+
+    def cleanup_track_prefix(self, track_id: str) -> str:
+        return f"{self.task_prefix()}/cleanup_tracks/{track_id}"
+
+    def cleanup_track_input(self, track_id: str, stem: str, ext: str) -> str:
+        safe_stem = re.sub(r"[^a-zA-Z0-9_-]+", "", stem)[:80] or "input"
+        safe_ext = ext if ext.startswith(".") else f".{ext}"
+        return f"{self.cleanup_track_prefix(track_id)}/input/{self._filename(safe_stem, safe_ext)}"
+
+    def cleanup_track_working_segment(self, track_id: str, stem: str = "source_segment") -> str:
+        safe_stem = re.sub(r"[^a-zA-Z0-9_-]+", "", stem)[:80] or "segment"
+        return f"{self.cleanup_track_prefix(track_id)}/working/{self._filename(safe_stem, '.mp4')}"
+
+    def cleanup_track_working_frame(self, track_id: str, frame_kind: str, frame_index_local: int, ext: str = ".png") -> str:
+        safe_kind = re.sub(r"[^a-zA-Z0-9_-]+", "", frame_kind)[:32] or "frame"
+        safe_ext = ext if ext.startswith(".") else f".{ext}"
+        return (
+            f"{self.cleanup_track_prefix(track_id)}/working/{safe_kind}_frames/"
+            f"{self._filename(f'frame_{frame_index_local:04d}', safe_ext)}"
+        )
+
+    def cleanup_track_tracking_run_prefix(self, track_id: str, run_id: str) -> str:
+        return f"{self.cleanup_track_prefix(track_id)}/tracking/runs/{run_id}"
+
+    def cleanup_track_tracking_run_artifact(self, track_id: str, run_id: str, stem: str, ext: str) -> str:
+        safe_stem = re.sub(r"[^a-zA-Z0-9_-]+", "", stem)[:80] or "artifact"
+        safe_ext = ext if ext.startswith(".") else f".{ext}"
+        return f"{self.cleanup_track_tracking_run_prefix(track_id, run_id)}/{self._filename(safe_stem, safe_ext)}"
+
+    def cleanup_track_tracking_mask(self, track_id: str, run_id: str, frame_index_local: int) -> str:
+        return (
+            f"{self.cleanup_track_tracking_run_prefix(track_id, run_id)}/masks/"
+            f"{self._filename(f'frame_{frame_index_local:04d}', '.png')}"
+        )
+
+    def cleanup_track_review_frame(self, track_id: str, frame_kind: str, frame_index_local: int, ext: str = ".png") -> str:
+        safe_kind = re.sub(r"[^a-zA-Z0-9_-]+", "", frame_kind)[:32] or "frame"
+        safe_ext = ext if ext.startswith(".") else f".{ext}"
+        return (
+            f"{self.cleanup_track_prefix(track_id)}/review/{safe_kind}_frames/"
+            f"{self._filename(f'frame_{frame_index_local:04d}', safe_ext)}"
+        )
+
+    def cleanup_track_review_artifact(self, track_id: str, stem: str, ext: str) -> str:
+        safe_stem = re.sub(r"[^a-zA-Z0-9_-]+", "", stem)[:80] or "artifact"
+        safe_ext = ext if ext.startswith(".") else f".{ext}"
+        return f"{self.cleanup_track_prefix(track_id)}/review/{self._filename(safe_stem, safe_ext)}"
+
+    def cleanup_track_keyframe_mask(self, track_id: str, frame_index_local: int) -> str:
+        return (
+            f"{self.cleanup_track_prefix(track_id)}/keyframes/"
+            f"{self._filename(f'frame_{frame_index_local:04d}_mask', '.png')}"
+        )
+
+    def cleanup_track_apply_artifact(self, track_id: str, stem: str, ext: str) -> str:
+        safe_stem = re.sub(r"[^a-zA-Z0-9_-]+", "", stem)[:80] or "artifact"
+        safe_ext = ext if ext.startswith(".") else f".{ext}"
+        return f"{self.cleanup_track_prefix(track_id)}/apply/{self._filename(safe_stem, safe_ext)}"
+
+
+@dataclass(frozen=True)
+class ApiAssetPaths:
+    user_id: str
+
+    def _filename(self, stem: str, ext: str) -> str:
+        safe_stem = re.sub(r"[^a-zA-Z0-9_-]+", "", stem)[:80] or "asset"
+        safe_ext = ext if ext.startswith(".") else f".{ext}"
+        return f"{safe_stem}{safe_ext}"
+
+    def uploads_prefix(self) -> str:
+        return f"users/{self.user_id}/api_uploads"
+
+    def upload_asset(self, asset_id: str, filename: str) -> str:
+        ext = Path(filename).suffix or ".bin"
+        safe_asset = re.sub(r"[^a-zA-Z0-9_-]+", "", asset_id)[:40] or "asset"
+        return f"{self.uploads_prefix()}/{safe_asset}/{self._filename('incoming', ext)}"
+
+    def requests_prefix(self) -> str:
+        return f"users/{self.user_id}/api_requests"
+
+    def request_prefix(self, request_id: str) -> str:
+        safe_request = re.sub(r"[^a-zA-Z0-9_-]+", "", request_id)[:40] or "request"
+        return f"{self.requests_prefix()}/{safe_request}"
+
+    def request_artifact(self, request_id: str, section: str, stem: str, ext: str) -> str:
+        safe_section = re.sub(r"[^a-zA-Z0-9_-]+", "", section)[:32] or "artifact"
+        return f"{self.request_prefix(request_id)}/{safe_section}/{self._filename(stem, ext)}"
+
 
 class AssetStore:
     def __init__(self, assets_bucket: str, aws_region: str):
@@ -182,6 +294,18 @@ class AssetStore:
 
     def delete_object(self, key: str) -> None:
         self.s3.delete_object(Bucket=self.assets_bucket, Key=key)
+
+    def copy_object(self, source_key: str, target_key: str, *, content_type: str | None = None) -> None:
+        extra_args: dict[str, Any] = {"ServerSideEncryption": "AES256"}
+        if content_type:
+            extra_args["ContentType"] = content_type
+            extra_args["MetadataDirective"] = "REPLACE"
+        self.s3.copy_object(
+            Bucket=self.assets_bucket,
+            Key=target_key,
+            CopySource={"Bucket": self.assets_bucket, "Key": source_key},
+            **extra_args,
+        )
 
 
 def sha256_bytes(data: bytes) -> str:

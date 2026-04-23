@@ -1,4 +1,4 @@
-import type { ComponentType } from "react";
+import { useMemo, useState, type ComponentType } from "react";
 
 import type { ExportRecord, SegmentGeneration, SegmentRecord } from "../../types/api";
 
@@ -10,8 +10,11 @@ type VideoFrameStripItem = {
 export type MergeTabCtx = {
   mergeTargetGeneration: SegmentGeneration | null;
   mergeTargetSegment: SegmentRecord | null;
+  completeGenerations: SegmentGeneration[];
   describeGeneration: (generation: SegmentGeneration) => string;
   describeSegment: (segment: SegmentRecord) => string;
+  getSegmentForGeneration: (generation: SegmentGeneration) => SegmentRecord | null;
+  sourceFrameCount: number;
   mergeMaxFrameIndex: number;
   mergeInsertStartFrame: number;
   setMergeInsertStartFrame: (value: number) => void;
@@ -59,6 +62,15 @@ export type MergeTabCtx = {
   endBoundaryGeneratedThumbs: VideoFrameStripItem[];
   endBoundaryOriginalThumbs: VideoFrameStripItem[];
   mergeMutation: { isPending: boolean; mutate: () => void };
+  extendGeneration: (payload: {
+    generationId: string;
+    alignmentFrameIndex: number;
+    anchorFramesFromEnd: number;
+    durationSeconds?: number;
+    prompt?: string;
+  }) => void;
+  isExtendingGeneration: boolean;
+  extendGenerationError: string | null;
   sortedExports: ExportRecord[];
   humanizeFilename: (value: string) => string;
   keyBasenameFromS3Key: (key: string) => string;
@@ -74,8 +86,11 @@ export default function MergeTab({ ctx }: MergeTabProps) {
   const {
     mergeTargetGeneration,
     mergeTargetSegment,
+    completeGenerations,
     describeGeneration,
     describeSegment,
+    getSegmentForGeneration,
+    sourceFrameCount,
     mergeMaxFrameIndex,
     mergeInsertStartFrame,
     setMergeInsertStartFrame,
@@ -104,12 +119,71 @@ export default function MergeTab({ ctx }: MergeTabProps) {
     endBoundaryGeneratedThumbs,
     endBoundaryOriginalThumbs,
     mergeMutation,
+    extendGeneration,
+    isExtendingGeneration,
+    extendGenerationError,
     sortedExports,
     humanizeFilename,
     keyBasenameFromS3Key,
     formatCompactTimestamp,
     openMotionSyncModal,
   } = ctx;
+  const [isExtendModalOpen, setIsExtendModalOpen] = useState(false);
+  const [extendGenerationId, setExtendGenerationId] = useState("");
+  const [extendAlignmentFrame, setExtendAlignmentFrame] = useState("");
+  const [extendAnchorFramesFromEnd, setExtendAnchorFramesFromEnd] = useState("5");
+  const [extendDurationSeconds, setExtendDurationSeconds] = useState("");
+  const [extendPrompt, setExtendPrompt] = useState("");
+  const selectedExtendGeneration = useMemo(
+    () => completeGenerations.find((generation) => generation.genId === extendGenerationId) ?? null,
+    [completeGenerations, extendGenerationId],
+  );
+  const selectedExtendSegment = selectedExtendGeneration ? getSegmentForGeneration(selectedExtendGeneration) : null;
+  const parsedAlignmentFrame = Number(extendAlignmentFrame);
+  const parsedAnchorFramesFromEnd = Number(extendAnchorFramesFromEnd);
+  const parsedDurationSeconds = extendDurationSeconds.trim() ? Number(extendDurationSeconds) : undefined;
+  const canSubmitExtension =
+    Boolean(selectedExtendGeneration) &&
+    Number.isInteger(parsedAlignmentFrame) &&
+    parsedAlignmentFrame >= 0 &&
+    (sourceFrameCount <= 0 || parsedAlignmentFrame < sourceFrameCount) &&
+    Number.isInteger(parsedAnchorFramesFromEnd) &&
+    parsedAnchorFramesFromEnd >= 1 &&
+    parsedAnchorFramesFromEnd <= 60 &&
+    (parsedDurationSeconds === undefined || (Number.isInteger(parsedDurationSeconds) && parsedDurationSeconds >= 1 && parsedDurationSeconds <= 15));
+
+  function resetExtendModalForGeneration(generation: SegmentGeneration | null) {
+    const segment = generation ? getSegmentForGeneration(generation) : null;
+    const defaultAlignment = Math.max(0, (segment?.endFrameExclusive ?? 1) - 6);
+    const defaultDuration = Math.max(1, Math.ceil(segment?.durationSec ?? 5));
+    setExtendGenerationId(generation?.genId ?? "");
+    setExtendAlignmentFrame(String(defaultAlignment));
+    setExtendAnchorFramesFromEnd("5");
+    setExtendDurationSeconds(String(defaultDuration));
+    setExtendPrompt(generation?.luma.prompt ?? "");
+  }
+
+  function openExtendModal() {
+    resetExtendModalForGeneration(mergeTargetGeneration ?? completeGenerations[0] ?? null);
+    setIsExtendModalOpen(true);
+  }
+
+  function handleExtendGenerationChange(genId: string) {
+    const generation = completeGenerations.find((item) => item.genId === genId) ?? null;
+    resetExtendModalForGeneration(generation);
+  }
+
+  function submitExtension() {
+    if (!canSubmitExtension || !selectedExtendGeneration) return;
+    extendGeneration({
+      generationId: selectedExtendGeneration.genId,
+      alignmentFrameIndex: parsedAlignmentFrame,
+      anchorFramesFromEnd: parsedAnchorFramesFromEnd,
+      durationSeconds: parsedDurationSeconds,
+      prompt: extendPrompt.trim() || undefined,
+    });
+    setIsExtendModalOpen(false);
+  }
 
   return (
     <div className="space-y-4">
@@ -255,13 +329,24 @@ export default function MergeTab({ ctx }: MergeTabProps) {
           </>
         ) : null}
 
-        <button
-          className="rounded-md bg-accent2 px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-60"
-          disabled={!mergeTargetGeneration || mergeMutation.isPending}
-          onClick={() => mergeMutation.mutate()}
-        >
-          {mergeMutation.isPending ? "Merging..." : "Merge generation"}
-        </button>
+        <div className="flex flex-wrap gap-2">
+          <button
+            className="rounded-md bg-accent2 px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-60"
+            disabled={!mergeTargetGeneration || mergeMutation.isPending}
+            onClick={() => mergeMutation.mutate()}
+          >
+            {mergeMutation.isPending ? "Merging..." : "Merge generation"}
+          </button>
+          <button
+            type="button"
+            className="rounded-md border border-ink/20 bg-white px-4 py-2 text-ink disabled:cursor-not-allowed disabled:opacity-60"
+            disabled={!completeGenerations.length || isExtendingGeneration}
+            onClick={openExtendModal}
+          >
+            {isExtendingGeneration ? "Queueing extension..." : "Extend generation"}
+          </button>
+        </div>
+        {extendGenerationError ? <p className="text-sm text-red-700">{extendGenerationError}</p> : null}
       </div>
       <div className="space-y-2">
         {sortedExports.map((exp) => (
@@ -300,6 +385,109 @@ export default function MergeTab({ ctx }: MergeTabProps) {
           </div>
         ))}
       </div>
+      {isExtendModalOpen ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/40 p-4">
+          <div className="w-full max-w-2xl rounded-xl bg-white p-4 shadow-xl">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h4 className="text-lg font-semibold">Extend generation</h4>
+                <p className="mt-1 text-sm text-ink/60">
+                  Creates the next source segment and uses a generated anchor frame from the previous result as the new first-frame edit.
+                </p>
+              </div>
+              <button type="button" className="rounded border border-ink/20 px-2 py-1 text-sm" onClick={() => setIsExtendModalOpen(false)}>
+                Close
+              </button>
+            </div>
+            <div className="mt-4 space-y-3">
+              <label className="block space-y-1 text-sm">
+                <span className="font-medium">Previous generated video</span>
+                <select
+                  className="w-full rounded-md border border-ink/20 px-2 py-2"
+                  value={extendGenerationId}
+                  onChange={(event) => handleExtendGenerationChange(event.target.value)}
+                >
+                  {completeGenerations.map((generation) => {
+                    const segment = getSegmentForGeneration(generation);
+                    return (
+                      <option key={generation.genId} value={generation.genId}>
+                        {describeGeneration(generation)}
+                        {segment ? ` · ${describeSegment(segment)}` : ""}
+                      </option>
+                    );
+                  })}
+                </select>
+              </label>
+              <div className="grid gap-3 md:grid-cols-3">
+                <label className="space-y-1 text-sm">
+                  <span className="block font-medium">Alignment source frame</span>
+                  <input
+                    type="number"
+                    min={0}
+                    max={Math.max(0, sourceFrameCount - 1)}
+                    className="w-full rounded-md border border-ink/20 px-2 py-2"
+                    value={extendAlignmentFrame}
+                    onChange={(event) => setExtendAlignmentFrame(event.target.value)}
+                  />
+                </label>
+                <label className="space-y-1 text-sm">
+                  <span className="block font-medium">Generated anchor offset</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={60}
+                    className="w-full rounded-md border border-ink/20 px-2 py-2"
+                    value={extendAnchorFramesFromEnd}
+                    onChange={(event) => setExtendAnchorFramesFromEnd(event.target.value)}
+                  />
+                </label>
+                <label className="space-y-1 text-sm">
+                  <span className="block font-medium">Next segment seconds</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={15}
+                    className="w-full rounded-md border border-ink/20 px-2 py-2"
+                    value={extendDurationSeconds}
+                    onChange={(event) => setExtendDurationSeconds(event.target.value)}
+                  />
+                </label>
+              </div>
+              <p className="text-xs text-ink/60">
+                Default alignment is five frames before the previous segment's last source frame. Adjust it to the original frame that visually matches the
+                generated anchor. The anchor offset default uses frame five before the generated clip end.
+              </p>
+              {selectedExtendSegment ? (
+                <p className="rounded-md bg-bg p-2 text-xs text-ink/70">
+                  Previous segment: {describeSegment(selectedExtendSegment)}. New source segment will start at f{Number.isFinite(parsedAlignmentFrame) ? parsedAlignmentFrame : 0}.
+                </p>
+              ) : null}
+              <label className="block space-y-1 text-sm">
+                <span className="font-medium">Prompt for next segment</span>
+                <textarea
+                  rows={4}
+                  className="w-full rounded-md border border-ink/20 px-2 py-2"
+                  value={extendPrompt}
+                  onChange={(event) => setExtendPrompt(event.target.value)}
+                />
+              </label>
+              <div className="flex flex-wrap justify-end gap-2">
+                <button type="button" className="rounded border border-ink/20 px-4 py-2" onClick={() => setIsExtendModalOpen(false)}>
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="rounded bg-accent2 px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-60"
+                  disabled={!canSubmitExtension || isExtendingGeneration}
+                  onClick={submitExtension}
+                >
+                  Queue next segment
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

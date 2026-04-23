@@ -171,6 +171,7 @@ export type PickFrameTabCtx = {
     durationFrames: number;
     durationSec: number;
     overLimit: boolean;
+    limitMessage: string | null;
   } | null;
   lumaModel: string;
   selectedSegmentId: string | null;
@@ -199,13 +200,9 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
     captureCurrentFrameFor,
     setFirstFrameId,
     timelineDelta,
-    hasHardDurationLimit,
-    lumaHardLimitFrames,
-    lumaHardLimitSeconds,
     lastFrame,
     setLastFrameId,
     selectedRange,
-    lumaModel,
     selectedSegmentId,
     selectedSegment,
     setSelectedSegmentId,
@@ -471,7 +468,7 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
 
   return (
     <div className="space-y-4">
-      <h3 className="text-lg font-semibold">Pick Frame & Segment Selection</h3>
+      <h3 className="text-lg font-semibold">Select Frames & Segment Selection</h3>
       <div className="grid gap-3 lg:grid-cols-[1fr_320px]">
         {timelinePlaybackUrl ? (
           <div className="relative w-fit max-w-full">
@@ -547,9 +544,6 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
           <p className={`text-xs font-medium ${timelineDelta.overLimit ? "text-red-600" : "text-ink/70"}`}>{timelineDelta.frames} frames</p>
           <p className="my-1 text-xl text-ink/70">→</p>
           <p className={`text-xs font-medium ${timelineDelta.overLimit ? "text-red-600" : "text-ink/70"}`}>{timelineDelta.seconds.toFixed(2)}s</p>
-          <p className="mt-1 text-[10px] text-ink/50">
-            {hasHardDurationLimit ? `limit ${lumaHardLimitFrames}f / ${lumaHardLimitSeconds}s` : "Runway input constrained by 64MB"}
-          </p>
         </div>
 
         <FrameSelectCard
@@ -568,10 +562,7 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
             {selectedRange.durationSec.toFixed(2)}s)
           </p>
           {selectedRange.overLimit ? (
-            <p className="text-xs text-red-600">
-              This exceeds the current model limit ({lumaHardLimitSeconds}s for {lumaModel}). You can still save the segment, but generation will be
-              blocked until under the hard limit.
-            </p>
+            <p className="text-xs text-red-600">{selectedRange.limitMessage}</p>
           ) : null}
         </div>
       ) : null}

@@ -14,6 +14,28 @@ function safeTimestamp(iso: string | undefined): number {
   return Number.isNaN(timestamp) ? 0 : timestamp;
 }
 
+function generationSortTimestamp(generation: SegmentGeneration): number {
+  return safeTimestamp(generation.finishedAt) || safeTimestamp(generation.updatedAt) || safeTimestamp(generation.createdAt);
+}
+
+function generationSourceFrameOffset(generation: SegmentGeneration | null | undefined): number {
+  if (!generation) return 0;
+  return Math.max(
+    0,
+    Number(
+      generation.sourceFrameOffset ??
+        generation.alignment?.sourceFrameOffset ??
+        generation.generationSettings?.timelineAlignment?.sourceFrameOffset ??
+        0,
+    ) || 0,
+  );
+}
+
+function generationStoredOutputFrameCount(generation: SegmentGeneration | null | undefined): number {
+  if (!generation) return 0;
+  return Math.max(0, Number(generation.generationSettings?.storedOutput?.frameCount ?? 0) || 0);
+}
+
 export function useGenerationMergeState({ task, selectedSegmentId, segmentsById }: UseGenerationMergeStateParams) {
   const [selectedGenIds, setSelectedGenIds] = useState<string[]>([]);
   const [selectedPreviewGenId, setSelectedPreviewGenId] = useState<string>("");
@@ -26,26 +48,24 @@ export function useGenerationMergeState({ task, selectedSegmentId, segmentsById 
   const segmentGenerations = useMemo(
     () =>
       Object.values(task?.segmentGenerations ?? {})
-        .filter((generation) => generation.status !== "failed")
-        .sort((a, b) => safeTimestamp(b.createdAt) - safeTimestamp(a.createdAt)),
+        .sort((a, b) => generationSortTimestamp(b) - generationSortTimestamp(a)),
     [task?.segmentGenerations],
   );
 
   const selectedSegmentGenerations = useMemo(
     () =>
       segmentGenerations
-        .filter((gen) => !selectedSegmentId || gen.segmentId === selectedSegmentId)
-        .sort((a, b) => safeTimestamp(b.createdAt) - safeTimestamp(a.createdAt)),
+        .filter(
+          (gen) =>
+            (!selectedSegmentId || gen.segmentId === selectedSegmentId) &&
+            gen.status === "complete" &&
+            Boolean(gen.outputKey),
+        )
+        .sort((a, b) => generationSortTimestamp(b) - generationSortTimestamp(a)),
     [segmentGenerations, selectedSegmentId],
   );
 
-  const selectedSegmentCompleteGenerations = useMemo(
-    () =>
-      selectedSegmentGenerations.filter(
-        (generation) => generation.status === "complete" && Boolean(generation.outputKey),
-      ),
-    [selectedSegmentGenerations],
-  );
+  const selectedSegmentCompleteGenerations = selectedSegmentGenerations;
 
   const selectedMergeGenerations = useMemo(
     () =>
@@ -55,7 +75,7 @@ export function useGenerationMergeState({ task, selectedSegmentId, segmentsById 
           if (!generation) return false;
           return generation.status === "complete" && Boolean(generation.outputKey);
         })
-        .sort((a, b) => safeTimestamp(b.createdAt) - safeTimestamp(a.createdAt)),
+        .sort((a, b) => generationSortTimestamp(b) - generationSortTimestamp(a)),
     [selectedGenIds, task?.segmentGenerations],
   );
 
@@ -96,10 +116,26 @@ export function useGenerationMergeState({ task, selectedSegmentId, segmentsById 
   useEffect(() => {
     const selectedId = selectedPreviewGeneration?.genId;
     if (!selectedId) {
-      setSelectedGenIds([]);
+      setSelectedGenIds((previous) =>
+        previous.filter((genId) => {
+          const generation = task?.segmentGenerations?.[genId];
+          return Boolean(generation && generation.status === "complete" && generation.outputKey);
+        }),
+      );
       return;
     }
-    setSelectedGenIds([selectedId]);
+    setSelectedGenIds((previous) => {
+      const selectedGeneration = task?.segmentGenerations?.[selectedId];
+      if (!selectedGeneration || selectedGeneration.status !== "complete" || !selectedGeneration.outputKey) {
+        return previous;
+      }
+      const filtered = previous.filter((genId) => {
+        if (genId === selectedId) return false;
+        const generation = task?.segmentGenerations?.[genId];
+        return Boolean(generation && generation.status === "complete" && generation.outputKey && generation.segmentId !== selectedGeneration.segmentId);
+      });
+      return [selectedId, ...filtered];
+    });
   }, [selectedPreviewGeneration?.genId, task?.segmentGenerations]);
 
   useEffect(() => {
@@ -110,10 +146,18 @@ export function useGenerationMergeState({ task, selectedSegmentId, segmentsById 
     }
     if (generationId === mergeConfiguredGenId) return;
     setMergeConfiguredGenId(generationId);
-    setMergeInsertStartFrame(mergeTargetSegment?.startFrame ?? 0);
+    const sourceFrameOffset = generationSourceFrameOffset(mergeTargetGeneration);
+    const targetStartFrame = Math.max(0, (mergeTargetSegment?.startFrame ?? 0) + sourceFrameOffset);
+    const segmentDurationFrames = Math.max(
+      1,
+      Number(mergeTargetSegment?.durationFrames ?? Math.max(1, (mergeTargetSegment?.endFrameExclusive ?? 1) - (mergeTargetSegment?.startFrame ?? 0))) || 1,
+    );
+    const storedOutputFrameCount = generationStoredOutputFrameCount(mergeTargetGeneration);
+    const defaultTrimEndFrames = storedOutputFrameCount > 0 ? Math.max(0, storedOutputFrameCount - Math.max(1, segmentDurationFrames - sourceFrameOffset)) : 0;
+    setMergeInsertStartFrame(targetStartFrame);
     setMergeTrimStartFrames(0);
-    setMergeTrimEndFrames(0);
-  }, [mergeConfiguredGenId, mergeTargetGeneration?.genId, mergeTargetSegment?.startFrame]);
+    setMergeTrimEndFrames(defaultTrimEndFrames);
+  }, [mergeConfiguredGenId, mergeTargetGeneration, mergeTargetGeneration?.genId, mergeTargetSegment]);
 
   function selectSegmentGeneration(genId: string) {
     const selectedGeneration = task?.segmentGenerations?.[genId];

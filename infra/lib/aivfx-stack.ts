@@ -21,9 +21,11 @@ export class AivfxStack extends cdk.Stack {
     const manageAppCloudFront = (process.env.MANAGE_APP_CLOUDFRONT ?? "false").toLowerCase() === "true";
     const webPublicBaseUrl = process.env.WEB_PUBLIC_BASE_URL?.trim() ?? "";
     const cognitoRedirectSignInRaw =
-      process.env.COGNITO_REDIRECT_SIGN_IN_URLS ?? "https://www.shwsh.co.uk/experiments/aivfx/,http://localhost:5173/";
+      process.env.COGNITO_REDIRECT_SIGN_IN_URLS ??
+      "https://www.shwsh.co.uk/experiments/aivfx/,https://www.shwsh.co.uk/experiments/aivfx/api-test.html,https://shwsh.co.uk/experiments/aivfx/,https://shwsh.co.uk/experiments/aivfx/api-test.html,http://localhost:5173/,http://localhost:5173/api-test.html";
     const cognitoRedirectSignOutRaw =
-      process.env.COGNITO_REDIRECT_SIGN_OUT_URLS ?? "https://www.shwsh.co.uk/experiments/aivfx/,http://localhost:5173/";
+      process.env.COGNITO_REDIRECT_SIGN_OUT_URLS ??
+      "https://www.shwsh.co.uk/experiments/aivfx/,https://www.shwsh.co.uk/experiments/aivfx/api-test.html,https://shwsh.co.uk/experiments/aivfx/,https://shwsh.co.uk/experiments/aivfx/api-test.html,http://localhost:5173/,http://localhost:5173/api-test.html";
     const cognitoRedirectSignInUrls = cognitoRedirectSignInRaw
       .split(",")
       .map((value) => value.trim())
@@ -148,7 +150,7 @@ export class AivfxStack extends cdk.Stack {
     });
 
     const jobsQueue = new sqs.Queue(this, "JobsQueue", {
-      visibilityTimeout: cdk.Duration.minutes(15),
+      visibilityTimeout: cdk.Duration.minutes(30),
       retentionPeriod: cdk.Duration.days(4),
       encryption: sqs.QueueEncryption.SQS_MANAGED,
       deadLetterQueue: {
@@ -220,6 +222,7 @@ export class AivfxStack extends cdk.Stack {
     );
 
     jobsQueue.grantSendMessages(apiFn);
+    jobsQueue.grantSendMessages(workerFn);
     jobsQueue.grantConsumeMessages(workerFn);
 
     assetsBucket.grantReadWrite(apiFn);

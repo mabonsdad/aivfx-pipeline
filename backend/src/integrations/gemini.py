@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import base64
+import time
 from typing import Any
 
 import requests
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 GEMINI_MODEL_MAP = {
-    "nano_banana": "gemini-3.1-flash-image-preview",
+    "nano_banana": "gemini-2.5-flash-image",
     "nano_banana_pro": "gemini-3-pro-image-preview",
 }
 
@@ -31,7 +32,32 @@ def _extract_image_bytes(payload: dict[str, Any]) -> bytes:
             inline = part.get("inlineData") or part.get("inline_data")
             if inline and inline.get("data"):
                 return base64.b64decode(inline["data"])
-    raise GeminiError("Gemini response did not include inline image bytes")
+
+    prompt_feedback = payload.get("promptFeedback") or payload.get("prompt_feedback") or {}
+    block_reason = prompt_feedback.get("blockReason") or prompt_feedback.get("block_reason")
+    block_reason_message = prompt_feedback.get("blockReasonMessage") or prompt_feedback.get("block_reason_message")
+
+    details: list[str] = []
+    if block_reason:
+        details.append(f"prompt blocked ({block_reason})")
+    if block_reason_message:
+        details.append(block_reason_message)
+
+    for candidate in candidates:
+        finish_reason = candidate.get("finishReason") or candidate.get("finish_reason")
+        finish_message = candidate.get("finishMessage") or candidate.get("finish_message")
+        if finish_reason:
+            details.append(f"finishReason={finish_reason}")
+        if finish_message:
+            details.append(finish_message)
+        content = candidate.get("content", {})
+        text_parts = [str(part.get("text", "")).strip() for part in content.get("parts", []) if part.get("text")]
+        if text_parts:
+            details.append(" ".join(text_parts))
+
+    if details:
+        raise GeminiError(f"Gemini did not return an image: {' | '.join(details)}")
+    raise GeminiError("Gemini did not return an image")
 
 
 def generate_image_edit(
@@ -89,8 +115,20 @@ def generate_image_edit(
             }
         ],
         "generationConfig": {
-            "responseModalities": ["IMAGE"],
+            "responseModalities": ["TEXT", "IMAGE"],
         },
     }
-    data = _post(url, headers, payload)
-    return _extract_image_bytes(data)
+    last_error: GeminiError | None = None
+    for attempt in range(2):
+        data = _post(url, headers, payload)
+        try:
+            return _extract_image_bytes(data)
+        except GeminiError as exc:
+            last_error = exc
+            if attempt == 0 and "finishReason=IMAGE_OTHER" in str(exc):
+                time.sleep(1.5)
+                continue
+            raise
+    if last_error is not None:
+        raise last_error
+    raise GeminiError("Gemini did not return an image")

@@ -1,6 +1,22 @@
 import { getIdToken } from "../lib/auth";
 import { config } from "../lib/config";
-import type { JobStatus, SegmentRecord, TaskDetail, TaskSummary } from "../types/api";
+import type { ApiRequestRecord, CustomReportOutputRef, JobStatus, SegmentRecord, TaskDetail, TaskSummary, VideoCleanupTrack, VideoCleanupSettings } from "../types/api";
+
+function extractApiErrorMessage(payload: unknown, fallback: string): string {
+  if (payload && typeof payload === "object") {
+    const errorValue = (payload as { error?: unknown }).error;
+    if (typeof errorValue === "string" && errorValue) {
+      return errorValue;
+    }
+    if (errorValue && typeof errorValue === "object") {
+      const message = (errorValue as { message?: unknown }).message;
+      if (typeof message === "string" && message) {
+        return message;
+      }
+    }
+  }
+  return fallback;
+}
 
 async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const token = await getIdToken();
@@ -19,7 +35,7 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
 
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(payload.error ?? `Request failed: ${response.status}`);
+    throw new Error(extractApiErrorMessage(payload, `Request failed: ${response.status}`));
   }
   return payload as T;
 }
@@ -32,13 +48,38 @@ export const apiClient = {
   getTask: (taskId: string) => api<TaskDetail>(`/tasks/${taskId}`),
   createVideoUpload: (taskId: string, payload: { filename: string; contentType: string; sizeBytes: number }) =>
     api<{ uploadUrl: string; s3Key: string }>(`/tasks/${taskId}/uploads/video`, { method: "POST", body: JSON.stringify(payload) }),
+  createExternalQcPairUpload: (
+    taskId: string,
+    payload: {
+      originalFilename: string;
+      originalContentType: string;
+      editedFilename: string;
+      editedContentType: string;
+    },
+  ) =>
+    api<{
+      pairId: string;
+      originalUploadUrl: string;
+      editedUploadUrl: string;
+      pair: {
+        pairId: string;
+        originalKey: string;
+        editedKey: string;
+        originalFilename?: string;
+        editedFilename?: string;
+        originalUrl?: string;
+        editedUrl?: string;
+        createdAt: string;
+        updatedAt: string;
+      };
+    }>(`/tasks/${taskId}/external-qc/pairs/uploads`, { method: "POST", body: JSON.stringify(payload) }),
   ingestTask: (taskId: string) => api<{ jobId: string }>(`/tasks/${taskId}/ingest`, { method: "POST" }),
   thumbnails: (taskId: string) => api<{ manifestUrl: string }>(`/tasks/${taskId}/thumbnails`),
   frameStrip: (taskId: string, startSec: number, endSec: number) =>
     api<{ frames: Array<{ frameIndex: number; timecode: string; thumbUrl: string }> }>(
       `/tasks/${taskId}/frames/strip?startSec=${startSec}&endSec=${endSec}`,
     ),
-  createSegment: (taskId: string, payload: { startFrameIndex: number; durationSeconds: number }) =>
+  createSegment: (taskId: string, payload: { startFrameIndex: number; durationSeconds?: number; endFrameExclusive?: number }) =>
     api<{ segmentId: string; resolvedStartFrameIndex: number; resolvedEndFrameIndex: number }>(`/tasks/${taskId}/segments`, {
       method: "POST",
       body: JSON.stringify(payload),
@@ -125,6 +166,50 @@ export const apiClient = {
       sourceVariantId?: string;
     },
   ) => api<{ jobId: string }>(`/tasks/${taskId}/frames/${frameId}/edits/patch/submit`, { method: "POST", body: JSON.stringify(payload) }),
+  initApiAssetUpload: (payload: { filename: string; contentType: string; assetType: "image" | "video" }) =>
+    api<{ assetId: string; assetKey: string; uploadUrl: string }>(`/api/v1/assets/uploads/init`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  listApiRequests: (params?: { status?: string; workflow?: string; model?: string; limit?: number }) => {
+    const search = new URLSearchParams();
+    if (params?.status) search.set("status", params.status);
+    if (params?.workflow) search.set("workflow", params.workflow);
+    if (params?.model) search.set("model", params.model);
+    if (typeof params?.limit === "number") search.set("limit", String(params.limit));
+    const query = search.toString();
+    return api<{ requests: ApiRequestRecord[] }>(`/api/v1/requests${query ? `?${query}` : ""}`);
+  },
+  getApiRequest: (requestId: string) => api<ApiRequestRecord>(`/api/v1/requests/${requestId}`),
+  apiFullEdit: (payload: { model: "nano_banana" | "nano_banana_pro" | "chatgpt"; prompt: string; inputAssetKey: string }) =>
+    api<{ requestId: string; jobId: string }>(`/api/v1/image-edits/full`, { method: "POST", body: JSON.stringify(payload) }),
+  apiPatchEdit: (payload: {
+    model: "nano_banana_pro" | "chatgpt" | "runware_flux_fill" | "runware_ace_pp";
+    prompt: string;
+    inputAssetKey: string;
+    patchAssetKey: string;
+    patchRect: { x: number; y: number; width: number; height: number };
+    maskAssetKey?: string;
+    referenceAssetKey?: string;
+    featherPx: number;
+    bleedPx: number;
+    runwareRepaintingScale?: number;
+    edgeAwareRefine?: boolean;
+    edgeAwareStrength?: number;
+    edgeAwareRadiusPx?: number;
+    maskGrowPx?: number;
+  }) => api<{ requestId: string; jobId: string }>(`/api/v1/image-edits/patch`, { method: "POST", body: JSON.stringify(payload) }),
+  apiReferenceVideoGenerate: (payload: {
+    model: string;
+    mode: string;
+    prompt?: string | null;
+    videoAssetKey: string;
+    firstFrameAssetKey: string;
+    lastFrameAssetKey?: string | null;
+    replicateKlingMode?: "std" | "pro";
+    replicateKlingV3Mode?: "standard" | "pro";
+    wan27Resolution?: "720p" | "1080p";
+  }) => api<{ requestId: string; jobId: string }>(`/api/v1/video-generations/reference-video`, { method: "POST", body: JSON.stringify(payload) }),
   initQualityMatchMaskUpload: (
     taskId: string,
     frameId: string,
@@ -163,6 +248,7 @@ export const apiClient = {
         restorationMapUri: string;
         previewUri: string;
         reportJsonUri: string;
+        originalMaskUri?: string | null;
       };
       metrics: {
         changedPctBefore?: number;
@@ -189,6 +275,104 @@ export const apiClient = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
+  previewQualityMatch: (
+    taskId: string,
+    frameId: string,
+    payload: {
+      analysisId: string;
+      maskKey: string;
+      settings?: {
+        diffThreshold?: number;
+        minRegionAreaPct?: number;
+        featherWidthPx?: number;
+        boundaryProtectionWidthPx?: number;
+        edgeSuppression?: "off" | "low" | "medium" | "high";
+        useSeamlessCloneFallback?: boolean;
+        autoDetectEditRegion?: boolean;
+      };
+    },
+  ) =>
+    api<{
+      analysisId: string;
+      artifacts: {
+        previewUri: string;
+      };
+      metrics: {
+        changedPctPreview?: number;
+        outsideLeakagePreview?: number;
+        boundarySpillPreview?: number;
+        proposedGeneratedCoveragePct?: number;
+        proposedOriginalRestorePct?: number;
+      };
+      warnings: string[];
+      settings: {
+        diffThreshold: number;
+        minRegionAreaPct: number;
+        featherWidthPx: number;
+        boundaryProtectionWidthPx: number;
+        edgeSuppression: "off" | "low" | "medium" | "high";
+        useSeamlessCloneFallback: boolean;
+        autoDetectEditRegion: boolean;
+      };
+    }>(`/tasks/${taskId}/frames/${frameId}/quality-match/preview`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  exportManualRefinePsd: (
+    taskId: string,
+    frameId: string,
+    payload: { sourceVariantId: string; format?: "psd" | "png_zip" },
+  ) =>
+    api<{
+      downloadUrl: string;
+      filename: string;
+      exportMeta: {
+        width: number;
+        height: number;
+        changedPixelPct: number;
+        includedLayers: string[];
+      };
+    }>(`/tasks/${taskId}/frames/${frameId}/manual-refine/export`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  initManualRefineUpload: (
+    taskId: string,
+    frameId: string,
+    payload: { sourceVariantId: string; filename: string; contentType: string },
+  ) =>
+    api<{ uploadKey: string; uploadUrl: string }>(`/tasks/${taskId}/frames/${frameId}/manual-refine/upload/init`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  completeManualRefineUpload: (
+    taskId: string,
+    frameId: string,
+    payload: { sourceVariantId: string; uploadKey: string; filename: string },
+  ) =>
+    api<{ variant: { variantId: string; imageUrl?: string } }>(`/tasks/${taskId}/frames/${frameId}/manual-refine/upload/complete`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  segmentQualityMatchSam: (
+    taskId: string,
+    frameId: string,
+    payload: {
+      variantId: string;
+      analysisId?: string;
+      promptType: "points" | "box";
+      positivePoints?: Array<{ x: number; y: number }>;
+      negativePoints?: Array<{ x: number; y: number }>;
+      box?: { x: number; y: number; w: number; h: number };
+      restrictToMaskBounds?: boolean;
+      existingMaskKey?: string;
+      edgeBias?: "conservative" | "balanced" | "inclusive";
+    },
+  ) =>
+    api<{ jobId: string; analysisId: string }>(`/tasks/${taskId}/frames/${frameId}/quality-match/sam`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
   applyQualityMatch: (
     taskId: string,
     frameId: string,
@@ -207,26 +391,83 @@ export const apiClient = {
       overwriteGeneratedFrame?: boolean;
     },
   ) =>
-    api<{
-      frameId: string;
-      replacedFrameUri: string;
-      qcReviewed: boolean;
-      qualityMatched: boolean;
-      reportJsonUri: string;
-      metrics: {
-        changedPctBefore?: number;
-        changedPctAfter?: number;
-        outsideLeakageBefore?: number;
-        outsideLeakageAfter?: number;
-        boundarySpillBefore?: number;
-        boundarySpillAfter?: number;
+    api<{ jobId: string }>(`/tasks/${taskId}/frames/${frameId}/quality-match/apply`, { method: "POST", body: JSON.stringify(payload) }),
+  createVideoCleanupTrack: (
+    taskId: string,
+    segmentId: string,
+    generationId: string,
+    payload: {
+      firstMaskSource: {
+        type: "quality_match_analysis";
+        analysisId: string;
       };
-      artifacts?: {
-        finalUri?: string;
-        previewUri?: string;
-        maskUri?: string;
-      };
-    }>(`/tasks/${taskId}/frames/${frameId}/quality-match/apply`, { method: "POST", body: JSON.stringify(payload) }),
+      settings?: Partial<VideoCleanupSettings>;
+    },
+  ) =>
+    api<{ trackId: string; jobId: string }>(`/tasks/${taskId}/segments/${segmentId}/generations/${generationId}/cleanup-tracks`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  getVideoCleanupTrack: (taskId: string, trackId: string) =>
+    api<{ track: VideoCleanupTrack }>(`/tasks/${taskId}/cleanup-tracks/${trackId}`),
+  initVideoCleanupKeyframeUpload: (
+    taskId: string,
+    trackId: string,
+    payload: { frameIndexLocal: number; filename: string; contentType: string },
+  ) =>
+    api<{ uploadKey: string; uploadUrl: string }>(`/tasks/${taskId}/cleanup-tracks/${trackId}/keyframes/upload-init`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  completeVideoCleanupKeyframeUpload: (
+    taskId: string,
+    trackId: string,
+    payload: {
+      frameIndexLocal: number;
+      uploadKey: string;
+      propagationMode?: "windowed" | "forward" | "backward" | "bidirectional";
+    },
+  ) =>
+    api<{ jobId: string; keyframeId: string }>(`/tasks/${taskId}/cleanup-tracks/${trackId}/keyframes/complete`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  samAssistVideoCleanupTrack: (
+    taskId: string,
+    trackId: string,
+    payload: {
+      frameIndexLocal: number;
+      positivePoints?: Array<{ x: number; y: number }>;
+      negativePoints?: Array<{ x: number; y: number }>;
+      box?: { x: number; y: number; width: number; height: number };
+      existingMaskKey?: string;
+      restrictToMaskBounds?: boolean;
+      edgeBias?: "conservative" | "balanced" | "inclusive";
+      propagationMode?: "windowed" | "forward" | "backward" | "bidirectional";
+    },
+  ) =>
+    api<{ jobId: string }>(`/tasks/${taskId}/cleanup-tracks/${trackId}/sam-assist`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  previewVideoCleanupTrack: (
+    taskId: string,
+    trackId: string,
+    payload: { settings?: Partial<VideoCleanupSettings> },
+  ) =>
+    api<{ jobId: string }>(`/tasks/${taskId}/cleanup-tracks/${trackId}/preview`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  applyVideoCleanupTrack: (
+    taskId: string,
+    trackId: string,
+    payload: { settings?: Partial<VideoCleanupSettings>; createSegmentGenerationVariant?: boolean },
+  ) =>
+    api<{ jobId: string }>(`/tasks/${taskId}/cleanup-tracks/${trackId}/apply`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
   selectVariant: (taskId: string, frameId: string, variantId: string) =>
     api<{ ok: true }>(`/tasks/${taskId}/frames/${frameId}/variants/${variantId}/select`, { method: "POST", body: "{}" }),
   generateSegment: (
@@ -238,16 +479,41 @@ export const apiClient = {
         | "ray-flash-2"
         | "runway-gen4.5"
         | "kling-2.6"
+        | "kling-o1"
+        | "kling-v3-omni-video"
+        | "seedance-2.0-reference-to-video"
         | "veo-3.1"
         | "veo-3.1-fast"
         | "wan2.2-a14b"
-        | "wan2.2-animate";
+        | "wan2.2-animate"
+        | "wan2.7-videoedit";
       mode: string;
       prompt?: string;
       firstFrameVariantId?: string;
       lastFrameVariantId?: string;
+      replicateKlingMode?: "std" | "pro";
+      replicateKlingV3Mode?: "standard" | "pro";
+      wan27Resolution?: "720p" | "1080p";
     },
-  ) => api<{ jobId: string }>(`/tasks/${taskId}/segments/${segmentId}/generate`, { method: "POST", body: JSON.stringify(payload) }),
+  ) => api<{ jobId: string; genId: string }>(`/tasks/${taskId}/segments/${segmentId}/generate`, { method: "POST", body: JSON.stringify(payload) }),
+  extendSegmentGeneration: (
+    taskId: string,
+    genId: string,
+    payload: {
+      alignmentFrameIndex: number;
+      anchorFramesFromEnd?: number;
+      durationSeconds?: number;
+      prompt?: string;
+    },
+  ) =>
+    api<{
+      jobId: string;
+      genId: string;
+      segmentId: string;
+      anchorVariantId: string;
+      alignmentFrameIndex: number;
+      sourceGeneratedFrameIndex: number;
+    }>(`/tasks/${taskId}/segment-generations/${genId}/extend`, { method: "POST", body: JSON.stringify(payload) }),
   merge: (
     taskId: string,
     payload: {
@@ -287,12 +553,9 @@ export const apiClient = {
   createCustomReport: (
     taskId: string,
     payload: {
-      reportType: "qc_frame" | "qc_video";
+      reportType: "qc_frame" | "qc_video" | "video_compare";
       tests: string[];
-      outputRefs: Array<
-        | { assetType: "frame_variant"; frameId: string; variantId: string }
-        | { assetType: "segment_generation"; genId: string }
-      >;
+      outputRefs: CustomReportOutputRef[];
       name?: string;
     },
   ) => api<{ reportId: string }>(`/tasks/${taskId}/reports`, { method: "POST", body: JSON.stringify(payload) }),

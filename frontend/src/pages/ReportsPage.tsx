@@ -3,6 +3,17 @@ import { useQuery } from "@tanstack/react-query";
 import type { UseMutationResult, UseQueryResult } from "@tanstack/react-query";
 
 import { apiClient } from "../api/client";
+import {
+  FRAME_TEST_OPTIONS,
+  HeatmapLegend,
+  InfoButton,
+  InfoModal,
+  QC_INFO_TEXT,
+  ReportCreateModal,
+  VIDEO_COMPARE_TEST_OPTIONS,
+  VIDEO_TEST_OPTIONS,
+  type InfoModalState,
+} from "../components/reports/QcReportShared";
 import type {
   CustomReportOutputRef,
   CustomReportRecord,
@@ -16,6 +27,7 @@ import type {
 } from "../types/api";
 
 type ReportView = "frames" | "videos" | "reports";
+type CustomReportType = "qc_frame" | "qc_video" | "video_compare";
 
 type ReportsPageCtx = {
   reportTask: TaskDetail | undefined;
@@ -37,7 +49,7 @@ type ReportsPageCtx = {
     Error,
     {
       taskId: string;
-      reportType: "qc_frame" | "qc_video";
+      reportType: CustomReportType;
       tests: string[];
       outputRefs: CustomReportOutputRef[];
       name?: string;
@@ -58,11 +70,6 @@ type ReportsPageProps = {
   ctx: ReportsPageCtx;
 };
 
-type InfoModalState = {
-  title: string;
-  lines: string[];
-} | null;
-
 type FrameOutputRow = {
   frame: FrameRecord;
   variant: FrameVariant;
@@ -79,16 +86,24 @@ type VideoOutputRow = {
 };
 
 type FrameReportRow = {
-  assetType: "frame_variant";
-  frameId: string;
-  variantId: string;
-  role: "start" | "end" | "unlinked";
-  frameIndex: number;
-  timecode: string;
+  assetType: "frame_variant" | "external_frame_pair";
+  frameId?: string;
+  variantId?: string;
+  pairId?: string;
+  sourceMediaType?: "image" | "video" | string;
+  role: "start" | "end" | "unlinked" | "external";
+  frameIndex?: number;
+  timecode?: string;
+  label?: string;
+  sampleIndex?: number;
+  sampleTimeSec?: number;
   createdAt?: string;
   model?: string;
   variantType?: string;
+  processingDurationSec?: number;
   prompt?: string;
+  originalFilename?: string;
+  editedFilename?: string;
   originalFrameUrl?: string;
   maskUrl?: string;
   editedFrameUrl?: string;
@@ -120,6 +135,7 @@ type VideoReportRow = {
   createdAt?: string;
   model?: string;
   mode?: string;
+  processingDurationSec?: number;
   prompt?: string;
   originalFrameUrl?: string;
   editedStartFrameUrl?: string;
@@ -134,96 +150,106 @@ type VideoReportRow = {
   } | null;
 };
 
-const FRAME_TEST_OPTIONS = [
-  { id: "frame_diff", label: "Frame diff set", description: "Diff heatmap, overlay, binary/boundary map and standard still metrics." },
-  { id: "frame_composite", label: "Composite anomaly map", description: "Combined anomaly overlay with top anomalous regions." },
-  { id: "frame_perceptual", label: "Perceptual difference map", description: "Patchwise perceptual-difference proxy and local change scores." },
-  { id: "frame_boundary", label: "Boundary spill analysis", description: "Inside/outside ring analysis for spill beyond the intended edit region." },
-  { id: "frame_sharpness", label: "Frame sharpness consistency", description: "Focus and sharpness mismatch maps across the edited frame." },
-  { id: "frame_naturalness", label: "Naturalness proxy", description: "Edited-frame anomaly proxy highlighting statistically unusual patches." },
-  { id: "frame_texture", label: "Frame microtexture", description: "Noise and microtexture consistency map for over-smoothed or over-sharpened areas." },
-] as const;
+type VideoCompareItem = {
+  genId?: string;
+  model?: string;
+  mode?: string;
+  generatedFrameIndex?: number;
+  expectedGeneratedFrameIndex?: number;
+  sourceFrameOffset?: number;
+  frameUrl?: string;
+  diffUrl?: string;
+  zoomFrameUrl?: string;
+  zoomDiffUrl?: string;
+};
 
-const VIDEO_TEST_OPTIONS = [
-  { id: "video_diff", label: "Video diff set", description: "Diff video, timeline graph/CSV and aggregate video QC metrics." },
-  { id: "video_frame_evidence", label: "Video frame evidence", description: "Representative extracted frame QC evidence from the generated segment." },
-] as const;
+type VideoCompareSample = {
+  frameIndex?: number;
+  comparisonFrameIndex?: number;
+  sourceFrameIndex?: number;
+  timeSec?: number;
+  alignedTimeSec?: number;
+  originalUrl?: string;
+  originalZoomUrl?: string;
+  zoomRegion?: { x: number; y: number; width: number; height: number; scale: number };
+  items?: VideoCompareItem[];
+};
 
-const QC_INFO_TEXT = {
-  frameQcAnalysis: [
-    "This summary shows how much the edited frame differs from the original frame, and if a mask is present, how much of that change falls outside the intended edit area. It is the clearest high-level check for edit containment.",
-    "Use Changed to understand how much of the frame was altered at all, Outside leakage to see how much change happened outside the intended region, and Boundary spill to check whether change is clustering just beyond the mask edge. Read this together with the Frame diff overlay, Boundary/Binary map, and Boundary spill analysis to see whether the numbers reflect harmless global change or problematic spread beyond the edit.",
-  ],
-  frameDiffHeatmap: [
-    "This view shows the strength of pixel-level change between the original frame and the edited frame. Cooler colors indicate little change, while warmer colors indicate stronger visible difference.",
-    "Read this as a direct where did the frame change map. Strong activity inside the intended edit area is usually expected. Strong activity outside the intended area is more concerning, especially if it lines up with high values in the Composite anomaly map or Boundary spill analysis. Use this together with the Frame diff overlay when you want to relate the heatmap back to the actual image content.",
-  ],
-  frameDiffOverlay: [
-    "This overlays the frame difference heatmap on top of the edited image, making it easier to see exactly which parts of the picture changed. If a mask is present, the intended edit boundary is also shown.",
-    "Use this when you want the most intuitive answer to what changed, and where did it happen in the final image. This is often the fastest artifact for checking whether the edit stayed on the intended subject. If you see strong change outside the mask here, compare it with the Boundary/Binary map for a simpler changed or not changed view and with the Boundary spill analysis to judge how serious the spill is.",
-  ],
-  boundaryBinaryMap: [
-    "This is a simplified changed or not changed view of the frame. Instead of showing change strength, it highlights only the pixels that crossed the change threshold, so it acts like a clean containment map.",
-    "Use this when you want a simple answer to whether the edit stayed inside the intended region. It is less nuanced than the heatmap, but often easier to interpret quickly. Compare it with the Frame diff heatmap if you want more detail on change strength, and with the Boundary spill analysis if you want a boundary-specific measure of how much change extended beyond the mask.",
-  ],
-  advancedQcAnalysis: [
-    "This section groups the advanced QC artifacts, which are designed to highlight local inconsistency rather than just raw pixel change. These checks are stronger for prioritizing review than the standard diff outputs, but they should still be interpreted alongside the original and edited images.",
-    "Use this section when the standard frame diff outputs show that change occurred, but you need more help understanding whether the changed regions look visually coherent, contained, and plausible. Start with the Composite anomaly map for the overall pattern, then use the more specific advanced artifacts to understand what kind of issue is being detected.",
-  ],
-  compositeAnomalyMap: [
-    "This is a combined review map that blends several patch-level checks into one image, so you can quickly see which regions deserve closer attention. It highlights areas that look locally inconsistent based on multiple signals rather than just raw pixel change.",
-    "Read this as a where should I look first map, not a literal truth score. Higher values inside the intended edit area may simply reflect the intended change. Higher values outside the intended area are more concerning, especially if they also show up in the Frame diff overlay or Boundary spill analysis. This is the best single artifact for prioritizing manual review, while the individual advanced maps help explain why an area was highlighted.",
-  ],
-  perceptualDifferenceMap: [
-    "This view highlights patches where the edited frame differs most strongly from the original frame in overall appearance. It is designed to reflect visually meaningful local change rather than only binary changed pixels.",
-    "Use this to judge where the edit changed the look of the image most noticeably. Strong activity inside the intended edit area is often expected. Strong activity outside that area suggests visible spill or collateral change. Compare it with the Frame diff heatmap to see whether those changes are also large at the pixel level, and with the Composite anomaly map to see whether the changed areas also look locally inconsistent.",
-  ],
-  boundarySpillAnalysis: [
-    "This view focuses specifically on the area around the intended edit boundary. It helps show whether the edit remained concentrated inside the masked region or whether significant change and anomaly extend into the surrounding area.",
-    "Use this as the most targeted containment check in the advanced QC set. A lower score usually means the edit is staying more cleanly inside the intended boundary. Higher outside activity means the surrounding pixels are being altered more than expected. Compare it with the Boundary/Binary map for a stricter changed or not changed view, and with the Composite anomaly map when you want to know whether the spill also looks locally inconsistent.",
-  ],
-  sharpnessConsistency: [
-    "This map shows where the edited image has a different local sharpness or edge strength pattern from the original image, or where a patch stands out from the overall sharpness pattern of the edited frame.",
-    "Use this when you want to see whether the edited area looks too sharp, too soft, or uneven compared with the rest of the image. High values inside the intended edit area may be acceptable if the edit adds or removes detail. High values outside the intended area are more concerning. Compare this with the Noise or microtexture map to separate edge crispness issues from fine-detail texture changes, and with the Composite anomaly map to see whether sharpness inconsistency is a major driver of the overall anomaly.",
-  ],
-  naturalnessProxy: [
-    "This map highlights areas in the edited frame that look statistically unusual compared with the rest of that same edited frame. Unlike most of the other artifacts, it does not compare against the original frame.",
-    "Use this as an edited-frame-only anomaly check. It is best for spotting patches that stand out from their surroundings because they look unusually flat, noisy, or otherwise atypical within the final image. High values inside the intended edit region may simply reflect the changed content, so this view is strongest when used as supporting evidence. Compare it with the comparison-based artifacts, especially the Composite anomaly map and Noise or microtexture map, before drawing conclusions.",
-  ],
-  microtextureMap: [
-    "This map highlights where the fine detail, grain, or local texture pattern changed between the original frame and the edited frame. It is useful for spotting areas that have become over-smoothed, over-sharpened, or texturally inconsistent.",
-    "Use this when the overall structure looks plausible but the surface detail feels wrong. High values inside the intended edit region may be expected for a strong edit, but high values outside it are a stronger warning sign. Compare it with Focus or sharpness consistency to separate texture shifts from edge sharpness changes, and with the Perceptual difference map to see whether the textural change also corresponds to a more visible overall appearance change.",
-  ],
-  qcClassification: [
-    "This is the overall pass, warn, or fail summary for the advanced QC checks. It is a rule-based result that gives a quick triage view of whether the edit appears contained and visually consistent enough to pass review.",
-    "Use this as a summary, not as the only thing you rely on. When a frame is flagged, look at the Composite anomaly map first for the overall pattern, then use Boundary spill analysis and the standard diff artifacts to understand whether the issue is mainly leakage outside the intended edit area or broader local inconsistency. The classification is most useful for ranking and filtering, while the artifacts explain why the frame was flagged.",
-  ],
-  diffVideoMap: [
-    "This video shows the moving difference between the original clip and the edited clip over time. It makes temporal change easy to spot, including drift, flicker, and any change appearing outside the intended edit region.",
-    "Use this when a still frame is not enough and you want to see whether the edit remains stable throughout the shot. Bright or persistent activity outside the intended area is more concerning. Compare what you see here with the Timeline graph to find the specific moments where change or leakage spikes.",
-  ],
-  videoQcAnalysis: [
-    "This summary shows how much the generated segment differs from the original segment over time, and if a start-frame mask exists, how much of that change appears to leak outside the intended edit region. It is the clearest high-level check for temporal edit containment.",
-    "Use Changed mean to understand how much of the clip differs overall, Outside leak mean to see how much of that change falls beyond the intended region, and the similarity metrics to judge how close the generated segment stays to the original over time. Read this together with the Diff video map, Timeline graph, and Video frame evidence to decide whether the differences are acceptable or indicate drift, flicker, or spill.",
-  ],
-  timelineGraph: [
-    "This graph shows how frame-level change and outside leakage vary over time across the clip. It helps identify whether problems are isolated to a few moments or persist throughout the segment.",
-    "Use this as the fastest way to spot unstable edits. Peaks in total change show moments where the frame differs most from the original, while peaks in outside leakage suggest containment problems. If you see spikes, check the corresponding Video frame evidence and Diff video map to understand what happened visually at those times.",
-  ],
-  timelineCsv: [
-    "This file contains the timeline data behind the video QC report in machine-readable form. It is useful for deeper inspection, debugging, filtering, or plotting outside the report UI.",
-    "Use this when you want exact values rather than the summarized graph. It is especially helpful for correlating spikes in change or leakage with timestamps, or for comparing segments programmatically. Read it together with the Timeline graph and Video frame evidence for the clearest interpretation.",
-  ],
-  videoFrameEvidence: [
-    "These are selected frames from the clip that best illustrate the strongest anomalies or the most representative midpoint. Each evidence frame includes the same still-frame diff artifacts used in frame QC.",
-    "Use these as the bridge between the timeline-level summary and actual visible content. When the timeline shows spikes, these frames help explain what the clip looked like at those moments. Compare them with the Diff video map for temporal context and with the still-frame advanced maps when you want a more detailed local explanation of the issue.",
-  ],
-} as const;
+type VideoCompareReport = {
+  segmentId?: string;
+  segmentStartFrame?: number;
+  segmentEndFrameExclusive?: number;
+  sourceFps?: number;
+  alignment?: {
+    method?: string;
+    scanFrameCount?: number;
+    anchorFrames?: number[];
+    alignedStartFrame?: number;
+    note?: string;
+  };
+  generations?: Array<{
+    genId?: string;
+    model?: string;
+    modelSubsetting?: string;
+    prompt?: string;
+    inputResolution?: { width?: number; height?: number };
+    outputResolution?: { width?: number; height?: number };
+    storedOutputResolution?: { width?: number; height?: number };
+    aspectRatio?: string;
+    frameCount?: number;
+    fps?: number;
+    durationSec?: number;
+    processingDurationSec?: number;
+    sourceFrameOffset?: number;
+    alignmentConfidence?: number;
+    alignment?: {
+      sourceFrameOffset?: number;
+      confidence?: number;
+      score?: number;
+      runnerUpScore?: number;
+      scanFrameCount?: number;
+      method?: string;
+      anchorFrames?: number[];
+      anchorCount?: number;
+      sourceFrameSteps?: number[];
+    };
+  }>;
+  samples?: VideoCompareSample[];
+};
+
+function reportTypeLabel(reportType: CustomReportType): string {
+  if (reportType === "qc_frame") return "Frame QC";
+  if (reportType === "video_compare") return "Video Compare";
+  return "Video QC";
+}
 
 function safeTimestamp(iso: string | undefined): number {
   if (!iso) return 0;
   const timestamp = new Date(iso).getTime();
   return Number.isNaN(timestamp) ? 0 : timestamp;
+}
+
+function formatProcessingDuration(seconds: number | undefined): string | null {
+  if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) return null;
+  if (seconds < 60) return `${seconds.toFixed(seconds < 10 ? 1 : 0)}s`;
+  const whole = Math.round(seconds);
+  const mins = Math.floor(whole / 60);
+  const secs = whole % 60;
+  if (mins < 60) return `${mins}m ${secs}s`;
+  const hours = Math.floor(mins / 60);
+  const remMins = mins % 60;
+  return `${hours}h ${remMins}m`;
+}
+
+function formatResolution(resolution: { width?: number; height?: number } | undefined): string {
+  return resolution?.width && resolution?.height ? `${resolution.width}x${resolution.height}` : "n/a";
+}
+
+function sameResolution(
+  first: { width?: number; height?: number } | undefined,
+  second: { width?: number; height?: number } | undefined,
+): boolean {
+  return Boolean(first?.width && first?.height && second?.width && second?.height && first.width === second.width && first.height === second.height);
 }
 
 function frameRole(task: TaskDetail, frameId: string): "start" | "end" | "unlinked" {
@@ -270,12 +296,38 @@ function selectionMarker(checked: boolean): string {
   return checked ? "✓" : "";
 }
 
+function PreviewableImage(props: {
+  url: string | null | undefined;
+  alt: string;
+  label: string;
+  className: string;
+  onPreview: (value: { url: string; label: string }) => void;
+}) {
+  if (!props.url) return null;
+  return (
+    <button type="button" className="block w-full text-left" onClick={() => props.onPreview({ url: props.url as string, label: props.label })}>
+      <img src={props.url} alt={props.alt} className={props.className} />
+    </button>
+  );
+}
+
 function summarizeReport(report: CustomReportRecord, task: TaskDetail | undefined): string {
   const asset_refs = report.assetRefs ?? [];
   if (!task || !asset_refs.length) {
     return `${asset_refs.length} selected asset${asset_refs.length === 1 ? "" : "s"}`;
   }
   if (report.reportType === "qc_frame") {
+    const external_pairs = asset_refs.filter(
+      (ref): ref is Extract<CustomReportOutputRef, { assetType: "external_frame_pair" }> => ref.assetType === "external_frame_pair",
+    );
+    if (external_pairs.length) {
+      const pair_map = new Map((task.externalQcPairs ?? []).map((pair) => [pair.pairId, pair]));
+      const preview = external_pairs
+        .slice(0, 3)
+        .map((ref) => pair_map.get(ref.pairId)?.editedFilename || pair_map.get(ref.pairId)?.originalFilename || ref.pairId)
+        .join(", ");
+      return `External pairs ${preview}${external_pairs.length > 3 ? ` +${external_pairs.length - 3} more` : ""}`;
+    }
     const frame_numbers = asset_refs
       .filter((ref): ref is Extract<CustomReportOutputRef, { assetType: "frame_variant" }> => ref.assetType === "frame_variant")
       .map((ref) => task.frames[ref.frameId]?.frameIndex)
@@ -298,131 +350,6 @@ function summarizeReport(report: CustomReportRecord, task: TaskDetail | undefine
   if (!segment_labels.length) return `${asset_refs.length} selected video${asset_refs.length === 1 ? "" : "s"}`;
   const preview = segment_labels.slice(0, 4).join(", ");
   return `Segments ${preview}${segment_labels.length > 4 ? ` +${segment_labels.length - 4} more` : ""}`;
-}
-
-function ReportCreateModal(props: {
-  isOpen: boolean;
-  title: string;
-  selectedCount: number;
-  reportName: string;
-  setReportName: (value: string) => void;
-  tests: readonly { id: string; label: string; description: string }[];
-  selectedTests: string[];
-  toggleTest: (id: string) => void;
-  onClose: () => void;
-  onCreate: () => void;
-  isPending: boolean;
-}) {
-  const { isOpen, title, selectedCount, reportName, setReportName, tests, selectedTests, toggleTest, onClose, onCreate, isPending } = props;
-  if (!isOpen) return null;
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="w-full max-w-2xl rounded-2xl border border-ink/10 bg-card p-5 shadow-xl">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <h3 className="text-xl font-semibold">{title}</h3>
-            <p className="text-sm text-ink/60">Selected outputs: {selectedCount}</p>
-          </div>
-          <button type="button" className="text-sm text-ink/60 underline" onClick={onClose}>
-            Close
-          </button>
-        </div>
-        <div className="mt-4 space-y-4">
-          <label className="block space-y-1">
-            <span className="text-sm font-medium text-ink/80">Report name</span>
-            <input
-              value={reportName}
-              onChange={(event) => setReportName(event.target.value)}
-              placeholder="Optional report name"
-              className="w-full rounded border border-ink/20 bg-white px-3 py-2 text-sm"
-            />
-          </label>
-          <div className="space-y-2">
-            <p className="text-sm font-medium text-ink/80">QC tests</p>
-            {tests.map((test) => (
-              <label key={test.id} className="flex items-start gap-3 rounded border border-ink/10 bg-white p-3">
-                <input
-                  type="checkbox"
-                  checked={selectedTests.includes(test.id)}
-                  onChange={() => toggleTest(test.id)}
-                  className="mt-1"
-                />
-                <span className="space-y-1">
-                  <span className="block text-sm font-medium">{test.label}</span>
-                  <span className="block text-xs text-ink/60">{test.description}</span>
-                </span>
-              </label>
-            ))}
-          </div>
-        </div>
-        <div className="mt-5 flex items-center justify-end gap-2">
-          <button type="button" className="rounded border border-ink/20 bg-white px-3 py-2 text-sm" onClick={onClose}>
-            Cancel
-          </button>
-          <button
-            type="button"
-            className="rounded bg-accent px-4 py-2 text-sm text-white disabled:cursor-not-allowed disabled:opacity-50"
-            disabled={isPending || selectedCount === 0 || selectedTests.length === 0}
-            onClick={onCreate}
-          >
-            {isPending ? "Creating..." : "Create Report"}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function InfoButton(props: { onClick: () => void; label: string }) {
-  const { onClick, label } = props;
-  return (
-    <button
-      type="button"
-      aria-label={label}
-      title={label}
-      onClick={onClick}
-      className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-ink/20 bg-white text-[10px] font-semibold text-ink/70"
-    >
-      i
-    </button>
-  );
-}
-
-function HeatmapLegend(props: { label: string }) {
-  const { label } = props;
-  return (
-    <div className="flex flex-wrap items-center gap-2 rounded border border-ink/10 bg-white px-2 py-1 text-[11px] text-ink/65">
-      <span className="font-medium text-ink/80">{label}</span>
-      <span>Blue = lower</span>
-      <span className="h-2 w-8 rounded bg-gradient-to-r from-[#1e4fba] via-[#ffd84d] to-[#e22626]" />
-      <span>Yellow = moderate</span>
-      <span>Red = stronger</span>
-    </div>
-  );
-}
-
-function InfoModal(props: { state: InfoModalState; onClose: () => void }) {
-  const { state, onClose } = props;
-  if (!state) return null;
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="w-full max-w-4xl rounded-2xl border border-ink/10 bg-card p-6 shadow-xl">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <h3 className="text-2xl font-semibold">{state.title}</h3>
-          </div>
-          <button type="button" className="text-sm text-ink/60 underline" onClick={onClose}>
-            Close
-          </button>
-        </div>
-        <div className="mt-5 space-y-4 text-base leading-7 text-ink/75">
-          {state.lines.map((line, index) => (
-            <p key={`${state.title}-${index}`}>{line}</p>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
 }
 
 export default function ReportsPage({ ctx }: ReportsPageProps) {
@@ -452,7 +379,7 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
     setReportGraphModal,
   } = ctx;
 
-  const [createModalMode, setCreateModalMode] = useState<"qc_frame" | "qc_video" | null>(null);
+  const [createModalMode, setCreateModalMode] = useState<CustomReportType | null>(null);
   const [reportName, setReportName] = useState("");
   const [selectedTests, setSelectedTests] = useState<string[]>([]);
   const [infoModal, setInfoModal] = useState<InfoModalState>(null);
@@ -514,6 +441,17 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
   const selectedRefsForTask = reportTaskId ? selectedOutputRefsByTask[reportTaskId] ?? [] : [];
   const selectedFrameRefs = selectedRefsForTask.filter((ref) => ref.assetType === "frame_variant");
   const selectedVideoRefs = selectedRefsForTask.filter((ref) => ref.assetType === "segment_generation");
+  const selectedVideoComparisonEligible = useMemo(() => {
+    if (!reportTask || selectedVideoRefs.length < 2) return false;
+    const keys = new Set<string>();
+    for (const ref of selectedVideoRefs) {
+      const generation = reportTask.segmentGenerations?.[ref.genId];
+      const segment = generation ? reportTask.segments.find((item) => item.segmentId === generation.segmentId) : null;
+      if (!generation || generation.status !== "complete" || !generation.outputKey || !segment) return false;
+      keys.add(`${segment.segmentId}:${segment.startFrame}`);
+    }
+    return keys.size === 1;
+  }, [reportTask, selectedVideoRefs]);
 
   const activeReportQuery = useQuery({
     queryKey: ["task", "report-result", reportTaskId, activeCustomReportId],
@@ -542,13 +480,15 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
     return () => window.clearInterval(timer);
   }, [activeReportMeta, activeReportQuery, reportTaskQuery]);
 
-  function openCreateModal(mode: "qc_frame" | "qc_video") {
+  function openCreateModal(mode: CustomReportType) {
     setCreateModalMode(mode);
     setReportName("");
     setSelectedTests(
       mode === "qc_frame"
         ? ["frame_diff", "frame_composite"]
-        : ["video_diff", "video_frame_evidence"],
+        : mode === "video_compare"
+          ? ["video_model_compare"]
+          : ["video_diff", "video_frame_evidence"],
     );
   }
 
@@ -595,10 +535,16 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
 
   const latestQcJob =
     sortedJobs.find((job) => job.type === "qc_report_build" && (!reportTaskId || job.taskId === reportTaskId)) ?? null;
+  const runningReport =
+    reports.find((report) => report.status === "running") ??
+    reports.find((report) => report.status === "queued") ??
+    null;
+  const runningReportJob =
+    latestQcJob && (latestQcJob.status === "queued" || latestQcJob.status === "running") ? latestQcJob : null;
 
   const activeResult = activeReportQuery.data?.result ?? null;
   const frameReportRows = ((activeResult?.rows as Array<Record<string, unknown>> | undefined) ?? []).filter(
-    (row): row is FrameReportRow => row.assetType === "frame_variant",
+    (row): row is FrameReportRow => row.assetType === "frame_variant" || row.assetType === "external_frame_pair",
   );
   const videoReportRows = ((activeResult?.rows as Array<Record<string, unknown>> | undefined) ?? []).filter(
     (row): row is VideoReportRow => row.assetType === "segment_generation",
@@ -657,12 +603,48 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
               Create Video QC Report
             </button>
           ) : null}
+          {reportView === "videos" ? (
+            <button
+              type="button"
+              className="rounded border border-ink/20 bg-white px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={!reportTaskId || !selectedVideoComparisonEligible || createCustomReportMutation.isPending}
+              onClick={() => openCreateModal("video_compare")}
+              title={
+                selectedVideoRefs.length < 2
+                  ? "Select at least two generated videos"
+                  : selectedVideoComparisonEligible
+                    ? "Compare selected videos from this segment"
+                    : "Comparison reports require completed videos from the same segment/start frame"
+              }
+            >
+              Create Video Comparison Report
+            </button>
+          ) : null}
           <button type="button" className="rounded border border-ink/20 bg-white px-3 py-2 text-sm" onClick={() => void reportTaskQuery.refetch()}>
             Refresh
           </button>
         </div>
 
-        {latestQcJob ? (
+        {runningReport || runningReportJob ? (
+          <div className="rounded-2xl border-2 border-amber-400 bg-amber-50 p-4 shadow-sm">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-base font-semibold text-amber-950">
+                  Report is {runningReport?.status ?? runningReportJob?.status ?? "running"}
+                </p>
+                <p className="text-sm text-amber-900">
+                  {runningReport?.name ?? "A QC report"} is being built. This page refreshes automatically while the worker generates the report assets.
+                </p>
+              </div>
+              {runningReportJob ? (
+                <div className="min-w-48 rounded-lg bg-white/70 px-3 py-2 text-sm text-amber-950">
+                  <p className="font-medium">Job {truncateIdentifier(runningReportJob.jobId, 12)}</p>
+                  <p>{runningReportJob.progress}% complete</p>
+                </div>
+              ) : null}
+            </div>
+          </div>
+        ) : latestQcJob ? (
           <p className="text-xs text-ink/70">
             Latest report job {truncateIdentifier(latestQcJob.jobId, 12)}: {latestQcJob.status} ({latestQcJob.progress}%)
           </p>
@@ -719,27 +701,46 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                       <div className="grid gap-3 md:grid-cols-3">
                         <div>
                           <p className="text-xs font-medium text-ink/70">Original frame</p>
-                          {row.frame.imageUrl ? <img src={row.frame.imageUrl} alt="Original frame" className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain" /> : null}
+                          <PreviewableImage
+                            url={row.frame.imageUrl}
+                            alt="Original frame"
+                            label="Original frame"
+                            onPreview={setImagePreviewModal}
+                            className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain"
+                          />
                         </div>
                         <div>
                           <p className="text-xs font-medium text-ink/70">Mask edit</p>
                           {row.variant.patchMeta?.maskUrl ? (
-                            <img src={row.variant.patchMeta.maskUrl} alt="Mask" className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain" />
+                            <PreviewableImage
+                              url={row.variant.patchMeta.maskUrl}
+                              alt="Mask"
+                              label="Mask"
+                              onPreview={setImagePreviewModal}
+                              className="aspect-video w-full rounded border border-ink/10 bg-black object-contain"
+                            />
                           ) : (
                             <p className="text-xs text-ink/50">No mask</p>
                           )}
                         </div>
                         <div>
                           <p className="text-xs font-medium text-ink/70">Edited frame</p>
-                          {row.variant.imageUrl ? (
-                            <button type="button" className="block w-full" onClick={() => setImagePreviewModal({ url: row.variant.imageUrl as string, label: "Edited frame" })}>
-                              <img src={row.variant.imageUrl} alt="Edited frame" className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain" />
-                            </button>
-                          ) : null}
+                          <PreviewableImage
+                            url={row.variant.imageUrl}
+                            alt="Edited frame"
+                            label="Edited frame"
+                            onPreview={setImagePreviewModal}
+                            className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain"
+                          />
                         </div>
                       </div>
                       <div className="rounded border border-ink/10 bg-bg/20 p-2 text-xs text-ink/70">
-                        <p>Model: {row.variant.model} ({row.variant.type})</p>
+                        <p>
+                          Model: {row.variant.model} ({row.variant.type})
+                          {formatProcessingDuration(row.variant.processingDurationSec)
+                            ? ` · ${formatProcessingDuration(row.variant.processingDurationSec)}`
+                            : ""}
+                        </p>
                         <p>Prompt: {framePrompt(row.variant, truncateIdentifier)}</p>
                         <p>{formatCompactTimestamp(row.variant.createdAt)}</p>
                       </div>
@@ -796,24 +797,48 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                       <div className="grid gap-3 md:grid-cols-5">
                         <div>
                           <p className="text-xs font-medium text-ink/70">Original start frame</p>
-                          {row.startFrame?.imageUrl ? <img src={row.startFrame.imageUrl} alt="Original start frame" className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain" /> : null}
+                          <PreviewableImage
+                            url={row.startFrame?.imageUrl}
+                            alt="Original start frame"
+                            label="Original start frame"
+                            onPreview={setImagePreviewModal}
+                            className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain"
+                          />
                         </div>
                         <div>
                           <p className="text-xs font-medium text-ink/70">Mask edit</p>
                           {row.startVariant?.patchMeta?.maskUrl ? (
-                            <img src={row.startVariant.patchMeta.maskUrl} alt="Mask" className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain" />
+                            <PreviewableImage
+                              url={row.startVariant.patchMeta.maskUrl}
+                              alt="Mask"
+                              label="Mask"
+                              onPreview={setImagePreviewModal}
+                              className="aspect-video w-full rounded border border-ink/10 bg-black object-contain"
+                            />
                           ) : (
                             <p className="text-xs text-ink/50">No mask</p>
                           )}
                         </div>
                         <div>
                           <p className="text-xs font-medium text-ink/70">Edited start frame</p>
-                          {row.startVariant?.imageUrl ? <img src={row.startVariant.imageUrl} alt="Edited start frame" className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain" /> : null}
+                          <PreviewableImage
+                            url={row.startVariant?.imageUrl}
+                            alt="Edited start frame"
+                            label="Edited start frame"
+                            onPreview={setImagePreviewModal}
+                            className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain"
+                          />
                         </div>
                         <div>
                           <p className="text-xs font-medium text-ink/70">End frame</p>
                           {row.endVariant?.imageUrl || row.endFrame?.imageUrl ? (
-                            <img src={(row.endVariant?.imageUrl ?? row.endFrame?.imageUrl) as string} alt="End frame" className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain" />
+                            <PreviewableImage
+                              url={(row.endVariant?.imageUrl ?? row.endFrame?.imageUrl) as string}
+                              alt="End frame"
+                              label="End frame"
+                              onPreview={setImagePreviewModal}
+                              className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain"
+                            />
                           ) : null}
                         </div>
                         <div>
@@ -830,7 +855,12 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                         </div>
                       </div>
                       <div className="rounded border border-ink/10 bg-bg/20 p-2 text-xs text-ink/70">
-                        <p>Model: {row.generation.luma.model} - {row.generation.luma.mode}</p>
+                        <p>
+                          Model: {row.generation.luma.model} - {row.generation.luma.mode}
+                          {formatProcessingDuration(row.generation.processingDurationSec)
+                            ? ` · ${formatProcessingDuration(row.generation.processingDurationSec)}`
+                            : ""}
+                        </p>
                         <p>Prompt: {row.generation.luma.prompt?.trim() || "No prompt provided"}</p>
                         <p>{formatCompactTimestamp(row.generation.createdAt)}</p>
                       </div>
@@ -855,7 +885,7 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                       <button type="button" className="text-left" onClick={() => setActiveCustomReportId(report.reportId)}>
                         <p className="text-sm font-semibold">{report.name}</p>
                         <p className="text-xs text-ink/60">
-                          {report.reportType === "qc_frame" ? "Frame QC" : "Video QC"} - {report.status}
+                          {reportTypeLabel(report.reportType)} - {report.status}
                         </p>
                         <p className="text-xs text-ink/60">{summarizeReport(report, reportTask)}</p>
                         <p className="text-xs text-ink/50">Tests: {report.tests.join(", ")}</p>
@@ -887,7 +917,7 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                     </button>
                     <h4 className="text-lg font-semibold">{activeReportMeta.name}</h4>
                     <p className="text-xs text-ink/60">
-                      {activeReportMeta.reportType === "qc_frame" ? "Frame QC" : "Video QC"} - {activeReportMeta.status}
+                      {reportTypeLabel(activeReportMeta.reportType)} - {activeReportMeta.status}
                     </p>
                   </div>
                   {activeReportMeta.error ? <p className="text-sm text-red-600">{activeReportMeta.error}</p> : null}
@@ -898,6 +928,36 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
 
                 {activeResult && activeReportMeta.reportType === "qc_frame" ? (
                   <div className="space-y-3">
+                    {Array.isArray((activeResult as { videoComparisons?: Array<Record<string, unknown>> }).videoComparisons) &&
+                    (activeResult as { videoComparisons?: Array<Record<string, unknown>> }).videoComparisons!.length ? (
+                      <div className="grid gap-3 md:grid-cols-2">
+                        {(activeResult as { videoComparisons?: Array<Record<string, unknown>> }).videoComparisons!.map((item, index) => {
+                          const diffVideoUrl = typeof item.diffVideoUrl === "string" ? item.diffVideoUrl : undefined;
+                          const diffVideoPosterUrl = typeof item.diffVideoPosterUrl === "string" ? item.diffVideoPosterUrl : undefined;
+                          const label = typeof item.label === "string" ? item.label : `Video comparison ${index + 1}`;
+                          return (
+                            <div key={`${label}:${index}`} className="space-y-2 rounded-lg border border-ink/10 bg-white p-3">
+                              <div className="flex items-center justify-between gap-2">
+                                <p className="text-sm font-semibold">{label}</p>
+                                <p className="text-xs text-ink/60">
+                                  {typeof item.durationSec === "number" ? `${item.durationSec.toFixed(1)}s` : null}
+                                  {typeof item.sampledFrameCount === "number" ? ` · ${item.sampledFrameCount} sampled frames` : null}
+                                </p>
+                              </div>
+                              {diffVideoUrl ? (
+                                <button type="button" className="block w-full" onClick={() => setVideoPreviewModal({ url: diffVideoUrl, label })}>
+                                  {diffVideoPosterUrl ? (
+                                    <img src={diffVideoPosterUrl} alt={label} className="aspect-video w-full rounded border border-ink/10 bg-white object-contain" />
+                                  ) : (
+                                    <div className="flex aspect-video items-center justify-center rounded border border-ink/10 bg-bg/30 text-sm text-ink/55">Open diff video</div>
+                                  )}
+                                </button>
+                              ) : null}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : null}
                     {frameReportRows.map((row) => {
                       const frameMetrics = row.standard?.metrics;
                       const frameArtifacts = row.standard?.artifacts;
@@ -968,36 +1028,77 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                         },
                       ].filter((card) => (advanced?.selectedTests ?? []).some((test) => test.includes(card.key) || (card.key === "lpips" && test === "frame_perceptual") || (card.key === "boundary" && test === "frame_boundary") || (card.key === "sharpness" && test === "frame_sharpness") || (card.key === "naturalness" && test === "frame_naturalness") || (card.key === "texture" && test === "frame_texture") || (card.key === "composite" && test === "frame_composite")));
                       return (
-                        <article key={`${row.frameId}:${row.variantId}`} className="space-y-2 rounded-lg border border-ink/10 bg-bg/20 p-3">
+                        <article
+                          key={
+                            row.assetType === "external_frame_pair"
+                              ? `external:${row.pairId}:${String(row.sampleIndex ?? row.sampleTimeSec ?? "base")}`
+                              : `${row.frameId}:${row.variantId}`
+                          }
+                          className="space-y-2 rounded-lg border border-ink/10 bg-bg/20 p-3"
+                        >
                           <div className="flex flex-wrap items-center justify-between gap-2">
                             <p className="text-sm font-semibold">
-                              {row.role === "start" ? "Start" : row.role === "end" ? "End" : "Unlinked"} frame edit - frame {row.frameIndex}
+                              {row.assetType === "external_frame_pair"
+                                ? row.label || "External frame comparison"
+                                : `${row.role === "start" ? "Start" : row.role === "end" ? "End" : "Unlinked"} frame edit - frame ${row.frameIndex}`}
                             </p>
                             <p className="text-xs text-ink/60">{formatCompactTimestamp(row.createdAt)}</p>
                           </div>
                           <div className="grid gap-3 md:grid-cols-3">
                             <div>
                               <p className="text-xs font-medium text-ink/70">Original frame</p>
-                              {row.originalFrameUrl ? <img src={row.originalFrameUrl} alt="Original frame" className="aspect-video w-full rounded border border-ink/10 bg-white object-contain" /> : null}
+                              <PreviewableImage
+                                url={row.originalFrameUrl}
+                                alt="Original frame"
+                                label="Original frame"
+                                onPreview={setImagePreviewModal}
+                                className="aspect-video w-full rounded border border-ink/10 bg-white object-contain"
+                              />
                             </div>
-                            <div>
-                              <p className="text-xs font-medium text-ink/70">Mask edit</p>
-                              {row.maskUrl ? (
-                                <img src={row.maskUrl} alt="Mask" className="aspect-video w-full rounded border border-ink/10 bg-black object-contain" />
-                              ) : (
-                                <p className="text-xs text-ink/50">No user mask was used. QC will infer a provisional mask from the frame difference.</p>
-                              )}
-                            </div>
+                            {row.assetType === "external_frame_pair" ? null : (
+                              <div>
+                                <p className="text-xs font-medium text-ink/70">Mask edit</p>
+                                {row.maskUrl ? (
+                                  <PreviewableImage
+                                    url={row.maskUrl}
+                                    alt="Mask"
+                                    label="Mask"
+                                    onPreview={setImagePreviewModal}
+                                    className="aspect-video w-full rounded border border-ink/10 bg-black object-contain"
+                                  />
+                                ) : (
+                                  <p className="text-xs text-ink/50">No user mask was used. QC will infer a provisional mask from the frame difference.</p>
+                                )}
+                              </div>
+                            )}
                             <div>
                               <p className="text-xs font-medium text-ink/70">Edited frame</p>
-                              {row.editedFrameUrl ? <img src={row.editedFrameUrl} alt="Edited frame" className="aspect-video w-full rounded border border-ink/10 bg-white object-contain" /> : null}
+                              <PreviewableImage
+                                url={row.editedFrameUrl}
+                                alt="Edited frame"
+                                label="Edited frame"
+                                onPreview={setImagePreviewModal}
+                                className="aspect-video w-full rounded border border-ink/10 bg-white object-contain"
+                              />
                             </div>
                           </div>
                           <div className="grid gap-3 md:grid-cols-3">
                             <div className="rounded border border-ink/10 bg-white p-2 text-xs text-ink/70 md:col-span-2">
                               <p className="font-semibold text-ink/90">Edit metadata</p>
-                              <p>Model: {row.model} ({row.variantType})</p>
-                              <p>Prompt: {row.prompt}</p>
+                              {row.assetType === "external_frame_pair" ? (
+                                <>
+                                  <p>Original file: {row.originalFilename ?? "original"}</p>
+                                  <p>Edited file: {row.editedFilename ?? "edited"}</p>
+                                </>
+                              ) : (
+                                <>
+                                  <p>Model: {`${row.model ?? "unknown"} (${row.variantType ?? "unknown"})`}</p>
+                                  {formatProcessingDuration(row.processingDurationSec) ? (
+                                    <p>Processing: {formatProcessingDuration(row.processingDurationSec)}</p>
+                                  ) : null}
+                                  <p>Prompt: {row.prompt}</p>
+                                </>
+                              )}
                             </div>
                             <div className="rounded border border-ink/10 bg-white p-2 text-xs text-ink/70">
                               <div className="mb-1 flex items-center gap-2">
@@ -1025,8 +1126,10 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                           ) : null}
                           {row.standard ? (
                             <div className="space-y-2">
-                              <p className="text-[11px] text-ink/55">Standard diff views are thresholded pixel-change diagnostics.</p>
-                              <HeatmapLegend label="Standard diff legend" />
+                              <HeatmapLegend
+                                label="Standard diff legend"
+                                description="Standard diff views are thresholded pixel-change diagnostics."
+                              />
                               <div className="grid gap-3 md:grid-cols-3">
                               <div className="space-y-1">
                                 <div className="flex items-center gap-2">
@@ -1135,8 +1238,10 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                                   />
                                 </div>
                               </div>
-                              <p className="text-[11px] text-ink/55">Advanced views are normalized patchwise anomaly maps.</p>
-                              <HeatmapLegend label="Advanced anomaly legend" />
+                              <HeatmapLegend
+                                label="Advanced anomaly legend"
+                                description="Advanced views are normalized patchwise anomaly maps."
+                              />
                               <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
                                 {advancedCards.map((card) => (
                                   <div key={card.key} className="space-y-2 rounded border border-ink/10 bg-bg/20 p-2">
@@ -1201,24 +1306,53 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                           <div className="grid gap-3 overflow-x-auto xl:grid-cols-5">
                             <div>
                               <p className="text-xs font-medium text-ink/70">Original start frame</p>
-                              {row.originalFrameUrl ? <img src={row.originalFrameUrl} alt="Original start frame" className="aspect-video w-full rounded border border-ink/10 bg-white object-contain" /> : null}
+                              <PreviewableImage
+                                url={row.originalFrameUrl}
+                                alt="Original start frame"
+                                label="Original start frame"
+                                onPreview={setImagePreviewModal}
+                                className="aspect-video w-full rounded border border-ink/10 bg-white object-contain"
+                              />
                             </div>
                             <div>
                               <p className="text-xs font-medium text-ink/70">Mask edit</p>
                               {row.maskUrl ? (
-                                <img src={row.maskUrl} alt="Mask" className="aspect-video w-full rounded border border-ink/10 bg-black object-contain" />
+                                <PreviewableImage
+                                  url={row.maskUrl}
+                                  alt="Mask"
+                                  label="Mask"
+                                  onPreview={setImagePreviewModal}
+                                  className="aspect-video w-full rounded border border-ink/10 bg-black object-contain"
+                                />
                               ) : (
                                 <p className="text-xs text-ink/50">No user mask was used. QC will infer a provisional mask from frame differences where needed.</p>
                               )}
                               <p className="mt-2 text-xs text-ink/70">{row.prompt}</p>
+                              {formatProcessingDuration(row.processingDurationSec) ? (
+                                <p className="mt-1 text-xs text-ink/70">Processing: {formatProcessingDuration(row.processingDurationSec)}</p>
+                              ) : null}
                             </div>
                             <div>
                               <p className="text-xs font-medium text-ink/70">Edited start frame</p>
-                              {row.editedStartFrameUrl ? <img src={row.editedStartFrameUrl} alt="Edited start frame" className="aspect-video w-full rounded border border-ink/10 bg-white object-contain" /> : null}
+                              <PreviewableImage
+                                url={row.editedStartFrameUrl}
+                                alt="Edited start frame"
+                                label="Edited start frame"
+                                onPreview={setImagePreviewModal}
+                                className="aspect-video w-full rounded border border-ink/10 bg-white object-contain"
+                              />
                             </div>
                             <div>
                               <p className="text-xs font-medium text-ink/70">End frame</p>
-                              {row.endFrameUrl ? <img src={row.endFrameUrl} alt="End frame" className="aspect-video w-full rounded border border-ink/10 bg-white object-contain" /> : <p className="text-xs text-ink/50">No end frame</p>}
+                              {row.endFrameUrl ? (
+                                <PreviewableImage
+                                  url={row.endFrameUrl}
+                                  alt="End frame"
+                                  label="End frame"
+                                  onPreview={setImagePreviewModal}
+                                  className="aspect-video w-full rounded border border-ink/10 bg-white object-contain"
+                                />
+                              ) : <p className="text-xs text-ink/50">No end frame</p>}
                             </div>
                             <div>
                               <p className="text-xs font-medium text-ink/70">Generated video</p>
@@ -1244,6 +1378,9 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                                   <p>Outside leak mean: {asNumber(videoAggregates?.outsideLeakagePctMean)?.toFixed(2) ?? "n/a"}%</p>
                                   <p>SSIM mean: {asNumber(videoAggregates?.ssimMean)?.toFixed(4) ?? "n/a"}</p>
                                   <p>PSNR mean: {asNumber(videoAggregates?.psnrMean)?.toFixed(2) ?? "n/a"}</p>
+                                  {typeof (videoAggregates?.alignment as Record<string, unknown> | undefined)?.sourceFrameOffset === "number" ? (
+                                    <p>Alignment starts at original frame {String((videoAggregates?.alignment as Record<string, unknown>).sourceFrameOffset)}</p>
+                                  ) : null}
                                 </>
                               ) : (
                                 <p>No video diff tests were selected for this report.</p>
@@ -1296,7 +1433,8 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                                 <div key={`video-frame-${row.genId}-${frame.index}`} className="space-y-1">
                                   <div className="flex items-center gap-2">
                                     <p className="text-xs font-medium text-ink/70">
-                                      Evidence frame {String(frame.index)}{typeof frame.timeSec === "number" ? ` · ${Number(frame.timeSec).toFixed(2)}s` : ""}
+                                      Evidence original frame {String(frame.sourceFrameIndex ?? frame.index)}
+                                      {typeof frame.timeSec === "number" ? ` · source ${Number(frame.timeSec).toFixed(2)}s` : ""}
                                     </p>
                                     <InfoButton
                                       label={`Explain evidence frame ${String(frame.index)}`}
@@ -1310,6 +1448,9 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                                   ) : (
                                     <p className="text-xs text-ink/50">No evidence image</p>
                                   )}
+                                  <p className="text-[11px] text-ink/50">
+                                    Generated f{String(frame.generatedFrameIndex ?? "n/a")} · starts at original frame {String(frame.sourceFrameOffset ?? 0)}
+                                  </p>
                                 </div>
                               ))}
                             </div>
@@ -1324,6 +1465,184 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                     ) : null}
                   </div>
                 ) : null}
+
+                {activeResult && activeReportMeta.reportType === "video_compare" ? (
+                  <div className="space-y-4">
+                    {(() => {
+                      const comparison = (activeResult.videoCompare ?? null) as VideoCompareReport | null;
+                      if (!comparison) {
+                        return <p className="text-sm text-ink/60">No comparison data was produced for this report.</p>;
+                      }
+                      const generations = comparison.generations ?? [];
+                      const samples = comparison.samples ?? [];
+                      const generationLabel = (genId: string | undefined) => {
+                        const entry = generations.find((generation) => generation.genId === genId);
+                        return entry ? `${entry.model ?? "model"} / ${entry.modelSubsetting ?? "default"}` : genId ?? "generation";
+                      };
+                      const renderSampleGrid = (
+                        sample: VideoCompareSample,
+                        keyName: keyof Pick<VideoCompareItem, "frameUrl" | "diffUrl" | "zoomFrameUrl" | "zoomDiffUrl">,
+                        title: string,
+                      ) => (
+                        <div key={`${title}-${sample.frameIndex}`} className="space-y-2 rounded-lg border border-ink/10 bg-white p-3">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <p className="text-sm font-semibold">
+                              {title} - original frame {sample.sourceFrameIndex ?? sample.frameIndex ?? "n/a"}
+                            </p>
+                            <p className="text-xs text-ink/60">
+                              {typeof sample.timeSec === "number" ? `Source ${sample.timeSec.toFixed(2)}s` : ""}
+                              {typeof sample.comparisonFrameIndex === "number" ? ` · comparison point ${sample.comparisonFrameIndex}` : ""}
+                            </p>
+                            {keyName === "zoomFrameUrl" || keyName === "zoomDiffUrl" ? (
+                              <p className="text-xs text-ink/60">
+                                300% crop
+                                {sample.zoomRegion
+                                  ? ` · x${sample.zoomRegion.x}, y${sample.zoomRegion.y}, ${sample.zoomRegion.width}x${sample.zoomRegion.height}`
+                                  : ""}
+                              </p>
+                            ) : null}
+                          </div>
+                          <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-4">
+                            {keyName === "frameUrl" && sample.originalUrl ? (
+                              <div className="space-y-1">
+                                <PreviewableImage
+                                  url={sample.originalUrl}
+                                  alt="Original source frame"
+                                  label={`Original source frame ${sample.frameIndex ?? ""}`}
+                                  onPreview={setImagePreviewModal}
+                                  className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain"
+                                />
+                                <p className="text-xs font-medium text-ink/70">Original source</p>
+                                <p className="text-[11px] text-ink/50">
+                                  Original f{sample.sourceFrameIndex ?? "n/a"} · starts at frame 0
+                                </p>
+                              </div>
+                            ) : null}
+                            {keyName === "zoomFrameUrl" && sample.originalZoomUrl ? (
+                              <div className="space-y-1">
+                                <PreviewableImage
+                                  url={sample.originalZoomUrl}
+                                  alt="Original source zoom"
+                                  label={`Original source zoom ${sample.frameIndex ?? ""}`}
+                                  onPreview={setImagePreviewModal}
+                                  className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain"
+                                />
+                                <p className="text-xs font-medium text-ink/70">Original source zoom</p>
+                                <p className="text-[11px] text-ink/50">
+                                  Original f{sample.sourceFrameIndex ?? "n/a"} · starts at frame 0
+                                </p>
+                              </div>
+                            ) : null}
+                            {(sample.items ?? []).map((item) => {
+                              const url = item[keyName];
+                              return (
+                                <div key={`${sample.frameIndex}:${item.genId}:${keyName}`} className="space-y-1">
+                                  <PreviewableImage
+                                    url={url}
+                                    alt={`${title} ${item.genId ?? ""}`}
+                                    label={`${title} - ${generationLabel(item.genId)} - frame ${sample.frameIndex ?? ""}`}
+                                    onPreview={setImagePreviewModal}
+                                    className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain"
+                                  />
+                                  <p className="text-xs font-medium text-ink/70">{generationLabel(item.genId)}</p>
+                                  <p className="text-[11px] text-ink/50">
+                                    Generated f{item.generatedFrameIndex ?? "n/a"} · starts at original frame {item.sourceFrameOffset ?? 0}
+                                    {typeof item.expectedGeneratedFrameIndex === "number" && item.expectedGeneratedFrameIndex !== item.generatedFrameIndex
+                                      ? ` · refined from f${item.expectedGeneratedFrameIndex}`
+                                      : ""}
+                                  </p>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      );
+
+                      return (
+                        <>
+                          <div className="rounded-lg border border-ink/10 bg-bg/20 p-3">
+                            <p className="text-sm font-semibold">Segment comparison</p>
+                            <p className="text-xs text-ink/60">
+                              Segment {comparison.segmentId ?? "n/a"} · source start f{comparison.segmentStartFrame ?? "n/a"} · source fps{" "}
+                              {typeof comparison.sourceFps === "number" ? comparison.sourceFps.toFixed(3) : "n/a"}
+                            </p>
+                            {comparison.alignment ? (
+                              <p className="mt-1 text-xs text-ink/60">
+                                Temporal alignment: comparisons start at original frame {comparison.alignment.alignedStartFrame ?? 0} after scanning the first{" "}
+                                {comparison.alignment.scanFrameCount ?? "n/a"} source frames against generated anchor frames{" "}
+                                {(comparison.alignment.anchorFrames ?? []).join(", ") || "n/a"}. Each model is aligned independently before the common start is chosen.
+                              </p>
+                            ) : null}
+                          </div>
+                          <div className="overflow-x-auto rounded-lg border border-ink/10 bg-white">
+                            <table className="min-w-full text-left text-xs">
+                              <thead className="bg-bg text-ink/70">
+                                <tr>
+                                  <th className="px-3 py-2">Model</th>
+                                  <th className="px-3 py-2">Model setting</th>
+                                  <th className="px-3 py-2">Prompt</th>
+                                  <th className="px-3 py-2">Sent to model</th>
+                                  <th className="px-3 py-2">Returned</th>
+                                  <th className="px-3 py-2">Aspect</th>
+                                  <th className="px-3 py-2">Frames</th>
+                                  <th className="px-3 py-2">FPS</th>
+                                  <th className="px-3 py-2">Seconds</th>
+                                  <th className="px-3 py-2">Frame offset</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {generations.map((generation) => (
+                                  <tr key={generation.genId} className="border-t border-ink/10 align-top">
+                                    <td className="px-3 py-2 font-medium">{generation.model ?? "n/a"}</td>
+                                    <td className="px-3 py-2">{generation.modelSubsetting ?? "n/a"}</td>
+                                    <td className="max-w-md px-3 py-2">{generation.prompt ?? "No prompt provided"}</td>
+                                    <td className="px-3 py-2">{formatResolution(generation.inputResolution)}</td>
+                                    <td className="px-3 py-2">
+                                      {formatResolution(generation.outputResolution)}
+                                      {generation.storedOutputResolution && !sameResolution(generation.outputResolution, generation.storedOutputResolution) ? (
+                                        <span className="block text-[11px] text-ink/50">
+                                          stored {formatResolution(generation.storedOutputResolution)}
+                                        </span>
+                                      ) : null}
+                                    </td>
+                                    <td className="px-3 py-2">{generation.aspectRatio ?? "n/a"}</td>
+                                    <td className="px-3 py-2">{generation.frameCount ?? "n/a"}</td>
+                                    <td className="px-3 py-2">{typeof generation.fps === "number" ? generation.fps.toFixed(3) : "n/a"}</td>
+                                    <td className="px-3 py-2">{typeof generation.durationSec === "number" ? generation.durationSec.toFixed(2) : "n/a"}</td>
+                                    <td className="px-3 py-2">
+                                      starts at frame {generation.sourceFrameOffset ?? generation.alignment?.sourceFrameOffset ?? 0}
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                          <div className="space-y-3">
+                            <h5 className="text-sm font-semibold">Generated frame comparison</h5>
+                            {samples.map((sample) => renderSampleGrid(sample, "frameUrl", "Generated frames"))}
+                          </div>
+                          <div className="space-y-3">
+                            <h5 className="text-sm font-semibold">Diff maps vs original source</h5>
+                            {samples.map((sample) => renderSampleGrid(sample, "diffUrl", "Diff maps"))}
+                          </div>
+                          <div className="space-y-3">
+                            <h5 className="text-sm font-semibold">300% zoomed generated frames</h5>
+                            {samples.map((sample) => renderSampleGrid(sample, "zoomFrameUrl", "Zoomed generated frames"))}
+                          </div>
+                          <div className="space-y-3">
+                            <h5 className="text-sm font-semibold">300% zoomed diff maps</h5>
+                            {samples.map((sample) => renderSampleGrid(sample, "zoomDiffUrl", "Zoomed diff maps"))}
+                          </div>
+                          {activeResult.failures?.length ? (
+                            <div className="rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                              {activeResult.failures.length} comparison item(s) failed during report build.
+                            </div>
+                          ) : null}
+                        </>
+                      );
+                    })()}
+                  </div>
+                ) : null}
               </div>
             )}
           </section>
@@ -1332,11 +1651,23 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
 
       <ReportCreateModal
         isOpen={createModalMode !== null}
-        title={createModalMode === "qc_frame" ? "Create Frame QC Report" : "Create Video QC Report"}
+        title={
+          createModalMode === "qc_frame"
+            ? "Create Frame QC Report"
+            : createModalMode === "video_compare"
+              ? "Create Video Comparison Report"
+              : "Create Video QC Report"
+        }
         selectedCount={createModalMode === "qc_frame" ? selectedFrameRefs.length : selectedVideoRefs.length}
         reportName={reportName}
         setReportName={setReportName}
-        tests={createModalMode === "qc_frame" ? FRAME_TEST_OPTIONS : VIDEO_TEST_OPTIONS}
+        tests={
+          createModalMode === "qc_frame"
+            ? FRAME_TEST_OPTIONS
+            : createModalMode === "video_compare"
+              ? VIDEO_COMPARE_TEST_OPTIONS
+              : VIDEO_TEST_OPTIONS
+        }
         selectedTests={selectedTests}
         toggleTest={toggleTest}
         onClose={closeCreateModal}

@@ -1,7 +1,7 @@
 import { ReactCompareSlider } from "react-compare-slider";
 import { useEffect, useRef, type RefObject } from "react";
 
-import type { SegmentGeneration, SegmentRecord, TaskDetail } from "../../types/api";
+import type { CustomReportOutputRef, SegmentGeneration, SegmentRecord, TaskDetail } from "../../types/api";
 
 type GenerateInputMode = "start_video" | "start_end" | "start_only";
 type VideoModel =
@@ -9,10 +9,14 @@ type VideoModel =
   | "ray-flash-2"
   | "runway-gen4.5"
   | "kling-2.6"
+  | "kling-o1"
+  | "kling-v3-omni-video"
+  | "seedance-2.0-reference-to-video"
   | "veo-3.1"
   | "veo-3.1-fast"
   | "wan2.2-a14b"
-  | "wan2.2-animate";
+  | "wan2.2-animate"
+  | "wan2.7-videoedit";
 
 export type GenerateTabCtx = {
   setGenerationInputMode: (mode: GenerateInputMode) => void;
@@ -30,16 +34,29 @@ export type GenerateTabCtx = {
   generationModelOptions: Array<{ value: VideoModel; label: string }>;
   advancedMode: string;
   setAdvancedMode: (value: string) => void;
+  replicateKlingMode: "std" | "pro";
+  setReplicateKlingMode: (value: "std" | "pro") => void;
+  replicateKlingV3Mode: "standard" | "pro";
+  setReplicateKlingV3Mode: (value: "standard" | "pro") => void;
+  wan27Resolution: "720p" | "1080p";
+  setWan27Resolution: (value: "720p" | "1080p") => void;
   lumaPrompt: string;
   setLumaPrompt: (value: string) => void;
+  generationPromptPlaceholder: string;
+  generationPromptError: string | null;
   generationInputNote: string;
   generationHelp: { title: string; lines: string[] };
+  selectedStartSourceLabel: string;
+  selectedEndSourceLabel: string | null;
   selectedSegmentOverLimit: boolean;
   lumaHardLimitSeconds: number;
+  selectedSegmentLimitMessage: string | null;
   selectedSegmentId: string | null;
   generateSegmentMutation: { mutate: () => void };
   segmentWindow: { startSec: number; endSec: number; startLabel: string; endLabel: string } | null;
   originalSegmentPreviewUrl: string | null;
+  generatedSegmentPreviewUrl: string | null;
+  generatedSegmentPreviewPosterUrl: string | null;
   selectedPreviewGeneration: SegmentGeneration | null;
   task: TaskDetail | undefined;
   compareOriginalRef: RefObject<HTMLVideoElement>;
@@ -48,6 +65,9 @@ export type GenerateTabCtx = {
   syncOriginalToGenerated: (generatedVideo: HTMLVideoElement) => void;
   originalPreviewIsSegmentClip: boolean;
   selectedSegmentGenerations: SegmentGeneration[];
+  selectedReportOutputs: Record<string, { taskId: string; ref: CustomReportOutputRef }>;
+  reportOutputRefKey: (ref: CustomReportOutputRef) => string;
+  toggleCustomReportOutput: (taskId: string, ref: CustomReportOutputRef) => void;
   generationCardsVisible: number;
   truncateIdentifier: (value: string, maxLength?: number) => string;
   selectSegmentGeneration: (genId: string) => void;
@@ -55,6 +75,7 @@ export type GenerateTabCtx = {
   generationThumbnailUrl: (generation: SegmentGeneration) => string | null;
   formatCompactTimestamp: (iso: string | undefined) => string;
   setVideoPreviewModal: (value: { url: string; label: string } | null) => void;
+  openVideoCleanupModal: (generation: SegmentGeneration) => void;
   onAssetError: () => void;
   handleDeleteAsset: (item: {
     id: string;
@@ -87,16 +108,26 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
     generationModelOptions,
     advancedMode,
     setAdvancedMode,
+    replicateKlingMode,
+    setReplicateKlingMode,
+    replicateKlingV3Mode,
+    setReplicateKlingV3Mode,
+    wan27Resolution,
+    setWan27Resolution,
     lumaPrompt,
     setLumaPrompt,
+    generationPromptPlaceholder,
+    generationPromptError,
     generationInputNote,
     generationHelp,
     selectedSegmentOverLimit,
-    lumaHardLimitSeconds,
+    selectedSegmentLimitMessage,
     selectedSegmentId,
     generateSegmentMutation,
     segmentWindow,
     originalSegmentPreviewUrl,
+    generatedSegmentPreviewUrl,
+    generatedSegmentPreviewPosterUrl,
     selectedPreviewGeneration,
     task,
     compareOriginalRef,
@@ -105,6 +136,9 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
     syncOriginalToGenerated,
     originalPreviewIsSegmentClip,
     selectedSegmentGenerations,
+    selectedReportOutputs,
+    reportOutputRefKey,
+    toggleCustomReportOutput,
     generationCardsVisible,
     truncateIdentifier,
     selectSegmentGeneration,
@@ -112,6 +146,7 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
     generationThumbnailUrl,
     formatCompactTimestamp,
     setVideoPreviewModal,
+    openVideoCleanupModal,
     onAssetError,
     handleDeleteAsset,
     setGenerationCardsVisible,
@@ -239,7 +274,11 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
         <div className="grid gap-3 p-3 lg:grid-cols-[1.65fr_1fr]">
           <div className="space-y-3">
             <div className="rounded-md border border-ink/20 bg-bg px-3 py-2 text-xs text-ink/70">
-              Segment in use: {selectedSegment ? describeSegment(selectedSegment) : "No segment selected. Go to Pick Frame first."}
+              Segment in use: {selectedSegment ? describeSegment(selectedSegment) : "No segment selected. Go to Select Frames first."}
+            </div>
+            <div className="rounded-md border border-ink/20 bg-bg px-3 py-2 text-xs text-ink/70">
+              Source frames for generation: start uses {ctx.selectedStartSourceLabel}
+              {generationInputMode === "start_end" ? ` · end uses ${ctx.selectedEndSourceLabel ?? "no selection"}` : ""}
             </div>
             <div className="grid gap-3 md:grid-cols-2">
               <select
@@ -275,9 +314,36 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
                     </option>
                   ))}
                 </select>
+              ) : lumaModel === "kling-o1" ? (
+                <select
+                  value={replicateKlingMode}
+                  onChange={(e) => setReplicateKlingMode(e.target.value as "std" | "pro")}
+                  className="rounded-md border border-ink/20 px-3 py-2"
+                >
+                  <option value="std">Kling mode: std</option>
+                  <option value="pro">Kling mode: pro</option>
+                </select>
+              ) : lumaModel === "kling-v3-omni-video" ? (
+                <select
+                  value={replicateKlingV3Mode}
+                  onChange={(e) => setReplicateKlingV3Mode(e.target.value as "standard" | "pro")}
+                  className="rounded-md border border-ink/20 px-3 py-2"
+                >
+                  <option value="standard">Kling mode: standard</option>
+                  <option value="pro">Kling mode: pro</option>
+                </select>
+              ) : lumaModel === "wan2.7-videoedit" ? (
+                <select
+                  value={wan27Resolution}
+                  onChange={(e) => setWan27Resolution(e.target.value as "720p" | "1080p")}
+                  className="rounded-md border border-ink/20 px-3 py-2"
+                >
+                  <option value="720p">Resolution: 720p</option>
+                  <option value="1080p">Resolution: 1080p</option>
+                </select>
               ) : (
                 <div className="rounded-md border border-ink/20 bg-bg px-3 py-2 text-xs text-ink/60">
-                  Mode dropdown is only used by Luma models.
+                  Extra mode controls are only used by selected models.
                 </div>
               )}
             </div>
@@ -289,10 +355,11 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
               <textarea
                 value={lumaPrompt}
                 onChange={(e) => setLumaPrompt(e.target.value)}
-                placeholder="Optional generation prompt"
+                placeholder={generationPromptPlaceholder}
                 className="h-20 w-full rounded-md border border-ink/20 p-2"
               />
             )}
+            {generationPromptError ? <p className="text-xs text-red-600">{generationPromptError}</p> : null}
             <p className="text-xs text-ink/60">{generationInputNote}</p>
           </div>
           <div className="rounded-lg border border-ink/15 bg-bg p-3">
@@ -307,14 +374,12 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
       </div>
 
       {selectedSegmentOverLimit ? (
-        <p className="text-xs text-red-600">
-          Selected segment is {selectedSegment?.durationSec.toFixed(2)}s, exceeding the {lumaModel} limit of {lumaHardLimitSeconds}s.
-        </p>
+        <p className="text-xs text-red-600">{selectedSegmentLimitMessage}</p>
       ) : null}
 
       <button
         className="rounded-md bg-accent px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-50"
-        disabled={!selectedSegmentId || selectedSegmentOverLimit}
+        disabled={!selectedSegmentId || selectedSegmentOverLimit || Boolean(generationPromptError)}
         onClick={() => generateSegmentMutation.mutate()}
       >
         Generate Segment Variant
@@ -325,7 +390,7 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
         {segmentWindow ? (
           <p className="text-xs text-ink/70">Showing selected segment only: {segmentWindow.startLabel}s to {segmentWindow.endLabel}s.</p>
         ) : null}
-        {originalSegmentPreviewUrl && selectedPreviewGeneration?.downloadUrl ? (
+        {originalSegmentPreviewUrl && generatedSegmentPreviewUrl && selectedPreviewGeneration ? (
           <div
             className="overflow-hidden rounded-md border border-ink/10 bg-bg"
             style={{
@@ -359,11 +424,11 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
                 <video
                   key={`gen-${selectedPreviewGeneration.genId}`}
                   ref={compareVariantRef}
-                  src={selectedPreviewGeneration.downloadUrl}
+                  src={generatedSegmentPreviewUrl}
                   controls
                   playsInline
                   preload="metadata"
-                  poster={generationThumbnailUrl(selectedPreviewGeneration) ?? undefined}
+                  poster={generatedSegmentPreviewPosterUrl ?? undefined}
                   className="h-full w-full object-contain"
                   onLoadedMetadata={(e) => {
                     e.currentTarget.currentTime = 0;
@@ -382,7 +447,11 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
           <p className="text-sm text-ink/60">Select a segment and generated variant to compare.</p>
         )}
         <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-          {selectedSegmentGenerations.slice(0, generationCardsVisible).map((gen, index) => (
+          {selectedSegmentGenerations.slice(0, generationCardsVisible).map((gen, index) => {
+              const reportRef: CustomReportOutputRef = { assetType: "segment_generation", genId: gen.genId };
+              const reportSelectionKey = task?.taskId ? `${task.taskId}:${reportOutputRefKey(reportRef)}` : "";
+              const selectedForReport = Boolean(reportSelectionKey && selectedReportOutputs[reportSelectionKey]);
+              return (
             <div
               key={gen.genId}
               className={`rounded border p-2 ${
@@ -390,12 +459,27 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
                   ? "border-orange-400 bg-orange-50"
                   : selectedPreviewGeneration?.genId === gen.genId
                     ? "border-teal-500 bg-teal-50"
-                    : "border-ink/10"
+                    : selectedForReport
+                      ? "border-sky-400 bg-sky-50"
+                      : "border-ink/10"
               }`}
             >
-              <div className="mb-2 flex items-center justify-between text-xs">
+              <div className="mb-2 flex items-center justify-between gap-2 text-xs">
                 <span className={`uppercase text-ink/60 ${index === 0 ? "font-semibold" : ""}`}>{gen.status}</span>
-                <span className="text-[11px] text-ink/50">{truncateIdentifier(gen.genId, 14)}</span>
+                <div className="flex items-center gap-2">
+                  {gen.status === "complete" ? (
+                    <label className="flex items-center gap-1 text-[11px] text-ink/60" title="Include this video in a report">
+                      <input
+                        type="checkbox"
+                        checked={selectedForReport}
+                        disabled={!task?.taskId}
+                        onChange={() => task?.taskId && toggleCustomReportOutput(task.taskId, reportRef)}
+                      />
+                      QC
+                    </label>
+                  ) : null}
+                  <span className="text-[11px] text-ink/50">{truncateIdentifier(gen.genId, 14)}</span>
+                </div>
               </div>
               <button
                 type="button"
@@ -418,7 +502,12 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
                 )}
               </button>
               <p className="mt-2 text-xs font-medium text-ink/80">{gen.luma.model} / {gen.luma.mode}</p>
-              <p className="text-[11px] text-ink/60">{formatCompactTimestamp(gen.createdAt)}</p>
+              <p className="text-[11px] text-ink/60">{formatCompactTimestamp(gen.finishedAt ?? gen.createdAt)}</p>
+              {gen.status === "failed" && gen.error ? (
+                <p className="mt-1 line-clamp-3 text-[11px] text-orange-700" title={gen.error}>
+                  {gen.error}
+                </p>
+              ) : null}
               <div className="mt-2 flex items-center gap-2">
                 <button
                   type="button"
@@ -451,6 +540,16 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
                     </svg>
                   </a>
                 ) : null}
+                {gen.status === "complete" && gen.downloadUrl && gen.luma.provider === "luma" && !gen.derivedFromGenerationId ? (
+                  <button
+                    type="button"
+                    className="rounded border border-accent/25 bg-white px-3 py-2 text-xs font-medium text-accent"
+                    title="Refine this Luma generation with tracked keep-mask cleanup"
+                    onClick={() => openVideoCleanupModal(gen)}
+                  >
+                    Refine
+                  </button>
+                ) : null}
                 <button
                   type="button"
                   className="rounded border border-red-200 bg-white p-2 text-xs text-red-700"
@@ -479,7 +578,9 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
                 </button>
               </div>
             </div>
-          ))}
+              );
+            }
+          )}
         </div>
         {generationCardsVisible < selectedSegmentGenerations.length ? (
           <button className="text-sm text-accent underline" onClick={() => setGenerationCardsVisible((count) => count + 6)}>

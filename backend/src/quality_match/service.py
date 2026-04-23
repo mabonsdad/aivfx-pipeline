@@ -8,7 +8,7 @@ from PIL import Image, ImageChops, ImageFilter, ImageOps, ImageStat
 
 
 DEFAULT_SETTINGS: dict[str, Any] = {
-    "diffThreshold": 0.12,
+    "diffThreshold": 0.08,
     "minRegionAreaPct": 0.0005,
     "featherWidthPx": 6,
     "boundaryProtectionWidthPx": 8,
@@ -16,6 +16,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "useSeamlessCloneFallback": True,
     "autoDetectEditRegion": True,
 }
+ECC_MAX_DIMENSION = 1600
+QUALITY_MATCH_MAX_WORK_DIMENSION = 1280
 
 
 @dataclass
@@ -35,7 +37,7 @@ class QualityMatchSettings:
         if edge not in {"off", "low", "medium", "high"}:
             edge = "medium"
         return cls(
-            diff_threshold=max(0.01, min(0.99, float(raw.get("diffThreshold", 0.12)))),
+            diff_threshold=max(0.01, min(0.99, float(raw.get("diffThreshold", 0.08)))),
             min_region_area_pct=max(0.0, min(0.1, float(raw.get("minRegionAreaPct", 0.0005)))),
             feather_width_px=max(0, min(64, int(raw.get("featherWidthPx", 6)))),
             boundary_protection_width_px=max(0, min(128, int(raw.get("boundaryProtectionWidthPx", 8)))),
@@ -60,7 +62,7 @@ def _load_rgb(image_bytes: bytes) -> Image.Image:
     return ImageOps.exif_transpose(Image.open(BytesIO(image_bytes))).convert("RGB")
 
 
-def _load_mask(mask_bytes: bytes | None, size: tuple[int, int]) -> Image.Image | None:
+def _load_mask(mask_bytes: bytes | None, size: tuple[int, int], *, preserve_grayscale: bool = False) -> Image.Image | None:
     if not mask_bytes:
         return None
     mask = ImageOps.exif_transpose(Image.open(BytesIO(mask_bytes))).convert("L")
@@ -69,6 +71,8 @@ def _load_mask(mask_bytes: bytes | None, size: tuple[int, int]) -> Image.Image |
         fitted = Image.new("L", size, 0)
         fitted.paste(mask, ((size[0] - mask.size[0]) // 2, (size[1] - mask.size[1]) // 2))
         mask = fitted
+    if preserve_grayscale:
+        return mask
     return mask.point(lambda px: 255 if px >= 127 else 0)
 
 
@@ -79,6 +83,22 @@ def _fit_generated(generated: Image.Image, size: tuple[int, int]) -> Image.Image
     canvas = Image.new("RGB", size, (0, 0, 0))
     canvas.paste(fitted, ((size[0] - fitted.size[0]) // 2, (size[1] - fitted.size[1]) // 2))
     return canvas
+
+
+def _working_size(size: tuple[int, int], *, max_dimension: int = QUALITY_MATCH_MAX_WORK_DIMENSION) -> tuple[int, int]:
+    width, height = size
+    longest = max(width, height)
+    if longest <= max_dimension:
+        return size
+    scale = float(max_dimension) / float(longest)
+    return (max(1, int(round(width * scale))), max(1, int(round(height * scale))))
+
+
+def _resize_image(image: Image.Image, size: tuple[int, int], *, mask: bool = False) -> Image.Image:
+    if image.size == size:
+        return image
+    resample = Image.Resampling.NEAREST if mask else Image.Resampling.LANCZOS
+    return image.resize(size, resample)
 
 
 def _maybe_align_with_ecc(
@@ -95,14 +115,28 @@ def _maybe_align_with_ecc(
     try:
         orig_np = np.array(original.convert("RGB"))
         gen_np = np.array(generated.convert("RGB"))
-        orig_gray = cv2.cvtColor(orig_np, cv2.COLOR_RGB2GRAY).astype("float32") / 255.0
-        gen_gray = cv2.cvtColor(gen_np, cv2.COLOR_RGB2GRAY).astype("float32") / 255.0
+        full_height, full_width = orig_np.shape[0], orig_np.shape[1]
+        scale = min(1.0, float(ECC_MAX_DIMENSION) / float(max(full_width, full_height)))
+
+        if scale < 0.999:
+            scaled_width = max(1, int(round(full_width * scale)))
+            scaled_height = max(1, int(round(full_height * scale)))
+            orig_np_small = cv2.resize(orig_np, (scaled_width, scaled_height), interpolation=cv2.INTER_AREA)
+            gen_np_small = cv2.resize(gen_np, (scaled_width, scaled_height), interpolation=cv2.INTER_AREA)
+        else:
+            orig_np_small = orig_np
+            gen_np_small = gen_np
+
+        orig_gray = cv2.cvtColor(orig_np_small, cv2.COLOR_RGB2GRAY).astype("float32") / 255.0
+        gen_gray = cv2.cvtColor(gen_np_small, cv2.COLOR_RGB2GRAY).astype("float32") / 255.0
 
         warp_matrix = np.eye(2, 3, dtype="float32")
-        criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 80, 1e-6)
+        criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 40, 1e-5)
         ecc_mask = None
         if original_mask is not None:
             mask_np = np.array(original_mask.convert("L"))
+            if scale < 0.999:
+                mask_np = cv2.resize(mask_np, (orig_gray.shape[1], orig_gray.shape[0]), interpolation=cv2.INTER_NEAREST)
             # Prioritize stable background for registration.
             ecc_mask = cv2.bitwise_not((mask_np >= 127).astype("uint8") * 255)
         cc, warp_matrix = cv2.findTransformECC(
@@ -114,6 +148,10 @@ def _maybe_align_with_ecc(
             inputMask=ecc_mask,
             gaussFiltSize=5,
         )
+        if scale < 0.999:
+            warp_matrix = warp_matrix.copy()
+            warp_matrix[0, 2] = float(warp_matrix[0, 2]) / scale
+            warp_matrix[1, 2] = float(warp_matrix[1, 2]) / scale
         aligned_np = cv2.warpAffine(
             gen_np,
             warp_matrix,
@@ -124,6 +162,7 @@ def _maybe_align_with_ecc(
         return Image.fromarray(aligned_np, mode="RGB"), {
             "method": "opencv_ecc_affine",
             "ecc": float(cc),
+            "scale": scale,
             "warpMatrix": [[float(value) for value in row] for row in warp_matrix.tolist()],
         }
     except Exception as exc:  # pragma: no cover - safety fallback
@@ -199,7 +238,7 @@ def _connected_components_filter(
         if area < min_area:
             continue
         mean_diff = diff_sum / max(1, area) / 255.0
-        threshold = 0.12 + edge_penalty
+        threshold = 0.08 + edge_penalty
         if touches_edge and mean_diff < threshold:
             continue
         for pixel_idx in component:
@@ -279,12 +318,12 @@ def _build_restoration_map(
     uncertain_band: Image.Image,
     leakage_mask: Image.Image | None,
 ) -> Image.Image:
-    base = Image.new("RGBA", keep_mask.size, (32, 136, 255, 185))  # Restore original (blue)
+    base = Image.new("RGBA", keep_mask.size, (0, 0, 0, 0))
     keep = Image.new("RGBA", keep_mask.size, (44, 190, 99, 185))  # Keep generated (green)
     base.paste(keep, (0, 0), keep_mask)
     if uncertain_band:
-        amber = Image.new("RGBA", keep_mask.size, (255, 180, 45, 210))
-        base.paste(amber, (0, 0), uncertain_band)
+        light_green = Image.new("RGBA", keep_mask.size, (146, 230, 174, 210))
+        base.paste(light_green, (0, 0), uncertain_band)
     if leakage_mask is not None:
         leakage = leakage_mask.point(lambda value: 255 if value >= 127 else 0)
         red = Image.new("RGBA", keep_mask.size, (230, 54, 46, 220))
@@ -326,6 +365,21 @@ def _try_seamless_clone(
         return generated_aligned
 
 
+def _apply_edge_only_seamless_fallback(
+    *,
+    base_merged: Image.Image,
+    seamless_candidate: Image.Image,
+    keep_mask: Image.Image,
+    width_px: int,
+) -> Image.Image:
+    edge_mask = _edge_band(keep_mask, max(1, width_px))
+    if _count_pixels(edge_mask) <= 0:
+        return base_merged
+    if width_px > 1:
+        edge_mask = edge_mask.filter(ImageFilter.GaussianBlur(radius=max(0.5, width_px / 2.0)))
+    return Image.composite(seamless_candidate, base_merged, edge_mask.convert("L"))
+
+
 def analyse_quality_match(
     *,
     original_bytes: bytes,
@@ -338,6 +392,18 @@ def analyse_quality_match(
     generated = _fit_generated(_load_rgb(generated_bytes), original.size)
     original_mask = _load_mask(original_mask_bytes, original.size)
     override_mask = _load_mask(override_mask_bytes, original.size)
+
+    full_size = original.size
+    work_size = _working_size(full_size)
+    analysis_scale = work_size[0] / full_size[0] if full_size[0] else 1.0
+
+    if work_size != full_size:
+        original = _resize_image(original, work_size)
+        generated = _resize_image(generated, work_size)
+        if original_mask is not None:
+            original_mask = _resize_image(original_mask, work_size, mask=True)
+        if override_mask is not None:
+            override_mask = _resize_image(override_mask, work_size, mask=True)
 
     aligned_generated, alignment_info = _maybe_align_with_ecc(original, generated, original_mask)
     diff_gray = ImageChops.difference(original.convert("RGB"), aligned_generated.convert("RGB")).convert("L")
@@ -353,6 +419,8 @@ def analyse_quality_match(
     )
 
     warnings: list[str] = []
+    if work_size != full_size:
+        warnings.append(f"Quality Match analysis used a scaled working resolution ({work_size[0]}x{work_size[1]}) for responsiveness.")
     effective_mask = override_mask if override_mask is not None else original_mask
     if effective_mask is not None:
         proposed_merge_mask = ImageChops.multiply(meaningful_change, effective_mask)
@@ -384,9 +452,14 @@ def analyse_quality_match(
     if settings.use_seamless_clone_fallback and seam_score_value > 0.12:
         candidate = _try_seamless_clone(original=original, generated_aligned=aligned_generated, keep_mask=proposed_merge_mask)
         if candidate is not aligned_generated:
-            preview = Image.composite(candidate, original, alpha_mask.convert("L"))
+            preview = _apply_edge_only_seamless_fallback(
+                base_merged=preview,
+                seamless_candidate=candidate,
+                keep_mask=proposed_merge_mask,
+                width_px=max(2, settings.feather_width_px or 2),
+            )
             used_seamless = True
-            warnings.append("Seamless blend fallback was used due to boundary seam risk.")
+            warnings.append("Edge-only seamless blend fallback was used due to boundary seam risk.")
 
     if leakage_mask is not None and _count_pixels(leakage_mask) > 0:
         warnings.append("Outside-mask leakage detected and suppressed in restoration map.")
@@ -416,7 +489,7 @@ def analyse_quality_match(
     heatmap = _colorize_heatmap(diff_gray)
     quality_report = {
         "settings": settings.to_dict(),
-        "alignment": alignment_info,
+        "alignment": {**alignment_info, "analysisScale": analysis_scale},
         "warnings": warnings,
         "metricsBefore": metrics_before,
         "metricsPreview": metrics_preview,
@@ -442,12 +515,99 @@ def analyse_quality_match(
         },
         "report": quality_report,
         "artifacts": {
-            "alignedGenerated": _encode_png(aligned_generated),
-            "diffHeatmap": _encode_png(heatmap),
-            "binaryChangeMask": _encode_png(raw_binary.convert("L")),
-            "proposedMergeMask": _encode_png(proposed_merge_mask.convert("L")),
-            "restorationMap": _encode_png(restoration_map.convert("RGBA")),
-            "preview": _encode_png(preview),
+            "alignedGenerated": _encode_png(_resize_image(aligned_generated, full_size)),
+            "diffHeatmap": _encode_png(_resize_image(heatmap, full_size)),
+            "binaryChangeMask": _encode_png(_resize_image(raw_binary.convert("L"), full_size, mask=True)),
+            "proposedMergeMask": _encode_png(_resize_image(proposed_merge_mask.convert("L"), full_size, mask=True)),
+            "restorationMap": _encode_png(_resize_image(restoration_map.convert("RGBA"), full_size)),
+            "preview": _encode_png(_resize_image(preview, full_size)),
+        },
+    }
+
+
+def preview_quality_match_from_mask(
+    *,
+    original_bytes: bytes,
+    final_mask_bytes: bytes,
+    settings: QualityMatchSettings,
+    aligned_generated_bytes: bytes | None = None,
+    generated_bytes: bytes | None = None,
+    original_mask_bytes: bytes | None = None,
+) -> dict[str, Any]:
+    original = _load_rgb(original_bytes)
+    original_mask = _load_mask(original_mask_bytes, original.size)
+    full_size = original.size
+    work_size = _working_size(full_size)
+    if aligned_generated_bytes is not None:
+        aligned_generated = _fit_generated(_load_rgb(aligned_generated_bytes), original.size)
+    elif generated_bytes is not None:
+        generated = _fit_generated(_load_rgb(generated_bytes), original.size)
+        aligned_generated, _ = _maybe_align_with_ecc(original, generated, original_mask)
+    else:
+        raise ValueError("Either aligned generated bytes or generated bytes are required")
+
+    final_mask_alpha = _load_mask(final_mask_bytes, original.size, preserve_grayscale=True)
+    if final_mask_alpha is None:
+        raise ValueError("Final mask is required")
+
+    if work_size != full_size:
+        original = _resize_image(original, work_size)
+        aligned_generated = _resize_image(aligned_generated, work_size)
+        final_mask_alpha = _resize_image(final_mask_alpha, work_size)
+        if original_mask is not None:
+            original_mask = _resize_image(original_mask, work_size, mask=True)
+
+    final_mask_binary = final_mask_alpha.point(lambda value: 255 if value >= 127 else 0)
+
+    alpha_mask = final_mask_alpha
+    if settings.feather_width_px > 0:
+        alpha_mask = alpha_mask.filter(ImageFilter.GaussianBlur(radius=max(0.5, settings.feather_width_px / 2.0)))
+    preview = Image.composite(aligned_generated, original, alpha_mask.convert("L"))
+
+    seam_score_value = _seam_score(original, preview, final_mask_binary, max(2, settings.feather_width_px or 2))
+    warnings: list[str] = []
+    if work_size != full_size:
+        warnings.append(f"Preview used a scaled working resolution ({work_size[0]}x{work_size[1]}) for responsiveness.")
+    used_seamless = False
+    if settings.use_seamless_clone_fallback and seam_score_value > 0.12:
+        candidate = _try_seamless_clone(original=original, generated_aligned=aligned_generated, keep_mask=final_mask_binary)
+        if candidate is not aligned_generated:
+            preview = _apply_edge_only_seamless_fallback(
+                base_merged=preview,
+                seamless_candidate=candidate,
+                keep_mask=final_mask_binary,
+                width_px=max(2, settings.feather_width_px or 2),
+            )
+            used_seamless = True
+            warnings.append("Edge-only seamless blend fallback was used due to boundary seam risk.")
+
+    metrics_preview = _compute_metrics(
+        original,
+        preview,
+        region_mask=original_mask or final_mask_binary,
+        threshold_norm=settings.diff_threshold,
+        boundary_ring_px=settings.boundary_protection_width_px,
+    )
+    coverage = (sum(final_mask_alpha.getdata()) / 255.0 * 100.0) / max(1, original.width * original.height)
+    return {
+        "settings": settings.to_dict(),
+        "warnings": warnings,
+        "metricsPreview": {
+            "changedPctPreview": metrics_preview.get("changedPctTotal"),
+            "outsideLeakagePreview": metrics_preview.get("outsideLeakagePct"),
+            "boundarySpillPreview": metrics_preview.get("boundarySpillPct"),
+            "proposedGeneratedCoveragePct": round(coverage, 4),
+            "proposedOriginalRestorePct": round(100.0 - coverage, 4),
+        },
+        "artifacts": {
+            "preview": _encode_png(_resize_image(preview, full_size)),
+            "finalMask": _encode_png(_resize_image(final_mask_alpha.convert("L"), full_size, mask=True)),
+        },
+        "report": {
+            "settings": settings.to_dict(),
+            "warnings": warnings,
+            "metricsPreview": metrics_preview,
+            "usedSeamlessFallback": used_seamless,
         },
     }
 
@@ -469,28 +629,34 @@ def apply_quality_match(
     )
     original = _load_rgb(original_bytes)
     aligned_generated = _load_rgb(analysis["artifacts"]["alignedGenerated"])
-    final_mask = _load_mask(final_mask_bytes, original.size)
-    if final_mask is None:
+    final_mask_alpha = _load_mask(final_mask_bytes, original.size, preserve_grayscale=True)
+    if final_mask_alpha is None:
         raise ValueError("Final mask is required")
+    final_mask_binary = final_mask_alpha.point(lambda value: 255 if value >= 127 else 0)
 
-    alpha_mask = final_mask
+    alpha_mask = final_mask_alpha
     if settings.feather_width_px > 0:
         alpha_mask = alpha_mask.filter(ImageFilter.GaussianBlur(radius=max(0.5, settings.feather_width_px / 2.0)))
     merged = Image.composite(aligned_generated, original, alpha_mask.convert("L"))
 
-    seam_score_value = _seam_score(original, merged, final_mask, max(2, settings.feather_width_px or 2))
+    seam_score_value = _seam_score(original, merged, final_mask_binary, max(2, settings.feather_width_px or 2))
     used_seamless = False
     if settings.use_seamless_clone_fallback and seam_score_value > 0.12:
-        candidate = _try_seamless_clone(original=original, generated_aligned=aligned_generated, keep_mask=final_mask)
+        candidate = _try_seamless_clone(original=original, generated_aligned=aligned_generated, keep_mask=final_mask_binary)
         if candidate is not aligned_generated:
-            merged = Image.composite(candidate, original, alpha_mask.convert("L"))
+            merged = _apply_edge_only_seamless_fallback(
+                base_merged=merged,
+                seamless_candidate=candidate,
+                keep_mask=final_mask_binary,
+                width_px=max(2, settings.feather_width_px or 2),
+            )
             used_seamless = True
 
     metrics_before = analysis["metrics"]
     metrics_after = _compute_metrics(
         original,
         merged,
-        region_mask=_load_mask(original_mask_bytes, original.size) or final_mask,
+        region_mask=_load_mask(original_mask_bytes, original.size) or final_mask_binary,
         threshold_norm=settings.diff_threshold,
         boundary_ring_px=settings.boundary_protection_width_px,
     )
@@ -511,8 +677,7 @@ def apply_quality_match(
         },
         "artifacts": {
             "final": _encode_png(merged),
-            "finalMask": _encode_png(final_mask.convert("L")),
+            "finalMask": _encode_png(final_mask_alpha.convert("L")),
             "reportJson": report,
         },
     }
-

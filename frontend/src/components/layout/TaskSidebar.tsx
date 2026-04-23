@@ -10,6 +10,8 @@ type TaskSidebarProps = {
   onSelectTask: (taskId: string) => void;
   onDeleteTask: (taskId: string) => void;
   onOpenAssetLibrary: () => void;
+  onOpenCustomQc: () => void;
+  onOpenApiLogs: () => void;
 };
 
 export default function TaskSidebar({
@@ -21,6 +23,8 @@ export default function TaskSidebar({
   onSelectTask,
   onDeleteTask,
   onOpenAssetLibrary,
+  onOpenCustomQc,
+  onOpenApiLogs,
 }: TaskSidebarProps) {
   const [pendingDeleteTask, setPendingDeleteTask] = useState<TaskSummary | null>(null);
 
@@ -83,9 +87,17 @@ export default function TaskSidebar({
           </div>
         ))}
       </div>
-      <button className="mt-3 text-xs text-accent underline" onClick={onOpenAssetLibrary}>
-        Open Asset Library
-      </button>
+      <div className="mt-3 space-y-2">
+        <button className="block text-xs text-accent underline" onClick={onOpenAssetLibrary}>
+          Open Asset Library
+        </button>
+        <button className="block text-xs text-accent underline" onClick={onOpenCustomQc}>
+          Custom QC test
+        </button>
+        <button className="block text-xs text-accent underline" onClick={onOpenApiLogs}>
+          API Logs
+        </button>
+      </div>
 
       {pendingDeleteTask ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
