@@ -13,7 +13,7 @@ export type FrameVariant = {
   variantKind?: "edited" | "refined";
   sourceVariantId?: string | null;
   refinedVariantIds?: string[];
-  model: "nano_banana" | "nano_banana_pro" | "chatgpt" | "runware_flux_fill" | "runware_ace_pp" | "generated_extension_anchor";
+  model: "nano_banana" | "nano_banana_pro" | "chatgpt" | "chatgpt_latest" | "runware_flux_fill" | "runware_ace_pp" | "generated_extension_anchor";
   promptHash: string;
   createdAt: string;
   jobId?: string | null;

@@ -143,6 +143,7 @@ Response:
 Supported models:
 
 - `chatgpt`
+- `chatgpt_latest`
 - `nano_banana`
 - `nano_banana_pro`
 
@@ -182,6 +183,7 @@ Request:
 Supported models:
 
 - `chatgpt`
+- `chatgpt_latest`
 - `nano_banana_pro`
 - `runware_flux_fill`
 - `runware_ace_pp`

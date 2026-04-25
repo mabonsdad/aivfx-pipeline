@@ -30,12 +30,14 @@ type VideoModelOption = {
 const IMAGE_FULL_MODELS = [
   { value: "nano_banana", label: "Nano Banana" },
   { value: "nano_banana_pro", label: "Nano Banana Pro" },
-  { value: "chatgpt", label: "ChatGPT" },
+  { value: "chatgpt", label: "ChatGPT-image 1.5" },
+  { value: "chatgpt_latest", label: "ChatGPT-image 2.0" },
 ] as const;
 
 const IMAGE_MASKED_MODELS = [
   { value: "nano_banana_pro", label: "Nano Banana Pro" },
-  { value: "chatgpt", label: "ChatGPT" },
+  { value: "chatgpt", label: "ChatGPT-image 1.5" },
+  { value: "chatgpt_latest", label: "ChatGPT-image 2.0" },
   { value: "runware_flux_fill", label: "Runware Flux Fill" },
 ] as const;
 
@@ -338,7 +340,7 @@ function App() {
         const created = await apiTestRequest<{ requestId: string; jobId: string }>("/api/v1/image-edits/full", {
           method: "POST",
           body: JSON.stringify({
-            model: imageModel as "nano_banana" | "nano_banana_pro" | "chatgpt",
+            model: imageModel as "nano_banana" | "nano_banana_pro" | "chatgpt" | "chatgpt_latest",
             prompt: prompt.trim(),
             inputAssetKey,
           }),
@@ -357,7 +359,7 @@ function App() {
         const created = await apiTestRequest<{ requestId: string; jobId: string }>("/api/v1/image-edits/patch", {
           method: "POST",
           body: JSON.stringify({
-            model: maskedModel as "nano_banana_pro" | "chatgpt" | "runware_flux_fill",
+            model: maskedModel as "nano_banana_pro" | "chatgpt" | "chatgpt_latest" | "runware_flux_fill",
             prompt: prompt.trim(),
             inputAssetKey,
             patchAssetKey: inputAssetKey,

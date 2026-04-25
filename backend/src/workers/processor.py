@@ -1313,7 +1313,7 @@ def _handle_full_edit(
     _job_progress(job, store, 10, "running", "Loading source frame")
     src_bytes = asset_store.read_bytes(source_key)
     src_image = ImageOps.exif_transpose(Image.open(BytesIO(src_bytes))).convert("RGBA")
-    if model_name == "chatgpt":
+    if model_name in {"chatgpt", "chatgpt_latest"}:
         openai_key = secrets.get("OPENAI_API_KEY")
         if not openai_key:
             raise RuntimeError("OPENAI_API_KEY is required for ChatGPT image edits")
@@ -1321,7 +1321,7 @@ def _handle_full_edit(
         _job_progress(job, store, 30, "running", "Calling OpenAI edit")
         out_bytes = generate_openai_image_edit(
             api_key=openai_key,
-            model="chatgpt",
+            model=model_name,
             prompt=payload["prompt"],
             input_image_bytes=src_bytes,
         )
@@ -1474,7 +1474,7 @@ def _handle_patch_edit(
             refined_mask_io = BytesIO()
             refined_mask_image.save(refined_mask_io, format="PNG")
             refined_mask_bytes = refined_mask_io.getvalue()
-        if model_name == "chatgpt":
+        if model_name in {"chatgpt", "chatgpt_latest"}:
             openai_key = secrets.get("OPENAI_API_KEY")
             if not openai_key:
                 raise RuntimeError("OPENAI_API_KEY is required for ChatGPT patch edits")
@@ -1483,7 +1483,7 @@ def _handle_patch_edit(
             _job_progress(job, store, 30, "running", "Calling OpenAI patch edit")
             edited_patch = generate_openai_image_edit(
                 api_key=openai_key,
-                model="chatgpt",
+                model=model_name,
                 prompt=model_prompt,
                 input_image_bytes=patch_bytes,
                 mask_image_bytes=openai_mask_bytes,
@@ -1590,7 +1590,7 @@ def _handle_api_image_edit_full(
     model_name = str(payload["model"])
     provider_name = "gemini"
 
-    if model_name == "chatgpt":
+    if model_name in {"chatgpt", "chatgpt_latest"}:
         openai_key = secrets.get("OPENAI_API_KEY")
         if not openai_key:
             raise RuntimeError("OPENAI_API_KEY is required for ChatGPT image edits")
@@ -1598,7 +1598,7 @@ def _handle_api_image_edit_full(
         _api_request_progress(job=job, store=store, request_record=request_record, progress=35, status="running", logs="Calling OpenAI image edit")
         out_bytes = generate_openai_image_edit(
             api_key=openai_key,
-            model="chatgpt",
+            model=model_name,
             prompt=str(payload["prompt"]),
             input_image_bytes=src_bytes,
         )
@@ -1736,7 +1736,7 @@ def _handle_api_image_edit_patch(
             refined_mask_io = BytesIO()
             refined_mask_image.save(refined_mask_io, format="PNG")
             refined_mask_bytes = refined_mask_io.getvalue()
-        if model_name == "chatgpt":
+        if model_name in {"chatgpt", "chatgpt_latest"}:
             openai_key = secrets.get("OPENAI_API_KEY")
             if not openai_key:
                 raise RuntimeError("OPENAI_API_KEY is required for ChatGPT patch edits")
@@ -1744,7 +1744,7 @@ def _handle_api_image_edit_patch(
             _api_request_progress(job=job, store=store, request_record=request_record, progress=35, status="running", logs="Calling OpenAI patch edit")
             edited_patch = generate_openai_image_edit(
                 api_key=openai_key,
-                model="chatgpt",
+                model=model_name,
                 prompt=model_prompt,
                 input_image_bytes=patch_bytes,
                 mask_image_bytes=_to_openai_alpha_mask(refined_mask_bytes),

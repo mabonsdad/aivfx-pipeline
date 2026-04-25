@@ -11,6 +11,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 OPENAI_IMAGE_MODEL_MAP = {
     "chatgpt": "gpt-image-1.5",
+    "chatgpt_latest": "chatgpt-image-latest",
 }
 OPENAI_SUPPORTED_SIZES: tuple[tuple[int, int], ...] = (
     (1536, 1024),

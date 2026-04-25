@@ -122,7 +122,7 @@ export const apiClient = {
   fullEdit: (
     taskId: string,
     frameId: string,
-    payload: { model: "nano_banana" | "nano_banana_pro" | "chatgpt"; prompt: string; sourceVariantId?: string },
+    payload: { model: "nano_banana" | "nano_banana_pro" | "chatgpt" | "chatgpt_latest"; prompt: string; sourceVariantId?: string },
   ) =>
     api<{ jobId: string }>(`/tasks/${taskId}/frames/${frameId}/edits/full`, {
       method: "POST",
@@ -150,7 +150,7 @@ export const apiClient = {
     taskId: string,
     frameId: string,
     payload: {
-      model: "nano_banana_pro" | "chatgpt" | "runware_flux_fill" | "runware_ace_pp";
+      model: "nano_banana_pro" | "chatgpt" | "chatgpt_latest" | "runware_flux_fill" | "runware_ace_pp";
       prompt: string;
       patchKey: string;
       maskKey?: string;
@@ -181,10 +181,10 @@ export const apiClient = {
     return api<{ requests: ApiRequestRecord[] }>(`/api/v1/requests${query ? `?${query}` : ""}`);
   },
   getApiRequest: (requestId: string) => api<ApiRequestRecord>(`/api/v1/requests/${requestId}`),
-  apiFullEdit: (payload: { model: "nano_banana" | "nano_banana_pro" | "chatgpt"; prompt: string; inputAssetKey: string }) =>
+  apiFullEdit: (payload: { model: "nano_banana" | "nano_banana_pro" | "chatgpt" | "chatgpt_latest"; prompt: string; inputAssetKey: string }) =>
     api<{ requestId: string; jobId: string }>(`/api/v1/image-edits/full`, { method: "POST", body: JSON.stringify(payload) }),
   apiPatchEdit: (payload: {
-    model: "nano_banana_pro" | "chatgpt" | "runware_flux_fill" | "runware_ace_pp";
+    model: "nano_banana_pro" | "chatgpt" | "chatgpt_latest" | "runware_flux_fill" | "runware_ace_pp";
     prompt: string;
     inputAssetKey: string;
     patchAssetKey: string;

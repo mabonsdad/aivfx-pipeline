@@ -32,8 +32,8 @@ export type EditFrameTabCtx = {
     | null;
   prompt: string;
   setPrompt: (value: string) => void;
-  model: "nano_banana" | "nano_banana_pro" | "chatgpt";
-  setModel: (value: "nano_banana" | "nano_banana_pro" | "chatgpt") => void;
+  model: "nano_banana" | "nano_banana_pro" | "chatgpt" | "chatgpt_latest";
+  setModel: (value: "nano_banana" | "nano_banana_pro" | "chatgpt" | "chatgpt_latest") => void;
   fullEditMutation: { isPending: boolean; mutate: (frameId: string) => void };
   task: TaskDetail | undefined;
   activeEditSourceImageUrl: string | null;
@@ -59,8 +59,8 @@ export type EditFrameTabCtx = {
   onPatchMaskPointerDown: (event: PointerEvent<HTMLCanvasElement>) => void;
   onPatchMaskPointerMove: (event: PointerEvent<HTMLCanvasElement>) => void;
   onPatchMaskPointerUp: (event: PointerEvent<HTMLCanvasElement>) => void;
-  patchEngine: "nano_banana_pro" | "chatgpt" | "runware_flux_fill" | "runware_ace_pp";
-  setPatchEngine: (value: "nano_banana_pro" | "chatgpt" | "runware_flux_fill" | "runware_ace_pp") => void;
+  patchEngine: "nano_banana_pro" | "chatgpt" | "chatgpt_latest" | "runware_flux_fill" | "runware_ace_pp";
+  setPatchEngine: (value: "nano_banana_pro" | "chatgpt" | "chatgpt_latest" | "runware_flux_fill" | "runware_ace_pp") => void;
   patchToolMode: "brush_add" | "brush_erase" | "lasso_add" | "lasso_erase";
   setPatchToolMode: (value: "brush_add" | "brush_erase" | "lasso_add" | "lasso_erase") => void;
   patchBrushSize: number;
@@ -197,12 +197,13 @@ export default function EditFrameTab({ ctx }: EditFrameTabProps) {
                     <div className="flex flex-wrap items-center gap-2">
                       <select
                         value={model}
-                        onChange={(e) => setModel(e.target.value as "nano_banana" | "nano_banana_pro" | "chatgpt")}
+                        onChange={(e) => setModel(e.target.value as "nano_banana" | "nano_banana_pro" | "chatgpt" | "chatgpt_latest")}
                         className="rounded-md border border-ink/20 px-2 py-2"
                       >
                         <option value="nano_banana_pro">Nano Banana Pro</option>
                         <option value="nano_banana">Nano Banana Std</option>
-                        <option value="chatgpt">ChatGPT-image</option>
+                        <option value="chatgpt">ChatGPT-image 1.5</option>
+                        <option value="chatgpt_latest">ChatGPT-image 2.0</option>
                       </select>
                       <button
                         type="button"
@@ -409,7 +410,8 @@ export default function EditFrameTab({ ctx }: EditFrameTabProps) {
                                 className="mt-1 block w-full rounded border border-ink/20 px-2 py-1 text-sm"
                               >
                                 <option value="nano_banana_pro">Google Nano Banana Pro</option>
-                                <option value="chatgpt">OpenAI ChatGPT (gpt-image-1)</option>
+                                <option value="chatgpt">OpenAI ChatGPT-image 1.5</option>
+                                <option value="chatgpt_latest">OpenAI ChatGPT-image 2.0</option>
                                 <option value="runware_flux_fill">Runware FLUX Fill</option>
                                 <option value="runware_ace_pp">Runware ACE++ + FLUX Fill</option>
                               </select>

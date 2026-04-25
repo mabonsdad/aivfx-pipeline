@@ -117,7 +117,7 @@ type LibraryAsset = {
     | { assetType: "export"; exportId: string };
 };
 
-type PatchEngine = "nano_banana_pro" | "chatgpt" | "runware_flux_fill" | "runware_ace_pp";
+type PatchEngine = "nano_banana_pro" | "chatgpt" | "chatgpt_latest" | "runware_flux_fill" | "runware_ace_pp";
 type PatchToolMode = "brush_add" | "brush_erase" | "lasso_add" | "lasso_erase";
 
 type MaskPoint = {
@@ -818,7 +818,7 @@ export default function App() {
   const [generationCardsVisible, setGenerationCardsVisible] = useState(6);
   const [jobsVisible, setJobsVisible] = useState(6);
   const [prompt, setPrompt] = useState("");
-  const [model, setModel] = useState<"nano_banana" | "nano_banana_pro" | "chatgpt">("nano_banana_pro");
+  const [model, setModel] = useState<"nano_banana" | "nano_banana_pro" | "chatgpt" | "chatgpt_latest">("nano_banana_pro");
   const [patchPrompt, setPatchPrompt] = useState("");
   const [patchEngine, setPatchEngine] = useState<PatchEngine>("nano_banana_pro");
   const [runwareRepaintingScale, setRunwareRepaintingScale] = useState(0.7);
@@ -2906,9 +2906,10 @@ export default function App() {
           ],
         });
 
-      const imageModels: Array<{ model: "nano_banana_pro" | "chatgpt"; label: string }> = [
+      const imageModels: Array<{ model: "nano_banana_pro" | "chatgpt" | "chatgpt_latest"; label: string }> = [
         { model: "nano_banana_pro", label: "Nano Banana Pro" },
-        { model: "chatgpt", label: "ChatGPT-image" },
+        { model: "chatgpt", label: "ChatGPT-image 1.5" },
+        { model: "chatgpt_latest", label: "ChatGPT-image 2.0" },
       ];
 
       const throwIfCancelled = () => {

@@ -55,7 +55,7 @@ class FrameCaptureRequest(BaseModel):
 
 
 class FullEditRequest(BaseModel):
-    model: Literal["nano_banana", "nano_banana_pro", "chatgpt"]
+    model: Literal["nano_banana", "nano_banana_pro", "chatgpt", "chatgpt_latest"]
     prompt: str = Field(min_length=1)
     sourceVariantId: str | None = None
 
@@ -76,7 +76,7 @@ class PatchInitRequest(BaseModel):
 
 
 class PatchSubmitRequest(BaseModel):
-    model: Literal["nano_banana_pro", "chatgpt", "runware_flux_fill", "runware_ace_pp"]
+    model: Literal["nano_banana_pro", "chatgpt", "chatgpt_latest", "runware_flux_fill", "runware_ace_pp"]
     prompt: str = Field(min_length=1)
     patchKey: str
     maskKey: str | None = None
@@ -153,13 +153,13 @@ class ApiAssetUploadInitRequest(BaseModel):
 
 
 class ApiImageEditFullRequest(BaseModel):
-    model: Literal["nano_banana", "nano_banana_pro", "chatgpt"]
+    model: Literal["nano_banana", "nano_banana_pro", "chatgpt", "chatgpt_latest"]
     prompt: str = Field(min_length=1)
     inputAssetKey: str = Field(min_length=1)
 
 
 class ApiImageEditPatchRequest(BaseModel):
-    model: Literal["nano_banana_pro", "chatgpt", "runware_flux_fill", "runware_ace_pp"]
+    model: Literal["nano_banana_pro", "chatgpt", "chatgpt_latest", "runware_flux_fill", "runware_ace_pp"]
     prompt: str = Field(min_length=1)
     inputAssetKey: str = Field(min_length=1)
     patchAssetKey: str = Field(min_length=1)
@@ -354,7 +354,7 @@ class CustomReportCreateRequest(BaseModel):
 class TaskFrameVariant(BaseModel):
     variantId: str
     type: Literal["full", "patch", "extension_anchor"]
-    model: Literal["nano_banana", "nano_banana_pro", "chatgpt", "runware_flux_fill", "runware_ace_pp", "generated_extension_anchor"]
+    model: Literal["nano_banana", "nano_banana_pro", "chatgpt", "chatgpt_latest", "runware_flux_fill", "runware_ace_pp", "generated_extension_anchor"]
     promptHash: str
     createdAt: datetime
     jobId: str | None = None

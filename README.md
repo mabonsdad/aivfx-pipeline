@@ -27,7 +27,7 @@ The main workflow is task-based. Assets and task metadata are private to the aut
 3. **Edit Frames**
    - Previously named Edit Frame.
    - The user edits selected frames with full-frame or patch-based image models.
-   - Supported frame-edit providers include Gemini Nano Banana / Nano Banana Pro, ChatGPT image generation, Runware Flux Fill, and Runware ACE++.
+   - Supported frame-edit providers include Gemini Nano Banana / Nano Banana Pro, OpenAI ChatGPT-image 1.5, OpenAI ChatGPT-image 2.0, Runware Flux Fill, and Runware ACE++.
    - The QA launch button was removed from Edit Frames thumbnail blocks; Quality Match is now launched from the Refine Frames step.
 
 4. **Refine Frames**
