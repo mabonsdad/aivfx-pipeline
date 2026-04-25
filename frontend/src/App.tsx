@@ -179,6 +179,10 @@ const ACTIVE_TASK_POLL_MS = 3000;
 const URL_REFRESH_IDLE_MS = 2 * 60 * 1000;
 const AUTOMATION_CANCELLED = "__automation_cancelled__";
 const SEGMENT_SELECTION_STORAGE_KEY = "aivfx:lastSegmentByTask:v1";
+const VIDEO_WORK_MODE_STORAGE_KEY = "aivfx:videoWorkModeByTask:v1";
+const WHOLE_VIDEO_SINGLE_PASS_LIMIT_SECONDS = 10;
+
+type VideoWorkMode = "whole_video" | "custom_segment";
 
 type VideoFrameStripItem = {
   frameIndex: number;
@@ -279,6 +283,34 @@ function writeSegmentSelectionMap(value: Record<string, string>): void {
     window.localStorage.setItem(SEGMENT_SELECTION_STORAGE_KEY, JSON.stringify(value));
   } catch {
     // Ignore storage errors (private mode/quota) without breaking app flow.
+  }
+}
+
+function readVideoWorkModeMap(): Record<string, VideoWorkMode> {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = window.localStorage.getItem(VIDEO_WORK_MODE_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object") return {};
+    const output: Record<string, VideoWorkMode> = {};
+    for (const [taskId, mode] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof taskId === "string" && (mode === "whole_video" || mode === "custom_segment")) {
+        output[taskId] = mode;
+      }
+    }
+    return output;
+  } catch {
+    return {};
+  }
+}
+
+function writeVideoWorkModeMap(value: Record<string, VideoWorkMode>): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(VIDEO_WORK_MODE_STORAGE_KEY, JSON.stringify(value));
+  } catch {
+    // Ignore storage errors without breaking app flow.
   }
 }
 
@@ -896,6 +928,7 @@ export default function App() {
   const [automationSelectionState, setAutomationSelectionState] = useState<AutomationSelectionState | null>(null);
   const [firstFrameId, setFirstFrameId] = useState<string | null>(null);
   const [lastFrameId, setLastFrameId] = useState<string | null>(null);
+  const [videoWorkMode, setVideoWorkModeState] = useState<VideoWorkMode | null>(null);
   const [editFrameTab, setEditFrameTab] = useState<"first" | "last">("first");
   const [refineFrameTab, setRefineFrameTab] = useState<"first" | "last">("first");
   const timelineVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -908,6 +941,7 @@ export default function App() {
   const signedUrlRefreshRef = useRef<Map<string, number>>(new Map());
   const pageHiddenAtRef = useRef<number | null>(null);
   const automationCancelRef = useRef(false);
+  const defaultSegmentInitRef = useRef<Set<string>>(new Set());
   const automationSelectionResolverRef = useRef<
     ((choice: { startVariantId: string; endVariantId: string | null; cancelled: boolean }) => void) | null
   >(null);
@@ -952,6 +986,27 @@ export default function App() {
       navigate(taskRoute(targetTaskId, nextTab), { replace });
     },
     [navigate, selectedTaskId, tasksQuery.data],
+  );
+
+  const setVideoWorkMode = useCallback(
+    (mode: VideoWorkMode | null, taskIdOverride?: string | null) => {
+      const targetTaskId = taskIdOverride ?? selectedTaskId ?? null;
+      setVideoWorkModeState(mode);
+      if (!targetTaskId) return;
+      const stored = readVideoWorkModeMap();
+      if (!mode) {
+        if (stored[targetTaskId]) {
+          delete stored[targetTaskId];
+          writeVideoWorkModeMap(stored);
+        }
+        return;
+      }
+      if (stored[targetTaskId] !== mode) {
+        stored[targetTaskId] = mode;
+        writeVideoWorkModeMap(stored);
+      }
+    },
+    [selectedTaskId],
   );
 
   const goToReport = useCallback(
@@ -1112,6 +1167,28 @@ export default function App() {
 
   const assetsLoading = tab === "assets" && assetTaskQueries.some((query) => query.isPending || query.isFetching) && assetTasks.length === 0;
   const selectedSegment = task?.segments.find((s) => s.segmentId === selectedSegmentId) ?? null;
+  const totalVideoFrames = frameCount(task);
+  const defaultVideoSegment = useMemo(
+    () =>
+      (task?.segments ?? []).find(
+        (segment) => segment.startFrame === 0 && totalVideoFrames > 0 && segment.endFrameExclusive === totalVideoFrames,
+      ) ?? null,
+    [task?.segments, totalVideoFrames],
+  );
+  const isWholeVideoSelection = Boolean(
+    selectedSegment &&
+      totalVideoFrames > 0 &&
+      selectedSegment.startFrame === 0 &&
+      selectedSegment.endFrameExclusive === totalVideoFrames,
+  );
+  const wholeVideoNeedsChunking = Boolean(
+    isWholeVideoSelection && selectedSegment && selectedSegment.durationSec > WHOLE_VIDEO_SINGLE_PASS_LIMIT_SECONDS + 1e-6,
+  );
+  useEffect(() => {
+    if (wholeVideoNeedsChunking && generationInputMode === "start_end") {
+      setGenerationInputMode("start_video");
+    }
+  }, [generationInputMode, wholeVideoNeedsChunking]);
   const completeGenerations = useMemo(
     () => segmentGenerations.filter((generation) => generation.status === "complete" && Boolean(generation.outputKey)),
     [segmentGenerations],
@@ -1273,6 +1350,7 @@ export default function App() {
     setFirstFrameId(null);
     setLastFrameId(null);
     setSelectedSegmentId(null);
+    setVideoWorkModeState(null);
     setQualityMatchModal({
       isOpen: false,
       frameId: null,
@@ -1295,23 +1373,38 @@ export default function App() {
   }, [selectedTaskId, setSelectedSegmentId]);
 
   useEffect(() => {
+    if (!selectedTaskId) return;
+    const stored = readVideoWorkModeMap();
+    setVideoWorkModeState(stored[selectedTaskId] ?? null);
+  }, [selectedTaskId]);
+
+  useEffect(() => {
     if (tab !== "refine") return;
     setRefineFrameTab(editFrameTab);
   }, [editFrameTab, tab]);
 
   useEffect(() => {
-    if (!selectedTaskId || selectedSegmentId || !task?.segments?.length) return;
+    if (!selectedTaskId || selectedSegmentId) return;
     const rememberedByTask = readSegmentSelectionMap();
     const rememberedSegmentId = rememberedByTask[selectedTaskId];
-    if (!rememberedSegmentId) return;
-    const exists = task.segments.some((segment) => segment.segmentId === rememberedSegmentId);
-    if (!exists) {
-      delete rememberedByTask[selectedTaskId];
-      writeSegmentSelectionMap(rememberedByTask);
+    if (rememberedSegmentId && task?.segments?.length) {
+      const exists = task.segments.some((segment) => segment.segmentId === rememberedSegmentId);
+      if (!exists) {
+        delete rememberedByTask[selectedTaskId];
+        writeSegmentSelectionMap(rememberedByTask);
+      } else if (videoWorkMode === "custom_segment") {
+        setSelectedSegmentId(rememberedSegmentId);
+        return;
+      }
+    }
+    if (defaultVideoSegment) {
+      setSelectedSegmentId(defaultVideoSegment.segmentId);
       return;
     }
-    setSelectedSegmentId(rememberedSegmentId);
-  }, [selectedSegmentId, selectedTaskId, setSelectedSegmentId, task?.segments]);
+    if (rememberedSegmentId && task?.segments?.length) {
+      setSelectedSegmentId(rememberedSegmentId);
+    }
+  }, [defaultVideoSegment, selectedSegmentId, selectedTaskId, setSelectedSegmentId, task?.segments, videoWorkMode]);
 
   useEffect(() => {
     if (!selectedTaskId || !selectedSegmentId) return;
@@ -1320,6 +1413,31 @@ export default function App() {
     rememberedByTask[selectedTaskId] = selectedSegmentId;
     writeSegmentSelectionMap(rememberedByTask);
   }, [selectedSegmentId, selectedTaskId]);
+
+  useEffect(() => {
+    if (!selectedSegment) return;
+    if (!firstFrameId || videoWorkMode === "whole_video") {
+      setFirstFrameId(selectedSegment.startFrameId);
+    }
+    if (!lastFrameId || videoWorkMode === "whole_video") {
+      setLastFrameId(selectedSegment.endFrameId);
+    }
+  }, [firstFrameId, lastFrameId, selectedSegment, videoWorkMode]);
+
+  useEffect(() => {
+    if (!selectedSegment) return;
+    if (isWholeVideoSelection) {
+      if (!videoWorkMode && defaultVideoSegment && selectedSegment.segmentId === defaultVideoSegment.segmentId) return;
+      if (videoWorkMode === "custom_segment" && defaultVideoSegment && selectedSegment.segmentId === defaultVideoSegment.segmentId) return;
+      if (videoWorkMode !== "whole_video") {
+        setVideoWorkMode("whole_video");
+      }
+      return;
+    }
+    if (videoWorkMode !== "custom_segment") {
+      setVideoWorkMode("custom_segment");
+    }
+  }, [defaultVideoSegment, isWholeVideoSelection, selectedSegment, setVideoWorkMode, videoWorkMode]);
 
   useEffect(() => {
     setEditSourceVariantIds((previous) => {
@@ -1538,6 +1656,21 @@ export default function App() {
       await queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
     },
   });
+
+  useEffect(() => {
+    if (!task || !selectedTaskId || !totalVideoFrames || defaultVideoSegment || createSegmentMutation.isPending) return;
+    const initKey = `${selectedTaskId}:${totalVideoFrames}`;
+    if (defaultSegmentInitRef.current.has(initKey)) return;
+    defaultSegmentInitRef.current.add(initKey);
+    void createSegmentMutation
+      .mutateAsync({
+        startFrameIndex: 0,
+        endFrameExclusive: totalVideoFrames,
+      })
+      .catch(() => {
+        defaultSegmentInitRef.current.delete(initKey);
+      });
+  }, [createSegmentMutation, defaultVideoSegment, selectedTaskId, task, totalVideoFrames]);
 
   const saveSegmentCropMutation = useMutation({
     mutationFn: async ({
@@ -3308,6 +3441,48 @@ export default function App() {
     return created.segmentId;
   }
 
+  async function ensureDefaultVideoSegment(): Promise<string | null> {
+    if (!task) return null;
+    if (defaultVideoSegment) {
+      setSelectedSegmentId(defaultVideoSegment.segmentId);
+      return defaultVideoSegment.segmentId;
+    }
+    const totalFrames = frameCount(task);
+    if (!totalFrames) return null;
+    const created = await createSegmentMutation.mutateAsync({
+      startFrameIndex: 0,
+      endFrameExclusive: totalFrames,
+    });
+    setSelectedSegmentId(created.segmentId);
+    await taskQuery.refetch();
+    return created.segmentId;
+  }
+
+  async function chooseWholeVideoWorkMode() {
+    const segmentId = await ensureDefaultVideoSegment();
+    if (!segmentId) {
+      throw new Error("Full video range is not ready yet.");
+    }
+    const defaultSegment = task?.segments.find((segment) => segment.segmentId === segmentId) ?? defaultVideoSegment;
+    if (defaultSegment) {
+      setFirstFrameId(defaultSegment.startFrameId);
+      setLastFrameId(defaultSegment.endFrameId);
+      setCurrentFrameIndex(defaultSegment.startFrame);
+    }
+    setVideoWorkMode("whole_video");
+    setTab("frames");
+  }
+
+  function chooseCustomSegmentWorkMode() {
+    setVideoWorkMode("custom_segment");
+    setSelectedSegmentId(null);
+    if (defaultVideoSegment) {
+      setFirstFrameId(defaultVideoSegment.startFrameId);
+      setLastFrameId(defaultVideoSegment.endFrameId);
+      setCurrentFrameIndex(defaultVideoSegment.startFrame);
+    }
+  }
+
   const saveSegmentCrop = useCallback(
     async (crop: { aspect: "16:9" | "9:16"; x: number; y: number; width: number; height: number; featherPx?: number } | null) => {
       if (!selectedTaskId) throw new Error("Select a task first.");
@@ -3326,16 +3501,30 @@ export default function App() {
   async function handleTabChange(nextTab: TabId) {
     if (nextTab === tab) return;
     if (tab === "timeline" && nextTab !== "timeline" && nextTab !== "report" && nextTab !== "custom_qc" && nextTab !== "api_logs") {
-      if (!selectedRange) {
-        window.alert("You need to pick a start and end frame before moving on.");
+      if (!videoWorkMode) {
+        window.alert("Choose whether to work on the whole video or select a segment first.");
         return;
       }
-      try {
-        await ensureSegmentForSelectedFrames();
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "Failed to create segment from selected frames.";
-        window.alert(message);
-        return;
+      if (videoWorkMode === "whole_video") {
+        try {
+          await ensureDefaultVideoSegment();
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Failed to prepare the full video range.";
+          window.alert(message);
+          return;
+        }
+      } else {
+        if (!selectedRange) {
+          window.alert("Choose whether to work on the whole video or select a segment first.");
+          return;
+        }
+        try {
+          await ensureSegmentForSelectedFrames();
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Failed to create segment from selected frames.";
+          window.alert(message);
+          return;
+        }
       }
     }
     setTab(nextTab);
@@ -3498,6 +3687,17 @@ export default function App() {
       setLastFrameId,
       selectedRange,
       lumaModel,
+      videoWorkMode,
+      defaultVideoSegment,
+      wholeVideoNeedsChunking,
+      wholeVideoSinglePassLimitSeconds: WHOLE_VIDEO_SINGLE_PASS_LIMIT_SECONDS,
+      onChooseWholeVideo: () => {
+        void chooseWholeVideoWorkMode();
+      },
+      onChooseCustomSegment: chooseCustomSegmentWorkMode,
+      onContinueToEditFrames: () => {
+        void handleTabChange("frames");
+      },
       selectedSegmentId,
       selectedSegment,
       setSelectedSegmentId,
@@ -3517,8 +3717,14 @@ export default function App() {
       lastFrame,
       selectedRange,
       lumaModel,
+      videoWorkMode,
+      defaultVideoSegment,
+      wholeVideoNeedsChunking,
       selectedSegmentId,
       selectedSegment,
+      chooseCustomSegmentWorkMode,
+      chooseWholeVideoWorkMode,
+      handleTabChange,
       captureCurrentFrameFor,
       ensureSegmentForSelectedFrames,
       saveSegmentCrop,
@@ -3653,6 +3859,9 @@ export default function App() {
       generationModelByInput,
       generationInputMode,
       selectedSegment,
+      isWholeVideoSelection,
+      wholeVideoNeedsChunking,
+      wholeVideoSinglePassLimitSeconds: WHOLE_VIDEO_SINGLE_PASS_LIMIT_SECONDS,
       describeSegment,
       lumaModel,
       selectedStartSourceLabel: describeSelectedFrameSource(editFirstFrame, refineSourceVariantIds.first || compareVariantIds.first),
@@ -3712,6 +3921,8 @@ export default function App() {
       generationModelByInput,
       generationInputMode,
       selectedSegment,
+      isWholeVideoSelection,
+      wholeVideoNeedsChunking,
       lumaModel,
       describeSelectedFrameSource,
       editFirstFrame,

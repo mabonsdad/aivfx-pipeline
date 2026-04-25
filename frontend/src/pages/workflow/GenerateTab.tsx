@@ -24,6 +24,9 @@ export type GenerateTabCtx = {
   generationModelByInput: Record<GenerateInputMode, VideoModel>;
   generationInputMode: GenerateInputMode;
   selectedSegment: SegmentRecord | null;
+  isWholeVideoSelection: boolean;
+  wholeVideoNeedsChunking: boolean;
+  wholeVideoSinglePassLimitSeconds: number;
   describeSegment: (segment: SegmentRecord) => string;
   lumaModel: VideoModel;
   setGenerationModelByInput: (
@@ -102,6 +105,9 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
     generationModelByInput,
     generationInputMode,
     selectedSegment,
+    isWholeVideoSelection,
+    wholeVideoNeedsChunking,
+    wholeVideoSinglePassLimitSeconds,
     describeSegment,
     lumaModel,
     setGenerationModelByInput,
@@ -257,7 +263,9 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
             <button
               key={entry.id}
               type="button"
+              disabled={wholeVideoNeedsChunking && entry.id === "start_end"}
               onClick={() => {
+                if (wholeVideoNeedsChunking && entry.id === "start_end") return;
                 setGenerationInputMode(entry.id);
                 setLumaModel(generationModelByInput[entry.id]);
               }}
@@ -265,7 +273,7 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
                 generationInputMode === entry.id
                   ? "-mb-px border-ink/25 border-b-white bg-white font-semibold text-ink"
                   : "border-ink/10 bg-bg text-ink/65"
-              }`}
+              } disabled:cursor-not-allowed disabled:opacity-50`}
             >
               {entry.label}
             </button>
@@ -274,8 +282,14 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
         <div className="grid gap-3 p-3 lg:grid-cols-[1.65fr_1fr]">
           <div className="space-y-3">
             <div className="rounded-md border border-ink/20 bg-bg px-3 py-2 text-xs text-ink/70">
-              Segment in use: {selectedSegment ? describeSegment(selectedSegment) : "No segment selected. Go to Select Frames first."}
+              {isWholeVideoSelection ? "Video in use: whole uploaded video" : "Segment in use:"}{" "}
+              {selectedSegment ? describeSegment(selectedSegment) : "No working range selected. Go to Select Frames first."}
             </div>
+            {wholeVideoNeedsChunking ? (
+              <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                This whole-video selection is longer than the current {wholeVideoSinglePassLimitSeconds}s single-pass generation limit. Chunked generation will be required here. Start + end frame video flows are disabled for this path, and for now you should select a shorter segment if you want to generate immediately.
+              </div>
+            ) : null}
             <div className="rounded-md border border-ink/20 bg-bg px-3 py-2 text-xs text-ink/70">
               Source frames for generation: start uses {ctx.selectedStartSourceLabel}
               {generationInputMode === "start_end" ? ` · end uses ${ctx.selectedEndSourceLabel ?? "no selection"}` : ""}
@@ -379,10 +393,10 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
 
       <button
         className="rounded-md bg-accent px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-50"
-        disabled={!selectedSegmentId || selectedSegmentOverLimit || Boolean(generationPromptError)}
+        disabled={!selectedSegmentId || selectedSegmentOverLimit || wholeVideoNeedsChunking || Boolean(generationPromptError)}
         onClick={() => generateSegmentMutation.mutate()}
       >
-        Generate Segment Variant
+        Generate Video Variant
       </button>
 
       <div className="space-y-2 rounded-lg border border-ink/10 p-3">

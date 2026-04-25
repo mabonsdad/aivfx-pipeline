@@ -65,18 +65,18 @@ export default function NewTaskModal({
 
   const submitLabel =
     stage === "creating"
-      ? "Creating task..."
+      ? "Creating video..."
       : stage === "uploading"
         ? "Uploading..."
         : stage === "ingesting"
           ? "Ingesting..."
-          : "Create Task and Ingest";
+          : "Upload Video";
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
       <div className="w-full max-w-xl rounded-2xl border border-ink/10 bg-card p-5 shadow-xl">
         <div className="mb-4 flex items-center justify-between">
-          <h3 className="text-lg font-semibold">Create Task & Upload Video</h3>
+          <h3 className="text-lg font-semibold">Upload New Video</h3>
           <button
             className="text-sm text-ink/60 underline disabled:cursor-not-allowed disabled:opacity-50"
             onClick={onClose}
@@ -87,7 +87,7 @@ export default function NewTaskModal({
         </div>
         <div className="space-y-3">
           <div>
-            <label className="mb-1 block text-sm font-medium">Task name</label>
+            <label className="mb-1 block text-sm font-medium">Video name</label>
             <input
               value={taskName}
               onChange={(event: ChangeEvent<HTMLInputElement>) => onTaskNameChange(event.target.value)}
@@ -98,7 +98,7 @@ export default function NewTaskModal({
             <p className="mt-1 text-xs text-ink/60">
               Final name: <span className="font-medium">{normalizedTaskName || "(invalid)"}</span> (max 15 chars)
             </p>
-            {showTaskNameExistsWarning ? <p className="text-xs text-red-600">Name already used by another task.</p> : null}
+            {showTaskNameExistsWarning ? <p className="text-xs text-red-600">Name already used by another uploaded video.</p> : null}
           </div>
           <div>
             <label className="mb-1 block text-sm font-medium">Video file</label>

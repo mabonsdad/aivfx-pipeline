@@ -31,14 +31,14 @@ export default function TaskSidebar({
   return (
     <aside className="col-span-12 rounded-2xl border border-ink/10 bg-card p-3 md:col-span-2">
       <div className="mb-3 flex items-center justify-between">
-        <h2 className="text-base font-semibold">Tasks</h2>
+        <h2 className="text-base font-semibold">Videos</h2>
         <button onClick={onSignOut} className="text-xs text-ink/60 underline">
           Sign out
         </button>
       </div>
 
       <button className="mb-3 w-full rounded-md bg-accent px-3 py-1.5 text-xs text-white" onClick={onOpenNewTask}>
-        Add New Task
+        Upload New Video
       </button>
 
       <div className="space-y-1.5">
@@ -53,7 +53,7 @@ export default function TaskSidebar({
               <button
                 type="button"
                 className="inline-flex h-5 w-5 items-center justify-center rounded-full border border-ink/20 bg-white text-[10px] font-semibold text-ink/70"
-                title="Open task report"
+                title="Open video report"
                 aria-label={`Open report for ${taskItem.name}`}
                 onClick={(event) => {
                   event.stopPropagation();
@@ -65,7 +65,7 @@ export default function TaskSidebar({
               <button
                 type="button"
                 className="inline-flex h-5 w-5 items-center justify-center rounded-full border border-ink/20 bg-white text-red-600"
-                title="Delete task"
+                title="Delete video"
                 aria-label={`Delete ${taskItem.name}`}
                 onClick={(event) => {
                   event.stopPropagation();
@@ -102,7 +102,7 @@ export default function TaskSidebar({
       {pendingDeleteTask ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
           <div className="w-full max-w-sm rounded-lg border border-ink/15 bg-white p-4 shadow-xl">
-            <p className="text-sm font-medium text-ink">Are you sure you want to delete this task?</p>
+            <p className="text-sm font-medium text-ink">Are you sure you want to delete this video?</p>
             <p className="mt-1 text-xs text-ink/70">{pendingDeleteTask.name}</p>
             <div className="mt-4 flex items-center justify-end gap-2">
               <button

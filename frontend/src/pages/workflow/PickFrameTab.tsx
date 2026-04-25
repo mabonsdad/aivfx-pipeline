@@ -174,6 +174,13 @@ export type PickFrameTabCtx = {
     limitMessage: string | null;
   } | null;
   lumaModel: string;
+  videoWorkMode: "whole_video" | "custom_segment" | null;
+  defaultVideoSegment: SegmentRecord | null;
+  wholeVideoNeedsChunking: boolean;
+  wholeVideoSinglePassLimitSeconds: number;
+  onChooseWholeVideo: () => void;
+  onChooseCustomSegment: () => void;
+  onContinueToEditFrames: () => void;
   selectedSegmentId: string | null;
   selectedSegment: SegmentRecord | null;
   setSelectedSegmentId: (segmentId: string | null) => void;
@@ -203,6 +210,13 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
     lastFrame,
     setLastFrameId,
     selectedRange,
+    videoWorkMode,
+    defaultVideoSegment,
+    wholeVideoNeedsChunking,
+    wholeVideoSinglePassLimitSeconds,
+    onChooseWholeVideo,
+    onChooseCustomSegment,
+    onContinueToEditFrames,
     selectedSegmentId,
     selectedSegment,
     setSelectedSegmentId,
@@ -468,7 +482,57 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
 
   return (
     <div className="space-y-4">
-      <h3 className="text-lg font-semibold">Select Frames & Segment Selection</h3>
+      <h3 className="text-lg font-semibold">Select Frames</h3>
+      <div className="rounded-lg border border-ink/15 bg-white p-4">
+        <p className="text-sm font-semibold text-ink">Choose your working range</p>
+        <p className="mt-1 text-sm text-ink/70">
+          The full uploaded video is treated as the default working range. You can continue with the whole video or define a shorter segment.
+        </p>
+        {defaultVideoSegment ? (
+          <p className="mt-2 text-xs text-ink/60">
+            Default video range: frames {defaultVideoSegment.startFrame} to {Math.max(defaultVideoSegment.endFrameExclusive - 1, defaultVideoSegment.startFrame)} (
+            {defaultVideoSegment.durationSec.toFixed(2)}s)
+          </p>
+        ) : (
+          <p className="mt-2 text-xs text-ink/60">Preparing the default full-video range…</p>
+        )}
+        {wholeVideoNeedsChunking ? (
+          <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+            This full video is longer than the current {wholeVideoSinglePassLimitSeconds}s single-pass generation limit. You can still edit and refine frames across the full video, but generation will need chunking and start + end frame video flows will not be available for the whole-video path.
+          </div>
+        ) : null}
+        <div className="mt-3 flex flex-wrap gap-2">
+          <button
+            type="button"
+            className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={!defaultVideoSegment}
+            onClick={onChooseWholeVideo}
+          >
+            Work on whole video
+          </button>
+          <button type="button" className="rounded-md border border-ink/20 bg-white px-4 py-2 text-sm" onClick={onChooseCustomSegment}>
+            Select segment
+          </button>
+        </div>
+      </div>
+      {videoWorkMode === "whole_video" ? (
+        <div className="rounded-lg border border-ink/15 bg-bg p-4">
+          <p className="text-sm font-semibold text-ink">Whole video selected</p>
+          <p className="mt-1 text-sm text-ink/70">
+            The first and last frames of the uploaded video are being used automatically for the rest of the workflow.
+          </p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button type="button" className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-white" onClick={onContinueToEditFrames}>
+              Continue to Edit frames
+            </button>
+            <button type="button" className="rounded-md border border-ink/20 bg-white px-4 py-2 text-sm" onClick={onChooseCustomSegment}>
+              Switch to custom segment
+            </button>
+          </div>
+        </div>
+      ) : null}
+      {videoWorkMode !== "custom_segment" ? null : (
+        <>
       <div className="grid gap-3 lg:grid-cols-[1fr_320px]">
         {timelinePlaybackUrl ? (
           <div className="relative w-fit max-w-full">
@@ -498,7 +562,7 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
         <div className="space-y-3">
           <div className="rounded-lg border border-ink/15 bg-bg p-3 text-xs text-ink/70 whitespace-pre-line">
             {
-              "Select a start and end frame to define the segment of video you want the AI to edit or add effects to.\n\nUse the slider to pick the frames.\n\nMoving to the next step saves the segment."
+              "Select a first and last frame to define the segment you want to work on.\n\nUse the slider to pick the frames.\n\nThis segment becomes the working video for the rest of the app."
             }
           </div>
           <div className={`rounded-lg border p-3 ${canOpenCropTool ? "border-ink/15 bg-white" : "border-ink/10 bg-bg opacity-60"}`}>
@@ -568,7 +632,7 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
       ) : null}
 
       <div className="grid gap-2">
-        <p className="text-sm font-medium text-ink/80">Available segments - click to reuse a segment</p>
+        <p className="text-sm font-medium text-ink/80">Available segments</p>
         {task?.segments.map((seg) => (
           <button
             key={seg.segmentId}
@@ -581,15 +645,32 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
             className={`rounded-lg border p-3 text-left ${seg.segmentId === selectedSegmentId ? "border-accent bg-accent/10" : "border-ink/10"}`}
           >
             <div className="flex items-center justify-between gap-2">
-              <p className="font-medium">{seg.segmentId}</p>
-              {seg.crop?.enabled ? <span className="text-xs font-semibold text-red-600">CROPPED</span> : null}
+              <p className="font-medium">
+                {defaultVideoSegment?.segmentId === seg.segmentId ? "Whole video" : `Segment ${seg.segmentId.slice(-6)}`}
+              </p>
+              <div className="flex items-center gap-2">
+                {defaultVideoSegment?.segmentId === seg.segmentId ? <span className="text-xs font-semibold text-ink/60">DEFAULT</span> : null}
+                {seg.crop?.enabled ? <span className="text-xs font-semibold text-red-600">CROPPED</span> : null}
+              </div>
             </div>
             <p className="text-sm text-ink/70">
-              {seg.startFrame} {"->"} {seg.endFrameExclusive} ({seg.durationSec}s)
+              {seg.startFrame} {"->"} {Math.max(seg.endFrameExclusive - 1, seg.startFrame)} ({seg.durationSec.toFixed(2)}s)
             </p>
           </button>
         ))}
       </div>
+      <div className="flex justify-end">
+        <button
+          type="button"
+          className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+          disabled={!selectedRange}
+          onClick={onContinueToEditFrames}
+        >
+          Use selected segment and continue
+        </button>
+      </div>
+      </>
+      )}
 
       {isCropModalOpen && cropDraft ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">

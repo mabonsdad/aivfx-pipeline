@@ -96,7 +96,7 @@ export function useTaskLifecycle({
   onTrackJobId,
 }: UseTaskLifecycleParams) {
   const [isNewTaskModalOpen, setIsNewTaskModalOpen] = useState(false);
-  const [newTaskName, setNewTaskName] = useState("New VFX Task");
+  const [newTaskName, setNewTaskName] = useState("New Video");
   const [newTaskFile, setNewTaskFile] = useState<File | null>(null);
   const [newTaskStage, setNewTaskStage] = useState<NewTaskStage>("idle");
   const [newTaskError, setNewTaskError] = useState<string | null>(null);
@@ -160,7 +160,7 @@ export function useTaskLifecycle({
   }, [newTaskStage, pendingCreateJobQuery.data, pendingCreatedTaskId, pendingIngestCompleteHook, queryClient, selectedTaskId, setTab]);
 
   function openNewTaskModal() {
-    setNewTaskName("New VFX Task");
+    setNewTaskName("New Video");
     setNewTaskFile(null);
     setNewTaskStage("idle");
     setNewTaskError(null);
@@ -179,12 +179,12 @@ export function useTaskLifecycle({
       const normalizedTaskName = normalizeTaskNameInput(newTaskName);
       if (!normalizedTaskName) {
         setNewTaskStage("error");
-        setNewTaskError("Task name must include letters or numbers");
+        setNewTaskError("Video name must include letters or numbers");
         return;
       }
       if (taskNameAlreadyExists) {
         setNewTaskStage("error");
-        setNewTaskError("Task name already exists. Choose a unique name.");
+        setNewTaskError("Video name already exists. Choose a unique name.");
         return;
       }
       setNewTaskStage("creating");
@@ -211,7 +211,7 @@ export function useTaskLifecycle({
       onTrackJobId(ingest.jobId);
     } catch (error) {
       setNewTaskStage("error");
-      setNewTaskError(error instanceof Error ? error.message : "Task setup failed");
+      setNewTaskError(error instanceof Error ? error.message : "Video setup failed");
       setPendingCreatedTaskId(null);
       setPendingIngestCompleteHook(null);
     }
