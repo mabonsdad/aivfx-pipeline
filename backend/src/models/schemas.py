@@ -240,6 +240,48 @@ class SegmentGenerationExtendRequest(BaseModel):
     prompt: str | None = None
 
 
+class ChunkedSegmentGenerateRequest(BaseModel):
+    lumaModel: Literal[
+        "ray-2",
+        "ray-flash-2",
+        "kling-o1",
+        "kling-v3-omni-video",
+        "seedance-2.0-reference-to-video",
+        "wan2.2-animate",
+        "wan2.7-videoedit",
+    ] = "ray-2"
+    mode: Literal[
+        "adhere_1",
+        "adhere_2",
+        "adhere_3",
+        "flex_1",
+        "flex_2",
+        "flex_3",
+        "reimagine_1",
+        "reimagine_2",
+        "reimagine_3",
+        "wan_animate_replace",
+        "kling_o1_video_edit",
+        "kling_v3_omni_video_edit",
+        "seedance_reference_to_video",
+        "wan27_video_edit",
+    ]
+    prompt: str | None = Field(default=None)
+    firstFrameVariantId: str | None = None
+    replicateKlingMode: Literal["std", "pro"] | None = None
+    replicateKlingV3Mode: Literal["standard", "pro"] | None = None
+    wan27Resolution: Literal["720p", "1080p"] | None = None
+
+
+class ChunkedGenerationPauseRequest(BaseModel):
+    reason: str | None = None
+
+
+class ChunkedGenerationRestartRequest(BaseModel):
+    fromChunkIndex: int = Field(ge=0)
+    prompt: str | None = None
+
+
 class QcRunRequest(BaseModel):
     generationIds: list[str] | None = Field(default=None, max_length=20)
     mode: Literal["standard", "advanced_frame"] = "standard"
@@ -395,6 +437,7 @@ class TaskMetadata(BaseModel):
     segments: list[dict[str, Any]] = Field(default_factory=list)
     frames: dict[str, TaskFrame] = Field(default_factory=dict)
     segmentGenerations: dict[str, Any] = Field(default_factory=dict)
+    chunkedGenerationRuns: list[dict[str, Any]] = Field(default_factory=list)
     externalQcPairs: list[dict[str, Any]] = Field(default_factory=list)
     qualityMatchAnalyses: dict[str, Any] = Field(default_factory=dict)
     videoCleanupTracks: list[dict[str, Any]] = Field(default_factory=list)

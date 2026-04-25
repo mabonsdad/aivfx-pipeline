@@ -1,6 +1,15 @@
 import { getIdToken } from "../lib/auth";
 import { config } from "../lib/config";
-import type { ApiRequestRecord, CustomReportOutputRef, JobStatus, SegmentRecord, TaskDetail, TaskSummary, VideoCleanupTrack, VideoCleanupSettings } from "../types/api";
+import type {
+  ApiRequestRecord,
+  CustomReportOutputRef,
+  JobStatus,
+  SegmentRecord,
+  TaskDetail,
+  TaskSummary,
+  VideoCleanupTrack,
+  VideoCleanupSettings,
+} from "../types/api";
 
 function extractApiErrorMessage(payload: unknown, fallback: string): string {
   if (payload && typeof payload === "object") {
@@ -496,6 +505,38 @@ export const apiClient = {
       wan27Resolution?: "720p" | "1080p";
     },
   ) => api<{ jobId: string; genId: string }>(`/tasks/${taskId}/segments/${segmentId}/generate`, { method: "POST", body: JSON.stringify(payload) }),
+  generateSegmentChunked: (
+    taskId: string,
+    segmentId: string,
+    payload: {
+      lumaModel: "ray-2" | "ray-flash-2" | "kling-o1" | "kling-v3-omni-video" | "seedance-2.0-reference-to-video" | "wan2.2-animate" | "wan2.7-videoedit";
+      mode: string;
+      prompt?: string;
+      firstFrameVariantId?: string;
+      replicateKlingMode?: "std" | "pro";
+      replicateKlingV3Mode?: "standard" | "pro";
+      wan27Resolution?: "720p" | "1080p";
+    },
+  ) =>
+    api<{ runId: string; jobId?: string; genId?: string; chunkCount: number; chunkDurationSec: number; minimumOverlapFrames: number }>(
+      `/tasks/${taskId}/segments/${segmentId}/chunked-generate`,
+      { method: "POST", body: JSON.stringify(payload) },
+    ),
+  pauseChunkedGeneration: (taskId: string, runId: string, payload?: { reason?: string }) =>
+    api<{ ok: true }>(`/tasks/${taskId}/chunked-generations/${runId}/pause`, {
+      method: "POST",
+      body: JSON.stringify(payload ?? {}),
+    }),
+  resumeChunkedGeneration: (taskId: string, runId: string) =>
+    api<{ ok: true; jobId?: string | null }>(`/tasks/${taskId}/chunked-generations/${runId}/resume`, {
+      method: "POST",
+      body: "{}",
+    }),
+  restartChunkedGeneration: (taskId: string, runId: string, payload: { fromChunkIndex: number; prompt?: string }) =>
+    api<{ ok: true; jobId?: string | null; genId?: string | null }>(`/tasks/${taskId}/chunked-generations/${runId}/restart`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
   extendSegmentGeneration: (
     taskId: string,
     genId: string,

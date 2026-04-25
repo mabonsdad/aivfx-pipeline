@@ -15,6 +15,7 @@ def now_iso() -> str:
 
 _KEYED_LIST_IDS: dict[str, str] = {
     "segments": "segmentId",
+    "chunkedGenerationRuns": "runId",
     "videoCleanupTracks": "trackId",
     "customReports": "reportId",
     "externalQcPairs": "pairId",

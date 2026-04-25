@@ -229,6 +229,9 @@ function hasActiveTaskWork(task: TaskDetail | undefined): boolean {
   for (const generation of Object.values(task.segmentGenerations ?? {})) {
     if (generation.status === "queued" || generation.status === "running") return true;
   }
+  for (const run of task.chunkedGenerationRuns ?? []) {
+    if (run.status === "created" || run.status === "running") return true;
+  }
   for (const track of task.videoCleanupTracks ?? []) {
     if (["created", "preparing", "tracking", "applying"].includes(track.status)) return true;
   }
@@ -1193,9 +1196,25 @@ export default function App() {
     () => segmentGenerations.filter((generation) => generation.status === "complete" && Boolean(generation.outputKey)),
     [segmentGenerations],
   );
+  const selectedSegmentChunkedGenerationRuns = useMemo(
+    () =>
+      [...(task?.chunkedGenerationRuns ?? [])]
+        .filter((run) => run.sourceSegmentId === selectedSegmentId)
+        .sort((a, b) => new Date(b.updatedAt ?? b.createdAt).getTime() - new Date(a.updatedAt ?? a.createdAt).getTime()),
+    [selectedSegmentId, task?.chunkedGenerationRuns],
+  );
   const getSegmentForGeneration = useCallback(
     (generation: SegmentGeneration) => segmentsById.get(generation.segmentId) ?? null,
     [segmentsById],
+  );
+  const frameVariantImageUrl = useCallback(
+    (frameId: string | null | undefined, variantId: string | null | undefined) => {
+      if (!frameId || !variantId) return null;
+      const frame = task?.frames?.[frameId];
+      const variant = frame?.variants?.find((item) => item.variantId === variantId);
+      return variant?.imageUrl ?? null;
+    },
+    [task?.frames],
   );
   const activeVideoCleanupGeneration = useMemo<SegmentGeneration | null>(() => {
     if (!videoCleanupModal.generationId) return null;
@@ -1868,6 +1887,79 @@ export default function App() {
     },
   });
 
+  const generateChunkedSegmentMutation = useMutation({
+    mutationFn: async () => {
+      if (!selectedTaskId || !selectedSegmentId) throw new Error("Select a segment");
+      const trimmedPrompt = lumaPrompt.trim();
+      const selectedMode =
+        lumaModel === "kling-o1"
+          ? "kling_o1_video_edit"
+          : lumaModel === "kling-v3-omni-video"
+            ? "kling_v3_omni_video_edit"
+            : lumaModel === "seedance-2.0-reference-to-video"
+              ? "seedance_reference_to_video"
+              : lumaModel === "wan2.2-animate"
+                ? "wan_animate_replace"
+                : lumaModel === "wan2.7-videoedit"
+                  ? "wan27_video_edit"
+                  : advancedMode;
+      return apiClient.generateSegmentChunked(selectedTaskId, selectedSegmentId, {
+        lumaModel: lumaModel as "ray-2" | "ray-flash-2" | "kling-o1" | "kling-v3-omni-video" | "seedance-2.0-reference-to-video" | "wan2.2-animate" | "wan2.7-videoedit",
+        mode: selectedMode,
+        prompt: lumaModel === "wan2.2-animate" ? undefined : trimmedPrompt || undefined,
+        firstFrameVariantId: refineSourceVariantIds.first || compareVariantIds.first || undefined,
+        replicateKlingMode: lumaModel === "kling-o1" ? replicateKlingMode : undefined,
+        replicateKlingV3Mode: lumaModel === "kling-v3-omni-video" ? replicateKlingV3Mode : undefined,
+        wan27Resolution: lumaModel === "wan2.7-videoedit" ? wan27Resolution : undefined,
+      });
+    },
+    onSuccess: async (result) => {
+      if (result.jobId) {
+        setJobIds((prev) => appendTrackedJobId(prev, result.jobId as string));
+      }
+      await queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
+      await queryClient.invalidateQueries({ queryKey: ["task", "report", selectedTaskId] });
+      await queryClient.invalidateQueries({ queryKey: ["task", "assets", selectedTaskId] });
+      setTab("generate");
+    },
+  });
+
+  const pauseChunkedGenerationMutation = useMutation({
+    mutationFn: async ({ runId, reason }: { runId: string; reason?: string }) => {
+      if (!selectedTaskId) throw new Error("Select a task");
+      return apiClient.pauseChunkedGeneration(selectedTaskId, runId, { reason });
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
+    },
+  });
+
+  const resumeChunkedGenerationMutation = useMutation({
+    mutationFn: async ({ runId }: { runId: string }) => {
+      if (!selectedTaskId) throw new Error("Select a task");
+      return apiClient.resumeChunkedGeneration(selectedTaskId, runId);
+    },
+    onSuccess: async (result) => {
+      if (result.jobId) {
+        setJobIds((prev) => appendTrackedJobId(prev, result.jobId as string));
+      }
+      await queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
+    },
+  });
+
+  const restartChunkedGenerationMutation = useMutation({
+    mutationFn: async ({ runId, fromChunkIndex, prompt }: { runId: string; fromChunkIndex: number; prompt?: string }) => {
+      if (!selectedTaskId) throw new Error("Select a task");
+      return apiClient.restartChunkedGeneration(selectedTaskId, runId, { fromChunkIndex, prompt });
+    },
+    onSuccess: async (result) => {
+      if (result.jobId) {
+        setJobIds((prev) => appendTrackedJobId(prev, result.jobId as string));
+      }
+      await queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
+    },
+  });
+
   const extendSegmentGenerationMutation = useMutation({
     mutationFn: async ({
       generationId,
@@ -1992,6 +2084,11 @@ export default function App() {
     for (const generation of Object.values(task?.segmentGenerations ?? {})) {
       if (generation.jobId) ids.push(generation.jobId);
     }
+    for (const run of task?.chunkedGenerationRuns ?? []) {
+      for (const chunk of run.chunks ?? []) {
+        if (chunk.jobId) ids.push(chunk.jobId);
+      }
+    }
     for (const report of task?.customReports ?? []) {
       if (report.jobId) ids.push(report.jobId);
     }
@@ -2000,7 +2097,7 @@ export default function App() {
       if (motionJobId) ids.push(motionJobId);
     }
     return ids;
-  }, [task?.customReports, task?.exports, task?.segmentGenerations]);
+  }, [task?.chunkedGenerationRuns, task?.customReports, task?.exports, task?.segmentGenerations]);
 
   const trackedJobIds = useMemo(
     () => [...new Set([...jobIds, ...taskTrackedJobIds])],
@@ -3890,6 +3987,17 @@ export default function App() {
       selectedSegmentLimitMessage,
       selectedSegmentId,
       generateSegmentMutation,
+      generateChunkedSegmentMutation,
+      selectedSegmentChunkedGenerationRuns,
+      pauseChunkedGeneration: pauseChunkedGenerationMutation.mutate,
+      resumeChunkedGeneration: resumeChunkedGenerationMutation.mutate,
+      restartChunkedGeneration: restartChunkedGenerationMutation.mutate,
+      isChunkedGenerationMutationPending:
+        generateChunkedSegmentMutation.isPending ||
+        pauseChunkedGenerationMutation.isPending ||
+        resumeChunkedGenerationMutation.isPending ||
+        restartChunkedGenerationMutation.isPending,
+      frameVariantImageUrl,
       segmentWindow,
       originalSegmentPreviewUrl: stableOriginalSegmentPreviewUrl,
       generatedSegmentPreviewUrl: stableGeneratedSegmentPreviewUrl,
@@ -3944,6 +4052,16 @@ export default function App() {
       selectedSegmentLimitMessage,
       selectedSegmentId,
       generateSegmentMutation,
+      generateChunkedSegmentMutation,
+      selectedSegmentChunkedGenerationRuns,
+      pauseChunkedGenerationMutation.mutate,
+      resumeChunkedGenerationMutation.mutate,
+      restartChunkedGenerationMutation.mutate,
+      generateChunkedSegmentMutation.isPending,
+      pauseChunkedGenerationMutation.isPending,
+      resumeChunkedGenerationMutation.isPending,
+      restartChunkedGenerationMutation.isPending,
+      frameVariantImageUrl,
       segmentWindow,
       stableOriginalSegmentPreviewUrl,
       stableGeneratedSegmentPreviewUrl,

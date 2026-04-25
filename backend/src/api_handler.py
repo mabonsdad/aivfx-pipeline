@@ -34,6 +34,9 @@ from src.models.schemas import (
     ApiImageEditPatchRequest,
     ApiReferenceVideoGenerateRequest,
     AssetDeleteRequest,
+    ChunkedGenerationPauseRequest,
+    ChunkedGenerationRestartRequest,
+    ChunkedSegmentGenerateRequest,
     CustomReportCreateRequest,
     ExternalQcPairUploadRequest,
     FrameCaptureRequest,
@@ -99,6 +102,17 @@ VIDEO_MODEL_FRAME_BUDGET_FPS: dict[str, int] = {
     "veo-3.1": MODEL_FRAME_BUDGET_FPS,
     "veo-3.1-fast": MODEL_FRAME_BUDGET_FPS,
 }
+CHUNKED_GENERATION_SUPPORTED_MODELS = {
+    "ray-2",
+    "ray-flash-2",
+    "wan2.2-animate",
+    "kling-o1",
+    "kling-v3-omni-video",
+    "seedance-2.0-reference-to-video",
+    "wan2.7-videoedit",
+}
+CHUNKED_CONSERVATIVE_DURATION_SECONDS = 6
+CHUNKED_MIN_OVERLAP_SECONDS = 0.5
 PRESIGNED_GET_TTL_SECONDS = 3600
 STALE_GENERATION_MAX_AGE_SECONDS = 30 * 60
 CROP_LANDSCAPE_TARGET = (1920, 1080)
@@ -120,6 +134,73 @@ VIDEO_REPORT_TESTS = {
 VIDEO_COMPARE_REPORT_TESTS = {
     "video_model_compare",
 }
+
+
+def _find_chunked_generation_run(task: dict[str, Any], run_id: str) -> dict[str, Any] | None:
+    return next((item for item in task.get("chunkedGenerationRuns", []) if isinstance(item, dict) and item.get("runId") == run_id), None)
+
+
+def _find_chunked_generation_run_for_generation(task: dict[str, Any], gen_id: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    for run in task.get("chunkedGenerationRuns", []):
+        if not isinstance(run, dict):
+            continue
+        for chunk in run.get("chunks", []):
+            if isinstance(chunk, dict) and chunk.get("generationId") == gen_id:
+                return run, chunk
+    return None, None
+
+
+def _chunk_overlap_frames(fps: Fraction) -> int:
+    return max(12, int(round(float(fps) * CHUNKED_MIN_OVERLAP_SECONDS)))
+
+
+def _plan_chunk_windows(*, total_frames: int, fps: Fraction) -> tuple[int, list[dict[str, int | float]]]:
+    chunk_duration_sec = CHUNKED_CONSERVATIVE_DURATION_SECONDS
+    chunk_frames = max(1, int(round(float(fps) * chunk_duration_sec)))
+    overlap_frames = min(max(2, _chunk_overlap_frames(fps)), max(2, chunk_frames - 2))
+    if total_frames <= chunk_frames:
+        return overlap_frames, [
+            {
+                "chunkIndex": 0,
+                "startFrame": 0,
+                "endFrameExclusive": total_frames,
+                "durationFrames": total_frames,
+                "durationSec": round(total_frames / float(fps), 4),
+                "anchorFramesFromPrevious": 0,
+                "overlapFrames": 0,
+            }
+        ]
+
+    chunk_count = max(2, int(math.ceil((total_frames - overlap_frames) / float(chunk_frames - overlap_frames))))
+    last_start = max(0, total_frames - chunk_frames)
+    starts: list[int] = []
+    for idx in range(chunk_count):
+        if idx == chunk_count - 1:
+            start = last_start
+        else:
+            start = int(round((last_start * idx) / max(1, chunk_count - 1)))
+        if starts and start <= starts[-1]:
+            start = min(last_start, starts[-1] + 1)
+        starts.append(start)
+
+    chunks: list[dict[str, int | float]] = []
+    previous_end = 0
+    for idx, start in enumerate(starts):
+        end_exclusive = total_frames if idx == len(starts) - 1 else min(total_frames, start + chunk_frames)
+        overlap_with_previous = max(0, previous_end - start) if idx > 0 else 0
+        chunks.append(
+            {
+                "chunkIndex": idx,
+                "startFrame": start,
+                "endFrameExclusive": end_exclusive,
+                "durationFrames": max(0, end_exclusive - start),
+                "durationSec": round(max(0, end_exclusive - start) / float(fps), 4),
+                "anchorFramesFromPrevious": max(0, overlap_with_previous - 1),
+                "overlapFrames": overlap_with_previous,
+            }
+        )
+        previous_end = end_exclusive
+    return overlap_frames, chunks
 
 
 def _normalize_task_name(raw: str) -> str:
@@ -1180,6 +1261,60 @@ def _queue_segment_generation_record(
     return gen_id, job_id
 
 
+def _queue_chunk_generation_for_run(
+    *,
+    task: dict[str, Any],
+    store: S3JsonStore,
+    queue: JobQueue,
+    user_id: str,
+    task_id: str,
+    run: dict[str, Any],
+    chunk: dict[str, Any],
+    model: str,
+    mode: str,
+    prompt: str | None,
+    first_frame_variant_id: str | None,
+    replicate_kling_mode: str | None,
+    replicate_kling_v3_mode: str | None,
+    wan27_resolution: str | None,
+    parent_generation_id: str | None = None,
+    extension_metadata: dict[str, Any] | None = None,
+) -> tuple[str, str]:
+    gen_id, job_id = _queue_segment_generation_record(
+        task=task,
+        store=store,
+        queue=queue,
+        user_id=user_id,
+        task_id=task_id,
+        segment_id=str(chunk["segmentId"]),
+        model=model,
+        mode=mode,
+        prompt=prompt,
+        first_frame_variant_id=first_frame_variant_id,
+        last_frame_variant_id=None,
+        replicate_kling_mode=replicate_kling_mode,
+        replicate_kling_v3_mode=replicate_kling_v3_mode,
+        wan27_resolution=wan27_resolution,
+        parent_generation_id=parent_generation_id,
+        extension_metadata=extension_metadata,
+    )
+    now = now_iso()
+    chunk["generationId"] = gen_id
+    chunk["jobId"] = job_id
+    chunk["status"] = "queued"
+    chunk["reviewStatus"] = "running"
+    chunk.pop("error", None)
+    chunk["prompt"] = prompt
+    chunk["queuedAt"] = now
+    chunk["updatedAt"] = now
+    run["status"] = "running"
+    run["activeChunkIndex"] = int(chunk.get("chunkIndex") or 0)
+    run["updatedAt"] = now
+    run.pop("pauseRequestedAt", None)
+    run.pop("failureChunkIndex", None)
+    return gen_id, job_id
+
+
 def _copy_generated_anchor_to_frame_variant(
     *,
     task: dict[str, Any],
@@ -1620,6 +1755,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             "segments": [],
             "frames": {},
             "segmentGenerations": {},
+            "chunkedGenerationRuns": [],
             "externalQcPairs": [],
             "qualityMatchAnalyses": {},
             "videoCleanupTracks": [],
@@ -1726,6 +1862,8 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 )
             if generation.get("qc"):
                 _decorate_embedded_s3_keys(generation["qc"], asset_store)
+        if decorated.get("chunkedGenerationRuns"):
+            _decorate_embedded_s3_keys(decorated["chunkedGenerationRuns"], asset_store)
         for pair in decorated.get("externalQcPairs", []):
             if pair.get("originalKey"):
                 pair["originalUrl"] = asset_store.presign_get(pair["originalKey"], expires=PRESIGNED_GET_TTL_SECONDS)
@@ -3211,6 +3349,176 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             store.save_task(task, merge_on_conflict=True)
             return response(202, {"jobId": job_id, "genId": gen_id}, origin=origin)
 
+        if method == "POST" and len(parts) == 5 and parts[2] == "segments" and parts[4] == "chunked-generate":
+            segment_id = parts[3]
+            segment = next((s for s in task.get("segments", []) if s["segmentId"] == segment_id), None)
+            if not segment:
+                return error_response(404, "Segment not found", origin=origin)
+
+            req = _json_model(ChunkedSegmentGenerateRequest, event)
+            if req.lumaModel not in CHUNKED_GENERATION_SUPPORTED_MODELS:
+                return error_response(400, "This model is not supported for chunked whole-video generation yet", origin=origin)
+
+            total_frames = int(segment.get("durationFrames") or 0)
+            fps = _fps(task)
+            if total_frames <= 0:
+                return error_response(400, "Segment does not contain any frames", origin=origin)
+            if float(segment.get("durationSec") or 0.0) <= CHUNKED_CONSERVATIVE_DURATION_SECONDS + 1e-6:
+                return error_response(400, "This range already fits inside the conservative chunk duration", origin=origin)
+
+            first_frame = task.get("frames", {}).get(segment.get("startFrameId") or "")
+            if not isinstance(first_frame, dict):
+                return error_response(404, "Segment start frame not found", origin=origin)
+            first_variant_id = req.firstFrameVariantId or first_frame.get("selectedVariantId")
+            if not isinstance(first_variant_id, str) or not first_variant_id:
+                return error_response(400, "Chunked generation requires a selected edited start frame", origin=origin)
+            if not any(isinstance(variant, dict) and variant.get("variantId") == first_variant_id for variant in first_frame.get("variants", [])):
+                return error_response(404, "Selected start frame variant not found", origin=origin)
+
+            try:
+                prompt = _sanitize_prompt(req.prompt) if req.prompt else None
+            except ValueError as exc:
+                return error_response(400, str(exc), origin=origin)
+            if req.lumaModel in {"kling-o1", "kling-v3-omni-video", "seedance-2.0-reference-to-video", "wan2.7-videoedit"} and not prompt:
+                return error_response(400, f"{_video_model_label(req.lumaModel)} requires a prompt.", origin=origin)
+            if req.lumaModel in {"kling-o1", "kling-v3-omni-video"} and prompt:
+                missing_refs: list[str] = []
+                if "<<<video_1>>>" not in prompt:
+                    missing_refs.append("<<<video_1>>>")
+                if "<<<image_1>>>" not in prompt:
+                    missing_refs.append("<<<image_1>>>")
+                if missing_refs:
+                    return error_response(
+                        400,
+                        f"{_video_model_label(req.lumaModel)} prompt must reference {' and '.join(missing_refs)}.",
+                        origin=origin,
+                    )
+            if req.lumaModel == "seedance-2.0-reference-to-video" and prompt:
+                missing_refs: list[str] = []
+                if "@Video1" not in prompt:
+                    missing_refs.append("@Video1")
+                if "@Image1" not in prompt:
+                    missing_refs.append("@Image1")
+                if missing_refs:
+                    return error_response(
+                        400,
+                        f"{_video_model_label(req.lumaModel)} prompt must reference {' and '.join(missing_refs)}.",
+                        origin=origin,
+                    )
+
+            overlap_frames, chunk_windows = _plan_chunk_windows(total_frames=total_frames, fps=fps)
+            chunk_segments: list[dict[str, Any]] = []
+            for window in chunk_windows:
+                start = int(segment.get("startFrame") or 0) + int(window["startFrame"])
+                end_excl = int(segment.get("startFrame") or 0) + int(window["endFrameExclusive"])
+                chunk_segments.append(
+                    _create_segment_record(
+                        task=task,
+                        start=start,
+                        end_excl=end_excl,
+                        dur_frames=int(window["durationFrames"]),
+                        asset_store=asset_store,
+                    )
+                )
+
+            run_id = new_id("cgr")
+            now = now_iso()
+            run = {
+                "runId": run_id,
+                "sourceSegmentId": segment_id,
+                "status": "created",
+                "model": req.lumaModel,
+                "mode": req.mode,
+                "prompt": prompt,
+                "firstFrameVariantId": first_variant_id,
+                "replicateKlingMode": req.replicateKlingMode,
+                "replicateKlingV3Mode": req.replicateKlingV3Mode,
+                "wan27Resolution": req.wan27Resolution,
+                "chunkDurationSec": CHUNKED_CONSERVATIVE_DURATION_SECONDS,
+                "minimumOverlapFrames": overlap_frames,
+                "createdAt": now,
+                "startedAt": now,
+                "updatedAt": now,
+                "activeChunkIndex": 0,
+                "chunks": [],
+            }
+            absolute_segment_start = int(segment.get("startFrame") or 0)
+            for idx, (window, chunk_segment) in enumerate(zip(chunk_windows, chunk_segments)):
+                run["chunks"].append(
+                    {
+                        "chunkIndex": idx,
+                        "segmentId": chunk_segment["segmentId"],
+                        "segmentStartFrame": int(chunk_segment.get("startFrame") or 0),
+                        "segmentEndFrameExclusive": int(chunk_segment.get("endFrameExclusive") or 0),
+                        "segmentDurationFrames": int(chunk_segment.get("durationFrames") or 0),
+                        "segmentDurationSec": round(float(chunk_segment.get("durationSec") or 0.0), 4),
+                        "relativeStartFrame": int(window["startFrame"]),
+                        "relativeEndFrameExclusive": int(window["endFrameExclusive"]),
+                        "overlapFrames": int(window["overlapFrames"]),
+                        "anchorFramesFromPrevious": int(window["anchorFramesFromPrevious"]),
+                        "alignmentFrameIndex": absolute_segment_start + int(window["startFrame"]),
+                        "anchorSource": "initial_variant" if idx == 0 else "previous_generation",
+                        "anchorFrameId": chunk_segment.get("startFrameId"),
+                        "anchorVariantId": first_variant_id if idx == 0 else None,
+                        "status": "planned",
+                        "reviewStatus": "pending" if idx > 0 else "running",
+                        "prompt": prompt,
+                        "createdAt": now,
+                        "updatedAt": now,
+                    }
+                )
+            first_chunk = run["chunks"][0]
+            _queue_chunk_generation_for_run(
+                task=task,
+                store=store,
+                queue=queue,
+                user_id=user_id,
+                task_id=task_id,
+                run=run,
+                chunk=first_chunk,
+                model=req.lumaModel,
+                mode=req.mode,
+                prompt=prompt,
+                first_frame_variant_id=first_variant_id,
+                replicate_kling_mode=req.replicateKlingMode,
+                replicate_kling_v3_mode=req.replicateKlingV3Mode,
+                wan27_resolution=req.wan27Resolution,
+                extension_metadata={
+                    "chunkedRunId": run_id,
+                    "chunkIndex": 0,
+                    "sourceSegmentId": segment_id,
+                    "alignmentFrameIndex": absolute_segment_start,
+                    "anchorFramesFromEnd": 0,
+                    "anchorVariantId": first_variant_id,
+                    "createdAt": now,
+                },
+            )
+            task.setdefault("chunkedGenerationRuns", []).append(run)
+            _append_history_event(
+                task,
+                {
+                    "at": now,
+                    "event": "chunked_generation.created",
+                    "runId": run_id,
+                    "sourceSegmentId": segment_id,
+                    "model": req.lumaModel,
+                    "chunkCount": len(run["chunks"]),
+                },
+            )
+            store.save_task(task, merge_on_conflict=True)
+            return response(
+                202,
+                {
+                    "runId": run_id,
+                    "jobId": first_chunk.get("jobId"),
+                    "genId": first_chunk.get("generationId"),
+                    "chunkCount": len(run["chunks"]),
+                    "chunkDurationSec": CHUNKED_CONSERVATIVE_DURATION_SECONDS,
+                    "minimumOverlapFrames": overlap_frames,
+                },
+                origin=origin,
+            )
+
         if method == "POST" and len(parts) == 5 and parts[2] == "segment-generations" and parts[4] == "extend":
             previous_gen_id = parts[3]
             previous_generation = task.get("segmentGenerations", {}).get(previous_gen_id)
@@ -3311,6 +3619,159 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 },
                 origin=origin,
             )
+
+        if method == "POST" and len(parts) == 5 and parts[2] == "chunked-generations" and parts[4] == "pause":
+            run = _find_chunked_generation_run(task, parts[3])
+            if not isinstance(run, dict):
+                return error_response(404, "Chunked generation run not found", origin=origin)
+            req = _json_model(ChunkedGenerationPauseRequest, event)
+            run["status"] = "paused"
+            run["pauseRequestedAt"] = now_iso()
+            run["pauseReason"] = req.reason or "Paused by user"
+            run["updatedAt"] = now_iso()
+            store.save_task(task, merge_on_conflict=True)
+            return response(200, {"ok": True}, origin=origin)
+
+        if method == "POST" and len(parts) == 5 and parts[2] == "chunked-generations" and parts[4] == "resume":
+            run = _find_chunked_generation_run(task, parts[3])
+            if not isinstance(run, dict):
+                return error_response(404, "Chunked generation run not found", origin=origin)
+            chunks = [chunk for chunk in run.get("chunks", []) if isinstance(chunk, dict)]
+            active_chunk = next((chunk for chunk in chunks if chunk.get("status") in {"queued", "running"}), None)
+            pending_chunk = None if isinstance(active_chunk, dict) else next((chunk for chunk in chunks if chunk.get("status") in {"planned", "failed"}), None)
+            run["status"] = "running"
+            run["updatedAt"] = now_iso()
+            if isinstance(pending_chunk, dict):
+                chunk_index = int(pending_chunk.get("chunkIndex") or 0)
+                prompt = run.get("prompt")
+                parent_generation_id: str | None = None
+                if chunk_index == 0:
+                    first_frame_variant_id = str(run.get("firstFrameVariantId") or "")
+                else:
+                    previous_chunk = chunks[chunk_index - 1]
+                    previous_generation = task.get("segmentGenerations", {}).get(previous_chunk.get("generationId") or "")
+                    if not isinstance(previous_generation, dict) or previous_generation.get("status") != "complete":
+                        return error_response(400, "Cannot resume until the previous chunk is complete", origin=origin)
+                    anchor_variant = _copy_generated_anchor_to_frame_variant(
+                        task=task,
+                        generation=previous_generation,
+                        target_frame_id=str(pending_chunk.get("anchorFrameId") or ""),
+                        target_frame_index=int(pending_chunk.get("segmentStartFrame") or 0),
+                        anchor_frames_from_end=int(pending_chunk.get("anchorFramesFromPrevious") or 0),
+                        asset_store=asset_store,
+                    )
+                    first_frame_variant_id = str(anchor_variant.get("variantId") or "")
+                    pending_chunk["anchorVariantId"] = first_frame_variant_id
+                    pending_chunk["sourceGeneratedFrameIndex"] = anchor_variant.get("sourceGeneratedFrameIndex")
+                    parent_generation_id = str(previous_chunk.get("generationId") or "")
+                _queue_chunk_generation_for_run(
+                    task=task,
+                    store=store,
+                    queue=queue,
+                    user_id=user_id,
+                    task_id=task_id,
+                    run=run,
+                    chunk=pending_chunk,
+                    model=str(run.get("model") or ""),
+                    mode=str(run.get("mode") or ""),
+                    prompt=str(prompt) if prompt else None,
+                    first_frame_variant_id=first_frame_variant_id or None,
+                    replicate_kling_mode=run.get("replicateKlingMode"),
+                    replicate_kling_v3_mode=run.get("replicateKlingV3Mode"),
+                    wan27_resolution=run.get("wan27Resolution"),
+                    parent_generation_id=parent_generation_id or None,
+                    extension_metadata={
+                        "chunkedRunId": run.get("runId"),
+                        "chunkIndex": pending_chunk.get("chunkIndex"),
+                        "sourceSegmentId": run.get("sourceSegmentId"),
+                        "alignmentFrameIndex": pending_chunk.get("segmentStartFrame"),
+                        "anchorFramesFromEnd": pending_chunk.get("anchorFramesFromPrevious", 0),
+                        "anchorVariantId": pending_chunk.get("anchorVariantId"),
+                        "createdAt": now_iso(),
+                    },
+                )
+            store.save_task(task, merge_on_conflict=True)
+            return response(200, {"ok": True, "jobId": pending_chunk.get("jobId") if isinstance(pending_chunk, dict) else None}, origin=origin)
+
+        if method == "POST" and len(parts) == 5 and parts[2] == "chunked-generations" and parts[4] == "restart":
+            run = _find_chunked_generation_run(task, parts[3])
+            if not isinstance(run, dict):
+                return error_response(404, "Chunked generation run not found", origin=origin)
+            req = _json_model(ChunkedGenerationRestartRequest, event)
+            chunks = [chunk for chunk in run.get("chunks", []) if isinstance(chunk, dict)]
+            if req.fromChunkIndex >= len(chunks):
+                return error_response(400, "Chunk index is outside the run", origin=origin)
+            if req.fromChunkIndex > 0:
+                previous_chunk = chunks[req.fromChunkIndex - 1]
+                previous_generation = task.get("segmentGenerations", {}).get(previous_chunk.get("generationId") or "")
+                if not isinstance(previous_generation, dict) or previous_generation.get("status") != "complete":
+                    return error_response(400, "Restart requires the previous chunk generation to be complete", origin=origin)
+
+            prompt = _sanitize_prompt(req.prompt) if req.prompt is not None else run.get("prompt")
+            run["prompt"] = prompt
+            run["status"] = "running"
+            run["activeChunkIndex"] = req.fromChunkIndex
+            run["updatedAt"] = now_iso()
+            run.pop("failureChunkIndex", None)
+
+            for chunk in chunks[req.fromChunkIndex + 1 :]:
+                chunk["status"] = "planned"
+                chunk["reviewStatus"] = "pending"
+                chunk["prompt"] = prompt
+                chunk.pop("generationId", None)
+                chunk.pop("jobId", None)
+                chunk.pop("error", None)
+                chunk["updatedAt"] = now_iso()
+
+            chunk = chunks[req.fromChunkIndex]
+            first_frame_variant_id: str | None
+            parent_generation_id: str | None = None
+            if req.fromChunkIndex == 0:
+                first_frame_variant_id = str(run.get("firstFrameVariantId") or "")
+            else:
+                previous_chunk = chunks[req.fromChunkIndex - 1]
+                previous_generation = task.get("segmentGenerations", {}).get(previous_chunk.get("generationId") or "")
+                anchor_variant = _copy_generated_anchor_to_frame_variant(
+                    task=task,
+                    generation=previous_generation,
+                    target_frame_id=str(chunk.get("anchorFrameId") or ""),
+                    target_frame_index=int(chunk.get("segmentStartFrame") or 0),
+                    anchor_frames_from_end=int(chunk.get("anchorFramesFromPrevious") or 0),
+                    asset_store=asset_store,
+                )
+                first_frame_variant_id = str(anchor_variant.get("variantId") or "")
+                chunk["anchorVariantId"] = first_frame_variant_id
+                chunk["sourceGeneratedFrameIndex"] = anchor_variant.get("sourceGeneratedFrameIndex")
+                parent_generation_id = str(previous_chunk.get("generationId") or "")
+
+            _queue_chunk_generation_for_run(
+                task=task,
+                store=store,
+                queue=queue,
+                user_id=user_id,
+                task_id=task_id,
+                run=run,
+                chunk=chunk,
+                model=str(run.get("model") or ""),
+                mode=str(run.get("mode") or ""),
+                prompt=str(prompt) if prompt else None,
+                first_frame_variant_id=first_frame_variant_id or None,
+                replicate_kling_mode=run.get("replicateKlingMode"),
+                replicate_kling_v3_mode=run.get("replicateKlingV3Mode"),
+                wan27_resolution=run.get("wan27Resolution"),
+                parent_generation_id=parent_generation_id or None,
+                extension_metadata={
+                    "chunkedRunId": run.get("runId"),
+                    "chunkIndex": req.fromChunkIndex,
+                    "sourceSegmentId": run.get("sourceSegmentId"),
+                    "alignmentFrameIndex": chunk.get("segmentStartFrame"),
+                    "anchorFramesFromEnd": chunk.get("anchorFramesFromPrevious", 0),
+                    "anchorVariantId": chunk.get("anchorVariantId"),
+                    "createdAt": now_iso(),
+                },
+            )
+            store.save_task(task, merge_on_conflict=True)
+            return response(202, {"ok": True, "jobId": chunk.get("jobId"), "genId": chunk.get("generationId")}, origin=origin)
 
         if method == "POST" and len(parts) == 4 and parts[2] == "qc" and parts[3] == "run":
             req = _json_model(QcRunRequest, event)

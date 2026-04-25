@@ -1,7 +1,7 @@
 import { ReactCompareSlider } from "react-compare-slider";
-import { useEffect, useRef, type RefObject } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 
-import type { CustomReportOutputRef, SegmentGeneration, SegmentRecord, TaskDetail } from "../../types/api";
+import type { ChunkedGenerationRun, CustomReportOutputRef, SegmentGeneration, SegmentRecord, TaskDetail } from "../../types/api";
 
 type GenerateInputMode = "start_video" | "start_end" | "start_only";
 type VideoModel =
@@ -56,6 +56,13 @@ export type GenerateTabCtx = {
   selectedSegmentLimitMessage: string | null;
   selectedSegmentId: string | null;
   generateSegmentMutation: { mutate: () => void };
+  generateChunkedSegmentMutation: { mutate: () => void };
+  selectedSegmentChunkedGenerationRuns: ChunkedGenerationRun[];
+  pauseChunkedGeneration: (payload: { runId: string; reason?: string }) => void;
+  resumeChunkedGeneration: (payload: { runId: string }) => void;
+  restartChunkedGeneration: (payload: { runId: string; fromChunkIndex: number; prompt?: string }) => void;
+  isChunkedGenerationMutationPending: boolean;
+  frameVariantImageUrl: (frameId: string | null | undefined, variantId: string | null | undefined) => string | null;
   segmentWindow: { startSec: number; endSec: number; startLabel: string; endLabel: string } | null;
   originalSegmentPreviewUrl: string | null;
   generatedSegmentPreviewUrl: string | null;
@@ -130,6 +137,13 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
     selectedSegmentLimitMessage,
     selectedSegmentId,
     generateSegmentMutation,
+    generateChunkedSegmentMutation,
+    selectedSegmentChunkedGenerationRuns,
+    pauseChunkedGeneration,
+    resumeChunkedGeneration,
+    restartChunkedGeneration,
+    isChunkedGenerationMutationPending,
+    frameVariantImageUrl,
     segmentWindow,
     originalSegmentPreviewUrl,
     generatedSegmentPreviewUrl,
@@ -158,6 +172,9 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
     setGenerationCardsVisible,
   } = ctx;
   const syncRafRef = useRef<number | null>(null);
+  const latestChunkedRun = selectedSegmentChunkedGenerationRuns[0] ?? null;
+  const [restartChunkIndex, setRestartChunkIndex] = useState("0");
+  const [restartPrompt, setRestartPrompt] = useState("");
 
   useEffect(() => {
     return () => {
@@ -167,6 +184,12 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (!latestChunkedRun) return;
+    setRestartChunkIndex(String(latestChunkedRun.failureChunkIndex ?? latestChunkedRun.activeChunkIndex ?? 0));
+    setRestartPrompt(latestChunkedRun.prompt ?? "");
+  }, [latestChunkedRun?.failureChunkIndex, latestChunkedRun?.activeChunkIndex, latestChunkedRun?.prompt, latestChunkedRun?.runId]);
 
   useEffect(() => {
     const generated = compareVariantRef.current;
@@ -287,7 +310,7 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
             </div>
             {wholeVideoNeedsChunking ? (
               <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-                This whole-video selection is longer than the current {wholeVideoSinglePassLimitSeconds}s single-pass generation limit. Chunked generation will be required here. Start + end frame video flows are disabled for this path, and for now you should select a shorter segment if you want to generate immediately.
+                This whole-video selection is longer than the current {wholeVideoSinglePassLimitSeconds}s single-pass generation limit. The chunked flow uses conservative {6}s passes with overlap between chunks so later segments can survive models that drop early output frames. Start + end frame flows stay disabled here, and start frame only models are not used in this long-video path.
               </div>
             ) : null}
             <div className="rounded-md border border-ink/20 bg-bg px-3 py-2 text-xs text-ink/70">
@@ -389,6 +412,139 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
 
       {selectedSegmentOverLimit ? (
         <p className="text-xs text-red-600">{selectedSegmentLimitMessage}</p>
+      ) : null}
+
+      {wholeVideoNeedsChunking ? (
+        <div className="space-y-3 rounded-lg border border-amber-200 bg-amber-50 p-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="space-y-1">
+              <p className="text-sm font-semibold text-amber-950">Chunked Whole-Video Generation</p>
+              <p className="text-xs text-amber-900">
+                The app will split the working range into overlapping chunks, drive each later chunk from an anchor frame taken from the previous generated output, and let you pause or restart if quality drops.
+              </p>
+            </div>
+            <button
+              className="rounded-md bg-accent px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={
+                !selectedSegmentId ||
+                Boolean(generationPromptError) ||
+                generationInputMode !== "start_video" ||
+                !["ray-2", "ray-flash-2", "kling-o1", "kling-v3-omni-video", "seedance-2.0-reference-to-video", "wan2.2-animate", "wan2.7-videoedit"].includes(lumaModel) ||
+                isChunkedGenerationMutationPending
+              }
+              onClick={() => generateChunkedSegmentMutation.mutate()}
+            >
+              Start Chunked Generation
+            </button>
+          </div>
+          {generationInputMode !== "start_video" ? (
+            <p className="text-xs text-red-700">Switch to `start frame + video` for the long-video chunked flow.</p>
+          ) : null}
+          {!["ray-2", "ray-flash-2", "kling-o1", "kling-v3-omni-video", "seedance-2.0-reference-to-video", "wan2.2-animate", "wan2.7-videoedit"].includes(lumaModel) ? (
+            <p className="text-xs text-red-700">This model is not in the first chunked-release set. Use one of the first-frame + source-video models for whole-video generation.</p>
+          ) : null}
+
+          {latestChunkedRun ? (
+            <div className="space-y-3 rounded-md border border-amber-300 bg-white/70 p-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <p className="text-sm font-semibold text-ink">Latest run: {latestChunkedRun.model}</p>
+                  <p className="text-xs text-ink/70">
+                    Status {latestChunkedRun.status.toUpperCase()} · {latestChunkedRun.chunks.length} chunks · overlap at least {latestChunkedRun.minimumOverlapFrames} frames
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    className="rounded-md border border-ink/20 px-3 py-2 text-xs disabled:cursor-not-allowed disabled:opacity-50"
+                    disabled={latestChunkedRun.status !== "running" || isChunkedGenerationMutationPending}
+                    onClick={() => pauseChunkedGeneration({ runId: latestChunkedRun.runId, reason: "Paused from Generate Video" })}
+                  >
+                    Pause
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded-md border border-ink/20 px-3 py-2 text-xs disabled:cursor-not-allowed disabled:opacity-50"
+                    disabled={latestChunkedRun.status !== "paused" && latestChunkedRun.status !== "failed"}
+                    onClick={() => resumeChunkedGeneration({ runId: latestChunkedRun.runId })}
+                  >
+                    Resume
+                  </button>
+                </div>
+              </div>
+
+              <div className="space-y-2 rounded-md border border-ink/10 bg-bg p-3">
+                <p className="text-xs font-semibold uppercase tracking-wide text-ink/60">Restart From A Chunk</p>
+                <div className="grid gap-3 md:grid-cols-[140px_1fr_auto]">
+                  <label className="space-y-1 text-xs text-ink/70">
+                    <span className="block font-medium text-ink/80">Chunk index</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={Math.max(0, latestChunkedRun.chunks.length - 1)}
+                      value={restartChunkIndex}
+                      onChange={(e) => setRestartChunkIndex(e.target.value)}
+                      className="w-full rounded-md border border-ink/20 px-2 py-2 text-sm"
+                    />
+                  </label>
+                  <label className="space-y-1 text-xs text-ink/70">
+                    <span className="block font-medium text-ink/80">Prompt from this point</span>
+                    <input
+                      type="text"
+                      value={restartPrompt}
+                      onChange={(e) => setRestartPrompt(e.target.value)}
+                      className="w-full rounded-md border border-ink/20 px-2 py-2 text-sm"
+                    />
+                  </label>
+                  <div className="flex items-end">
+                    <button
+                      type="button"
+                      className="rounded-md border border-ink/20 px-3 py-2 text-xs disabled:cursor-not-allowed disabled:opacity-50"
+                      disabled={isChunkedGenerationMutationPending}
+                      onClick={() =>
+                        restartChunkedGeneration({
+                          runId: latestChunkedRun.runId,
+                          fromChunkIndex: Number(restartChunkIndex) || 0,
+                          prompt: restartPrompt.trim() || undefined,
+                        })
+                      }
+                    >
+                      Restart From Here
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                {latestChunkedRun.chunks.map((chunk) => {
+                  const anchorUrl = frameVariantImageUrl(chunk.anchorFrameId, chunk.anchorVariantId);
+                  return (
+                    <div key={`${latestChunkedRun.runId}-${chunk.chunkIndex}`} className="rounded-md border border-ink/15 bg-white p-3">
+                      <div className="mb-2 flex items-center justify-between gap-2">
+                        <p className="text-sm font-semibold">Chunk {chunk.chunkIndex + 1}</p>
+                        <span className="text-[11px] uppercase tracking-wide text-ink/60">{chunk.status}</span>
+                      </div>
+                      {anchorUrl ? (
+                        <img src={anchorUrl} alt={`Chunk ${chunk.chunkIndex + 1} anchor`} className="aspect-video w-full rounded-md bg-bg object-contain" />
+                      ) : (
+                        <div className="flex aspect-video items-center justify-center rounded-md border border-dashed border-ink/20 bg-bg text-xs text-ink/55">
+                          Anchor frame pending
+                        </div>
+                      )}
+                      <div className="mt-2 space-y-1 text-xs text-ink/70">
+                        <p>Source frames f{chunk.segmentStartFrame} to f{Math.max(chunk.segmentStartFrame, chunk.segmentEndFrameExclusive - 1)}</p>
+                        <p>Overlap from previous: {chunk.overlapFrames} frames</p>
+                        <p>Anchor frame source: {chunk.anchorSource === "initial_variant" ? "selected edit frame" : `${chunk.anchorFramesFromPrevious} frames before previous chunk end`}</p>
+                        {chunk.sourceGeneratedFrameIndex != null ? <p>Extracted from previous output frame {chunk.sourceGeneratedFrameIndex}</p> : null}
+                        {chunk.error ? <p className="text-red-700">{chunk.error}</p> : null}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ) : null}
+        </div>
       ) : null}
 
       <button

@@ -720,6 +720,256 @@ def _enqueue_follow_on_job(
     return job_id
 
 
+def _find_chunked_generation_run_for_generation(task: dict[str, Any], gen_id: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    for run in task.get("chunkedGenerationRuns", []):
+        if not isinstance(run, dict):
+            continue
+        for chunk in run.get("chunks", []):
+            if isinstance(chunk, dict) and chunk.get("generationId") == gen_id:
+                return run, chunk
+    return None, None
+
+
+def _copy_generated_anchor_to_frame_variant(
+    *,
+    task: dict[str, Any],
+    generation: dict[str, Any],
+    target_frame_id: str,
+    target_frame_index: int,
+    anchor_frames_from_end: int,
+    asset_store: AssetStore,
+    assets_bucket: str,
+) -> dict[str, Any]:
+    output_key = generation.get("outputKey")
+    if not isinstance(output_key, str) or not output_key:
+        raise RuntimeError("Previous generation does not have an output video")
+    s3 = boto3.client("s3")
+    paths = _asset_paths(task)
+    with tempfile.TemporaryDirectory() as td:
+        td_path = Path(td)
+        local_video = td_path / "previous_generated.mp4"
+        local_anchor = td_path / "extension_anchor.png"
+        _download_s3(s3, assets_bucket, output_key, local_video)
+        probe = ffprobe_video(str(local_video))
+        frame_count = int(probe.get("frame_count") or 0)
+        if frame_count <= 0:
+            duration = float(probe.get("duration_sec") or generation.get("providerDurationSec") or generation.get("requestedDurationSec") or 0.0)
+            fps_num = int(probe.get("fps_num") or 24)
+            fps_den = int(probe.get("fps_den") or 1)
+            frame_count = max(1, int(round(duration * (fps_num / max(1, fps_den)))))
+        anchor_frame_index = max(0, frame_count - 1 - int(anchor_frames_from_end))
+        extract_frame_png(str(local_video), anchor_frame_index, str(local_anchor))
+        variant_id = new_id("var")
+        variant_key = paths.frame_variant(target_frame_id, variant_id)
+        s3.upload_file(str(local_anchor), assets_bucket, variant_key, ExtraArgs={"ContentType": "image/png"})
+    prompt = f"Chunk anchor from {generation.get('genId') or 'previous_generation'}"
+    variant = {
+        "variantId": variant_id,
+        "type": "extension_anchor",
+        "variantKind": "edited",
+        "model": "generated_extension_anchor",
+        "promptHash": prompt_hash(prompt),
+        "createdAt": now_iso(),
+        "outputKey": variant_key,
+        "sourceVariantId": None,
+        "generationSettings": {
+            "workflow": "chunked_generation_anchor",
+            "anchorFramesFromEnd": int(anchor_frames_from_end),
+            "sourceGenerationId": generation.get("genId"),
+            "sourceGeneratedFrameIndex": anchor_frame_index,
+            "targetFrameIndex": int(target_frame_index),
+        },
+    }
+    target_frame = task.setdefault("frames", {}).setdefault(target_frame_id, {})
+    variants = target_frame.setdefault("variants", [])
+    variants.append(variant)
+    target_frame["selectedVariantId"] = variant_id
+    return {
+        **variant,
+        "sourceGeneratedFrameIndex": anchor_frame_index,
+    }
+
+
+def _queue_chunk_generation_follow_on(
+    *,
+    store: S3JsonStore,
+    task: dict[str, Any],
+    run: dict[str, Any],
+    chunk: dict[str, Any],
+    first_frame_variant_id: str,
+    parent_generation_id: str | None,
+    extension_metadata: dict[str, Any],
+    queue_url: str,
+) -> str:
+    gen_id = new_id("gen")
+    job_id = _enqueue_follow_on_job(
+        store=store,
+        user_id=task["userId"],
+        task_id=task["taskId"],
+        queue_url=queue_url,
+        job_type="segment_generate",
+        payload={
+            "segmentId": chunk["segmentId"],
+            "genId": gen_id,
+            "lumaModel": run.get("model"),
+            "mode": run.get("mode"),
+            "prompt": run.get("prompt"),
+            "firstFrameVariantId": first_frame_variant_id,
+            "replicateKlingMode": run.get("replicateKlingMode"),
+            "replicateKlingV3Mode": run.get("replicateKlingV3Mode"),
+            "wan27Resolution": run.get("wan27Resolution"),
+            "parentGenerationId": parent_generation_id,
+            "extensionMetadata": extension_metadata,
+        },
+    )
+    now = now_iso()
+    task.setdefault("segmentGenerations", {})[gen_id] = {
+        "genId": gen_id,
+        "segmentId": chunk["segmentId"],
+        "luma": {
+            "provider": _segment_generation_provider_name(str(run.get("model") or "")),
+            "model": run.get("model"),
+            "mode": run.get("mode"),
+            "prompt": run.get("prompt"),
+            "lumaGenerationId": None,
+        },
+        "status": "queued",
+        "outputKey": None,
+        "jobId": job_id,
+        "error": None,
+        "queuedAt": now,
+        "createdAt": now,
+        "updatedAt": now,
+        "parentGenerationId": parent_generation_id,
+        "extension": extension_metadata,
+    }
+    chunk["generationId"] = gen_id
+    chunk["jobId"] = job_id
+    chunk["status"] = "queued"
+    chunk["reviewStatus"] = "running"
+    chunk.pop("error", None)
+    chunk["updatedAt"] = now
+    run["status"] = "running"
+    run["activeChunkIndex"] = int(chunk.get("chunkIndex") or 0)
+    run["updatedAt"] = now
+    _append_task_history_event(
+        task,
+        {
+            "at": now,
+            "event": "chunked_generation.chunk_queued",
+            "runId": run.get("runId"),
+            "chunkIndex": chunk.get("chunkIndex"),
+            "genId": gen_id,
+        },
+    )
+    return job_id
+
+
+def _advance_chunked_generation_run_after_success(
+    *,
+    store: S3JsonStore,
+    asset_store: AssetStore,
+    task: dict[str, Any],
+    settings: Any,
+    gen_id: str,
+) -> None:
+    run, chunk = _find_chunked_generation_run_for_generation(task, gen_id)
+    if not isinstance(run, dict) or not isinstance(chunk, dict):
+        return
+    chunks = [item for item in run.get("chunks", []) if isinstance(item, dict)]
+    now = now_iso()
+    chunk["status"] = "complete"
+    chunk["reviewStatus"] = "complete"
+    chunk["finishedAt"] = now
+    chunk["updatedAt"] = now
+    current_index = int(chunk.get("chunkIndex") or 0)
+    if run.get("status") == "paused":
+        run["activeChunkIndex"] = current_index
+        run["updatedAt"] = now
+        store.save_task(task, merge_on_conflict=True)
+        return
+    if current_index >= len(chunks) - 1:
+        run["status"] = "complete"
+        run["finishedAt"] = now
+        run["updatedAt"] = now
+        run["activeChunkIndex"] = current_index
+        store.save_task(task, merge_on_conflict=True)
+        return
+
+    next_chunk = chunks[current_index + 1]
+    generation = task.get("segmentGenerations", {}).get(gen_id)
+    if not isinstance(generation, dict):
+        store.save_task(task, merge_on_conflict=True)
+        return
+    anchor_variant = _copy_generated_anchor_to_frame_variant(
+        task=task,
+        generation=generation,
+        target_frame_id=str(next_chunk.get("anchorFrameId") or ""),
+        target_frame_index=int(next_chunk.get("segmentStartFrame") or 0),
+        anchor_frames_from_end=int(next_chunk.get("anchorFramesFromPrevious") or 0),
+        asset_store=asset_store,
+        assets_bucket=settings.assets_bucket,
+    )
+    next_chunk["anchorVariantId"] = anchor_variant.get("variantId")
+    next_chunk["sourceGeneratedFrameIndex"] = anchor_variant.get("sourceGeneratedFrameIndex")
+    if run.get("status") != "running":
+        run["updatedAt"] = now
+        store.save_task(task, merge_on_conflict=True)
+        return
+    _queue_chunk_generation_follow_on(
+        store=store,
+        task=task,
+        run=run,
+        chunk=next_chunk,
+        first_frame_variant_id=str(anchor_variant.get("variantId")),
+        parent_generation_id=gen_id,
+        extension_metadata={
+            "chunkedRunId": run.get("runId"),
+            "chunkIndex": next_chunk.get("chunkIndex"),
+            "sourceSegmentId": run.get("sourceSegmentId"),
+            "alignmentFrameIndex": next_chunk.get("segmentStartFrame"),
+            "anchorFramesFromEnd": next_chunk.get("anchorFramesFromPrevious", 0),
+            "anchorVariantId": anchor_variant.get("variantId"),
+            "sourceGeneratedFrameIndex": anchor_variant.get("sourceGeneratedFrameIndex"),
+            "createdAt": now,
+        },
+        queue_url=settings.jobs_queue_url,
+    )
+    store.save_task(task, merge_on_conflict=True)
+
+
+def _mark_chunked_generation_run_failed(
+    *,
+    store: S3JsonStore,
+    task: dict[str, Any],
+    gen_id: str,
+    error: str,
+) -> None:
+    run, chunk = _find_chunked_generation_run_for_generation(task, gen_id)
+    if not isinstance(run, dict) or not isinstance(chunk, dict):
+        return
+    now = now_iso()
+    chunk["status"] = "failed"
+    chunk["reviewStatus"] = "needs_retry"
+    chunk["error"] = error
+    chunk["updatedAt"] = now
+    run["status"] = "failed"
+    run["failureChunkIndex"] = int(chunk.get("chunkIndex") or 0)
+    run["updatedAt"] = now
+    _append_task_history_event(
+        task,
+        {
+            "at": now,
+            "event": "chunked_generation.chunk_failed",
+            "runId": run.get("runId"),
+            "chunkIndex": chunk.get("chunkIndex"),
+            "genId": gen_id,
+            "error": error,
+        },
+    )
+    store.save_task(task, merge_on_conflict=True)
+
+
 def _handle_ingest(
     *,
     job: dict[str, Any],
@@ -3377,6 +3627,15 @@ def _handle_segment_generate(
         "finishedAt": gen_meta.get("finishedAt"),
         "processingDurationSec": processing_duration_sec,
     }
+    latest_task = store.load_task(task["userId"], task["taskId"])
+    if isinstance(latest_task, dict):
+        _advance_chunked_generation_run_after_success(
+            store=store,
+            asset_store=asset_store,
+            task=latest_task,
+            settings=settings,
+            gen_id=gen_id,
+        )
     store.save_job(job)
     return job
 
@@ -7832,6 +8091,14 @@ def process_job_record(record: dict[str, Any], *, settings: Any) -> None:
                     }
                 )
                 store.save_task(latest_task, merge_on_conflict=True)
+                refreshed_task = store.load_task(user_id, str(task_id or ""))
+                if isinstance(refreshed_task, dict):
+                    _mark_chunked_generation_run_failed(
+                        store=store,
+                        task=refreshed_task,
+                        gen_id=gen_id,
+                        error=str(exc),
+                    )
                 return
         elif job_type == "qc_report_build":
             report_id = str((job.get("payload") or {}).get("reportId") or "")

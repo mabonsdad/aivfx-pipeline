@@ -607,6 +607,65 @@ export type SegmentGeneration = {
   };
 };
 
+export type ChunkedGenerationChunk = {
+  chunkIndex: number;
+  segmentId: string;
+  segmentStartFrame: number;
+  segmentEndFrameExclusive: number;
+  segmentDurationFrames: number;
+  segmentDurationSec: number;
+  relativeStartFrame: number;
+  relativeEndFrameExclusive: number;
+  overlapFrames: number;
+  anchorFramesFromPrevious: number;
+  alignmentFrameIndex: number;
+  anchorSource: "initial_variant" | "previous_generation" | string;
+  anchorFrameId?: string | null;
+  anchorVariantId?: string | null;
+  sourceGeneratedFrameIndex?: number | null;
+  generationId?: string | null;
+  jobId?: string | null;
+  status: "planned" | "queued" | "running" | "complete" | "failed";
+  reviewStatus?: "pending" | "running" | "complete" | "needs_retry" | string;
+  prompt?: string | null;
+  error?: string | null;
+  createdAt: string;
+  updatedAt?: string;
+  queuedAt?: string;
+  finishedAt?: string;
+};
+
+export type ChunkedGenerationRun = {
+  runId: string;
+  sourceSegmentId: string;
+  status: "created" | "running" | "paused" | "failed" | "complete";
+  model:
+    | "ray-2"
+    | "ray-flash-2"
+    | "kling-o1"
+    | "kling-v3-omni-video"
+    | "seedance-2.0-reference-to-video"
+    | "wan2.2-animate"
+    | "wan2.7-videoedit";
+  mode: string;
+  prompt?: string | null;
+  firstFrameVariantId?: string | null;
+  replicateKlingMode?: "std" | "pro" | null;
+  replicateKlingV3Mode?: "standard" | "pro" | null;
+  wan27Resolution?: "720p" | "1080p" | null;
+  chunkDurationSec: number;
+  minimumOverlapFrames: number;
+  activeChunkIndex?: number;
+  failureChunkIndex?: number;
+  pauseRequestedAt?: string;
+  pauseReason?: string;
+  createdAt: string;
+  startedAt?: string;
+  finishedAt?: string;
+  updatedAt?: string;
+  chunks: ChunkedGenerationChunk[];
+};
+
 export type ExportRecord = {
   exportId: string;
   outputKey: string;
@@ -718,6 +777,7 @@ export type TaskDetail = {
   segments: SegmentRecord[];
   frames: Record<string, FrameRecord>;
   segmentGenerations: Record<string, SegmentGeneration>;
+  chunkedGenerationRuns?: ChunkedGenerationRun[];
   videoCleanupTracks?: VideoCleanupTrack[];
   externalQcPairs?: Array<{
     pairId: string;
