@@ -1411,7 +1411,7 @@ export default function App() {
       if (!exists) {
         delete rememberedByTask[selectedTaskId];
         writeSegmentSelectionMap(rememberedByTask);
-      } else if (videoWorkMode === "custom_segment") {
+      } else {
         setSelectedSegmentId(rememberedSegmentId);
         return;
       }
@@ -1446,8 +1446,6 @@ export default function App() {
   useEffect(() => {
     if (!selectedSegment) return;
     if (isWholeVideoSelection) {
-      if (!videoWorkMode && defaultVideoSegment && selectedSegment.segmentId === defaultVideoSegment.segmentId) return;
-      if (videoWorkMode === "custom_segment" && defaultVideoSegment && selectedSegment.segmentId === defaultVideoSegment.segmentId) return;
       if (videoWorkMode !== "whole_video") {
         setVideoWorkMode("whole_video");
       }
@@ -3598,29 +3596,40 @@ export default function App() {
   async function handleTabChange(nextTab: TabId) {
     if (nextTab === tab) return;
     if (tab === "timeline" && nextTab !== "timeline" && nextTab !== "report" && nextTab !== "custom_qc" && nextTab !== "api_logs") {
-      if (!videoWorkMode) {
-        window.alert("Choose whether to work on the whole video or select a segment first.");
-        return;
-      }
-      if (videoWorkMode === "whole_video") {
+      const shouldUseWholeVideo = videoWorkMode !== "custom_segment" || (!selectedSegmentId && !selectedRange);
+      if (shouldUseWholeVideo) {
         try {
           await ensureDefaultVideoSegment();
+          if (videoWorkMode !== "whole_video") {
+            setVideoWorkMode("whole_video");
+          }
         } catch (error) {
           const message = error instanceof Error ? error.message : "Failed to prepare the full video range.";
           window.alert(message);
           return;
         }
       } else {
-        if (!selectedRange) {
-          window.alert("Choose whether to work on the whole video or select a segment first.");
-          return;
-        }
-        try {
-          await ensureSegmentForSelectedFrames();
-        } catch (error) {
-          const message = error instanceof Error ? error.message : "Failed to create segment from selected frames.";
-          window.alert(message);
-          return;
+        if (selectedSegmentId) {
+          setVideoWorkMode("custom_segment");
+        } else {
+          if (!selectedRange) {
+            try {
+              await ensureDefaultVideoSegment();
+              setVideoWorkMode("whole_video");
+            } catch (error) {
+              const message = error instanceof Error ? error.message : "Failed to prepare the full video range.";
+              window.alert(message);
+              return;
+            }
+          } else {
+            try {
+              await ensureSegmentForSelectedFrames();
+            } catch (error) {
+              const message = error instanceof Error ? error.message : "Failed to create segment from selected frames.";
+              window.alert(message);
+              return;
+            }
+          }
         }
       }
     }

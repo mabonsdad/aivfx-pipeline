@@ -229,6 +229,7 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
   const sourceHeight = Number(task?.video?.editSource?.height ?? 0);
   const canOpenCropTool = Boolean(selectedSegmentId || selectedRange);
   const isSegmentCropped = Boolean(selectedSegment?.crop?.enabled);
+  const showWorkingRangeChooser = !selectedSegmentId;
 
   const [isCropModalOpen, setIsCropModalOpen] = useState(false);
   const [cropDraft, setCropDraft] = useState<CropDraft | null>(null);
@@ -483,39 +484,39 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
   return (
     <div className="space-y-4">
       <h3 className="text-lg font-semibold">Select Frames</h3>
-      <div className="rounded-lg border border-ink/15 bg-white p-4">
-        <p className="text-sm font-semibold text-ink">Choose your working range</p>
-        <p className="mt-1 text-sm text-ink/70">
-          The full uploaded video is treated as the default working range. You can continue with the whole video or define a shorter segment.
-        </p>
-        {defaultVideoSegment ? (
-          <p className="mt-2 text-xs text-ink/60">
-            Default video range: frames {defaultVideoSegment.startFrame} to {Math.max(defaultVideoSegment.endFrameExclusive - 1, defaultVideoSegment.startFrame)} (
-            {defaultVideoSegment.durationSec.toFixed(2)}s)
-          </p>
-        ) : (
-          <p className="mt-2 text-xs text-ink/60">Preparing the default full-video range…</p>
-        )}
-        {wholeVideoNeedsChunking ? (
-          <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-            This full video is longer than the current {wholeVideoSinglePassLimitSeconds}s single-pass generation limit. You can still edit and refine frames across the full video, but generation will need chunking and start + end frame video flows will not be available for the whole-video path.
+      {showWorkingRangeChooser ? (
+        <div className="rounded-lg border border-ink/15 bg-white p-4">
+          <p className="text-sm font-semibold text-ink">Choose your working range</p>
+          <p className="mt-1 text-sm text-ink/70">You can continue with the whole source video or define a shorter segment.</p>
+          {defaultVideoSegment ? (
+            <p className="mt-2 text-xs text-ink/60">
+              Default video range: frames {defaultVideoSegment.startFrame} to {Math.max(defaultVideoSegment.endFrameExclusive - 1, defaultVideoSegment.startFrame)} (
+              {defaultVideoSegment.durationSec.toFixed(2)}s)
+            </p>
+          ) : (
+            <p className="mt-2 text-xs text-ink/60">Preparing the default full-video range…</p>
+          )}
+          {wholeVideoNeedsChunking ? (
+            <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+              This full video is longer than the current single-pass generation limit and will be automatically generated in chunks. Some functionality will not be available and it is usually worth testing on an initial segment before returning to generate the whole video.
+            </div>
+          ) : null}
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button
+              type="button"
+              className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={!defaultVideoSegment}
+              onClick={onChooseWholeVideo}
+            >
+              Work on whole video
+            </button>
+            <button type="button" className="rounded-md border border-ink/20 bg-white px-4 py-2 text-sm" onClick={onChooseCustomSegment}>
+              Select segment
+            </button>
           </div>
-        ) : null}
-        <div className="mt-3 flex flex-wrap gap-2">
-          <button
-            type="button"
-            className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
-            disabled={!defaultVideoSegment}
-            onClick={onChooseWholeVideo}
-          >
-            Work on whole video
-          </button>
-          <button type="button" className="rounded-md border border-ink/20 bg-white px-4 py-2 text-sm" onClick={onChooseCustomSegment}>
-            Select segment
-          </button>
         </div>
-      </div>
-      {videoWorkMode === "whole_video" ? (
+      ) : null}
+      {videoWorkMode === "whole_video" && showWorkingRangeChooser ? (
         <div className="rounded-lg border border-ink/15 bg-bg p-4">
           <p className="text-sm font-semibold text-ink">Whole video selected</p>
           <p className="mt-1 text-sm text-ink/70">
@@ -531,7 +532,7 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
           </div>
         </div>
       ) : null}
-      {videoWorkMode !== "custom_segment" ? null : (
+      {!selectedSegmentId && videoWorkMode !== "custom_segment" ? null : (
         <>
       <div className="grid gap-3 lg:grid-cols-[1fr_320px]">
         {timelinePlaybackUrl ? (
@@ -656,6 +657,11 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
             <p className="text-sm text-ink/70">
               {seg.startFrame} {"->"} {Math.max(seg.endFrameExclusive - 1, seg.startFrame)} ({seg.durationSec.toFixed(2)}s)
             </p>
+            {defaultVideoSegment?.segmentId === seg.segmentId && seg.durationSec > wholeVideoSinglePassLimitSeconds + 1e-6 ? (
+              <p className="mt-1 text-xs text-amber-700">
+                This video is longer than single-pass generation limit and will require chunking.
+              </p>
+            ) : null}
           </button>
         ))}
       </div>
@@ -663,7 +669,7 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
         <button
           type="button"
           className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
-          disabled={!selectedRange}
+          disabled={!selectedRange && !selectedSegmentId}
           onClick={onContinueToEditFrames}
         >
           Use selected segment and continue
