@@ -56,7 +56,7 @@ export type GenerateTabCtx = {
   selectedSegmentLimitMessage: string | null;
   selectedSegmentId: string | null;
   generateSegmentMutation: { mutate: () => void };
-  generateChunkedSegmentMutation: { mutate: () => void };
+  generateChunkedSegmentMutation: { mutate: () => void; isPending?: boolean };
   selectedSegmentChunkedGenerationRuns: ChunkedGenerationRun[];
   pauseChunkedGeneration: (payload: { runId: string; reason?: string }) => void;
   resumeChunkedGeneration: (payload: { runId: string }) => void;
@@ -175,6 +175,7 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
   const latestChunkedRun = selectedSegmentChunkedGenerationRuns[0] ?? null;
   const [restartChunkIndex, setRestartChunkIndex] = useState("0");
   const [restartPrompt, setRestartPrompt] = useState("");
+  const isPreparingChunkPlan = Boolean(generateChunkedSegmentMutation.isPending);
 
   useEffect(() => {
     return () => {
@@ -437,6 +438,11 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
               Start Chunked Generation
             </button>
           </div>
+          {isPreparingChunkPlan ? (
+            <div className="rounded-md border border-accent/20 bg-white/80 px-3 py-2 text-sm text-ink">
+              Preparing chunk plan and creating the first chunk. This can take a short while before the chunk list appears.
+            </div>
+          ) : null}
           {generationInputMode !== "start_video" ? (
             <p className="text-xs text-red-700">Switch to `start frame + video` for the long-video chunked flow.</p>
           ) : null}
@@ -471,6 +477,9 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
                     Resume
                   </button>
                 </div>
+              </div>
+              <div className="rounded-md border border-ink/10 bg-bg px-3 py-2 text-xs text-ink/70">
+                Chunk videos can be previewed below as they complete. A stitched combined long-video output is not created yet in this step; that will come from the later stitch / merge pass.
               </div>
 
               <div className="space-y-2 rounded-md border border-ink/10 bg-bg p-3">
@@ -518,6 +527,8 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
               <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
                 {latestChunkedRun.chunks.map((chunk) => {
                   const anchorUrl = frameVariantImageUrl(chunk.anchorFrameId, chunk.anchorVariantId);
+                  const chunkGeneration = chunk.generationId ? task?.segmentGenerations?.[chunk.generationId] ?? null : null;
+                  const chunkThumbnail = chunkGeneration ? generationThumbnailUrl(chunkGeneration) : null;
                   return (
                     <div key={`${latestChunkedRun.runId}-${chunk.chunkIndex}`} className="rounded-md border border-ink/15 bg-white p-3">
                       <div className="mb-2 flex items-center justify-between gap-2">
@@ -537,6 +548,56 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
                         <p>Anchor frame source: {chunk.anchorSource === "initial_variant" ? "selected edit frame" : `${chunk.anchorFramesFromPrevious} frames before previous chunk end`}</p>
                         {chunk.sourceGeneratedFrameIndex != null ? <p>Extracted from previous output frame {chunk.sourceGeneratedFrameIndex}</p> : null}
                         {chunk.error ? <p className="text-red-700">{chunk.error}</p> : null}
+                      </div>
+                      <div className="mt-3 rounded-md border border-ink/10 bg-bg p-2">
+                        <p className="text-[11px] font-semibold uppercase tracking-wide text-ink/55">Generated chunk output</p>
+                        {chunkGeneration?.downloadUrl ? (
+                          <>
+                            {chunkThumbnail ? (
+                              <img
+                                src={chunkThumbnail}
+                                alt={`Chunk ${chunk.chunkIndex + 1} generated preview`}
+                                className="mt-2 aspect-video w-full rounded-md bg-white object-contain"
+                                onError={onAssetError}
+                              />
+                            ) : (
+                              <div className="mt-2 flex aspect-video items-center justify-center rounded-md border border-dashed border-ink/20 bg-white text-xs text-ink/55">
+                                Video thumbnail unavailable
+                              </div>
+                            )}
+                            <div className="mt-2 flex items-center gap-2">
+                              <button
+                                type="button"
+                                className="rounded border border-ink/20 bg-white px-3 py-2 text-xs"
+                                onClick={() =>
+                                  setVideoPreviewModal({
+                                    url: chunkGeneration.downloadUrl as string,
+                                    label: `Chunk ${chunk.chunkIndex + 1} · ${chunkGeneration.luma.model}`,
+                                  })
+                                }
+                              >
+                                Preview chunk
+                              </button>
+                              <a
+                                href={chunkGeneration.downloadUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                download
+                                className="rounded border border-ink/20 bg-white px-3 py-2 text-xs"
+                              >
+                                Download
+                              </a>
+                            </div>
+                          </>
+                        ) : (
+                          <p className="mt-2 text-xs text-ink/55">
+                            {chunk.status === "failed"
+                              ? "No output was produced for this chunk."
+                              : chunk.status === "complete"
+                                ? "Output is being decorated with preview URLs."
+                                : "This chunk video will appear here once it has completed."}
+                          </p>
+                        )}
                       </div>
                     </div>
                   );
