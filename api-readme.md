@@ -6,9 +6,9 @@ The API calls the same editing and generation modules used by the application. I
 
 The application UI is now organized around:
 
-- `Source`
-- `Create`
-- `Outputs`
+- `Select`
+- `Edit`
+- `Generate`
 - `Post Process`
 - `Reports`
 

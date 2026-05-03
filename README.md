@@ -14,26 +14,26 @@ Production-oriented React + AWS serverless application for frame-accurate VFX ex
 
 The underlying storage is still task-based, but the UI now presents each task as an uploaded source video. Assets and metadata remain private to the authenticated Cognito user.
 
-1. **Source**
+1. **Select**
    - Upload and ingest a source video.
    - The backend probes media with `ffprobe`, creates or records a constant-frame-rate edit source, generates a lightweight preview proxy, and creates timeline thumbnails.
    - The app creates a default full-video working range automatically. Users can also define and save shorter custom working ranges.
    - Optional crop is configured here and is later merged back in Post Process.
 
-2. **Create**
+2. **Edit**
    - Users choose a creation route up front:
      - source motion (`first frame + video`)
      - animate between two frames (`start + end`)
      - animate from start frame only
-   - The Create area then exposes only the inputs required for that route.
+   - The Edit area then exposes only the inputs required for that route.
    - `Edit frames` remains the main still-edit surface.
    - `Refine Frames` is now a contextual workspace opened from edited outputs rather than a primary peer step.
 
-3. **Outputs**
+3. **Generate**
    - Generated attempts are reviewed here for the current working range.
    - The chosen output is compared against the source and handed forward into Post Process.
    - Multiple overlapping generation jobs are supported. Jobs are tracked independently and completed results are added without overwriting earlier outputs.
-   - For long-video source-motion runs, chunked/continuation drafts stay inside their session UI until a stitched draft is saved back to Outputs.
+   - For long-video source-motion runs, chunked/continuation drafts stay inside their session UI until a stitched draft is saved back to Generate.
 
 4. **Post Process**
    - Acts on the currently chosen output from Outputs.
@@ -66,7 +66,7 @@ Internally, the app is moving toward these reusable concepts:
 - `Post Process Session`
 - `Report Set`
 
-The UI has already been restructured around those concepts even though storage compatibility is still maintained through the existing task/segment/frame/generation records.
+The UI has already been restructured around those concepts even though storage compatibility is maintained through the existing task/segment/frame/generation records.
 
 ## Supported Generation Models
 

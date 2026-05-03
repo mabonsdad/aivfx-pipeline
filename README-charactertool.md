@@ -4,7 +4,7 @@ This document records the current Wan Animate integration behavior and the recom
 
 ## Current State
 
-The main `Generate Video` workflow is still focused on general VFX segment replacement.
+The main `Generate` tab is still focused on general VFX segment replacement.
 
 Wan2.2 Animate is now available as one of the first-frame + video generation options, but it is treated as a constrained provider lane rather than a complete character-animation product surface.
 
