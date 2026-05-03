@@ -22,7 +22,16 @@ def _request(method: str, url: str, *, token: str, payload: dict[str, Any] | Non
         "Content-Type": "application/json",
     }
     response = requests.request(method, url, headers=headers, json=payload, timeout=90)
-    response.raise_for_status()
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        detail: str
+        try:
+            body = response.json()
+            detail = str(body)
+        except Exception:
+            detail = response.text.strip() or response.reason or "Unknown Runway error"
+        raise RunwayError(f"Runway API error ({response.status_code}): {detail}") from exc
     return response.json()
 
 
@@ -32,11 +41,13 @@ def create_video_to_video(
     video_uri: str,
     prompt_text: str | None,
     first_frame_uri: str | None,
+    ratio: str,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "model": "gen4_aleph",
         "videoUri": video_uri,
         "promptText": prompt_text or "Modify the source video while preserving overall composition and motion continuity.",
+        "ratio": ratio,
     }
     if first_frame_uri:
         payload["references"] = [{"type": "image", "uri": first_frame_uri}]

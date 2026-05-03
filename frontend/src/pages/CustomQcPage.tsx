@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { UseMutationResult, UseQueryResult } from "@tanstack/react-query";
 
 import { apiClient } from "../api/client";
+import { StatusNotice } from "../components/layout/UiFeedback";
 import { FRAME_TEST_OPTIONS, ReportCreateModal } from "../components/reports/QcReportShared";
 import type { CustomReportOutputRef, CustomReportRecord, TaskDetail } from "../types/api";
 
@@ -232,9 +233,21 @@ export default function CustomQcPage({
             Refresh
           </button>
         </div>
-        {taskQuery.error ? <p className="text-sm text-red-600">{taskQuery.error.message}</p> : null}
-        {createCustomReportMutation.error ? <p className="text-sm text-red-600">{createCustomReportMutation.error.message}</p> : null}
-        {deleteCustomReportMutation.error ? <p className="text-sm text-red-600">{deleteCustomReportMutation.error.message}</p> : null}
+        {taskQuery.error ? (
+          <StatusNotice variant="error">
+            <p>{taskQuery.error.message}</p>
+          </StatusNotice>
+        ) : null}
+        {createCustomReportMutation.error ? (
+          <StatusNotice variant="error">
+            <p>{createCustomReportMutation.error.message}</p>
+          </StatusNotice>
+        ) : null}
+        {deleteCustomReportMutation.error ? (
+          <StatusNotice variant="error">
+            <p>{deleteCustomReportMutation.error.message}</p>
+          </StatusNotice>
+        ) : null}
         {!customReports.length ? (
           <p className="text-sm text-ink/60">No custom QC reports created yet.</p>
         ) : (

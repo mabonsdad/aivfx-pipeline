@@ -106,6 +106,7 @@ class SegmentGenerateRequest(BaseModel):
         "ray-2",
         "ray-flash-2",
         "runway-gen4.5",
+        "runway-gen4-aleph",
         "kling-2.6",
         "kling-o1",
         "kling-v3-omni-video",
@@ -127,6 +128,7 @@ class SegmentGenerateRequest(BaseModel):
         "reimagine_2",
         "reimagine_3",
         "runway_i2v",
+        "runway_aleph_v2v",
         "kling_start_end",
         "kling_start_only",
         "veo_start_end",
@@ -144,6 +146,7 @@ class SegmentGenerateRequest(BaseModel):
     replicateKlingMode: Literal["std", "pro"] | None = None
     replicateKlingV3Mode: Literal["standard", "pro"] | None = None
     wan27Resolution: Literal["720p", "1080p"] | None = None
+    preserveFrames: bool = True
 
 
 class ApiAssetUploadInitRequest(BaseModel):
@@ -180,6 +183,7 @@ class ApiReferenceVideoGenerateRequest(BaseModel):
         "ray-2",
         "ray-flash-2",
         "runway-gen4.5",
+        "runway-gen4-aleph",
         "kling-2.6",
         "kling-o1",
         "kling-v3-omni-video",
@@ -201,6 +205,7 @@ class ApiReferenceVideoGenerateRequest(BaseModel):
         "reimagine_2",
         "reimagine_3",
         "runway_i2v",
+        "runway_aleph_v2v",
         "kling_start_end",
         "kling_start_only",
         "veo_start_end",
@@ -219,12 +224,14 @@ class ApiReferenceVideoGenerateRequest(BaseModel):
     replicateKlingMode: Literal["std", "pro"] | None = None
     replicateKlingV3Mode: Literal["standard", "pro"] | None = None
     wan27Resolution: Literal["720p", "1080p"] | None = None
+    preserveFrames: bool = True
 
 
 class MergeGenerationAdjustment(BaseModel):
     startFrameOverride: int | None = Field(default=None, ge=0)
     trimStartFrames: int = Field(default=0, ge=0)
     trimEndFrames: int = Field(default=0, ge=0)
+    playbackRate: float | None = Field(default=None, gt=0.05, le=20.0)
 
 
 class MergeRequest(BaseModel):
@@ -244,6 +251,7 @@ class ChunkedSegmentGenerateRequest(BaseModel):
     lumaModel: Literal[
         "ray-2",
         "ray-flash-2",
+        "runway-gen4-aleph",
         "kling-o1",
         "kling-v3-omni-video",
         "seedance-2.0-reference-to-video",
@@ -260,17 +268,20 @@ class ChunkedSegmentGenerateRequest(BaseModel):
         "reimagine_1",
         "reimagine_2",
         "reimagine_3",
+        "runway_aleph_v2v",
         "wan_animate_replace",
         "kling_o1_video_edit",
         "kling_v3_omni_video_edit",
         "seedance_reference_to_video",
         "wan27_video_edit",
     ]
-    prompt: str | None = Field(default=None)
+    openingPrompt: str | None = Field(default=None)
+    continuationPrompt: str | None = Field(default=None)
     firstFrameVariantId: str | None = None
     replicateKlingMode: Literal["std", "pro"] | None = None
     replicateKlingV3Mode: Literal["standard", "pro"] | None = None
     wan27Resolution: Literal["720p", "1080p"] | None = None
+    preserveFrames: bool = True
 
 
 class ChunkedGenerationPauseRequest(BaseModel):
@@ -282,9 +293,12 @@ class ChunkedGenerationRestartRequest(BaseModel):
     prompt: str | None = None
 
 
-class QcRunRequest(BaseModel):
-    generationIds: list[str] | None = Field(default=None, max_length=20)
-    mode: Literal["standard", "advanced_frame"] = "standard"
+class ChunkedGenerationSaveDraftRequest(BaseModel):
+    pass
+
+
+class ChunkedGenerationCancelRequest(BaseModel):
+    reason: str | None = None
 
 
 class MotionSyncQcRunRequest(BaseModel):
@@ -362,6 +376,16 @@ class ManualRefineUploadInitRequest(BaseModel):
 
 class ManualRefineUploadCompleteRequest(BaseModel):
     sourceVariantId: str = Field(min_length=1)
+    uploadKey: str = Field(min_length=1)
+    filename: str = Field(min_length=1, max_length=255)
+
+
+class ManualFrameUploadInitRequest(BaseModel):
+    filename: str = Field(min_length=1, max_length=255)
+    contentType: str = Field(min_length=1, max_length=120)
+
+
+class ManualFrameUploadCompleteRequest(BaseModel):
     uploadKey: str = Field(min_length=1)
     filename: str = Field(min_length=1, max_length=255)
 

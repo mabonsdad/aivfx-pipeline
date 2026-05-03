@@ -1,6 +1,8 @@
 import { useMemo, useRef, useState, type ChangeEvent } from "react";
 
 import { apiClient } from "../../api/client";
+import { DeleteIcon, DownloadIcon, IconActionButton, PreviewIcon } from "../../components/layout/MediaActionButtons";
+import { PendingButtonLabel, StatusNotice } from "../../components/layout/UiFeedback";
 import type { FrameVariant } from "../../types/api";
 
 type RefineVariantGroup = {
@@ -13,6 +15,7 @@ type RefineVariantGroup = {
 export type RefineFramesTabCtx = {
   refineFrameTab: "first" | "last";
   setRefineFrameTab: (tab: "first" | "last") => void;
+  allowEndFrameTab: boolean;
   activeRefineFrame:
     | {
         frameId: string;
@@ -51,36 +54,6 @@ function isManualRefineVariant(variant: FrameVariant): boolean {
   return variant.generationSettings?.workflow === "manual_refine_upload";
 }
 
-function PreviewIcon() {
-  return (
-    <svg viewBox="0 0 24 24" className="h-5 w-5" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2">
-      <path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6Z" />
-      <circle cx="12" cy="12" r="3" />
-    </svg>
-  );
-}
-
-function DownloadIcon() {
-  return (
-    <svg viewBox="0 0 24 24" className="h-5 w-5" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2">
-      <path d="M12 3v12" />
-      <path d="m7 10 5 5 5-5" />
-      <path d="M4 21h16" />
-    </svg>
-  );
-}
-
-function DeleteIcon() {
-  return (
-    <svg viewBox="0 0 24 24" className="h-5 w-5" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2">
-      <path d="M3 6h18" />
-      <path d="M8 6V4h8v2" />
-      <path d="m6 6 1 14h10l1-14" />
-      <path d="M10 11v6M14 11v6" />
-    </svg>
-  );
-}
-
 function ManualBadge() {
   return (
     <span className="inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-800">
@@ -93,6 +66,7 @@ export default function RefineFramesTab({ ctx }: RefineFramesTabProps) {
   const {
     refineFrameTab,
     setRefineFrameTab,
+    allowEndFrameTab,
     activeRefineFrame,
     refineGroups,
     focusedEditedVariantId,
@@ -108,6 +82,7 @@ export default function RefineFramesTab({ ctx }: RefineFramesTabProps) {
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
   const [isExporting, setIsExporting] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
+  const [uiError, setUiError] = useState<string | null>(null);
 
   const focusedGroup = focusedEditedVariantId
     ? refineGroups.find((group) => group.editedVariant.variantId === focusedEditedVariantId) ?? null
@@ -143,6 +118,7 @@ export default function RefineFramesTab({ ctx }: RefineFramesTabProps) {
   async function handleExport(format: "psd" | "png_zip") {
     if (!selectedTaskId || !activeRefineFrame || !sourceEditedVariant) return;
     setIsExporting(true);
+    setUiError(null);
     try {
       const exported = await apiClient.exportManualRefinePsd(selectedTaskId, activeRefineFrame.frameId, {
         sourceVariantId: sourceEditedVariant.variantId,
@@ -156,7 +132,7 @@ export default function RefineFramesTab({ ctx }: RefineFramesTabProps) {
       link.click();
       link.remove();
     } catch (error) {
-      window.alert(error instanceof Error ? error.message : "Failed to export layer bundle");
+      setUiError(error instanceof Error ? error.message : "Failed to export layer bundle");
     } finally {
       setIsExporting(false);
     }
@@ -167,6 +143,7 @@ export default function RefineFramesTab({ ctx }: RefineFramesTabProps) {
     event.target.value = "";
     if (!file || !selectedTaskId || !activeRefineFrame || !sourceEditedVariant) return;
     setIsUploading(true);
+    setUiError(null);
     try {
       const init = await apiClient.initManualRefineUpload(selectedTaskId, activeRefineFrame.frameId, {
         sourceVariantId: sourceEditedVariant.variantId,
@@ -191,7 +168,7 @@ export default function RefineFramesTab({ ctx }: RefineFramesTabProps) {
       selectRefineSourceVariant(completed.variant.variantId);
       await refreshTask();
     } catch (error) {
-      window.alert(error instanceof Error ? error.message : "Failed to upload manual refine");
+      setUiError(error instanceof Error ? error.message : "Failed to upload manual refine");
     } finally {
       setIsUploading(false);
     }
@@ -200,25 +177,15 @@ export default function RefineFramesTab({ ctx }: RefineFramesTabProps) {
   function renderVariantActions(frameId: string, variant: FrameVariant, label: string) {
     return (
       <div className="mt-2 flex items-center gap-2">
-        <button
-          type="button"
-          className="rounded border border-ink/20 bg-white p-2 text-xs"
-          title="Preview"
-          onClick={() => variant.imageUrl && setImagePreviewModal({ url: variant.imageUrl, label })}
-        >
+        <IconActionButton title="Preview" onClick={() => variant.imageUrl && setImagePreviewModal({ url: variant.imageUrl, label })}>
           <PreviewIcon />
-        </button>
-        <a href={variant.imageUrl} target="_blank" rel="noreferrer" download className="rounded border border-ink/20 bg-white p-2 text-xs" title="Download full quality image">
+        </IconActionButton>
+        <IconActionButton href={variant.imageUrl} download title="Download full quality image">
           <DownloadIcon />
-        </a>
-        <button
-          type="button"
-          className="rounded border border-red-200 bg-white p-2 text-xs text-red-700"
-          title={`Delete ${label.toLowerCase()}`}
-          onClick={() => void handleDeleteVariant(frameId, variant, label)}
-        >
+        </IconActionButton>
+        <IconActionButton title={`Delete ${label.toLowerCase()}`} tone="danger" onClick={() => void handleDeleteVariant(frameId, variant, label)}>
           <DeleteIcon />
-        </button>
+        </IconActionButton>
       </div>
     );
   }
@@ -226,7 +193,21 @@ export default function RefineFramesTab({ ctx }: RefineFramesTabProps) {
   return (
     <div className="space-y-4">
       <input ref={uploadInputRef} type="file" accept="image/*" className="hidden" onChange={(event) => void handleManualUpload(event)} />
-      <h3 className="text-lg font-semibold">Refine Frames</h3>
+      {isExporting ? (
+        <StatusNotice variant="loading">
+          <p className="text-sm">Preparing manual refine export. This can take a moment before the file download starts.</p>
+        </StatusNotice>
+      ) : null}
+      {isUploading ? (
+        <StatusNotice variant="loading">
+          <p className="text-sm">Uploading manual refine and creating a new saved refined output.</p>
+        </StatusNotice>
+      ) : null}
+      {uiError ? (
+        <StatusNotice variant="error">
+          <p className="text-sm">{uiError}</p>
+        </StatusNotice>
+      ) : null}
 
       <div className="flex gap-2">
         <button
@@ -235,17 +216,19 @@ export default function RefineFramesTab({ ctx }: RefineFramesTabProps) {
         >
           Start Frame
         </button>
-        <button
-          onClick={() => setRefineFrameTab("last")}
-          className={`rounded-md px-3 py-2 text-sm ${refineFrameTab === "last" ? "bg-ink text-white" : "bg-ink/10"}`}
-        >
-          End Frame (Optional)
-        </button>
+        {allowEndFrameTab ? (
+          <button
+            onClick={() => setRefineFrameTab("last")}
+            className={`rounded-md px-3 py-2 text-sm ${refineFrameTab === "last" ? "bg-ink text-white" : "bg-ink/10"}`}
+          >
+            End Frame
+          </button>
+        ) : null}
       </div>
 
       {!activeRefineFrame ? (
         <div className="rounded-md border border-dashed border-ink/20 bg-bg p-6 text-sm text-ink/60">
-          Select frames in Select Frames first, then return here to review and refine them.
+          Choose a working range in Source first, then return here to review and refine the frame edits.
         </div>
       ) : null}
 
@@ -301,7 +284,7 @@ export default function RefineFramesTab({ ctx }: RefineFramesTabProps) {
                     onClick={() => void handleExport("psd")}
                     disabled={isExporting || !sourceEditedVariant}
                   >
-                    {isExporting ? "Exporting PSD..." : "Export PSD"}
+                    <PendingButtonLabel isPending={isExporting} idle="Export PSD" pending="Exporting PSD..." />
                   </button>
                   <button
                     type="button"
@@ -309,7 +292,7 @@ export default function RefineFramesTab({ ctx }: RefineFramesTabProps) {
                     onClick={() => void handleExport("png_zip")}
                     disabled={isExporting || !sourceEditedVariant}
                   >
-                    {isExporting ? "Exporting..." : "Export PNG Layers"}
+                    <PendingButtonLabel isPending={isExporting} idle="Export PNG Layers" pending="Exporting layers..." />
                   </button>
                   <button
                     type="button"
@@ -318,7 +301,7 @@ export default function RefineFramesTab({ ctx }: RefineFramesTabProps) {
                     disabled={isUploading || !sourceEditedVariant}
                     title="Upload flattened image at same resolution/dimensions"
                   >
-                    {isUploading ? "Uploading..." : "Upload Manual Refine"}
+                    <PendingButtonLabel isPending={isUploading} idle="Upload Manual Refine" pending="Uploading refine..." />
                   </button>
                 </div>
               </div>

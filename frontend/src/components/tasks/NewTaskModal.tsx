@@ -1,4 +1,5 @@
 import type { ChangeEvent } from "react";
+import { PendingButtonLabel, StatusNotice } from "../layout/UiFeedback";
 
 type NewTaskStage = "idle" | "creating" | "uploading" | "ingesting" | "error";
 
@@ -98,7 +99,13 @@ export default function NewTaskModal({
             <p className="mt-1 text-xs text-ink/60">
               Final name: <span className="font-medium">{normalizedTaskName || "(invalid)"}</span> (max 15 chars)
             </p>
-            {showTaskNameExistsWarning ? <p className="text-xs text-red-600">Name already used by another uploaded video.</p> : null}
+            {showTaskNameExistsWarning ? (
+              <div className="mt-2">
+                <StatusNotice variant="warning">
+                  <p className="text-xs">Name already used by another uploaded video.</p>
+                </StatusNotice>
+              </div>
+            ) : null}
           </div>
           <div>
             <label className="mb-1 block text-sm font-medium">Video file</label>
@@ -193,13 +200,17 @@ export default function NewTaskModal({
               </div>
             </div>
           ) : null}
-          {error ? <p className="text-sm text-red-600">{error}</p> : null}
+          {error ? (
+            <StatusNotice variant="error">
+              <p>{error}</p>
+            </StatusNotice>
+          ) : null}
           <button
             className="w-full rounded-md bg-accent px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-50"
             disabled={!canSubmit || taskNameAlreadyExists || isBusy}
             onClick={onSubmit}
           >
-            {submitLabel}
+            <PendingButtonLabel isPending={isBusy} idle="Upload Video" pending={submitLabel} />
           </button>
         </div>
       </div>

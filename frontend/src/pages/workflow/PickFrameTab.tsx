@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType, type PointerEvent, type RefObject } from "react";
 
+import { HelpInfoButton, PendingButtonLabel, StatusNotice } from "../../components/layout/UiFeedback";
 import type { SegmentRecord, TaskDetail } from "../../types/api";
 
 type CropAspect = "16:9" | "9:16";
@@ -173,6 +174,7 @@ export type PickFrameTabCtx = {
     overLimit: boolean;
     limitMessage: string | null;
   } | null;
+  generationInputMode: "start_video" | "start_end" | "start_only";
   lumaModel: string;
   videoWorkMode: "whole_video" | "custom_segment" | null;
   defaultVideoSegment: SegmentRecord | null;
@@ -180,12 +182,15 @@ export type PickFrameTabCtx = {
   wholeVideoSinglePassLimitSeconds: number;
   onChooseWholeVideo: () => void;
   onChooseCustomSegment: () => void;
+  onBeginCustomSegmentEdit: () => void;
+  onCancelWorkingRangeDraft: () => void;
   onContinueToEditFrames: () => void;
   selectedSegmentId: string | null;
   selectedSegment: SegmentRecord | null;
+  segmentDraftFallbackAvailable: boolean;
   setSelectedSegmentId: (segmentId: string | null) => void;
   ensureSegmentForSelectedFrames: () => Promise<string | null>;
-  saveSegmentCrop: (crop: { aspect: CropAspect; x: number; y: number; width: number; height: number; featherPx?: number } | null) => Promise<void>;
+  saveSegmentCrop: (crop: { aspect: CropAspect; x: number; y: number; width: number; height: number; featherPx?: number } | null) => Promise<string | null>;
   isSavingSegmentCrop: boolean;
 };
 
@@ -210,12 +215,12 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
     lastFrame,
     setLastFrameId,
     selectedRange,
-    videoWorkMode,
+    generationInputMode,
     defaultVideoSegment,
     wholeVideoNeedsChunking,
     wholeVideoSinglePassLimitSeconds,
-    onChooseWholeVideo,
-    onChooseCustomSegment,
+    onBeginCustomSegmentEdit,
+    onCancelWorkingRangeDraft,
     onContinueToEditFrames,
     selectedSegmentId,
     selectedSegment,
@@ -227,14 +232,18 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
 
   const sourceWidth = Number(task?.video?.editSource?.width ?? 0);
   const sourceHeight = Number(task?.video?.editSource?.height ?? 0);
+  const totalFrameCount = frameCount(task);
+  const sourceFps = fpsValue(task);
+  const sourceDurationSec = sourceFps > 0 ? totalFrameCount / sourceFps : 0;
   const canOpenCropTool = Boolean(selectedSegmentId || selectedRange);
-  const isSegmentCropped = Boolean(selectedSegment?.crop?.enabled);
-  const showWorkingRangeChooser = !selectedSegmentId;
+  const [isWorkingRangeModalOpen, setIsWorkingRangeModalOpen] = useState(false);
 
   const [isCropModalOpen, setIsCropModalOpen] = useState(false);
   const [cropDraft, setCropDraft] = useState<CropDraft | null>(null);
   const [modalLayoutTick, setModalLayoutTick] = useState(0);
   const [modalScrubSec, setModalScrubSec] = useState(0);
+  const [uiError, setUiError] = useState<string | null>(null);
+  const workingRangeVideoRef = useRef<HTMLVideoElement | null>(null);
   const modalVideoRef = useRef<HTMLVideoElement | null>(null);
   const modalVideoWrapRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<DragState | null>(null);
@@ -261,15 +270,83 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
     if (!cropDraft || sourceWidth <= 0 || sourceHeight <= 0) return true;
     return cropDraft.x === 0 && cropDraft.y === 0 && cropDraft.width === sourceWidth && cropDraft.height === sourceHeight;
   }, [cropDraft, sourceHeight, sourceWidth]);
+  const visibleSegments = useMemo(() => (task?.segments ?? []).filter((segment) => !segment.internalOnly), [task?.segments]);
+  const uncroppedSegments = useMemo(
+    () => visibleSegments.filter((segment) => !segment.crop?.enabled),
+    [visibleSegments],
+  );
+  const selectedBaseSegment = useMemo(() => {
+    if (!selectedSegment) return defaultVideoSegment ?? uncroppedSegments[0] ?? null;
+    if (!selectedSegment.crop?.enabled) return selectedSegment;
+    return (
+      uncroppedSegments.find(
+        (segment) =>
+          segment.startFrame === selectedSegment.startFrame &&
+          segment.endFrameExclusive === selectedSegment.endFrameExclusive,
+      ) ?? selectedSegment
+    );
+  }, [defaultVideoSegment, selectedSegment, uncroppedSegments]);
+  const orderedSegments = useMemo(() => {
+    if (!uncroppedSegments.length) return uncroppedSegments;
+    const defaultId = defaultVideoSegment?.segmentId ?? null;
+    return [...uncroppedSegments].sort((a, b) => {
+      if (a.segmentId === defaultId) return -1;
+      if (b.segmentId === defaultId) return 1;
+      return a.startFrame - b.startFrame || a.endFrameExclusive - b.endFrameExclusive;
+    });
+  }, [defaultVideoSegment?.segmentId, uncroppedSegments]);
+  const cropOptions = useMemo(() => {
+    if (!selectedBaseSegment) return [];
+    const matching = visibleSegments.filter(
+      (segment) =>
+        segment.startFrame === selectedBaseSegment.startFrame &&
+        segment.endFrameExclusive === selectedBaseSegment.endFrameExclusive,
+    );
+    return matching.sort((a, b) => {
+      const aCrop = Boolean(a.crop?.enabled);
+      const bCrop = Boolean(b.crop?.enabled);
+      if (aCrop !== bCrop) return aCrop ? 1 : -1;
+      if (a.segmentId === selectedBaseSegment.segmentId) return -1;
+      if (b.segmentId === selectedBaseSegment.segmentId) return 1;
+      return a.segmentId.localeCompare(b.segmentId);
+    });
+  }, [selectedBaseSegment, visibleSegments]);
+
+  const openWorkingRangeModal = useCallback(() => {
+    if (selectedSegmentId || !selectedRange) {
+      onBeginCustomSegmentEdit();
+    }
+    setIsWorkingRangeModalOpen(true);
+  }, [onBeginCustomSegmentEdit, selectedRange, selectedSegmentId]);
+
+  const closeWorkingRangeModal = useCallback(() => {
+    onCancelWorkingRangeDraft();
+    setIsWorkingRangeModalOpen(false);
+    setUiError(null);
+  }, [onCancelWorkingRangeDraft]);
+
+  const saveWorkingRange = useCallback(async () => {
+    setUiError(null);
+    try {
+      const segmentId = await ensureSegmentForSelectedFrames();
+      if (!segmentId) {
+        throw new Error("Pick a valid start and end frame before saving this working range.");
+      }
+      setIsWorkingRangeModalOpen(false);
+    } catch (error) {
+      setUiError(error instanceof Error ? error.message : "Failed to save working range.");
+    }
+  }, [ensureSegmentForSelectedFrames]);
 
   const openCropModal = useCallback(async () => {
     if (!canOpenCropTool || sourceWidth <= 0 || sourceHeight <= 0) return;
-    let segment = selectedSegment;
+    let segment: SegmentRecord | null = selectedBaseSegment ?? selectedSegment;
     if (!segment) {
       const ensured = await ensureSegmentForSelectedFrames();
       if (!ensured) return;
       segment = task?.segments.find((item) => item.segmentId === ensured) ?? null;
     }
+    if (!segment) return;
     const defaultAspect: CropAspect =
       (segment?.crop?.aspect as CropAspect | undefined) ??
       (sourceWidth >= sourceHeight ? "16:9" : "9:16");
@@ -293,7 +370,7 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
       });
     }
     setIsCropModalOpen(true);
-  }, [canOpenCropTool, ensureSegmentForSelectedFrames, selectedSegment, sourceHeight, sourceWidth, task?.segments]);
+  }, [canOpenCropTool, ensureSegmentForSelectedFrames, selectedBaseSegment, selectedSegment, sourceHeight, sourceWidth, task?.segments]);
 
   useEffect(() => {
     if (!isCropModalOpen) return;
@@ -440,14 +517,15 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
 
   const applyCrop = useCallback(async () => {
     if (!cropDraft) return;
+    setUiError(null);
     try {
-      if (!selectedSegmentId) {
-        const segmentId = await ensureSegmentForSelectedFrames();
-        if (!segmentId) return;
-        setSelectedSegmentId(segmentId);
-      }
       if (isFullFrame) {
-        await saveSegmentCrop(null);
+        if (selectedBaseSegment) {
+          setSelectedSegmentId(selectedBaseSegment.segmentId);
+          setFirstFrameId(selectedBaseSegment.startFrameId);
+          setLastFrameId(selectedBaseSegment.endFrameId);
+          setCurrentFrameIndex(selectedBaseSegment.startFrame);
+        }
       } else {
         await saveSegmentCrop({
           aspect: cropDraft.aspect,
@@ -460,9 +538,9 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
       }
       setIsCropModalOpen(false);
     } catch (error) {
-      window.alert(error instanceof Error ? error.message : "Failed to save crop");
+      setUiError(error instanceof Error ? error.message : "Failed to save crop");
     }
-  }, [cropDraft, ensureSegmentForSelectedFrames, isFullFrame, saveSegmentCrop, selectedSegmentId, setSelectedSegmentId]);
+  }, [cropDraft, isFullFrame, saveSegmentCrop, selectedBaseSegment, setCurrentFrameIndex, setFirstFrameId, setLastFrameId, setSelectedSegmentId]);
 
   const cropStyle = useMemo(() => {
     if (!cropDraft || sourceWidth <= 0 || sourceHeight <= 0 || !modalVideoWrapRef.current || !modalVideoRef.current) return null;
@@ -481,208 +559,345 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
     };
   }, [cropDraft, modalLayoutTick, sourceHeight, sourceWidth, isCropModalOpen]);
 
+  const sourceAspectRatio = sourceWidth > 0 && sourceHeight > 0 ? `${sourceWidth} / ${sourceHeight}` : "16 / 9";
   return (
     <div className="space-y-4">
-      <h3 className="text-lg font-semibold">Select Frames</h3>
-      {showWorkingRangeChooser ? (
-        <div className="rounded-lg border border-ink/15 bg-white p-4">
-          <p className="text-sm font-semibold text-ink">Choose your working range</p>
-          <p className="mt-1 text-sm text-ink/70">You can continue with the whole source video or define a shorter segment.</p>
-          {defaultVideoSegment ? (
-            <p className="mt-2 text-xs text-ink/60">
-              Default video range: frames {defaultVideoSegment.startFrame} to {Math.max(defaultVideoSegment.endFrameExclusive - 1, defaultVideoSegment.startFrame)} (
-              {defaultVideoSegment.durationSec.toFixed(2)}s)
-            </p>
-          ) : (
-            <p className="mt-2 text-xs text-ink/60">Preparing the default full-video range…</p>
-          )}
-          {wholeVideoNeedsChunking ? (
-            <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-              This full video is longer than the current single-pass generation limit and will be automatically generated in chunks. Some functionality will not be available and it is usually worth testing on an initial segment before returning to generate the whole video.
+      {uiError ? (
+        <StatusNotice variant="error">
+          <p>{uiError}</p>
+        </StatusNotice>
+      ) : null}
+      <div className="rounded-2xl border border-ink/10 bg-card p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="flex items-start gap-2">
+            <div>
+              <p className="text-sm font-semibold text-ink">Select Working Range</p>
+              <p className="text-xs text-ink/60">Choose a segment of the video to work on or use the whole video</p>
             </div>
-          ) : null}
-          <div className="mt-3 flex flex-wrap gap-2">
-            <button
-              type="button"
-              className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
-              disabled={!defaultVideoSegment}
-              onClick={onChooseWholeVideo}
-            >
-              Work on whole video
-            </button>
-            <button type="button" className="rounded-md border border-ink/20 bg-white px-4 py-2 text-sm" onClick={onChooseCustomSegment}>
-              Select segment
-            </button>
           </div>
-        </div>
-      ) : null}
-      {videoWorkMode === "whole_video" && showWorkingRangeChooser ? (
-        <div className="rounded-lg border border-ink/15 bg-bg p-4">
-          <p className="text-sm font-semibold text-ink">Whole video selected</p>
-          <p className="mt-1 text-sm text-ink/70">
-            The first and last frames of the uploaded video are being used automatically for the rest of the workflow.
-          </p>
-          <div className="mt-3 flex flex-wrap gap-2">
-            <button type="button" className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-white" onClick={onContinueToEditFrames}>
-              Continue to Edit frames
-            </button>
-            <button type="button" className="rounded-md border border-ink/20 bg-white px-4 py-2 text-sm" onClick={onChooseCustomSegment}>
-              Switch to custom segment
-            </button>
-          </div>
-        </div>
-      ) : null}
-      {!selectedSegmentId && videoWorkMode !== "custom_segment" ? null : (
-        <>
-      <div className="grid gap-3 lg:grid-cols-[1fr_320px]">
-        {timelinePlaybackUrl ? (
-          <div className="relative w-fit max-w-full">
-            <video
-              ref={timelineVideoRef}
-              className="max-h-[360px] max-w-full rounded-lg border border-ink/10"
-              src={timelinePlaybackUrl}
-              controls
-              preload="metadata"
-              onTimeUpdate={(e) => {
-                const totalFrames = frameCount(task);
-                if (!totalFrames) return;
-                const fps = fpsValue(task);
-                const nextFrame = Math.max(0, Math.min(totalFrames - 1, Math.round(e.currentTarget.currentTime * fps)));
-                if (nextFrame !== currentFrameIndex) {
-                  setCurrentFrameIndex(nextFrame);
-                }
-              }}
-            />
-            {isSegmentCropped ? (
-              <div className="absolute left-2 top-2 rounded bg-red-600 px-2 py-0.5 text-xs font-semibold tracking-wide text-white">CROPPED</div>
-            ) : null}
-          </div>
-        ) : (
-          <p className="text-sm text-ink/70">Ingest must complete before timeline is available.</p>
-        )}
-        <div className="space-y-3">
-          <div className="rounded-lg border border-ink/15 bg-bg p-3 text-xs text-ink/70 whitespace-pre-line">
-            {
-              "Select a first and last frame to define the segment you want to work on.\n\nUse the slider to pick the frames.\n\nThis segment becomes the working video for the rest of the app."
-            }
-          </div>
-          <div className={`rounded-lg border p-3 ${canOpenCropTool ? "border-ink/15 bg-white" : "border-ink/10 bg-bg opacity-60"}`}>
-            <p className="text-sm font-semibold text-ink">Segment cropping tool (optional)</p>
-            <p className="mt-1 text-xs text-ink/70">
-              You can crop into a region of the video so the AI works on it at a larger scale, and then recombine it later.
-            </p>
-            <button
-              type="button"
-              disabled={!canOpenCropTool}
-              onClick={() => {
-                void openCropModal();
-              }}
-              className="mt-3 rounded-md border border-accent bg-accent/10 px-3 py-2 text-sm font-medium text-ink disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              Crop Segment
-            </button>
-          </div>
-        </div>
-      </div>
-      <div>
-        <label className="mb-1 block text-sm font-medium">Current frame: {currentFrameIndex}</label>
-        <input
-          type="range"
-          min={0}
-          max={Math.max(0, frameCount(task) - 1)}
-          value={currentFrameIndex}
-          onChange={(e) => setCurrentFrameIndex(Number(e.target.value))}
-          className="w-full"
-        />
-      </div>
-
-      <div className="grid grid-cols-[1fr_auto_1fr] items-stretch gap-2">
-        <FrameSelectCard
-          title="Start Frame"
-          frame={firstFrame}
-          selectLabel="Select Start Frame"
-          onSelect={() => captureCurrentFrameFor("first")}
-          onClear={() => setFirstFrameId(null)}
-        />
-
-        <div className="flex w-24 flex-col items-center justify-center text-center">
-          <p className={`text-xs font-medium ${timelineDelta.overLimit ? "text-red-600" : "text-ink/70"}`}>{timelineDelta.frames} frames</p>
-          <p className="my-1 text-xl text-ink/70">→</p>
-          <p className={`text-xs font-medium ${timelineDelta.overLimit ? "text-red-600" : "text-ink/70"}`}>{timelineDelta.seconds.toFixed(2)}s</p>
-        </div>
-
-        <FrameSelectCard
-          title="End Frame"
-          frame={lastFrame}
-          selectLabel="Select End Frame"
-          onSelect={() => captureCurrentFrameFor("last")}
-          onClear={() => setLastFrameId(null)}
-        />
-      </div>
-
-      {selectedRange ? (
-        <div className="space-y-2 rounded-lg border border-ink/10 bg-white p-3">
-          <p className={`text-xs ${selectedRange.overLimit ? "text-red-600" : "text-ink/70"}`}>
-            Selected range: {selectedRange.startFrame} {"->"} {selectedRange.endFrameInclusive} ({selectedRange.durationFrames} frames /{" "}
-            {selectedRange.durationSec.toFixed(2)}s)
-          </p>
-          {selectedRange.overLimit ? (
-            <p className="text-xs text-red-600">{selectedRange.limitMessage}</p>
-          ) : null}
-        </div>
-      ) : null}
-
-      <div className="grid gap-2">
-        <p className="text-sm font-medium text-ink/80">Available segments</p>
-        {task?.segments.map((seg) => (
+          <HelpInfoButton
+            title="Working ranges"
+            lines={[
+              "The full source video is available as the default working range.",
+              "Create shorter working ranges when you only want to work on part of the video.",
+              "Saved working ranges can be reused across Create, Outputs, Post Process, and Reports.",
+            ]}
+          />
           <button
-            key={seg.segmentId}
-            onClick={() => {
-              setSelectedSegmentId(seg.segmentId);
-              setCurrentFrameIndex(seg.startFrame);
-              setFirstFrameId(seg.startFrameId);
-              setLastFrameId(seg.endFrameId);
-            }}
-            className={`rounded-lg border p-3 text-left ${seg.segmentId === selectedSegmentId ? "border-accent bg-accent/10" : "border-ink/10"}`}
+            type="button"
+            onClick={openWorkingRangeModal}
+            className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-white"
           >
-            <div className="flex items-center justify-between gap-2">
-              <p className="font-medium">
-                {defaultVideoSegment?.segmentId === seg.segmentId ? "Whole video" : `Segment ${seg.segmentId.slice(-6)}`}
-              </p>
-              <div className="flex items-center gap-2">
-                {defaultVideoSegment?.segmentId === seg.segmentId ? <span className="text-xs font-semibold text-ink/60">DEFAULT</span> : null}
-                {seg.crop?.enabled ? <span className="text-xs font-semibold text-red-600">CROPPED</span> : null}
-              </div>
-            </div>
-            <p className="text-sm text-ink/70">
-              {seg.startFrame} {"->"} {Math.max(seg.endFrameExclusive - 1, seg.startFrame)} ({seg.durationSec.toFixed(2)}s)
-            </p>
-            {defaultVideoSegment?.segmentId === seg.segmentId && seg.durationSec > wholeVideoSinglePassLimitSeconds + 1e-6 ? (
-              <p className="mt-1 text-xs text-amber-700">
-                This video is longer than single-pass generation limit and will require chunking.
-              </p>
-            ) : null}
+            Create New Working Range
           </button>
-        ))}
+        </div>
+        <div className="mt-3 grid gap-2 lg:grid-cols-2">
+          {orderedSegments.map((seg, index) => {
+            const endFrame = Math.max(seg.endFrameExclusive - 1, seg.startFrame);
+            const startFrameImage = task?.frames?.[seg.startFrameId]?.imageUrl;
+            const endFrameImage = task?.frames?.[seg.endFrameId]?.imageUrl;
+            const isSelected = seg.segmentId === selectedBaseSegment?.segmentId;
+            const rangeWarning =
+              generationInputMode === "start_video" && seg.durationFrames > 192
+                ? "Above frame limit for this mode - chunking required"
+                : generationInputMode === "start_end" && seg.durationFrames > 240
+                  ? "Above frame limit: output shorter than source"
+                  : generationInputMode === "start_only" && seg.durationFrames > 240
+                    ? "Above frame limit: output shorter than source"
+                    : null;
+            return (
+              <button
+                key={seg.segmentId}
+                type="button"
+                onClick={() => {
+                  setSelectedSegmentId(seg.segmentId);
+                  setCurrentFrameIndex(seg.startFrame);
+                  setFirstFrameId(seg.startFrameId);
+                  setLastFrameId(seg.endFrameId);
+                }}
+                className={`w-full rounded-lg border p-2.5 text-left transition ${
+                  isSelected ? "border-teal-500 bg-teal-50" : "border-ink/10 bg-white hover:border-ink/20"
+                }`}
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="font-medium text-ink">{defaultVideoSegment?.segmentId === seg.segmentId ? "Whole video" : `Working range ${index}`}</p>
+                  <div className="flex items-center gap-2 text-xs font-semibold">
+                    {defaultVideoSegment?.segmentId === seg.segmentId ? <span className="text-ink/60">DEFAULT</span> : null}
+                    {seg.crop?.enabled ? <span className="text-red-600">CROPPED</span> : null}
+                  </div>
+                </div>
+                <div className="mt-3 flex flex-wrap items-start gap-2">
+                  <div>
+                    <p className="mb-1 text-xs font-medium text-ink/65">Start f{seg.startFrame}</p>
+                    {startFrameImage ? (
+                      <img
+                        src={startFrameImage}
+                        alt={`Start frame ${seg.startFrame}`}
+                        className="h-20 w-32 rounded border border-ink/10 bg-bg object-cover"
+                        loading="lazy"
+                        decoding="async"
+                      />
+                    ) : (
+                      <div className="flex h-20 w-32 items-center justify-center rounded border border-ink/10 bg-bg text-xs text-ink/45">No preview</div>
+                    )}
+                  </div>
+                  <div className="flex min-w-[5.5rem] flex-col items-center justify-center pt-6 text-center text-xs text-ink/65">
+                    <p>{seg.durationFrames} frames</p>
+                    <div className="my-1 text-sm leading-none text-ink/45">→</div>
+                    <p>{seg.durationSec.toFixed(2)}s</p>
+                  </div>
+                  <div>
+                    <p className="mb-1 text-xs font-medium text-ink/65">End f{endFrame}</p>
+                    {endFrameImage ? (
+                      <img
+                        src={endFrameImage}
+                        alt={`End frame ${endFrame}`}
+                        className="h-20 w-32 rounded border border-ink/10 bg-bg object-cover"
+                        loading="lazy"
+                        decoding="async"
+                      />
+                    ) : (
+                      <div className="flex h-20 w-32 items-center justify-center rounded border border-ink/10 bg-bg text-xs text-ink/45">No preview</div>
+                    )}
+                  </div>
+                </div>
+                {rangeWarning ? <p className="mt-3 text-xs text-amber-700">{rangeWarning}</p> : null}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="rounded-2xl border border-ink/10 bg-card p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p className="text-sm font-semibold text-ink">Select Region (optional)</p>
+            <p className="text-xs text-ink/60">Crop into a region of the video to regenerate - Nb. works best for static shots and/or if all action in one part of video</p>
+          </div>
+          <button
+            type="button"
+            disabled={!canOpenCropTool}
+            onClick={() => {
+              void openCropModal();
+            }}
+            className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            Create New Cropped Region
+          </button>
+          <HelpInfoButton
+            title="Select Region"
+            lines={[
+              "Cropping focuses regeneration on one region of the frame.",
+              "It works best for static shots or where the action stays in one area of the image.",
+              "Overcropping or using it on fast camera movement can make results less stable.",
+            ]}
+          />
+        </div>
+        <div className="mt-3 grid gap-2 lg:grid-cols-2">
+          {cropOptions.map((segment) => {
+            const previewUrl = task?.frames?.[segment.startFrameId]?.imageUrl ?? null;
+            const isSelected = segment.segmentId === selectedSegmentId;
+            const crop = segment.crop?.enabled ? segment.crop : null;
+            const title =
+              !crop && defaultVideoSegment?.segmentId === segment.segmentId
+                ? "Whole Video (no crop)"
+                : !crop
+                  ? "No crop"
+                  : `Crop ${crop.aspect}`;
+            const meta = crop
+              ? [`Aspect ${crop.aspect}`, `x:${crop.x} y:${crop.y}`, `w:${crop.width} h:${crop.height}`]
+              : [`Aspect ${sourceWidth}:${sourceHeight}`, `x:0 y:0`, `w:${sourceWidth} h:${sourceHeight}`];
+            return (
+              <button
+                key={segment.segmentId}
+                type="button"
+                onClick={() => {
+                  setSelectedSegmentId(segment.segmentId);
+                  setCurrentFrameIndex(segment.startFrame);
+                  setFirstFrameId(segment.startFrameId);
+                  setLastFrameId(segment.endFrameId);
+                }}
+                className={`w-full rounded-lg border p-2.5 text-left transition ${
+                  isSelected ? "border-teal-500 bg-teal-50" : "border-ink/10 bg-white hover:border-ink/20"
+                }`}
+              >
+                <div className="flex items-start gap-3">
+                  <div className="flex h-20 w-32 items-center justify-center rounded border border-ink/10 bg-bg">
+                    {previewUrl ? (
+                      <img
+                        src={previewUrl}
+                        alt={title}
+                        className="h-full w-full rounded object-contain"
+                        loading="lazy"
+                        decoding="async"
+                      />
+                    ) : (
+                      <div className="text-xs text-ink/45">No preview</div>
+                    )}
+                  </div>
+                  <div className="space-y-1 text-sm text-ink/70">
+                    <p className="font-medium text-ink">{title}</p>
+                    {meta.map((line) => (
+                      <p key={line} className="text-xs">
+                        {line}
+                      </p>
+                    ))}
+                  </div>
+                </div>
+              </button>
+            );
+          })}
+        </div>
       </div>
       <div className="flex justify-end">
         <button
           type="button"
-          className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
-          disabled={!selectedRange && !selectedSegmentId}
+          className="rounded-md bg-teal-600 px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+          disabled={!selectedSegmentId && !defaultVideoSegment}
           onClick={onContinueToEditFrames}
         >
-          Use selected segment and continue
+          Next
         </button>
       </div>
-      </>
-      )}
+
+      {isWorkingRangeModalOpen ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <div className="max-h-[95vh] w-full max-w-5xl overflow-auto rounded-lg bg-white p-4">
+            <div className="mb-3 flex items-center justify-between gap-2">
+              <div>
+                <h4 className="text-lg font-semibold">Create Working Range</h4>
+                <p className="text-sm text-ink/60">Choose a start and end frame from the source video, then save the range for reuse.</p>
+              </div>
+              <button
+                type="button"
+                className="rounded border border-ink/20 px-2 py-1 text-sm"
+                onClick={closeWorkingRangeModal}
+              >
+                Cancel
+              </button>
+            </div>
+            <div className="grid gap-3 lg:grid-cols-[1fr_320px]">
+              {timelinePlaybackUrl ? (
+                <video
+                  ref={workingRangeVideoRef}
+                  className="max-h-[360px] max-w-full rounded-lg border border-ink/10 bg-black"
+                  src={timelinePlaybackUrl}
+                  controls
+                  preload="metadata"
+                  onTimeUpdate={(e) => {
+                    const totalFrames = frameCount(task);
+                    if (!totalFrames) return;
+                    const fps = fpsValue(task);
+                    const nextFrame = Math.max(0, Math.min(totalFrames - 1, Math.round(e.currentTarget.currentTime * fps)));
+                    if (nextFrame !== currentFrameIndex) {
+                      setCurrentFrameIndex(nextFrame);
+                    }
+                  }}
+                />
+              ) : (
+                <p className="text-sm text-ink/70">Ingest must complete before timeline is available.</p>
+              )}
+              <div className="space-y-3">
+                <div className="rounded-lg border border-ink/15 bg-bg p-3">
+                  <div className="flex items-center gap-2">
+                    <p className="text-sm font-semibold text-ink">Working range selection</p>
+                    <HelpInfoButton
+                      title="Create a working range"
+                      lines={[
+                        "Use the source player and slider to choose the start and end frames for a shorter saved range.",
+                        "If you cancel without saving, the previously selected working range stays in place.",
+                      ]}
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="mb-1 block text-sm font-medium">Current frame: {currentFrameIndex}</label>
+                  <input
+                    type="range"
+                    min={0}
+                    max={Math.max(0, frameCount(task) - 1)}
+                    value={currentFrameIndex}
+                    onChange={(e) => setCurrentFrameIndex(Number(e.target.value))}
+                    className="w-full"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-4 grid grid-cols-[1fr_auto_1fr] items-stretch gap-2">
+              <FrameSelectCard
+                title="Start Frame"
+                frame={firstFrame}
+                selectLabel="Select Start Frame"
+                onSelect={() => {
+                  onBeginCustomSegmentEdit();
+                  void captureCurrentFrameFor("first");
+                }}
+                onClear={() => {
+                  onBeginCustomSegmentEdit();
+                  setFirstFrameId(null);
+                }}
+              />
+
+              <div className="flex w-24 flex-col items-center justify-center text-center">
+                <p className={`text-xs font-medium ${timelineDelta.overLimit ? "text-red-600" : "text-ink/70"}`}>{timelineDelta.frames} frames</p>
+                <p className="my-1 text-xl text-ink/70">→</p>
+                <p className={`text-xs font-medium ${timelineDelta.overLimit ? "text-red-600" : "text-ink/70"}`}>{timelineDelta.seconds.toFixed(2)}s</p>
+              </div>
+
+              <FrameSelectCard
+                title="End Frame"
+                frame={lastFrame}
+                selectLabel="Select End Frame"
+                onSelect={() => {
+                  onBeginCustomSegmentEdit();
+                  void captureCurrentFrameFor("last");
+                }}
+                onClear={() => {
+                  onBeginCustomSegmentEdit();
+                  setLastFrameId(null);
+                }}
+              />
+            </div>
+
+            {selectedRange ? (
+              <div className="mt-4 space-y-2 rounded-lg border border-ink/10 bg-white p-3">
+                <p className={`text-xs ${selectedRange.overLimit ? "text-red-600" : "text-ink/70"}`}>
+                  Selected range: f{selectedRange.startFrame} to f{selectedRange.endFrameInclusive} ({selectedRange.durationFrames} frames /{" "}
+                  {selectedRange.durationSec.toFixed(2)}s)
+                </p>
+                {selectedRange.overLimit ? (
+                  <StatusNotice variant="warning">
+                    <p className="text-xs">{selectedRange.limitMessage}</p>
+                  </StatusNotice>
+                ) : null}
+              </div>
+            ) : null}
+
+            <div className="mt-4 flex items-center justify-end gap-2">
+              <button type="button" onClick={closeWorkingRangeModal} className="rounded border border-ink/20 bg-white px-3 py-2 text-sm">
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={!selectedRange}
+                onClick={() => {
+                  void saveWorkingRange();
+                }}
+                className="rounded bg-accent px-3 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Save Working Range
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {isCropModalOpen && cropDraft ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
           <div className="max-h-[95vh] w-full max-w-5xl overflow-auto rounded-lg bg-white p-4">
             <div className="mb-3 flex items-center justify-between gap-2">
-              <h4 className="text-lg font-semibold">Crop Segment</h4>
+              <h4 className="text-lg font-semibold">Create Cropped Region</h4>
               <button
                 type="button"
                 className="rounded border border-ink/20 px-2 py-1 text-sm"
@@ -797,12 +1012,14 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
                 />
               </div>
             ) : null}
-            <p className="mt-2 text-xs text-amber-700">
-              Do not crop too tight as the AI needs context. Overcropping can lead to output that has unrealistic detail.
-            </p>
-            <p className="mt-1 text-xs font-medium text-red-700">
-              Only use with fixed camera and 'adhere' setting in Luma AI.
-            </p>
+            <div className="mt-2 space-y-2">
+              <StatusNotice variant="warning">
+                <p className="text-xs">Do not crop too tight as the AI needs context. Overcropping can lead to unrealistic output detail.</p>
+              </StatusNotice>
+              <StatusNotice variant="warning">
+                <p className="text-xs">Use cropping cautiously on moving shots. It is most reliable on fixed-camera footage and conservative motion settings.</p>
+              </StatusNotice>
+            </div>
             <div className="mt-4 flex items-center justify-end gap-2">
               <button type="button" onClick={clearCrop} className="rounded border border-ink/20 bg-white px-3 py-2 text-sm">
                 Clear
@@ -813,7 +1030,7 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
                 onClick={() => void applyCrop()}
                 className="rounded bg-accent px-3 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
               >
-                {isSavingSegmentCrop ? "Saving..." : "Crop"}
+                <PendingButtonLabel isPending={isSavingSegmentCrop} idle="Crop" pending="Saving crop..." />
               </button>
             </div>
           </div>

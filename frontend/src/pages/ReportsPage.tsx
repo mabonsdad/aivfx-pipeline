@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import type { UseMutationResult, UseQueryResult } from "@tanstack/react-query";
 
 import { apiClient } from "../api/client";
+import { StatusNotice } from "../components/layout/UiFeedback";
 import {
   FRAME_TEST_OPTIONS,
   HeatmapLegend,
@@ -39,8 +40,6 @@ type ReportsPageCtx = {
   setReportView: (view: ReportView) => void;
   setActiveCustomReportId: (reportId: string | null) => void;
   activeCustomReportId: string | null;
-  goToTaskTimeline: (taskId: string) => void;
-  logout: () => void;
   formatAssetDate: (iso: string) => string;
   truncateIdentifier: (value: string, maxLength?: number) => string;
   reportTaskQuery: UseQueryResult<TaskDetail, Error>;
@@ -64,6 +63,10 @@ type ReportsPageCtx = {
   asNumber: (value: unknown) => number | null;
   describeSegment: (segment: SegmentRecord) => string;
   setReportGraphModal: (value: { url: string; label: string } | null) => void;
+  openSource: (taskId: string) => void;
+  openOutputs: (taskId: string) => void;
+  currentWorkingRangeLabel: string;
+  currentWorkingRangeSegment: SegmentRecord | null;
 };
 
 type ReportsPageProps = {
@@ -217,6 +220,8 @@ type VideoCompareReport = {
   samples?: VideoCompareSample[];
 };
 
+type ReportScope = "current_range" | "all_ranges";
+
 function reportTypeLabel(reportType: CustomReportType): string {
   if (reportType === "qc_frame") return "Frame QC";
   if (reportType === "video_compare") return "Video Compare";
@@ -306,7 +311,7 @@ function PreviewableImage(props: {
   if (!props.url) return null;
   return (
     <button type="button" className="block w-full text-left" onClick={() => props.onPreview({ url: props.url as string, label: props.label })}>
-      <img src={props.url} alt={props.alt} className={props.className} />
+      <img src={props.url} alt={props.alt} className={props.className} loading="lazy" decoding="async" />
     </button>
   );
 }
@@ -352,6 +357,23 @@ function summarizeReport(report: CustomReportRecord, task: TaskDetail | undefine
   return `Segments ${preview}${segment_labels.length > 4 ? ` +${segment_labels.length - 4} more` : ""}`;
 }
 
+function reportMatchesScope(report: CustomReportRecord, task: TaskDetail | undefined, segment: SegmentRecord | null): boolean {
+  if (!task || !segment) return true;
+  const segmentGenerations = task.segmentGenerations ?? {};
+  const frames = task.frames ?? {};
+  return (report.assetRefs ?? []).some((ref) => {
+    if (ref.assetType === "segment_generation") {
+      return segmentGenerations[ref.genId]?.segmentId === segment.segmentId;
+    }
+    if (ref.assetType === "frame_variant") {
+      const frame = frames[ref.frameId];
+      if (!frame) return false;
+      return frame.frameIndex >= segment.startFrame && frame.frameIndex < segment.endFrameExclusive;
+    }
+    return false;
+  });
+}
+
 export default function ReportsPage({ ctx }: ReportsPageProps) {
   const {
     reportTask,
@@ -363,8 +385,6 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
     setReportView,
     setActiveCustomReportId,
     activeCustomReportId,
-    goToTaskTimeline,
-    logout,
     formatAssetDate,
     truncateIdentifier,
     reportTaskQuery,
@@ -377,12 +397,21 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
     asNumber,
     describeSegment,
     setReportGraphModal,
+    openSource,
+    openOutputs,
+    currentWorkingRangeLabel,
+    currentWorkingRangeSegment,
   } = ctx;
 
   const [createModalMode, setCreateModalMode] = useState<CustomReportType | null>(null);
   const [reportName, setReportName] = useState("");
   const [selectedTests, setSelectedTests] = useState<string[]>([]);
   const [infoModal, setInfoModal] = useState<InfoModalState>(null);
+  const [reportScope, setReportScope] = useState<ReportScope>(currentWorkingRangeSegment ? "current_range" : "all_ranges");
+
+  useEffect(() => {
+    setReportScope(currentWorkingRangeSegment ? "current_range" : "all_ranges");
+  }, [currentWorkingRangeSegment?.segmentId]);
 
   const frameOutputRows = useMemo(() => {
     if (!reportTask) return [] as FrameOutputRow[];
@@ -399,6 +428,15 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
     }
     return rows.sort((a, b) => safeTimestamp(b.variant.createdAt) - safeTimestamp(a.variant.createdAt));
   }, [reportTask]);
+
+  const scopedFrameOutputRows = useMemo(() => {
+    if (reportScope !== "current_range" || !currentWorkingRangeSegment) return frameOutputRows;
+    return frameOutputRows.filter(
+      (row) =>
+        row.frame.frameIndex >= currentWorkingRangeSegment.startFrame &&
+        row.frame.frameIndex < currentWorkingRangeSegment.endFrameExclusive,
+    );
+  }, [currentWorkingRangeSegment, frameOutputRows, reportScope]);
 
   const videoOutputRows = useMemo(() => {
     if (!reportTask) return [] as VideoOutputRow[];
@@ -430,17 +468,41 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
       .sort((a, b) => safeTimestamp(b.generation.createdAt) - safeTimestamp(a.generation.createdAt));
   }, [reportTask]);
 
+  const scopedVideoOutputRows = useMemo(() => {
+    if (reportScope !== "current_range" || !currentWorkingRangeSegment) return videoOutputRows;
+    return videoOutputRows.filter((row) => row.segment?.segmentId === currentWorkingRangeSegment.segmentId);
+  }, [currentWorkingRangeSegment, reportScope, videoOutputRows]);
+
   const reports = useMemo(
     () => [...(reportTask?.customReports ?? [])].sort((a, b) => safeTimestamp(b.updatedAt) - safeTimestamp(a.updatedAt)),
     [reportTask?.customReports],
   );
+  const scopedReports = useMemo(() => {
+    if (reportScope !== "current_range" || !currentWorkingRangeSegment) return reports;
+    return reports.filter((report) => reportMatchesScope(report, reportTask, currentWorkingRangeSegment));
+  }, [currentWorkingRangeSegment, reportScope, reportTask, reports]);
   const activeReportMeta = useMemo(
-    () => reports.find((report) => report.reportId === activeCustomReportId) ?? null,
-    [activeCustomReportId, reports],
+    () => scopedReports.find((report) => report.reportId === activeCustomReportId) ?? null,
+    [activeCustomReportId, scopedReports],
   );
   const selectedRefsForTask = reportTaskId ? selectedOutputRefsByTask[reportTaskId] ?? [] : [];
-  const selectedFrameRefs = selectedRefsForTask.filter((ref) => ref.assetType === "frame_variant");
-  const selectedVideoRefs = selectedRefsForTask.filter((ref) => ref.assetType === "segment_generation");
+  const selectedFrameRefs = selectedRefsForTask.filter(
+    (ref): ref is Extract<CustomReportOutputRef, { assetType: "frame_variant" }> => {
+      if (ref.assetType !== "frame_variant") return false;
+      if (reportScope !== "current_range" || !currentWorkingRangeSegment || !reportTask) return true;
+      const frame = reportTask.frames?.[ref.frameId];
+      if (!frame) return false;
+      return frame.frameIndex >= currentWorkingRangeSegment.startFrame && frame.frameIndex < currentWorkingRangeSegment.endFrameExclusive;
+    },
+  );
+  const selectedVideoRefs = selectedRefsForTask.filter(
+    (ref): ref is Extract<CustomReportOutputRef, { assetType: "segment_generation" }> => {
+      if (ref.assetType !== "segment_generation") return false;
+      if (reportScope !== "current_range" || !currentWorkingRangeSegment || !reportTask) return true;
+      const generation = reportTask.segmentGenerations?.[ref.genId];
+      return generation?.segmentId === currentWorkingRangeSegment.segmentId;
+    },
+  );
   const selectedVideoComparisonEligible = useMemo(() => {
     if (!reportTask || selectedVideoRefs.length < 2) return false;
     const keys = new Set<string>();
@@ -452,6 +514,14 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
     }
     return keys.size === 1;
   }, [reportTask, selectedVideoRefs]);
+
+  useEffect(() => {
+    if (!activeCustomReportId || reportScope !== "current_range") return;
+    if (scopedReports.some((report) => report.reportId === activeCustomReportId)) return;
+    if (reports.some((report) => report.reportId === activeCustomReportId)) {
+      setReportScope("all_ranges");
+    }
+  }, [activeCustomReportId, reportScope, reports, scopedReports]);
 
   const activeReportQuery = useQuery({
     queryKey: ["task", "report-result", reportTaskId, activeCustomReportId],
@@ -465,10 +535,10 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
 
   useEffect(() => {
     if (!activeCustomReportId) return;
-    if (!reports.some((report) => report.reportId === activeCustomReportId)) {
+    if (!scopedReports.some((report) => report.reportId === activeCustomReportId)) {
       setActiveCustomReportId(null);
     }
-  }, [activeCustomReportId, reports, setActiveCustomReportId]);
+  }, [activeCustomReportId, scopedReports, setActiveCustomReportId]);
 
   useEffect(() => {
     if (!activeReportMeta) return;
@@ -536,8 +606,8 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
   const latestQcJob =
     sortedJobs.find((job) => job.type === "qc_report_build" && (!reportTaskId || job.taskId === reportTaskId)) ?? null;
   const runningReport =
-    reports.find((report) => report.status === "running") ??
-    reports.find((report) => report.status === "queued") ??
+    scopedReports.find((report) => report.status === "running") ??
+    scopedReports.find((report) => report.status === "queued") ??
     null;
   const runningReportJob =
     latestQcJob && (latestQcJob.status === "queued" || latestQcJob.status === "running") ? latestQcJob : null;
@@ -551,38 +621,89 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
   );
 
   return (
-    <main className="min-h-screen bg-bg text-ink">
-      <div className="mx-auto w-full max-w-[1700px] space-y-4 p-4 md:p-6">
-        <div className="flex items-center justify-between rounded-2xl border border-ink/10 bg-card p-4">
-          <div>
-            <h2 className="text-xl font-semibold">Reports: {reportTask?.name ?? reportTaskId ?? "Task"}</h2>
-            {reportTask ? <p className="text-sm text-ink/60">Updated {formatAssetDate(reportTask.updatedAt)}</p> : null}
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-start justify-between gap-3 rounded-2xl border border-ink/10 bg-card p-4">
+        <div>
+          <p className="text-sm font-semibold text-ink">
+            {reportTask?.name ?? reportTaskId ?? "Source video"} · Working range: {currentWorkingRangeLabel}
+          </p>
+          {reportTask ? <p className="text-xs text-ink/50">Updated {formatAssetDate(reportTask.updatedAt)}</p> : null}
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            className="rounded border border-ink/20 bg-white px-3 py-2 text-sm"
+            onClick={() => {
+              if (reportTaskId) openSource(reportTaskId);
+            }}
+          >
+            Open Source
+          </button>
+          <button
+            className="rounded border border-ink/20 bg-white px-3 py-2 text-sm"
+            onClick={() => {
+              if (reportTaskId) openOutputs(reportTaskId);
+            }}
+          >
+            Open Outputs
+          </button>
+        </div>
+      </div>
+
+      <div className="rounded-2xl border border-ink/10 bg-card p-4">
+        <div className="grid gap-3 md:grid-cols-3">
+          <div className="rounded-lg border border-ink/10 bg-bg p-3">
+            <p className="text-xs font-semibold uppercase tracking-wide text-ink/50">Frame Edits</p>
+            <p className="mt-1 text-2xl font-semibold text-ink">{scopedFrameOutputRows.length}</p>
+            <p className="text-xs text-ink/60">
+              {reportScope === "current_range" ? "Edited and refined frames in the current working range." : "Edited and refined frames available for frame QC."}
+            </p>
           </div>
-          <div className="flex items-center gap-3">
-            <button
-              className="rounded border border-ink/20 bg-white px-3 py-2 text-sm"
-              onClick={() => {
-                if (reportTaskId) goToTaskTimeline(reportTaskId);
-              }}
-            >
-              Back to Task
-            </button>
-            <button onClick={() => logout()} className="text-sm text-ink/60 underline">
-              Sign out
-            </button>
+          <div className="rounded-lg border border-ink/10 bg-bg p-3">
+            <p className="text-xs font-semibold uppercase tracking-wide text-ink/50">Video Outputs</p>
+            <p className="mt-1 text-2xl font-semibold text-ink">{scopedVideoOutputRows.length}</p>
+            <p className="text-xs text-ink/60">
+              {reportScope === "current_range" ? "Completed generated outputs for the current working range." : "Completed generated outputs attached to this source video."}
+            </p>
+          </div>
+          <div className="rounded-lg border border-ink/10 bg-bg p-3">
+            <p className="text-xs font-semibold uppercase tracking-wide text-ink/50">Saved Reports</p>
+            <p className="mt-1 text-2xl font-semibold text-ink">{scopedReports.length}</p>
+            <p className="text-xs text-ink/60">
+              {reportScope === "current_range" ? "Reports whose selected assets belong to this working range." : "QC reports built from selected edits and outputs."}
+            </p>
           </div>
         </div>
+      </div>
 
-        <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-ink/10 bg-card p-3">
-          <button className={`rounded px-3 py-2 text-sm ${reportView === "frames" ? "bg-ink text-white" : "bg-ink/10"}`} onClick={() => setReportView("frames")}>
-            Frame Outputs
-          </button>
-          <button className={`rounded px-3 py-2 text-sm ${reportView === "videos" ? "bg-ink text-white" : "bg-ink/10"}`} onClick={() => setReportView("videos")}>
-            Video Outputs
-          </button>
-          <button className={`rounded px-3 py-2 text-sm ${reportView === "reports" ? "bg-ink text-white" : "bg-ink/10"}`} onClick={() => setReportView("reports")}>
-            Reports
-          </button>
+      <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-ink/10 bg-card p-3">
+        <button className={`rounded px-3 py-2 text-sm ${reportView === "frames" ? "bg-ink text-white" : "bg-ink/10"}`} onClick={() => setReportView("frames")}>
+          Frame Outputs
+        </button>
+        <button className={`rounded px-3 py-2 text-sm ${reportView === "videos" ? "bg-ink text-white" : "bg-ink/10"}`} onClick={() => setReportView("videos")}>
+          Video Outputs
+        </button>
+        <button className={`rounded px-3 py-2 text-sm ${reportView === "reports" ? "bg-ink text-white" : "bg-ink/10"}`} onClick={() => setReportView("reports")}>
+          Reports
+        </button>
+        {currentWorkingRangeSegment ? (
+          <>
+            <span className="mx-1 hidden h-5 w-px bg-ink/10 md:block" aria-hidden="true" />
+            <button
+              type="button"
+              className={`rounded px-3 py-2 text-sm ${reportScope === "current_range" ? "border border-teal-500 bg-teal-50 text-ink" : "bg-ink/10"}`}
+              onClick={() => setReportScope("current_range")}
+            >
+              Current Range
+            </button>
+            <button
+              type="button"
+              className={`rounded px-3 py-2 text-sm ${reportScope === "all_ranges" ? "border border-teal-500 bg-teal-50 text-ink" : "bg-ink/10"}`}
+              onClick={() => setReportScope("all_ranges")}
+            >
+              All Ranges
+            </button>
+          </>
+        ) : null}
           {reportView === "frames" ? (
             <button
               type="button"
@@ -626,33 +747,44 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
         </div>
 
         {runningReport || runningReportJob ? (
-          <div className="rounded-2xl border-2 border-amber-400 bg-amber-50 p-4 shadow-sm">
+          <StatusNotice variant="loading" title={`Report is ${runningReport?.status ?? runningReportJob?.status ?? "running"}`} className="rounded-2xl border-2 p-4 shadow-sm">
             <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <p className="text-base font-semibold text-amber-950">
-                  Report is {runningReport?.status ?? runningReportJob?.status ?? "running"}
-                </p>
-                <p className="text-sm text-amber-900">
-                  {runningReport?.name ?? "A QC report"} is being built. This page refreshes automatically while the worker generates the report assets.
-                </p>
-              </div>
+              <p className="text-sm">
+                {runningReport?.name ?? "A QC report"} is being built. This page refreshes automatically while the worker generates the report assets.
+              </p>
               {runningReportJob ? (
-                <div className="min-w-48 rounded-lg bg-white/70 px-3 py-2 text-sm text-amber-950">
+                <div className="min-w-48 rounded-lg bg-white/70 px-3 py-2 text-sm text-ink">
                   <p className="font-medium">Job {truncateIdentifier(runningReportJob.jobId, 12)}</p>
                   <p>{runningReportJob.progress}% complete</p>
                 </div>
               ) : null}
             </div>
-          </div>
+          </StatusNotice>
         ) : latestQcJob ? (
           <p className="text-xs text-ink/70">
             Latest report job {truncateIdentifier(latestQcJob.jobId, 12)}: {latestQcJob.status} ({latestQcJob.progress}%)
           </p>
         ) : null}
-        {reportTaskQuery.isPending ? <p className="text-sm text-ink/60">Loading reports...</p> : null}
-        {reportTaskQuery.error ? <p className="text-sm text-red-600">{reportTaskQuery.error.message}</p> : null}
-        {createCustomReportMutation.error ? <p className="text-sm text-red-600">{createCustomReportMutation.error.message}</p> : null}
-        {deleteCustomReportMutation.error ? <p className="text-sm text-red-600">{deleteCustomReportMutation.error.message}</p> : null}
+        {reportTaskQuery.isPending ? (
+          <StatusNotice variant="loading">
+            <p>Loading reports...</p>
+          </StatusNotice>
+        ) : null}
+        {reportTaskQuery.error ? (
+          <StatusNotice variant="error">
+            <p>{reportTaskQuery.error.message}</p>
+          </StatusNotice>
+        ) : null}
+        {createCustomReportMutation.error ? (
+          <StatusNotice variant="error">
+            <p>{createCustomReportMutation.error.message}</p>
+          </StatusNotice>
+        ) : null}
+        {deleteCustomReportMutation.error ? (
+          <StatusNotice variant="error">
+            <p>{deleteCustomReportMutation.error.message}</p>
+          </StatusNotice>
+        ) : null}
 
         {reportView === "frames" ? (
           <section className="space-y-3 rounded-2xl border border-ink/10 bg-card p-4">
@@ -660,11 +792,11 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
               <h3 className="text-lg font-semibold">Frame Outputs</h3>
               <p className="text-xs text-ink/60">Selected for report: {selectedFrameRefs.length}</p>
             </div>
-            {frameOutputRows.length === 0 ? (
+            {scopedFrameOutputRows.length === 0 ? (
               <p className="text-sm text-ink/60">No edited frames available.</p>
             ) : (
               <div className="space-y-3">
-                {frameOutputRows.map((row) => {
+                {scopedFrameOutputRows.map((row) => {
                   const ref: CustomReportOutputRef = { assetType: "frame_variant", frameId: row.frame.frameId, variantId: row.variant.variantId };
                   const checked = selectedFrameRefs.some(
                     (selected_ref) => reportOutputRefKey(selected_ref) === reportOutputRefKey(ref),
@@ -758,11 +890,11 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
               <h3 className="text-lg font-semibold">Video Outputs</h3>
               <p className="text-xs text-ink/60">Selected for report: {selectedVideoRefs.length}</p>
             </div>
-            {videoOutputRows.length === 0 ? (
+            {scopedVideoOutputRows.length === 0 ? (
               <p className="text-sm text-ink/60">No generated videos available.</p>
             ) : (
               <div className="space-y-3">
-                {videoOutputRows.map((row) => {
+                {scopedVideoOutputRows.map((row) => {
                   const ref: CustomReportOutputRef = { assetType: "segment_generation", genId: row.generation.genId };
                   const checked = selectedVideoRefs.some(
                     (selected_ref) => reportOutputRefKey(selected_ref) === reportOutputRefKey(ref),
@@ -876,11 +1008,11 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
           <section className="space-y-4 rounded-2xl border border-ink/10 bg-card p-4">
             <h3 className="text-lg font-semibold">Saved Reports</h3>
             {!activeReportMeta ? (
-              !reports.length ? (
+              !scopedReports.length ? (
                 <p className="text-sm text-ink/60">No reports created yet.</p>
               ) : (
                 <div className="space-y-2">
-                  {reports.map((report) => (
+                  {scopedReports.map((report) => (
                     <div key={report.reportId} className="flex flex-wrap items-center justify-between gap-3 rounded border border-ink/10 bg-white p-3">
                       <button type="button" className="text-left" onClick={() => setActiveCustomReportId(report.reportId)}>
                         <p className="text-sm font-semibold">{report.name}</p>
@@ -920,11 +1052,25 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                       {reportTypeLabel(activeReportMeta.reportType)} - {activeReportMeta.status}
                     </p>
                   </div>
-                  {activeReportMeta.error ? <p className="text-sm text-red-600">{activeReportMeta.error}</p> : null}
+                  {activeReportMeta.error ? (
+                    <div className="min-w-[220px]">
+                      <StatusNotice variant="error">
+                        <p>{activeReportMeta.error}</p>
+                      </StatusNotice>
+                    </div>
+                  ) : null}
                 </div>
 
-                {activeReportQuery.isPending ? <p className="text-sm text-ink/60">Loading report data...</p> : null}
-                {activeReportQuery.error ? <p className="text-sm text-red-600">{activeReportQuery.error.message}</p> : null}
+                {activeReportQuery.isPending ? (
+                  <StatusNotice variant="loading">
+                    <p>Loading report data...</p>
+                  </StatusNotice>
+                ) : null}
+                {activeReportQuery.error ? (
+                  <StatusNotice variant="error">
+                    <p>{activeReportQuery.error.message}</p>
+                  </StatusNotice>
+                ) : null}
 
                 {activeResult && activeReportMeta.reportType === "qc_frame" ? (
                   <div className="space-y-3">
@@ -1378,6 +1524,8 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                                   <p>Outside leak mean: {asNumber(videoAggregates?.outsideLeakagePctMean)?.toFixed(2) ?? "n/a"}%</p>
                                   <p>SSIM mean: {asNumber(videoAggregates?.ssimMean)?.toFixed(4) ?? "n/a"}</p>
                                   <p>PSNR mean: {asNumber(videoAggregates?.psnrMean)?.toFixed(2) ?? "n/a"}</p>
+                                  <p>Drift mean abs: {asNumber((videoAggregates?.frameDrift as Record<string, unknown> | undefined)?.meanAbsDeltaFrames)?.toFixed(2) ?? "n/a"} frames</p>
+                                  <p>Drift max abs: {asNumber((videoAggregates?.frameDrift as Record<string, unknown> | undefined)?.maxAbsDeltaFrames)?.toFixed(2) ?? "n/a"} frames</p>
                                   {typeof (videoAggregates?.alignment as Record<string, unknown> | undefined)?.sourceFrameOffset === "number" ? (
                                     <p>Alignment starts at original frame {String((videoAggregates?.alignment as Record<string, unknown>).sourceFrameOffset)}</p>
                                   ) : null}
@@ -1428,9 +1576,9 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                             </div>
                           </div>
                           {(row.standard?.selectedTests ?? []).includes("video_frame_evidence") && selectedFrames.length ? (
-                            <div className="grid gap-3 md:grid-cols-3">
+                            <div className="grid gap-3">
                               {selectedFrames.slice(0, 3).map((frame) => (
-                                <div key={`video-frame-${row.genId}-${frame.index}`} className="space-y-1">
+                                <div key={`video-frame-${row.genId}-${frame.index}`} className="space-y-2 rounded border border-ink/10 bg-white p-3">
                                   <div className="flex items-center gap-2">
                                     <p className="text-xs font-medium text-ink/70">
                                       Evidence original frame {String(frame.sourceFrameIndex ?? frame.index)}
@@ -1441,15 +1589,51 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                                       onClick={() => openInfo("Video frame evidence", [...QC_INFO_TEXT.videoFrameEvidence])}
                                     />
                                   </div>
-                                  {frame.overlayUrl ? (
-                                    <button type="button" className="block w-full" onClick={() => setImagePreviewModal({ url: frame.overlayUrl as string, label: `Video evidence frame ${String(frame.index)}` })}>
-                                      <img src={frame.overlayUrl as string} alt="Video evidence frame" className="aspect-video w-full rounded border border-ink/10 bg-white object-contain" />
-                                    </button>
-                                  ) : (
-                                    <p className="text-xs text-ink/50">No evidence image</p>
-                                  )}
+                                  <div className="grid gap-3 md:grid-cols-3">
+                                    <div className="space-y-1">
+                                      <p className="text-[11px] font-medium text-ink/60">Source frame</p>
+                                      {frame.originalFrameUrl ? (
+                                        <button
+                                          type="button"
+                                          className="block w-full"
+                                          onClick={() => setImagePreviewModal({ url: frame.originalFrameUrl as string, label: `Source frame ${String(frame.sourceFrameIndex ?? frame.index)}` })}
+                                        >
+                                          <img src={frame.originalFrameUrl as string} alt="Source frame" className="aspect-video w-full rounded border border-ink/10 bg-white object-contain" />
+                                        </button>
+                                      ) : (
+                                        <p className="text-xs text-ink/50">No source frame image</p>
+                                      )}
+                                    </div>
+                                    <div className="space-y-1">
+                                      <p className="text-[11px] font-medium text-ink/60">Matched generated frame</p>
+                                      {frame.generatedFrameUrl ? (
+                                        <button
+                                          type="button"
+                                          className="block w-full"
+                                          onClick={() => setImagePreviewModal({ url: frame.generatedFrameUrl as string, label: `Generated frame ${String(frame.matchedGeneratedFrameIndex ?? frame.generatedFrameIndex ?? "n/a")}` })}
+                                        >
+                                          <img src={frame.generatedFrameUrl as string} alt="Generated frame" className="aspect-video w-full rounded border border-ink/10 bg-white object-contain" />
+                                        </button>
+                                      ) : (
+                                        <p className="text-xs text-ink/50">No generated frame image</p>
+                                      )}
+                                    </div>
+                                    <div className="space-y-1">
+                                      <p className="text-[11px] font-medium text-ink/60">Overlay / diff evidence</p>
+                                      {frame.overlayUrl ? (
+                                        <button type="button" className="block w-full" onClick={() => setImagePreviewModal({ url: frame.overlayUrl as string, label: `Video evidence frame ${String(frame.index)}` })}>
+                                          <img src={frame.overlayUrl as string} alt="Video evidence frame" className="aspect-video w-full rounded border border-ink/10 bg-white object-contain" />
+                                        </button>
+                                      ) : (
+                                        <p className="text-xs text-ink/50">No evidence image</p>
+                                      )}
+                                    </div>
+                                  </div>
                                   <p className="text-[11px] text-ink/50">
-                                    Generated f{String(frame.generatedFrameIndex ?? "n/a")} · starts at original frame {String(frame.sourceFrameOffset ?? 0)}
+                                    Expected generated f{String(frame.generatedFrameIndex ?? "n/a")} · matched f{String(frame.matchedGeneratedFrameIndex ?? frame.generatedFrameIndex ?? "n/a")} · drift{" "}
+                                    {typeof frame.frameDeltaDrift === "number" ? `${frame.frameDeltaDrift >= 0 ? "+" : ""}${frame.frameDeltaDrift} frames` : "n/a"} · starts at original frame{" "}
+                                    {String(frame.sourceFrameOffset ?? 0)}
+                                    {typeof frame.matchSimilarity === "number" ? ` · similarity ${Number(frame.matchSimilarity).toFixed(3)}` : ""}
                                   </p>
                                 </div>
                               ))}
@@ -1647,7 +1831,6 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
             )}
           </section>
         ) : null}
-      </div>
 
       <ReportCreateModal
         isOpen={createModalMode !== null}
@@ -1675,6 +1858,6 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
         isPending={createCustomReportMutation.isPending}
       />
       <InfoModal state={infoModal} onClose={() => setInfoModal(null)} />
-    </main>
+    </div>
   );
 }

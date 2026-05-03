@@ -28,14 +28,24 @@ from src.core.ffmpeg import (
     ffprobe_video,
     generate_thumbnail_strip,
     merge_with_segment_replacement,
+    stitch_video_segments,
+    trim_and_retime_video_uniform,
     transcode_for_preview,
     transcode_for_provider,
+    transcode_preserving_frame_count,
     transcode_to_cfr,
 )
 from src.core.ids import new_id, prompt_hash
 from src.core.logger import Logger
 from src.core.secrets import load_secret
 from src.core.store import S3JsonStore, now_iso
+from src.generation import (
+    LUMA_API_ALLOWED_MODES,
+    get_video_model_capability,
+    get_video_model_provider,
+    resolve_video_model_limit_error,
+    resolve_video_model_provider_fps,
+)
 from src.integrations.gemini import generate_image_edit as generate_gemini_image_edit
 from src.integrations.fal import (
     get_queue_result as get_fal_queue_result,
@@ -58,8 +68,11 @@ from src.integrations.replicate import (
 )
 from src.integrations.runware import patch_edit_aceplusplus, patch_edit_flux_fill
 from src.integrations.runway import (
+    create_ephemeral_upload,
+    create_video_to_video,
     create_image_to_video,
     get_task as get_runway_task,
+    upload_to_ephemeral,
 )
 from src.integrations.runware_video import (
     RUNWARE_VEO_31_FAST_MODEL,
@@ -133,56 +146,8 @@ FRAME_REPORT_ADVANCED_TESTS = {
     "frame_naturalness",
     "frame_texture",
 }
-LUMA_ALLOWED_MODES = {
-    "adhere_1",
-    "adhere_2",
-    "adhere_3",
-    "flex_1",
-    "flex_2",
-    "flex_3",
-    "reimagine_1",
-    "reimagine_2",
-    "reimagine_3",
-}
-MODEL_FRAME_BUDGET_FPS = 24
-VIDEO_MODEL_MAX_SECONDS: dict[str, int] = {
-    "ray-2": 10,
-    "ray-flash-2": 15,
-    "runway-gen4.5": 10,
-    "kling-2.6": 10,
-    "kling-o1": 10,
-    "kling-v3-omni-video": 10,
-    "seedance-2.0-reference-to-video": 15,
-    "veo-3.1": 8,
-    "veo-3.1-fast": 8,
-    "wan2.2-a14b": 5,
-    "wan2.2-animate": 10,
-    "wan2.7-videoedit": 10,
-}
-VIDEO_MODEL_MIN_SECONDS: dict[str, int] = {
-    "kling-o1": 3,
-    "kling-v3-omni-video": 3,
-    "seedance-2.0-reference-to-video": 4,
-    "wan2.7-videoedit": 2,
-}
-VIDEO_MODEL_FRAME_BUDGET_FPS: dict[str, int] = {
-    "veo-3.1": MODEL_FRAME_BUDGET_FPS,
-    "veo-3.1-fast": MODEL_FRAME_BUDGET_FPS,
-}
-
-
 def _segment_generation_provider_name(model: str) -> str:
-    if model == "runway-gen4.5":
-        return "runway"
-    if model == "kling-2.6":
-        return "kling"
-    if model in {"veo-3.1", "veo-3.1-fast", "wan2.2-a14b", "wan2.2-animate"}:
-        return "runware"
-    if model in {"kling-o1", "kling-v3-omni-video", "wan2.7-videoedit"}:
-        return "replicate"
-    if model == "seedance-2.0-reference-to-video":
-        return "fal"
-    return "luma"
+    return get_video_model_provider(model)
 
 
 RUNWARE_WAN22_ALLOWED_RESOLUTIONS: tuple[tuple[int, int], ...] = (
@@ -263,6 +228,23 @@ def _dimensions_for_aspect_ratio(aspect_ratio: str, *, long_edge: int, square_ed
     if aspect_ratio == "3:4":
         return int(round(long_edge * 3 / 4)), long_edge
     return long_edge, int(round(long_edge * 9 / 16))
+
+
+def _nearest_runway_aleph_resolution(width: int, height: int) -> tuple[int, int]:
+    aspect_ratio = _nearest_allowed_aspect_ratio(
+        width,
+        height,
+        allowed=("21:9", "16:9", "4:3", "1:1", "3:4", "9:16"),
+    )
+    resolutions = {
+        "21:9": (1584, 672),
+        "16:9": (1280, 720),
+        "4:3": (1104, 832),
+        "1:1": (960, 960),
+        "3:4": (832, 1104),
+        "9:16": (720, 1280),
+    }
+    return resolutions[aspect_ratio]
 
 
 def _dimensions_for_aspect_ratio_within_box(
@@ -384,6 +366,8 @@ def _prepare_replicate_video_data_url(
     input_path: str,
     output_path: str,
     fps: Fraction,
+    source_fps: Fraction | None = None,
+    preserve_frame_count: bool = False,
     target_width: int,
     target_height: int,
     max_bytes: int = WAN27_DATA_URL_MAX_BYTES,
@@ -391,16 +375,29 @@ def _prepare_replicate_video_data_url(
     last_size = 0
     for audio_bitrate in ("128k", "96k", "64k"):
         for crf in (24, 28, 32, 36, 40):
-            transcode_to_cfr(
-                input_path,
-                output_path,
-                fps,
-                target_width=target_width,
-                target_height=target_height,
-                crf=crf,
-                preset="medium",
-                audio_bitrate=audio_bitrate,
-            )
+            if preserve_frame_count and source_fps is not None and source_fps != fps:
+                transcode_preserving_frame_count(
+                    input_path,
+                    output_path,
+                    source_fps=source_fps,
+                    target_fps=fps,
+                    target_width=target_width,
+                    target_height=target_height,
+                    crf=crf,
+                    preset="medium",
+                    audio_bitrate=audio_bitrate,
+                )
+            else:
+                transcode_to_cfr(
+                    input_path,
+                    output_path,
+                    fps,
+                    target_width=target_width,
+                    target_height=target_height,
+                    crf=crf,
+                    preset="medium",
+                    audio_bitrate=audio_bitrate,
+                )
             payload = Path(output_path).read_bytes()
             last_size = len(payload)
             if last_size <= max_bytes:
@@ -444,27 +441,55 @@ def _transcode_exact_with_size_limit(
     input_path: str,
     output_path: str,
     fps: Fraction,
+    source_fps: Fraction | None = None,
+    preserve_frame_count: bool = False,
     target_width: int,
     target_height: int,
     max_bytes: int,
 ) -> tuple[int, int, int]:
     last_size = 0
     for crf in (18, 22, 26, 30, 34):
-        transcode_to_cfr(
-            input_path,
-            output_path,
-            fps,
-            target_width=target_width,
-            target_height=target_height,
-            crf=crf,
-            preset="medium",
-            audio_bitrate="192k",
-        )
+        if preserve_frame_count and source_fps is not None and source_fps != fps:
+            transcode_preserving_frame_count(
+                input_path,
+                output_path,
+                source_fps=source_fps,
+                target_fps=fps,
+                target_width=target_width,
+                target_height=target_height,
+                crf=crf,
+                preset="medium",
+                audio_bitrate="192k",
+            )
+        else:
+            transcode_to_cfr(
+                input_path,
+                output_path,
+                fps,
+                target_width=target_width,
+                target_height=target_height,
+                crf=crf,
+                preset="medium",
+                audio_bitrate="192k",
+            )
         output_size = Path(output_path).stat().st_size
         last_size = output_size
         if output_size <= max_bytes:
             return target_width, target_height, output_size
     raise RuntimeError(f"Unable to compress provider input under {max_bytes} bytes (last size={last_size} bytes)")
+
+
+def _resolved_provider_fps(
+    *,
+    model_name: str,
+    source_fps: Fraction,
+    preserve_frames: bool,
+) -> tuple[Fraction, str]:
+    return resolve_video_model_provider_fps(
+        model=model_name,
+        source_fps=source_fps,
+        preserve_frames=preserve_frames,
+    )
 
 
 def _asset_paths(task: dict[str, Any]) -> AssetPaths:
@@ -730,6 +755,17 @@ def _find_chunked_generation_run_for_generation(task: dict[str, Any], gen_id: st
     return None, None
 
 
+def _find_chunked_generation_run(task: dict[str, Any], run_id: str) -> dict[str, Any] | None:
+    return next(
+        (
+            run
+            for run in task.get("chunkedGenerationRuns", [])
+            if isinstance(run, dict) and str(run.get("runId") or "") == str(run_id)
+        ),
+        None,
+    )
+
+
 def _copy_generated_anchor_to_frame_variant(
     *,
     task: dict[str, Any],
@@ -757,7 +793,33 @@ def _copy_generated_anchor_to_frame_variant(
             fps_num = int(probe.get("fps_num") or 24)
             fps_den = int(probe.get("fps_den") or 1)
             frame_count = max(1, int(round(duration * (fps_num / max(1, fps_den)))))
-        anchor_frame_index = max(0, frame_count - 1 - int(anchor_frames_from_end))
+        anchor_frame_index: int | None = None
+        source_segment_timing = generation.get("generationSettings", {}).get("sourceSegmentTiming") if isinstance(generation.get("generationSettings"), dict) else None
+        source_segment_start_frame = None
+        if isinstance(source_segment_timing, dict):
+            source_segment_start_frame = int(source_segment_timing.get("startFrame") or 0)
+        if source_segment_start_frame is None:
+            segment_lookup = next(
+                (
+                    segment
+                    for segment in task.get("segments", [])
+                    if isinstance(segment, dict) and segment.get("segmentId") == generation.get("segmentId")
+                ),
+                None,
+            )
+            if isinstance(segment_lookup, dict):
+                source_segment_start_frame = int(segment_lookup.get("startFrame") or 0)
+        source_frame_offset = int(
+            generation.get("sourceFrameOffset")
+            or (generation.get("alignment", {}).get("sourceFrameOffset") if isinstance(generation.get("alignment"), dict) else 0)
+            or 0
+        )
+        if source_segment_start_frame is not None:
+            aligned_generated_start_frame = int(source_segment_start_frame) + source_frame_offset
+            anchor_frame_index = int(target_frame_index) - aligned_generated_start_frame
+        if anchor_frame_index is None:
+            anchor_frame_index = frame_count - 1 - int(anchor_frames_from_end)
+        anchor_frame_index = max(0, min(frame_count - 1, anchor_frame_index))
         extract_frame_png(str(local_video), anchor_frame_index, str(local_anchor))
         variant_id = new_id("var")
         variant_key = paths.frame_variant(target_frame_id, variant_id)
@@ -777,6 +839,7 @@ def _copy_generated_anchor_to_frame_variant(
             "anchorFramesFromEnd": int(anchor_frames_from_end),
             "sourceGenerationId": generation.get("genId"),
             "sourceGeneratedFrameIndex": anchor_frame_index,
+            "alignedSourceFrameIndex": int(target_frame_index),
             "targetFrameIndex": int(target_frame_index),
         },
     }
@@ -813,7 +876,7 @@ def _queue_chunk_generation_follow_on(
             "genId": gen_id,
             "lumaModel": run.get("model"),
             "mode": run.get("mode"),
-            "prompt": run.get("prompt"),
+            "prompt": chunk.get("prompt"),
             "firstFrameVariantId": first_frame_variant_id,
             "replicateKlingMode": run.get("replicateKlingMode"),
             "replicateKlingV3Mode": run.get("replicateKlingV3Mode"),
@@ -830,10 +893,13 @@ def _queue_chunk_generation_follow_on(
             "provider": _segment_generation_provider_name(str(run.get("model") or "")),
             "model": run.get("model"),
             "mode": run.get("mode"),
-            "prompt": run.get("prompt"),
+            "prompt": chunk.get("prompt"),
             "lumaGenerationId": None,
         },
         "status": "queued",
+        "isChunkInternal": True,
+        "chunkedRunId": run.get("runId"),
+        "chunkRole": "internal_chunk",
         "outputKey": None,
         "jobId": job_id,
         "error": None,
@@ -883,6 +949,20 @@ def _advance_chunked_generation_run_after_success(
     chunk["finishedAt"] = now
     chunk["updatedAt"] = now
     current_index = int(chunk.get("chunkIndex") or 0)
+    generation = task.get("segmentGenerations", {}).get(gen_id)
+    if isinstance(generation, dict):
+        source_frame_offset = int(
+            generation.get("sourceFrameOffset")
+            or (generation.get("alignment", {}).get("sourceFrameOffset") if isinstance(generation.get("alignment"), dict) else 0)
+            or 0
+        )
+        actual_output_start_frame = int(chunk.get("segmentStartFrame") or 0) + source_frame_offset
+        chunk["actualOutputStartFrame"] = actual_output_start_frame
+        chunk["actualCoverageTrimStartFrames"] = max(0, int(chunk.get("coverageStartFrame") or chunk.get("segmentStartFrame") or 0) - actual_output_start_frame)
+    if run.get("status") == "canceled":
+        run["updatedAt"] = now
+        store.save_task(task, merge_on_conflict=True)
+        return
     if run.get("status") == "paused":
         run["activeChunkIndex"] = current_index
         run["updatedAt"] = now
@@ -897,7 +977,6 @@ def _advance_chunked_generation_run_after_success(
         return
 
     next_chunk = chunks[current_index + 1]
-    generation = task.get("segmentGenerations", {}).get(gen_id)
     if not isinstance(generation, dict):
         store.save_task(task, merge_on_conflict=True)
         return
@@ -968,6 +1047,188 @@ def _mark_chunked_generation_run_failed(
         },
     )
     store.save_task(task, merge_on_conflict=True)
+
+
+def _handle_chunked_generation_finalize(
+    *,
+    job: dict[str, Any],
+    store: S3JsonStore,
+    asset_store: AssetStore,
+    task: dict[str, Any],
+    settings: Any,
+) -> dict[str, Any]:
+    payload = job.get("payload") or {}
+    run_id = str(payload.get("runId") or "")
+    run = _find_chunked_generation_run(task, run_id)
+    if not isinstance(run, dict):
+        raise RuntimeError("Chunked generation run not found")
+    if run.get("status") != "complete":
+        raise RuntimeError("Chunked generation run must be complete before saving a draft")
+    chunks = [chunk for chunk in run.get("chunks", []) if isinstance(chunk, dict)]
+    if not chunks:
+        raise RuntimeError("Chunked generation run does not contain any chunks")
+
+    run["saveStatus"] = "running"
+    run["saveError"] = None
+    run["updatedAt"] = now_iso()
+    store.save_task(task, merge_on_conflict=True)
+    _job_progress(job, store, 10, "running", "Preparing stitched draft")
+
+    source_segment_id = str(run.get("sourceSegmentId") or "")
+    source_segment = next((item for item in task.get("segments", []) if isinstance(item, dict) and item.get("segmentId") == source_segment_id), None)
+    if not isinstance(source_segment, dict):
+        raise RuntimeError("Source segment for chunked generation was not found")
+
+    output_width = int(task.get("video", {}).get("editSource", {}).get("width") or 0)
+    output_height = int(task.get("video", {}).get("editSource", {}).get("height") or 0)
+    if output_width <= 0 or output_height <= 0:
+        raise RuntimeError("Source video dimensions are unavailable for stitched draft")
+    fps = _fps(task)
+    s3 = boto3.client("s3")
+    paths = _asset_paths(task)
+    with tempfile.TemporaryDirectory() as td:
+        td_path = Path(td)
+        input_paths: list[str] = []
+        trim_start_frames: list[int] = []
+        trim_end_frames: list[int] = []
+        for chunk in sorted(chunks, key=lambda item: int(item.get("chunkIndex") or 0)):
+            generation_id = str(chunk.get("generationId") or "")
+            generation = task.get("segmentGenerations", {}).get(generation_id)
+            if not isinstance(generation, dict) or generation.get("status") != "complete":
+                raise RuntimeError(f"Chunk {int(chunk.get('chunkIndex') or 0) + 1} does not have a complete generated output")
+            output_key = generation.get("outputKey")
+            if not isinstance(output_key, str) or not output_key:
+                raise RuntimeError(f"Chunk {int(chunk.get('chunkIndex') or 0) + 1} is missing its output video")
+            local_input = td_path / f"chunk_{int(chunk.get('chunkIndex') or 0):03d}.mp4"
+            _download_s3(s3, settings.assets_bucket, output_key, local_input)
+            input_paths.append(str(local_input))
+            output_timing = generation.get("generationSettings", {}).get("storedOutput") if isinstance(generation.get("generationSettings"), dict) else None
+            output_frame_count = int((output_timing or {}).get("frameCount") or 0) if isinstance(output_timing, dict) else 0
+            if output_frame_count <= 0:
+                output_probe = ffprobe_video(str(local_input))
+                output_frame_count = int(output_probe.get("frame_count") or 0)
+            source_frame_offset = int(
+                generation.get("sourceFrameOffset")
+                or (generation.get("alignment", {}).get("sourceFrameOffset") if isinstance(generation.get("alignment"), dict) else 0)
+                or 0
+            )
+            actual_output_start_source = int(chunk.get("segmentStartFrame") or 0) + source_frame_offset
+            desired_start_index = max(0, int(chunk.get("coverageStartFrame") or chunk.get("segmentStartFrame") or 0) - actual_output_start_source)
+            desired_end_index_exclusive = min(
+                output_frame_count,
+                max(
+                    desired_start_index + 1,
+                    int(chunk.get("coverageEndFrameExclusive") or chunk.get("segmentEndFrameExclusive") or 0) - actual_output_start_source,
+                ),
+            )
+            trim_start_frames.append(desired_start_index)
+            trim_end_frames.append(max(0, output_frame_count - desired_end_index_exclusive))
+        stitched_path = td_path / "stitched_draft.mp4"
+        stitch_video_segments(
+            input_paths,
+            str(stitched_path),
+            fps_num=fps.numerator,
+            fps_den=fps.denominator,
+            output_width=output_width,
+            output_height=output_height,
+            trim_start_frames=trim_start_frames,
+            trim_end_frames=trim_end_frames,
+        )
+        stitched_probe = ffprobe_video(str(stitched_path))
+        gen_id = new_id("gen")
+        output_key = paths.segment_generated(source_segment_id, gen_id)
+        s3.upload_file(
+            str(stitched_path),
+            settings.assets_bucket,
+            output_key,
+            ExtraArgs={"ContentType": "video/mp4"},
+        )
+
+    _job_progress(job, store, 85, "running", "Saving stitched draft")
+    finished_at = now_iso()
+    source_start_frame = task.get("frames", {}).get(source_segment.get("startFrameId") or "")
+    generation_record = {
+        "genId": gen_id,
+        "segmentId": source_segment_id,
+        "luma": {
+            "provider": _segment_generation_provider_name(str(run.get("model") or "")),
+            "model": run.get("model"),
+            "mode": run.get("mode"),
+            "prompt": run.get("openingPrompt"),
+            "lumaGenerationId": None,
+        },
+        "status": "complete",
+        "outputKey": output_key,
+        "sourceFirstFrameCaptureKey": source_start_frame.get("captureKey") if isinstance(source_start_frame, dict) else None,
+        "requestedDurationSec": round(float(source_segment.get("durationSec") or 0.0), 3),
+        "providerDurationSec": round(float(stitched_probe.get("duration_sec") or 0.0), 3),
+        "sourceFrameOffset": 0,
+        "alignment": {
+            "sourceFrameOffset": 0,
+            "matchedSourceFrame": int(source_segment.get("startFrame") or 0),
+            "confidence": 1.0,
+            "strategy": "chunk_stitch_source_range",
+        },
+        "generationSettings": {
+            "provider": "chunked_generation",
+            "requestedModel": run.get("model"),
+            "model": run.get("model"),
+            "mode": run.get("mode"),
+            "chunkedRunId": run_id,
+            "chunkCount": len(chunks),
+            "openingPrompt": run.get("openingPrompt"),
+            "continuationPrompt": run.get("continuationPrompt"),
+            "sourceSegmentTiming": {
+                "startFrame": int(source_segment.get("startFrame") or 0),
+                "endFrameExclusive": int(source_segment.get("endFrameExclusive") or 0),
+                "durationFrames": int(source_segment.get("durationFrames") or 0),
+                "durationSec": round(float(source_segment.get("durationSec") or 0.0), 4),
+                "fps": {"num": fps.numerator, "den": fps.denominator},
+                "width": output_width,
+                "height": output_height,
+            },
+            "storedOutput": _video_timing_payload(stitched_probe),
+            "timelineAlignment": {
+                "sourceFrameOffset": 0,
+                "matchedSourceFrame": int(source_segment.get("startFrame") or 0),
+                "confidence": 1.0,
+                "strategy": "chunk_stitch_source_range",
+            },
+            "timelineConform": {
+                "policy": "source_cfr_resolution",
+                "applied": False,
+                "durationDeltaSec": round(float(stitched_probe.get("duration_sec") or 0.0) - float(source_segment.get("durationSec") or 0.0), 4),
+                "frameDelta": int(stitched_probe.get("frame_count") or 0) - int(source_segment.get("durationFrames") or 0),
+            },
+        },
+        "createdAt": finished_at,
+        "updatedAt": finished_at,
+        "finishedAt": finished_at,
+        "processingDurationSec": _processing_duration_seconds(job.get("startedAt"), finished_at),
+        "error": None,
+        "chunkedRunId": run_id,
+        "chunkRole": "draft_stitched",
+        "isChunkInternal": False,
+    }
+    task.setdefault("segmentGenerations", {})[gen_id] = generation_record
+    run["saveStatus"] = "complete"
+    run["savedGenerationId"] = gen_id
+    run["updatedAt"] = finished_at
+    run["saveCompletedAt"] = finished_at
+    _append_task_history_event(
+        task,
+        {
+            "at": finished_at,
+            "event": "chunked_generation.saved_draft",
+            "runId": run_id,
+            "genId": gen_id,
+        },
+    )
+    store.save_task(task, merge_on_conflict=True)
+    _job_progress(job, store, 100, "complete", "Chunked draft saved")
+    job["resultRefs"] = {"runId": run_id, "genId": gen_id, "outputKey": output_key}
+    store.save_job(job)
+    return job
 
 
 def _handle_ingest(
@@ -1159,6 +1420,17 @@ def _wait_runway_complete(api_key: str, task_id: str, *, timeout_sec: int = 1800
         if time.time() - start > timeout_sec:
             raise TimeoutError("Runway generation poll timeout")
         time.sleep(6)
+
+
+def _upload_runway_ephemeral_asset(*, api_key: str, file_path: Path, content_type: str) -> str:
+    created = create_ephemeral_upload(api_key=api_key, filename=file_path.name)
+    upload_url = created.get("uploadUrl")
+    fields = created.get("fields")
+    runway_uri = created.get("runwayUri") or created.get("uri")
+    if not isinstance(upload_url, str) or not isinstance(fields, dict) or not isinstance(runway_uri, str):
+        raise RuntimeError(f"Unexpected Runway upload response: {created}")
+    upload_to_ephemeral(upload_url=upload_url, fields=fields, file_path=file_path, content_type=content_type)
+    return runway_uri
 
 
 def _parse_runware_video_output_url(payload: dict[str, Any]) -> str:
@@ -2075,13 +2347,15 @@ def _handle_api_video_generate_reference(
     paths = _api_asset_paths(job["userId"])
     secrets = load_secret(settings.secrets_arn)
     model_name = str(payload["model"])
+    capability = get_video_model_capability(model_name)
     requested_mode = str(payload["mode"])
-    luma_mode = requested_mode if requested_mode in LUMA_ALLOWED_MODES else "flex_1"
+    luma_mode = requested_mode if requested_mode in LUMA_API_ALLOWED_MODES else "flex_1"
     uses_end_keyframe = requested_mode in {"kling_start_end", "veo_start_end"}
     replicate_kling_mode = str(payload.get("replicateKlingMode") or "pro")
     replicate_kling_v3_mode = str(payload.get("replicateKlingV3Mode") or "pro")
     wan27_resolution = str(payload.get("wan27Resolution") or "720p")
-    provider_name = _segment_generation_provider_name(model_name)
+    preserve_frames = bool(payload.get("preserveFrames", True))
+    provider_name = capability.provider
 
     _api_request_progress(job=job, store=store, request_record=request_record, progress=10, status="running", logs="Loading video generation assets")
     with tempfile.TemporaryDirectory() as td:
@@ -2101,21 +2375,17 @@ def _handle_api_video_generate_reference(
         provider_media_has_audio = bool(source_probe.get("has_audio"))
         source_size = source_video_path.stat().st_size
 
-        max_seconds = VIDEO_MODEL_MAX_SECONDS.get(model_name)
-        min_seconds = VIDEO_MODEL_MIN_SECONDS.get(model_name)
-        frame_budget_fps = VIDEO_MODEL_FRAME_BUDGET_FPS.get(model_name)
         duration_frames = max(1, int(round(segment_duration_sec * float(fps))))
-        if max_seconds is not None:
-            max_frames = int(round(max_seconds * (frame_budget_fps or float(fps))))
-            if segment_duration_sec > float(max_seconds) + 1e-6 or duration_frames > max_frames:
-                if frame_budget_fps is not None and duration_frames > max_frames and abs(float(fps) - frame_budget_fps) > 1e-3:
-                    raise RuntimeError(
-                        f"{model_name} allows up to {max_seconds}s at {frame_budget_fps}fps ({max_frames} frames). "
-                        f"Input video is {duration_frames} frames / {segment_duration_sec:.2f}s at {float(fps):.2f}fps."
-                    )
-                raise RuntimeError(f"{model_name} allows up to {max_seconds}s. Input video is {segment_duration_sec:.2f}s.")
-        if min_seconds is not None and segment_duration_sec + 1e-6 < float(min_seconds):
-            raise RuntimeError(f"{model_name} requires at least {min_seconds}s of source video. Input video is {segment_duration_sec:.2f}s.")
+        limit_error = resolve_video_model_limit_error(
+            model=model_name,
+            duration_seconds=segment_duration_sec,
+            duration_frames=duration_frames,
+            source_fps=fps,
+            source_label="source video",
+            selected_label="Input video",
+        )
+        if limit_error:
+            raise RuntimeError(limit_error)
 
         media_key_for_provider: str | None = None
         first_frame_input_key: str | None = None
@@ -2125,6 +2395,9 @@ def _handle_api_video_generate_reference(
         provider_media_width: int | None = None
         provider_media_height: int | None = None
         provider_media_fps: Fraction | None = None
+        provider_input_timing_policy = "source_fps"
+        provider_input_duration_sec = round(segment_duration_sec, 3)
+        local_provider_segment: Path | None = None
         wan27_video_transport: str | None = None
         wan27_reference_transport: str | None = None
         wan27_video_data_url: str | None = None
@@ -2136,7 +2409,7 @@ def _handle_api_video_generate_reference(
         seedance_output_width: int | None = None
         seedance_output_height: int | None = None
 
-        if model_name in {"kling-o1", "kling-v3-omni-video"}:
+        if capability.source_video_profile == "kling_edit":
             replicate_aspect_ratio = _nearest_allowed_aspect_ratio(
                 src_width,
                 src_height,
@@ -2156,14 +2429,17 @@ def _handle_api_video_generate_reference(
                 input_path=str(source_video_path),
                 output_path=str(local_provider_segment),
                 fps=fps,
+                source_fps=fps,
+                preserve_frame_count=False,
                 target_width=target_w,
                 target_height=target_h,
                 max_bytes=REPLICATE_VIDEO_MAX_BYTES,
             )
             provider_media_fps = fps
+            provider_input_duration_sec = round(float(ffprobe_video(str(local_provider_segment)).get("duration_sec") or segment_duration_sec), 3)
             media_key_for_provider = paths.request_artifact(request_id, "prepared", "provider_video", ".mp4")
             asset_store.put_bytes(media_key_for_provider, local_provider_segment.read_bytes(), content_type="video/mp4")
-        elif model_name == "seedance-2.0-reference-to-video":
+        elif capability.source_video_profile == "seedance_reference":
             seedance_aspect_ratio = _nearest_allowed_aspect_ratio(
                 src_width,
                 src_height,
@@ -2181,14 +2457,17 @@ def _handle_api_video_generate_reference(
                 input_path=str(source_video_path),
                 output_path=str(local_provider_segment),
                 fps=fps,
+                source_fps=fps,
+                preserve_frame_count=False,
                 target_width=target_w,
                 target_height=target_h,
                 max_bytes=SEEDANCE_REFERENCE_VIDEO_MAX_BYTES,
             )
             provider_media_fps = fps
+            provider_input_duration_sec = round(float(ffprobe_video(str(local_provider_segment)).get("duration_sec") or segment_duration_sec), 3)
             media_key_for_provider = paths.request_artifact(request_id, "prepared", "provider_video", ".mp4")
             asset_store.put_bytes(media_key_for_provider, local_provider_segment.read_bytes(), content_type="video/mp4")
-        elif model_name == "wan2.7-videoedit":
+        elif capability.source_video_profile == "wan27_edit":
             wan_edge = 1080 if wan27_resolution == "1080p" else 720
             target_w, target_h = _target_by_orientation(
                 src_width,
@@ -2196,13 +2475,19 @@ def _handle_api_video_generate_reference(
                 landscape=(int(round(wan_edge * 16 / 9)), wan_edge),
                 portrait=(wan_edge, int(round(wan_edge * 16 / 9))),
             )
-            wan_provider_fps = fps if float(fps) <= 24.0 else Fraction(24, 1)
+            wan_provider_fps, provider_input_timing_policy = _resolved_provider_fps(
+                model_name=model_name,
+                source_fps=fps,
+                preserve_frames=preserve_frames,
+            )
             local_provider_segment = td_path / "provider_segment_wan27.mp4"
             _api_request_progress(job=job, store=store, request_record=request_record, progress=20, status="running", logs="Preparing segment clip for Wan 2.7 VideoEdit")
             wan27_video_data_url, _ = _prepare_replicate_video_data_url(
                 input_path=str(source_video_path),
                 output_path=str(local_provider_segment),
                 fps=wan_provider_fps,
+                source_fps=fps,
+                preserve_frame_count=preserve_frames,
                 target_width=target_w,
                 target_height=target_h,
                 max_bytes=WAN27_DATA_URL_MAX_BYTES,
@@ -2210,6 +2495,7 @@ def _handle_api_video_generate_reference(
             provider_media_width = target_w
             provider_media_height = target_h
             provider_media_fps = wan_provider_fps
+            provider_input_duration_sec = round(float(ffprobe_video(str(local_provider_segment)).get("duration_sec") or segment_duration_sec), 3)
             wan27_video_transport = "data_url"
             media_key_for_provider = paths.request_artifact(request_id, "prepared", "provider_video", ".mp4")
             asset_store.put_bytes(media_key_for_provider, local_provider_segment.read_bytes(), content_type="video/mp4")
@@ -2227,6 +2513,7 @@ def _handle_api_video_generate_reference(
                 max_bytes=FULL_VIDEO_MAX_BYTES,
             )
             provider_media_fps = fps
+            provider_input_duration_sec = round(float(ffprobe_video(str(local_provider_segment)).get("duration_sec") or segment_duration_sec), 3)
             media_key_for_provider = paths.request_artifact(request_id, "prepared", "provider_video", ".mp4")
             asset_store.put_bytes(media_key_for_provider, local_provider_segment.read_bytes(), content_type="video/mp4")
         else:
@@ -2234,12 +2521,13 @@ def _handle_api_video_generate_reference(
             provider_media_width = src_width
             provider_media_height = src_height
             provider_media_fps = fps
+            provider_input_duration_sec = round(segment_duration_sec, 3)
 
         with Image.open(BytesIO(first_frame_bytes)) as first_image_probe:
             first_source_width, first_source_height = first_image_probe.size
-        if model_name in {"wan2.2-a14b", "wan2.2-animate"}:
+        if capability.first_frame_profile == "runware_wan22":
             first_target_w, first_target_h = _nearest_runware_wan22_resolution(first_source_width, first_source_height)
-        elif model_name in {"kling-o1", "kling-v3-omni-video"}:
+        elif capability.first_frame_profile == "kling_edit":
             if not replicate_aspect_ratio:
                 replicate_aspect_ratio = _nearest_allowed_aspect_ratio(
                     first_source_width,
@@ -2254,7 +2542,7 @@ def _handle_api_video_generate_reference(
                 long_edge=kling_long_edge,
                 square_edge=kling_square_edge,
             )
-        elif model_name == "wan2.7-videoedit":
+        elif capability.first_frame_profile == "wan27_edit":
             wan_edge = 1080 if wan27_resolution == "1080p" else 720
             first_target_w, first_target_h = _target_by_orientation(
                 first_source_width,
@@ -2262,7 +2550,7 @@ def _handle_api_video_generate_reference(
                 landscape=(int(round(wan_edge * 16 / 9)), wan_edge),
                 portrait=(wan_edge, int(round(wan_edge * 16 / 9))),
             )
-        elif model_name == "seedance-2.0-reference-to-video":
+        elif capability.first_frame_profile == "seedance_reference":
             if not seedance_aspect_ratio:
                 seedance_aspect_ratio = _nearest_allowed_aspect_ratio(
                     first_source_width,
@@ -2275,7 +2563,9 @@ def _handle_api_video_generate_reference(
                 portrait_box=(834, 1112),
                 square_edge=834,
             )
-        elif model_name in {"runway-gen4.5", "veo-3.1", "veo-3.1-fast"}:
+        elif capability.first_frame_profile == "runway_aleph":
+            first_target_w, first_target_h = _nearest_runway_aleph_resolution(first_source_width, first_source_height)
+        elif capability.first_frame_profile == "runway_standard_720":
             first_target_w, first_target_h = _target_by_orientation(
                 first_source_width,
                 first_source_height,
@@ -2336,6 +2626,34 @@ def _handle_api_video_generate_reference(
             result = _wait_runway_complete(runway_key, generation_id)
             out_url = _parse_runway_output_url(result)
             used_provider_model = "gen4.5"
+        elif model_name == "runway-gen4-aleph":
+            runway_key = secrets["RUNWAY_API_KEY"]
+            provider_duration_sec = round(provider_input_duration_sec or segment_duration_sec, 3)
+            _api_request_progress(job=job, store=store, request_record=request_record, progress=40, status="running", logs="Creating Runway Gen-4 Aleph video-to-video generation")
+            runway_video_uri = _upload_runway_ephemeral_asset(
+                api_key=runway_key,
+                file_path=local_provider_segment or source_video_path,
+                content_type="video/mp4",
+            )
+            runway_first_frame_uri = _upload_runway_ephemeral_asset(
+                api_key=runway_key,
+                file_path=td_path / f"first_frame{first_frame_ext}",
+                content_type=first_frame_content_type,
+            )
+            created = create_video_to_video(
+                api_key=runway_key,
+                video_uri=runway_video_uri,
+                prompt_text=str(payload.get("prompt") or "Modify the source video while preserving timing, camera movement, and overall motion continuity."),
+                first_frame_uri=runway_first_frame_uri,
+                ratio=f"{first_target_w}:{first_target_h}",
+            )
+            generation_id = created.get("id")
+            if not generation_id:
+                raise RuntimeError(f"Unexpected Runway create response: {created}")
+            _api_request_progress(job=job, store=store, request_record=request_record, progress=55, status="running", logs="Polling Runway Gen-4 Aleph generation")
+            result = _wait_runway_complete(runway_key, generation_id)
+            out_url = _parse_runway_output_url(result)
+            used_provider_model = "gen4_aleph"
         elif model_name == "kling-2.6":
             kling_key = secrets.get("RUNWARE_API_KEY") or secrets.get("KLING_API_KEY")
             if not kling_key:
@@ -2518,7 +2836,7 @@ def _handle_api_video_generate_reference(
                 raise RuntimeError("Wan 2.7 VideoEdit requires REPLICATE_API_KEY")
             if not wan27_video_data_url:
                 raise RuntimeError("Wan 2.7 VideoEdit requires a prepared source video payload")
-            provider_duration_sec = round(segment_duration_sec, 3)
+            provider_duration_sec = provider_input_duration_sec
             wan27_reference_data_url = _prepare_replicate_image_data_url(
                 first_frame_bytes,
                 target_width=first_target_w,
@@ -2651,6 +2969,8 @@ def _handle_api_video_generate_reference(
             if provider_media_fps
             else None
         ),
+        "preserveFrames": preserve_frames,
+        "providerInputTimingPolicy": provider_input_timing_policy,
         "preparedFirstFrameResolution": {"width": first_target_w, "height": first_target_h},
         "requestedDurationSec": round(segment_duration_sec, 3),
         "providerDurationSec": provider_duration_sec,
@@ -2842,22 +3162,16 @@ def _handle_segment_generate(
     paths = _asset_paths(task)
     s3 = boto3.client("s3")
     model_name = payload["lumaModel"]
+    capability = get_video_model_capability(model_name)
     requested_mode = payload["mode"]
-    luma_mode = requested_mode if requested_mode in LUMA_ALLOWED_MODES else "flex_1"
+    luma_mode = requested_mode if requested_mode in LUMA_API_ALLOWED_MODES else "flex_1"
     uses_end_keyframe = requested_mode in {"kling_start_end", "veo_start_end"}
     replicate_kling_mode = str(payload.get("replicateKlingMode") or "pro")
     replicate_kling_v3_mode = str(payload.get("replicateKlingV3Mode") or "pro")
     wan27_resolution = str(payload.get("wan27Resolution") or "720p")
+    preserve_frames = bool(payload.get("preserveFrames", True))
     segment_key: str | None = None
-    if model_name in {
-        "ray-2",
-        "ray-flash-2",
-        "wan2.2-animate",
-        "kling-o1",
-        "kling-v3-omni-video",
-        "seedance-2.0-reference-to-video",
-        "wan2.7-videoedit",
-    }:
+    if capability.uses_source_video:
         segment_key = _ensure_segment_clip(
             s3=s3,
             asset_store=asset_store,
@@ -2906,6 +3220,11 @@ def _handle_segment_generate(
     provider_media_height: int | None = None
     provider_media_has_audio: bool | None = None
     provider_media_fps: Fraction | None = None
+    provider_input_timing_policy = "source_fps"
+    provider_input_duration_sec = round(float(segment.get("durationSec") or 0.0), 3)
+    local_provider_segment: Path | None = None
+    runway_video_uri: str | None = None
+    runway_first_frame_uri: str | None = None
     wan27_reference_transport: str | None = None
     wan27_video_transport: str | None = None
     wan27_video_data_url: str | None = None
@@ -2930,7 +3249,7 @@ def _handle_segment_generate(
             source_segment_height = segment_src_height
             provider_media_has_audio = bool(segment_source_probe.get("has_audio"))
             source_size = local_segment_source.stat().st_size
-            if model_name in {"kling-o1", "kling-v3-omni-video"}:
+            if capability.source_video_profile == "kling_edit":
                 replicate_aspect_ratio = _nearest_allowed_aspect_ratio(
                     segment_src_width,
                     segment_src_height,
@@ -2951,14 +3270,17 @@ def _handle_segment_generate(
                     input_path=str(local_segment_source),
                     output_path=str(local_provider_segment),
                     fps=fps,
+                    source_fps=fps,
+                    preserve_frame_count=False,
                     target_width=target_w,
                     target_height=target_h,
                     max_bytes=REPLICATE_VIDEO_MAX_BYTES,
                 )
                 provider_media_fps = fps
+                provider_input_duration_sec = round(float(ffprobe_video(str(local_provider_segment)).get("duration_sec") or float(segment.get("durationSec") or 0.0)), 3)
                 media_key_for_provider = paths.segment_provider_input(segment_id, gen_id, "replicate")
                 _upload_s3(s3, settings.assets_bucket, media_key_for_provider, local_provider_segment, "video/mp4")
-            elif model_name == "seedance-2.0-reference-to-video":
+            elif capability.source_video_profile == "seedance_reference":
                 seedance_aspect_ratio = _nearest_allowed_aspect_ratio(
                     segment_src_width,
                     segment_src_height,
@@ -2976,14 +3298,17 @@ def _handle_segment_generate(
                     input_path=str(local_segment_source),
                     output_path=str(local_provider_segment),
                     fps=fps,
+                    source_fps=fps,
+                    preserve_frame_count=False,
                     target_width=target_w,
                     target_height=target_h,
                     max_bytes=SEEDANCE_REFERENCE_VIDEO_MAX_BYTES,
                 )
                 provider_media_fps = fps
+                provider_input_duration_sec = round(float(ffprobe_video(str(local_provider_segment)).get("duration_sec") or float(segment.get("durationSec") or 0.0)), 3)
                 media_key_for_provider = paths.segment_provider_input(segment_id, gen_id, "fal")
                 _upload_s3(s3, settings.assets_bucket, media_key_for_provider, local_provider_segment, "video/mp4")
-            elif model_name == "wan2.7-videoedit":
+            elif capability.source_video_profile == "wan27_edit":
                 wan_edge = 1080 if wan27_resolution == "1080p" else 720
                 target_w, target_h = _target_by_orientation(
                     segment_src_width,
@@ -2991,13 +3316,19 @@ def _handle_segment_generate(
                     landscape=(int(round(wan_edge * 16 / 9)), wan_edge),
                     portrait=(wan_edge, int(round(wan_edge * 16 / 9))),
                 )
-                wan_provider_fps = fps if float(fps) <= 24.0 else Fraction(24, 1)
+                wan_provider_fps, provider_input_timing_policy = _resolved_provider_fps(
+                    model_name=model_name,
+                    source_fps=fps,
+                    preserve_frames=preserve_frames,
+                )
                 _job_progress(job, store, 20, "running", "Preparing segment clip for Wan 2.7 VideoEdit")
                 local_provider_segment = td_path / "segment_wan27_data_url.mp4"
                 wan27_video_data_url, _ = _prepare_replicate_video_data_url(
                     input_path=str(local_segment_source),
                     output_path=str(local_provider_segment),
                     fps=wan_provider_fps,
+                    source_fps=fps,
+                    preserve_frame_count=preserve_frames,
                     target_width=target_w,
                     target_height=target_h,
                     max_bytes=WAN27_DATA_URL_MAX_BYTES,
@@ -3005,6 +3336,7 @@ def _handle_segment_generate(
                 provider_media_width = target_w
                 provider_media_height = target_h
                 provider_media_fps = wan_provider_fps
+                provider_input_duration_sec = round(float(ffprobe_video(str(local_provider_segment)).get("duration_sec") or float(segment.get("durationSec") or 0.0)), 3)
                 wan27_video_transport = "data_url"
                 media_key_for_provider = paths.segment_provider_input(segment_id, gen_id, "replicate")
                 _upload_s3(s3, settings.assets_bucket, media_key_for_provider, local_provider_segment, "video/mp4")
@@ -3024,6 +3356,7 @@ def _handle_segment_generate(
                 provider_media_width = luma_w
                 provider_media_height = luma_h
                 provider_media_fps = fps
+                provider_input_duration_sec = round(float(ffprobe_video(str(local_provider_segment)).get("duration_sec") or float(segment.get("durationSec") or 0.0)), 3)
                 media_key_for_provider = paths.segment_provider_input(segment_id, gen_id, "luma")
                 _upload_s3(s3, settings.assets_bucket, media_key_for_provider, local_provider_segment, "video/mp4")
             else:
@@ -3031,13 +3364,14 @@ def _handle_segment_generate(
                 provider_media_width = segment_src_width
                 provider_media_height = segment_src_height
                 provider_media_fps = fps
+                provider_input_duration_sec = round(float(segment.get("durationSec") or 0.0), 3)
 
         frame_bytes = asset_store.read_bytes(first_frame_key)
         with Image.open(BytesIO(frame_bytes)) as first_image_probe:
             first_source_width, first_source_height = first_image_probe.size
-        if model_name in {"wan2.2-a14b", "wan2.2-animate"}:
+        if capability.first_frame_profile == "runware_wan22":
             first_target_w, first_target_h = _nearest_runware_wan22_resolution(first_source_width, first_source_height)
-        elif model_name in {"kling-o1", "kling-v3-omni-video"}:
+        elif capability.first_frame_profile == "kling_edit":
             if not replicate_aspect_ratio:
                 replicate_aspect_ratio = _nearest_allowed_aspect_ratio(
                     first_source_width,
@@ -3052,7 +3386,7 @@ def _handle_segment_generate(
                 long_edge=kling_long_edge,
                 square_edge=kling_square_edge,
             )
-        elif model_name == "wan2.7-videoedit":
+        elif capability.first_frame_profile == "wan27_edit":
             wan_edge = 1080 if wan27_resolution == "1080p" else 720
             first_target_w, first_target_h = _target_by_orientation(
                 first_source_width,
@@ -3060,7 +3394,7 @@ def _handle_segment_generate(
                 landscape=(int(round(wan_edge * 16 / 9)), wan_edge),
                 portrait=(wan_edge, int(round(wan_edge * 16 / 9))),
             )
-        elif model_name == "seedance-2.0-reference-to-video":
+        elif capability.first_frame_profile == "seedance_reference":
             if not seedance_aspect_ratio:
                 seedance_aspect_ratio = _nearest_allowed_aspect_ratio(
                     first_source_width,
@@ -3073,7 +3407,9 @@ def _handle_segment_generate(
                 portrait_box=(834, 1112),
                 square_edge=834,
             )
-        elif model_name in {"runway-gen4.5", "veo-3.1", "veo-3.1-fast"}:
+        elif capability.first_frame_profile == "runway_aleph":
+            first_target_w, first_target_h = _nearest_runway_aleph_resolution(first_source_width, first_source_height)
+        elif capability.first_frame_profile == "runway_standard_720":
             first_target_w, first_target_h = _target_by_orientation(
                 first_source_width,
                 first_source_height,
@@ -3095,19 +3431,7 @@ def _handle_segment_generate(
         )
         local_first_frame = td_path / f"first_frame{first_frame_ext}"
         local_first_frame.write_bytes(prepared_first_frame)
-        provider_input_namespace = (
-            "runway"
-            if model_name == "runway-gen4.5"
-            else (
-                "kling"
-                if model_name == "kling-2.6"
-                else (
-                    "runware"
-                    if model_name in {"veo-3.1", "veo-3.1-fast", "wan2.2-a14b", "wan2.2-animate"}
-                    else ("replicate" if model_name in {"kling-o1", "kling-v3-omni-video", "wan2.7-videoedit"} else ("fal" if model_name == "seedance-2.0-reference-to-video" else "luma"))
-                )
-            )
-        )
+        provider_input_namespace = capability.provider_input_namespace or capability.provider
         first_frame_input_key = paths.segment_provider_first_frame(
             segment_id,
             gen_id,
@@ -3133,6 +3457,19 @@ def _handle_segment_generate(
                 ext=last_frame_ext,
             )
             _upload_s3(s3, settings.assets_bucket, last_frame_input_key, local_last_frame, last_frame_content_type)
+
+        if model_name == "runway-gen4-aleph":
+            runway_key = load_secret(settings.secrets_arn)["RUNWAY_API_KEY"]
+            runway_video_uri = _upload_runway_ephemeral_asset(
+                api_key=runway_key,
+                file_path=local_provider_segment or local_segment_source,
+                content_type="video/mp4",
+            )
+            runway_first_frame_uri = _upload_runway_ephemeral_asset(
+                api_key=runway_key,
+                file_path=local_first_frame,
+                content_type=first_frame_content_type,
+            )
 
     media_url = asset_store.presign_get(media_key_for_provider, expires=3600) if media_key_for_provider else None
     first_frame_url = asset_store.presign_get(first_frame_input_key, expires=3600)
@@ -3163,6 +3500,25 @@ def _handle_segment_generate(
         out_url = _parse_runway_output_url(result)
         provider_name = "runway"
         used_provider_model = "gen4.5"
+    elif model_name == "runway-gen4-aleph":
+        runway_key = secrets["RUNWAY_API_KEY"]
+        provider_duration_sec = round(provider_input_duration_sec or segment_duration_sec, 3)
+        _job_progress(job, store, 35, "running", "Creating Runway Gen-4 Aleph video-to-video generation")
+        created = create_video_to_video(
+            api_key=runway_key,
+            video_uri=str(runway_video_uri),
+            prompt_text=payload.get("prompt") or "Modify the source video while preserving timing, camera movement, and overall motion continuity.",
+            first_frame_uri=str(runway_first_frame_uri),
+            ratio=f"{first_target_w}:{first_target_h}",
+        )
+        generation_id = created.get("id")
+        if not generation_id:
+            raise RuntimeError(f"Unexpected Runway create response: {created}")
+        _job_progress(job, store, 55, "running", "Polling Runway Gen-4 Aleph generation")
+        result = _wait_runway_complete(runway_key, generation_id)
+        out_url = _parse_runway_output_url(result)
+        provider_name = "runway"
+        used_provider_model = "gen4_aleph"
     elif model_name == "kling-2.6":
         kling_key = secrets.get("RUNWARE_API_KEY") or secrets.get("KLING_API_KEY")
         if not kling_key:
@@ -3372,7 +3728,7 @@ def _handle_segment_generate(
             raise RuntimeError("Wan 2.7 VideoEdit requires a prepared segment video payload")
         if not frame_bytes:
             raise RuntimeError("Wan 2.7 VideoEdit requires a prepared reference image")
-        provider_duration_sec = round(segment_duration_sec, 3)
+        provider_duration_sec = provider_input_duration_sec
         wan27_reference_data_url = _prepare_replicate_image_data_url(
             frame_bytes,
             target_width=first_target_w,
@@ -3569,6 +3925,8 @@ def _handle_segment_generate(
                 "wan27Resolution": wan27_resolution if model_name == "wan2.7-videoedit" else None,
                 "wan27VideoTransport": wan27_video_transport if model_name == "wan2.7-videoedit" else None,
                 "wan27ReferenceTransport": wan27_reference_transport if model_name == "wan2.7-videoedit" else None,
+                "preserveFrames": preserve_frames,
+                "providerInputTimingPolicy": provider_input_timing_policy,
                 "mediaHasAudio": provider_media_has_audio,
                 "segmentCrop": segment.get("crop"),
                 "requestedDurationSec": round(segment_duration_sec, 3),
@@ -3584,10 +3942,11 @@ def _handle_segment_generate(
                 },
                 "providerInputTiming": (
                     {
-                        "durationSec": round(float(provider_duration_sec or segment_duration_sec), 4),
+                        "durationSec": round(float(provider_input_duration_sec or provider_duration_sec or segment_duration_sec), 4),
                         "fps": {"num": provider_media_fps.numerator, "den": provider_media_fps.denominator},
                         "width": provider_media_width,
                         "height": provider_media_height,
+                        "timingPolicy": provider_input_timing_policy,
                     }
                     if provider_media_fps and provider_media_width and provider_media_height
                     else None
@@ -3737,6 +4096,12 @@ def _handle_merge(
             default_trim_end_frames = max(0, stored_output_frame_count - available_target_frames) if stored_output_frame_count > 0 else 0
             trim_start_frames = max(0, int(raw_adjustment.get("trimStartFrames") if raw_adjustment.get("trimStartFrames") is not None else 0))
             trim_end_frames = max(0, int(raw_adjustment.get("trimEndFrames") if raw_adjustment.get("trimEndFrames") is not None else default_trim_end_frames))
+            playback_rate = raw_adjustment.get("playbackRate")
+            if playback_rate is not None:
+                try:
+                    playback_rate = max(0.05, min(20.0, float(playback_rate)))
+                except Exception:
+                    playback_rate = None
             start_frame_override = raw_adjustment.get("startFrameOverride")
             if start_frame_override is not None:
                 start_frame_override = max(0, int(start_frame_override))
@@ -3750,6 +4115,25 @@ def _handle_merge(
             effective_trim_start = trim_start_frames
             effective_trim_end = trim_end_frames
             merge_segment_path = seg_path
+            retime_cmd: list[str] | None = None
+            if playback_rate is not None and abs(playback_rate - 1.0) > 1e-4:
+                retimed_path = td_path / f"segment_retimed_{idx}.mp4"
+                retime_cmd = trim_and_retime_video_uniform(
+                    str(seg_path),
+                    str(retimed_path),
+                    fps=Fraction(task["video"]["editSource"]["fps"]["num"], task["video"]["editSource"]["fps"]["den"]),
+                    playback_rate=playback_rate,
+                    trim_start_frames=trim_start_frames,
+                    trim_end_frames=trim_end_frames,
+                    target_width=int(task["video"]["editSource"]["width"]),
+                    target_height=int(task["video"]["editSource"]["height"]),
+                    crf=16,
+                    preset="slow",
+                    audio_bitrate="192k",
+                )
+                merge_segment_path = retimed_path
+                effective_trim_start = 0
+                effective_trim_end = 0
             crop_settings = gen.get("segmentCrop") if isinstance(gen.get("segmentCrop"), dict) else segment.get("crop")
             crop_compose_cmd: list[str] | None = None
             if (
@@ -3803,11 +4187,13 @@ def _handle_merge(
                     "startFrameOverride": start_frame_override,
                     "trimStartFrames": trim_start_frames,
                     "trimEndFrames": trim_end_frames,
+                    "playbackRate": playback_rate,
                     "autoTimingApplied": {
                         "startFrameOverride": raw_adjustment.get("startFrameOverride") is None,
                         "trimEndFrames": raw_adjustment.get("trimEndFrames") is None,
                     },
                     "segmentCrop": crop_settings if isinstance(crop_settings, dict) else None,
+                    "retimeFfmpeg": (" ".join(retime_cmd).replace(str(td_path), "/tmp") if retime_cmd else None),
                     "cropComposeFfmpeg": (" ".join(crop_compose_cmd).replace(str(td_path), "/tmp") if crop_compose_cmd else None),
                     "ffmpeg": " ".join(cmd).replace(str(td_path), "/tmp"),
                 }
@@ -5045,19 +5431,59 @@ def _build_video_report_row(
                 selected_rows.append(per_frame_rows[len(per_frame_rows) // 2])
             dedup_selected = {int(row["index"]): row for row in selected_rows}
 
+            drift_rows: list[dict[str, Any]] = []
+            drift_frame_count = int(generated_probe.get("frame_count") or 0)
+            for row in per_frame_rows:
+                expected_generated_frame_index = max(0, min(drift_frame_count - 1, int(row.get("generatedFrameIndex") or 0)))
+                matched_generated_frame_index, matched_generated_image, match_similarity = _best_aligned_generated_frame_index(
+                    generated_path=generated_standard_path,
+                    source_image=row["_original"],
+                    expected_frame_index=expected_generated_frame_index,
+                    frame_count=drift_frame_count,
+                    work_dir=td_path / "standard_drift",
+                    prefix=f"{gen_id}_{int(row.get('index') or 0):04d}",
+                    search_radius=3,
+                )
+                drift_delta_frames = int(matched_generated_frame_index - expected_generated_frame_index)
+                row["expectedGeneratedFrameIndex"] = expected_generated_frame_index
+                row["matchedGeneratedFrameIndex"] = matched_generated_frame_index
+                row["frameDeltaDrift"] = drift_delta_frames
+                row["frameDeltaDriftSec"] = round(drift_delta_frames / float(target_fps), 4)
+                row["matchSimilarity"] = match_similarity
+                row["_matchedGenerated"] = matched_generated_image
+                drift_rows.append(
+                    {
+                        "index": int(row.get("index") or 0),
+                        "sourceFrameIndex": int(row.get("sourceFrameIndex") or 0),
+                        "generatedFrameIndex": expected_generated_frame_index,
+                        "matchedGeneratedFrameIndex": matched_generated_frame_index,
+                        "frameDeltaDrift": drift_delta_frames,
+                        "frameDeltaDriftSec": round(drift_delta_frames / float(target_fps), 4),
+                        "matchSimilarity": match_similarity,
+                    }
+                )
+
             selected_frame_artifacts: list[dict[str, Any]] = []
             for frame_idx in sorted(dedup_selected):
                 row = dedup_selected[frame_idx]
+                matched_generated_image = row.get("_matchedGenerated") or row["_edited"]
+                if isinstance(matched_generated_image, Image.Image) and matched_generated_image.size != row["_original"].size:
+                    matched_generated_image = matched_generated_image.resize(row["_original"].size, Image.Resampling.LANCZOS)
+                matched_diff_gray, _matched_diff_heatmap = _diff_heatmap_image(row["_original"], matched_generated_image)
                 heatmap_bytes, overlay_bytes, binary_bytes = _create_overlay_artifacts(
-                    edited_image=row["_edited"],
-                    diff_gray=row["_diff"],
+                    edited_image=matched_generated_image,
+                    diff_gray=matched_diff_gray,
                     binary_change=row["_binary"],
                     mask_bin=None,
                 )
                 stem_base = _report_safe_stem("video", gen_id[-8:], f"frame{frame_idx:03d}")
+                original_frame_key = paths.report_artifact(report_id, f"{stem_base}_source", ".png")
+                generated_frame_key = paths.report_artifact(report_id, f"{stem_base}_generated", ".png")
                 heatmap_key = paths.report_artifact(report_id, f"{stem_base}_heatmap", ".png")
                 overlay_key = paths.report_artifact(report_id, f"{stem_base}_overlay", ".png")
                 binary_key = paths.report_artifact(report_id, f"{stem_base}_binary", ".png")
+                asset_store.put_bytes(original_frame_key, _image_to_png_bytes(row["_original"]), content_type="image/png")
+                asset_store.put_bytes(generated_frame_key, _image_to_png_bytes(matched_generated_image), content_type="image/png")
                 asset_store.put_bytes(heatmap_key, heatmap_bytes, content_type="image/png")
                 asset_store.put_bytes(overlay_key, overlay_bytes, content_type="image/png")
                 asset_store.put_bytes(binary_key, binary_bytes, content_type="image/png")
@@ -5068,9 +5494,16 @@ def _build_video_report_row(
                         "generatedTimeSec": row.get("generatedTimeSec"),
                         "sourceFrameIndex": row.get("sourceFrameIndex"),
                         "generatedFrameIndex": row.get("generatedFrameIndex"),
+                        "matchedGeneratedFrameIndex": row.get("matchedGeneratedFrameIndex"),
+                        "expectedGeneratedFrameIndex": row.get("expectedGeneratedFrameIndex"),
+                        "frameDeltaDrift": row.get("frameDeltaDrift"),
+                        "frameDeltaDriftSec": row.get("frameDeltaDriftSec"),
+                        "matchSimilarity": row.get("matchSimilarity"),
                         "sourceFrameOffset": row.get("sourceFrameOffset"),
                         "changedPctTotal": row["changedPctTotal"],
                         "outsideLeakagePct": row.get("outsideLeakagePct"),
+                        "originalFrameKey": original_frame_key,
+                        "generatedFrameKey": generated_frame_key,
                         "heatmapKey": heatmap_key,
                         "overlayKey": overlay_key,
                         "binaryChangeKey": binary_key,
@@ -5123,8 +5556,8 @@ def _build_video_report_row(
             _upload_s3(s3, settings.assets_bucket, diff_video_poster_key, diff_video_poster_path, "image/png")
 
             timeline_rows = [{key: value for key, value in row.items() if not key.startswith("_")} for row in per_frame_rows]
-            timeline_csv = "index,timeSec,generatedTimeSec,sourceFrameIndex,generatedFrameIndex,sourceFrameOffset,changedPctTotal,outsideLeakagePct,meanDiffTotal,psnr\n" + "\n".join(
-                f"{item.get('index')},{item.get('timeSec')},{item.get('generatedTimeSec')},{item.get('sourceFrameIndex')},{item.get('generatedFrameIndex')},{item.get('sourceFrameOffset')},{item.get('changedPctTotal')},{item.get('outsideLeakagePct')},{item.get('meanDiffTotal')},{item.get('psnr')}"
+            timeline_csv = "index,timeSec,generatedTimeSec,sourceFrameIndex,generatedFrameIndex,matchedGeneratedFrameIndex,frameDeltaDrift,frameDeltaDriftSec,matchSimilarity,sourceFrameOffset,changedPctTotal,outsideLeakagePct,meanDiffTotal,psnr\n" + "\n".join(
+                f"{item.get('index')},{item.get('timeSec')},{item.get('generatedTimeSec')},{item.get('sourceFrameIndex')},{item.get('generatedFrameIndex')},{item.get('matchedGeneratedFrameIndex')},{item.get('frameDeltaDrift')},{item.get('frameDeltaDriftSec')},{item.get('matchSimilarity')},{item.get('sourceFrameOffset')},{item.get('changedPctTotal')},{item.get('outsideLeakagePct')},{item.get('meanDiffTotal')},{item.get('psnr')}"
                 for item in timeline_rows
             )
             timeline_csv_key = paths.report_artifact(report_id, _report_safe_stem("video", gen_id[-8:], "timeline"), ".csv")
@@ -5162,6 +5595,20 @@ def _build_video_report_row(
                 "ssimMin": round(min(ssim_values), 6) if ssim_values else None,
                 "psnrMean": round(sum(psnr_values) / len(psnr_values), 4) if psnr_values else None,
                 "psnrMin": round(min(psnr_values), 4) if psnr_values else None,
+                "frameDrift": {
+                    "sampleCount": len(drift_rows),
+                    "meanDeltaFrames": round(sum(float(item.get("frameDeltaDrift") or 0.0) for item in drift_rows) / max(1, len(drift_rows)), 4) if drift_rows else None,
+                    "meanAbsDeltaFrames": round(sum(abs(float(item.get("frameDeltaDrift") or 0.0)) for item in drift_rows) / max(1, len(drift_rows)), 4) if drift_rows else None,
+                    "maxAbsDeltaFrames": round(max((abs(float(item.get("frameDeltaDrift") or 0.0)) for item in drift_rows), default=0.0), 4),
+                    "p95AbsDeltaFrames": round(
+                        sorted(abs(float(item.get("frameDeltaDrift") or 0.0)) for item in drift_rows)[max(0, math.ceil(len(drift_rows) * 0.95) - 1)],
+                        4,
+                    )
+                    if drift_rows
+                    else None,
+                    "driftedFrameCount": sum(1 for item in drift_rows if int(item.get("frameDeltaDrift") or 0) != 0),
+                    "meanSimilarity": round(sum(float(item.get("matchSimilarity") or 0.0) for item in drift_rows) / max(1, len(drift_rows)), 4) if drift_rows else None,
+                },
                 "firstFrame": first_frame_metrics,
                 "lastFrame": last_frame_metrics,
                 "vmaf": vmaf_metrics,
@@ -5466,7 +5913,7 @@ def _best_aligned_generated_frame_index(
     work_dir: Path,
     prefix: str,
     search_radius: int = 2,
-) -> tuple[int, Image.Image]:
+) -> tuple[int, Image.Image, float]:
     candidates = sorted(
         {
             max(0, min(frame_count - 1, expected_frame_index + delta))
@@ -5489,8 +5936,224 @@ def _best_aligned_generated_frame_index(
         fallback_path = work_dir / f"{prefix}_fallback_{max(0, expected_frame_index):04d}.png"
         fallback_index = max(0, min(frame_count - 1, expected_frame_index))
         extract_frame_png(str(generated_path), fallback_index, str(fallback_path))
-        return fallback_index, Image.open(fallback_path).convert("RGB")
-    return best_index, best_image
+        return fallback_index, Image.open(fallback_path).convert("RGB"), 0.0
+    return best_index, best_image, round(best_score, 4)
+
+
+def compute_merge_alignment_suggestion(
+    *,
+    task: dict[str, Any],
+    segment: dict[str, Any],
+    generation: dict[str, Any],
+    asset_store: AssetStore,
+    paths: AssetPaths,
+    settings: Any,
+) -> dict[str, Any]:
+    crop_settings = segment.get("crop") if isinstance(segment.get("crop"), dict) and segment.get("crop", {}).get("enabled") else None
+    fps_info = task["video"]["editSource"]["fps"]
+    target_fps = Fraction(int(fps_info["num"]), int(fps_info["den"]))
+    source_width = int(task["video"]["editSource"]["width"])
+    source_height = int(task["video"]["editSource"]["height"])
+    analysis_width, analysis_height = _target_by_orientation(
+        source_width,
+        source_height,
+        landscape=(640, 360),
+        portrait=(360, 640),
+    )
+
+    s3 = boto3.client("s3")
+    with tempfile.TemporaryDirectory() as td:
+        td_path = Path(td)
+        original_segment_key = _ensure_segment_clip(
+            s3=s3,
+            asset_store=asset_store,
+            asset_paths=paths,
+            task=task,
+            segment=segment,
+            assets_bucket=settings.assets_bucket,
+        )
+        original_segment_path = td_path / "segment_original.mp4"
+        generated_segment_path = td_path / "segment_generated.mp4"
+        original_standard_path = td_path / "segment_original_merge_alignment.mp4"
+        generated_standard_path = td_path / "segment_generated_merge_alignment.mp4"
+        _download_s3(s3, settings.assets_bucket, original_segment_key, original_segment_path)
+        _download_s3(s3, settings.assets_bucket, generation["outputKey"], generated_segment_path)
+
+        transcode_to_cfr(
+            str(original_segment_path),
+            str(original_standard_path),
+            target_fps,
+            target_width=analysis_width,
+            target_height=analysis_height,
+            crf=24,
+            preset="ultrafast",
+            audio_bitrate="96k",
+        )
+        transcode_to_cfr(
+            str(generated_segment_path),
+            str(generated_standard_path),
+            target_fps,
+            target_width=analysis_width,
+            target_height=analysis_height,
+            crf=24,
+            preset="ultrafast",
+            audio_bitrate="96k",
+        )
+        original_probe = ffprobe_video(str(original_standard_path))
+        generated_probe = ffprobe_video(str(generated_standard_path))
+        alignment_source_frames = _load_video_alignment_source_frames(
+            original_standard_path,
+            td_path / "merge_alignment",
+            max_frames=MERGE_ALIGNMENT_SCAN_FRAMES,
+        )
+        video_alignment = _estimate_generated_source_offset(
+            source_frames=alignment_source_frames,
+            generated_path=generated_standard_path,
+            generated_probe=generated_probe,
+            source_fps=target_fps,
+            work_dir=td_path / "merge_alignment",
+            prefix="merge",
+        )
+        anchor_offset_frames = max(0, int(video_alignment.get("sourceFrameOffset") or 0))
+        source_offset_sec = anchor_offset_frames / float(target_fps)
+        common_duration_sec = max(
+            0.1,
+            min(
+                max(0.0, float(original_probe.get("duration_sec") or 0.0) - source_offset_sec),
+                float(generated_probe.get("duration_sec") or 0.0),
+            ),
+        )
+        drift_source_dir = td_path / "merge_orig_frames"
+        drift_source_dir.mkdir(parents=True, exist_ok=True)
+        generated_frame_count = int(generated_probe.get("frame_count") or 0)
+        drift_rows: list[dict[str, Any]] = []
+        sample_count = max(2, MERGE_ALIGNMENT_SAMPLE_POINTS)
+        if common_duration_sec <= 0.12:
+            sample_time_offsets = [0.0]
+        else:
+            max_offset = max(0.0, common_duration_sec - 0.05)
+            sample_time_offsets = [round((max_offset * idx) / max(1, sample_count - 1), 4) for idx in range(sample_count)]
+        paired_count = len(sample_time_offsets)
+        original_frame_count = max(1, int(original_probe.get("frame_count") or 1))
+        for frame_idx, sample_time_sec in enumerate(sample_time_offsets):
+            source_frame_index = max(
+                0,
+                min(
+                    original_frame_count - 1,
+                    int(round((source_offset_sec + sample_time_sec) * float(target_fps))),
+                ),
+            )
+            original_frame_path = drift_source_dir / f"source_{frame_idx:04d}.png"
+            extract_frame_png(str(original_standard_path), source_frame_index, str(original_frame_path))
+            source_image = Image.open(original_frame_path).convert("RGB")
+            expected_generated_frame_index = max(0, min(generated_frame_count - 1, int(round(sample_time_sec * float(target_fps)))))
+            matched_generated_frame_index, _matched_generated_image, match_similarity = _best_aligned_generated_frame_index(
+                generated_path=generated_standard_path,
+                source_image=source_image,
+                expected_frame_index=expected_generated_frame_index,
+                frame_count=generated_frame_count,
+                work_dir=td_path / "merge_drift",
+                prefix=f"merge_{generation.get('genId', 'gen')}_{frame_idx:04d}",
+                search_radius=MERGE_ALIGNMENT_SEARCH_RADIUS,
+            )
+            drift_delta_frames = int(matched_generated_frame_index - expected_generated_frame_index)
+            drift_rows.append(
+                {
+                    "index": frame_idx,
+                    "timeSec": round(source_offset_sec + sample_time_sec, 4),
+                    "sourceFrameIndex": source_frame_index,
+                    "expectedGeneratedFrameIndex": expected_generated_frame_index,
+                    "matchedGeneratedFrameIndex": matched_generated_frame_index,
+                    "frameDeltaDrift": drift_delta_frames,
+                    "matchSimilarity": match_similarity,
+                }
+            )
+
+    early_window = drift_rows[: min(3, len(drift_rows))]
+    late_window = drift_rows[max(0, len(drift_rows) - 3) :]
+    early_deltas = [int(item.get("frameDeltaDrift") or 0) for item in early_window]
+    late_deltas = [int(item.get("frameDeltaDrift") or 0) for item in late_window]
+    early_median = int(round(median(early_deltas))) if early_deltas else 0
+    late_median = int(round(median(late_deltas))) if late_deltas else 0
+    drift_values = [int(item.get("frameDeltaDrift") or 0) for item in drift_rows]
+    mean_abs_drift = (
+        round(sum(abs(value) for value in drift_values) / max(1, len(drift_values)), 4)
+        if drift_values
+        else 0.0
+    )
+
+    trim_start_frames = max(anchor_offset_frames, max(0, early_median))
+    residual_end_frames = late_median - trim_start_frames
+    trim_end_frames = max(0, residual_end_frames)
+    suggested_insert_start = int(segment.get("startFrame") or 0)
+    source_duration_frames = int(segment.get("durationFrames") or max(1, int(segment.get("endFrameExclusive") or 0) - suggested_insert_start))
+    generated_duration_frames = max(1, int(generated_probe.get("frame_count") or 0))
+    effective_generated_frames = max(1, generated_duration_frames - trim_start_frames)
+    suggested_playback_rate = round(effective_generated_frames / max(1, source_duration_frames), 6)
+    residual_drift_values = [value - trim_start_frames for value in drift_values]
+    residual_mean_abs_drift = (
+        round(sum(abs(value) for value in residual_drift_values) / max(1, len(residual_drift_values)), 4)
+        if residual_drift_values
+        else 0.0
+    )
+    monotonic_late_bias = (
+        len(drift_values) >= 3 and all(value >= 0 for value in drift_values[: min(3, len(drift_values))]) and late_median >= early_median
+    )
+
+    recommendation = "trim_only"
+    notes: list[str] = []
+    if crop_settings:
+        notes.append("Alignment was analysed against the same cropped source region, not the full original frame.")
+    if trim_start_frames > 0:
+        notes.append(f"Generated motion appears to start about {trim_start_frames} frame(s) late; trim opening first.")
+    if trim_end_frames > 0:
+        notes.append(f"Generated tail still overruns by about {trim_end_frames} frame(s); trim tail to land closer to source end.")
+    if residual_end_frames > 1 and monotonic_late_bias:
+        recommendation = "retime_recommended"
+        notes.append(f"Drift continues to build after opening trim. Estimated retime is about {suggested_playback_rate:.4f}x.")
+    elif residual_end_frames < -1:
+        recommendation = "rerender_recommended"
+        notes.append("Generated motion appears to run ahead of source timing; simple trim controls are unlikely to fix this cleanly.")
+    elif residual_mean_abs_drift > 2.0:
+        recommendation = "rerender_recommended"
+        notes.append("Residual drift varies through the clip, suggesting non-linear timing differences.")
+    elif trim_end_frames > 0:
+        recommendation = "trim_start_and_end"
+    elif trim_start_frames <= 1 and residual_mean_abs_drift <= 1.0:
+        recommendation = "merge_ready"
+
+    confidence = round(
+        max(
+            float(video_alignment.get("confidence") or 0.0),
+            min(1.0, 0.45 + (0.08 * len(drift_rows)) - (0.08 * residual_mean_abs_drift)),
+        ),
+        4,
+    )
+
+    return {
+        "suggested": {
+            "startFrameOverride": suggested_insert_start,
+            "trimStartFrames": trim_start_frames,
+            "trimEndFrames": trim_end_frames,
+        },
+        "analysis": {
+            "cropApplied": bool(crop_settings),
+            "sourceFrameOffset": anchor_offset_frames,
+            "sourceOffsetSec": round(source_offset_sec, 4),
+            "anchorAlignment": video_alignment,
+            "sampleCount": paired_count,
+            "earlyMedianDriftFrames": early_median,
+            "lateMedianDriftFrames": late_median,
+            "residualEndFrames": residual_end_frames,
+            "meanAbsDriftFrames": mean_abs_drift,
+            "residualMeanAbsDriftFrames": residual_mean_abs_drift,
+            "suggestedPlaybackRate": suggested_playback_rate,
+            "recommendation": recommendation,
+            "confidence": confidence,
+            "notes": notes,
+            "driftSamples": drift_rows,
+        },
+    }
 
 
 def _build_video_comparison_report(
@@ -5665,7 +6328,7 @@ def _build_video_comparison_report(
                 if expected_generated_frame_index < 0 or expected_generated_frame_index >= frame_count:
                     continue
                 gen_id = str(generation.get("genId") or "")
-                generated_frame_index, generated_image = _best_aligned_generated_frame_index(
+                generated_frame_index, generated_image, similarity_score = _best_aligned_generated_frame_index(
                     generated_path=item["path"],
                     source_image=original_image,
                     expected_frame_index=expected_generated_frame_index,
@@ -5687,6 +6350,7 @@ def _build_video_comparison_report(
                         "mode": generation.get("luma", {}).get("mode"),
                         "generatedFrameIndex": generated_frame_index,
                         "expectedGeneratedFrameIndex": expected_generated_frame_index,
+                        "matchSimilarity": similarity_score,
                         "sourceFrameOffset": source_offset,
                         "generatedImage": display_generated_image,
                         "diffImage": diff_heatmap,
@@ -5719,6 +6383,7 @@ def _build_video_comparison_report(
                         "mode": pending.get("mode"),
                         "generatedFrameIndex": pending.get("generatedFrameIndex"),
                         "expectedGeneratedFrameIndex": pending.get("expectedGeneratedFrameIndex"),
+                        "matchSimilarity": pending.get("matchSimilarity"),
                         "sourceFrameOffset": pending.get("sourceFrameOffset"),
                         "frameKey": frame_key,
                         "diffKey": diff_key,
@@ -5764,7 +6429,7 @@ def _build_timeline_graph_png(rows: list[dict[str, Any]]) -> bytes:
     width, height = 1280, 720
     chart = Image.new("RGB", (width, height), (244, 247, 249))
     draw = ImageDraw.Draw(chart)
-    left, top, right, bottom = 84, 36, width - 40, height - 72
+    left, top, right, bottom = 84, 36, width - 88, height - 72
     draw.rectangle((left, top, right, bottom), fill=(255, 255, 255), outline=(206, 214, 222), width=2)
 
     if not rows:
@@ -5780,12 +6445,20 @@ def _build_timeline_graph_png(rows: list[dict[str, Any]]) -> bytes:
         for item in rows
         if item.get("outsideLeakagePct") is not None
     ]
+    drift_values = [float(item.get("frameDeltaDrift") or 0.0) for item in rows if item.get("frameDeltaDrift") is not None]
     max_time = max(0.1, max(time_values))
     y_max = max(1.0, max(changed_values), max(outside_values) if outside_values else 0.0, QC_OUTSIDE_LEAK_BUDGET_PCT)
+    drift_max_abs = max(1.0, max((abs(value) for value in drift_values), default=0.0))
 
     def _point(time_sec: float, value: float) -> tuple[float, float]:
         x = left + ((time_sec / max_time) * (right - left))
         y = bottom - ((value / y_max) * (bottom - top))
+        return x, y
+
+    def _drift_point(time_sec: float, drift_frames: float) -> tuple[float, float]:
+        x = left + ((time_sec / max_time) * (right - left))
+        normalized = max(-1.0, min(1.0, drift_frames / drift_max_abs))
+        y = top + ((1.0 - ((normalized + 1.0) / 2.0)) * (bottom - top))
         return x, y
 
     for tick in range(6):
@@ -5793,6 +6466,12 @@ def _build_timeline_graph_png(rows: list[dict[str, Any]]) -> bytes:
         value = y_max * (1.0 - tick / 5.0)
         draw.line((left, y, right, y), fill=(232, 236, 241), width=1)
         draw.text((18, y - 8), f"{value:.1f}%", fill=(96, 110, 124))
+
+    for tick in range(5):
+        y = top + ((bottom - top) * tick / 4.0)
+        value = drift_max_abs * (1.0 - (tick / 2.0))
+        label = "0.0f" if abs(value) < 1e-6 else f"{value:+.1f}f"
+        draw.text((right + 12, y - 8), label, fill=(121, 81, 255))
 
     for tick in range(6):
         x = left + ((right - left) * tick / 5.0)
@@ -5817,9 +6496,23 @@ def _build_timeline_graph_png(rows: list[dict[str, Any]]) -> bytes:
     if len(outside_points) >= 2:
         draw.line(outside_points, fill=(40, 122, 214), width=3, joint="curve")
 
+    zero_drift_y = _drift_point(0.0, 0.0)[1]
+    draw.line((left, zero_drift_y, right, zero_drift_y), fill=(202, 190, 236), width=1)
+    drift_points = [
+        _drift_point(float(item.get("timeSec") or 0.0), float(item.get("frameDeltaDrift") or 0.0))
+        for item in rows
+        if item.get("frameDeltaDrift") is not None
+    ]
+    if len(drift_points) >= 2:
+        draw.line(drift_points, fill=(121, 81, 255), width=3, joint="curve")
+    elif len(drift_points) == 1:
+        x, y = drift_points[0]
+        draw.ellipse((x - 3, y - 3, x + 3, y + 3), fill=(121, 81, 255))
+
     draw.text((left + 14, top + 10), "Changed %", fill=(239, 133, 49))
     draw.text((left + 130, top + 10), "Outside leak %", fill=(40, 122, 214))
     draw.text((left + 300, top + 10), "Leak budget", fill=(210, 74, 74))
+    draw.text((left + 430, top + 10), "Frame drift", fill=(121, 81, 255))
 
     output = BytesIO()
     chart.save(output, format="PNG")
@@ -6249,661 +6942,6 @@ def _build_external_video_report_rows(
             }
 
     return {"rows": rows, "videoComparison": video_comparison}
-
-
-def _handle_qc_analysis(
-    *,
-    job: dict[str, Any],
-    store: S3JsonStore,
-    asset_store: AssetStore,
-    task: dict[str, Any],
-    settings: Any,
-) -> dict[str, Any]:
-    generation_ids = list(dict.fromkeys(job.get("payload", {}).get("generationIds") or []))
-    analysis_mode = str(job.get("payload", {}).get("mode") or "standard")
-    advanced_frame_only = analysis_mode == "advanced_frame"
-    if not generation_ids:
-        generation_ids = [
-            gen_id
-            for gen_id, generation in task.get("segmentGenerations", {}).items()
-            if generation.get("status") == "complete"
-            and generation.get("outputKey")
-        ]
-
-    if not generation_ids:
-        _job_progress(job, store, 100, "complete", "No eligible generations found for QC")
-        job["resultRefs"] = {"analyzedGenerationIds": [], "failedGenerationIds": []}
-        store.save_job(job)
-        return job
-
-    fps_info = task["video"]["editSource"]["fps"]
-    target_fps = Fraction(int(fps_info["num"]), int(fps_info["den"]))
-    source_width = int(task["video"]["editSource"]["width"])
-    source_height = int(task["video"]["editSource"]["height"])
-    analysis_width, analysis_height = _target_by_orientation(
-        source_width,
-        source_height,
-        landscape=(960, 540),
-        portrait=(540, 960),
-    )
-
-    s3 = boto3.client("s3")
-    paths = _asset_paths(task)
-    analyzed_ids: list[str] = []
-    failed_ids: list[str] = []
-
-    for index, gen_id in enumerate(generation_ids):
-        generation = task.get("segmentGenerations", {}).get(gen_id)
-        if not generation:
-            failed_ids.append(gen_id)
-            continue
-        if generation.get("status") != "complete" or not generation.get("outputKey"):
-            generation["qc"] = {
-                "status": "skipped",
-                "reason": "Generation is not complete",
-                "updatedAt": now_iso(),
-            }
-            failed_ids.append(gen_id)
-            continue
-
-        segment_id = generation.get("segmentId")
-        segment = next((item for item in task.get("segments", []) if item.get("segmentId") == segment_id), None)
-        if not segment:
-            generation["qc"] = {
-                "status": "failed",
-                "error": f"Segment missing for generation {gen_id}",
-                "updatedAt": now_iso(),
-            }
-            failed_ids.append(gen_id)
-            continue
-
-        start_frame = task.get("frames", {}).get(segment["startFrameId"])
-        if not start_frame:
-            generation["qc"] = {
-                "status": "failed",
-                "error": "Start frame metadata missing",
-                "updatedAt": now_iso(),
-            }
-            failed_ids.append(gen_id)
-            continue
-
-        def _resolve_variant_for_qc(
-            frame_record: dict[str, Any],
-            preferred_variant_id: Any,
-            preferred_output_keys: list[Any] | None = None,
-        ) -> tuple[str | None, dict[str, Any]]:
-            resolved_variant_id = preferred_variant_id if isinstance(preferred_variant_id, str) and preferred_variant_id else None
-            variants = frame_record.get("variants", [])
-            resolved_variant = (
-                next((item for item in variants if item.get("variantId") == resolved_variant_id), None)
-                if resolved_variant_id
-                else None
-            )
-            if resolved_variant and resolved_variant.get("outputKey"):
-                return resolved_variant_id, resolved_variant
-            if preferred_output_keys:
-                for key in preferred_output_keys:
-                    if not isinstance(key, str) or not key:
-                        continue
-                    by_output = next((item for item in variants if item.get("outputKey") == key), None)
-                    if by_output and by_output.get("outputKey"):
-                        return str(by_output.get("variantId")), by_output
-            if not resolved_variant or not resolved_variant.get("outputKey"):
-                selected_variant_id = frame_record.get("selectedVariantId")
-                if isinstance(selected_variant_id, str) and selected_variant_id:
-                    selected_variant = next((item for item in variants if item.get("variantId") == selected_variant_id), None)
-                    if selected_variant and selected_variant.get("outputKey"):
-                        return selected_variant_id, selected_variant
-            # Legacy generations may not carry variant linkage. Fall back to the captured frame.
-            return None, {"outputKey": frame_record["captureKey"], "patchMeta": {}}
-
-        source_first_variant_id, source_first_variant = _resolve_variant_for_qc(
-            start_frame,
-            generation.get("sourceFirstFrameVariantId"),
-            [generation.get("sourceFirstFrameResolvedKey"), generation.get("inputFirstFrameKey")],
-        )
-
-        end_frame = task.get("frames", {}).get(segment.get("endFrameId")) if segment.get("endFrameId") else None
-        source_last_variant_id: str | None = None
-        source_last_variant: dict[str, Any] | None = None
-        if end_frame and end_frame.get("captureKey"):
-            source_last_variant_id, source_last_variant = _resolve_variant_for_qc(
-                end_frame,
-                generation.get("sourceLastFrameVariantId"),
-                [generation.get("sourceLastFrameResolvedKey"), generation.get("inputLastFrameKey")],
-            )
-
-        if advanced_frame_only:
-            qc_state = generation.setdefault("qc", {})
-            if not isinstance(qc_state, dict):
-                qc_state = {}
-            qc_state["advancedFrame"] = {"status": "running", "updatedAt": now_iso()}
-            qc_state["updatedAt"] = now_iso()
-            generation["qc"] = qc_state
-        else:
-            generation["qc"] = {"status": "running", "updatedAt": now_iso()}
-        store.save_task(task)
-
-        try:
-            with tempfile.TemporaryDirectory() as td:
-                td_path = Path(td)
-                video_mask_key = (
-                    source_first_variant.get("patchMeta", {}).get("maskKey")
-                    if isinstance(source_first_variant.get("patchMeta"), dict)
-                    else None
-                )
-                video_mask_bytes = asset_store.read_bytes(video_mask_key) if isinstance(video_mask_key, str) else None
-
-                def _analyze_frame_variant(
-                    *,
-                    frame_record: dict[str, Any],
-                    variant_record: dict[str, Any],
-                    artifact_prefix: str,
-                    include_advanced: bool,
-                ) -> dict[str, Any]:
-                    original_frame_bytes = asset_store.read_bytes(frame_record["captureKey"])
-                    edited_frame_bytes = asset_store.read_bytes(variant_record["outputKey"])
-                    mask_key = (
-                        variant_record.get("patchMeta", {}).get("maskKey")
-                        if isinstance(variant_record.get("patchMeta"), dict)
-                        else None
-                    )
-                    mask_bytes = asset_store.read_bytes(mask_key) if isinstance(mask_key, str) else None
-
-                    original_frame_image = ImageOps.exif_transpose(Image.open(BytesIO(original_frame_bytes))).convert("RGB")
-                    edited_frame_image = ImageOps.exif_transpose(Image.open(BytesIO(edited_frame_bytes))).convert("RGB")
-                    frame_mask = _load_optional_mask(mask_bytes, original_frame_image.size)
-                    frame_metrics, frame_diff, frame_binary, frame_mask_bin = _analyze_image_pair(
-                        original_frame_image,
-                        edited_frame_image,
-                        mask_image=frame_mask,
-                        threshold=QC_DIFF_THRESHOLD,
-                        boundary_ring_px=QC_BOUNDARY_RING_PX,
-                    )
-                    frame_heatmap_bytes, frame_overlay_bytes, frame_binary_bytes = _create_overlay_artifacts(
-                        edited_image=edited_frame_image,
-                        diff_gray=frame_diff,
-                        binary_change=frame_binary,
-                        mask_bin=frame_mask_bin,
-                    )
-                    frame_boundary_overlay_bytes = _create_mask_boundary_overlay(
-                        original_image=original_frame_image,
-                        binary_change=frame_binary,
-                        mask_bin=frame_mask_bin,
-                    )
-                    frame_heatmap_key = paths.qc_artifact(segment["segmentId"], gen_id, f"{artifact_prefix}_heatmap", ".png")
-                    frame_overlay_key = paths.qc_artifact(segment["segmentId"], gen_id, f"{artifact_prefix}_overlay", ".png")
-                    frame_binary_key = paths.qc_artifact(segment["segmentId"], gen_id, f"{artifact_prefix}_binary", ".png")
-                    frame_boundary_overlay_key = paths.qc_artifact(
-                        segment["segmentId"], gen_id, f"{artifact_prefix}_boundary_overlay", ".png"
-                    )
-                    asset_store.put_bytes(frame_heatmap_key, frame_heatmap_bytes, content_type="image/png")
-                    asset_store.put_bytes(frame_overlay_key, frame_overlay_bytes, content_type="image/png")
-                    asset_store.put_bytes(frame_binary_key, frame_binary_bytes, content_type="image/png")
-                    asset_store.put_bytes(frame_boundary_overlay_key, frame_boundary_overlay_bytes, content_type="image/png")
-                    result: dict[str, Any] = {
-                        "metrics": frame_metrics,
-                        "artifacts": {
-                            "heatmapKey": frame_heatmap_key,
-                            "overlayKey": frame_overlay_key,
-                            "binaryChangeKey": frame_binary_key,
-                            "boundaryOverlayKey": frame_boundary_overlay_key,
-                        },
-                    }
-                    if include_advanced:
-                        advanced_result = _run_advanced_frame_qc(
-                            original_image=original_frame_image,
-                            edited_image=edited_frame_image,
-                            mask_bin=frame_mask_bin,
-                        )
-                        advanced_artifact_keys: dict[str, str] = {}
-                        for artifact_name, artifact_bytes in (advanced_result.get("artifacts") or {}).items():
-                            advanced_key_name = str(artifact_name)
-                            advanced_key = paths.qc_artifact(
-                                segment["segmentId"],
-                                gen_id,
-                                f"{artifact_prefix}_advanced_{advanced_key_name}",
-                                ".png",
-                            )
-                            asset_store.put_bytes(advanced_key, artifact_bytes, content_type="image/png")
-                            advanced_artifact_keys[f"{advanced_key_name}Key"] = advanced_key
-                        result["advanced"] = {
-                            "status": advanced_result.get("status") or "pass",
-                            "metrics": advanced_result.get("metrics") or {},
-                            "topRegions": advanced_result.get("topRegions") or [],
-                            "tooltips": advanced_result.get("tooltips") or {},
-                            "artifacts": advanced_artifact_keys,
-                        }
-                    return result
-
-                frame_by_variant: dict[str, dict[str, Any]] = {}
-
-                def _variants_with_output(frame_record: dict[str, Any]) -> list[dict[str, Any]]:
-                    variants = frame_record.get("variants", [])
-                    if not isinstance(variants, list):
-                        return []
-                    return [item for item in variants if isinstance(item, dict) and item.get("variantId") and item.get("outputKey")]
-
-                start_variants = _variants_with_output(start_frame)
-                first_frame_qc: dict[str, Any] | None = None
-                for variant_index, variant_record in enumerate(start_variants):
-                    variant_id = str(variant_record["variantId"])
-                    variant_qc = _analyze_frame_variant(
-                        frame_record=start_frame,
-                        variant_record=variant_record,
-                        artifact_prefix=f"frame_start_{variant_index:03d}",
-                        include_advanced=advanced_frame_only,
-                    )
-                    frame_by_variant[variant_id] = variant_qc
-                    if variant_id == source_first_variant_id:
-                        first_frame_qc = variant_qc
-
-                if first_frame_qc is None:
-                    first_frame_qc = _analyze_frame_variant(
-                        frame_record=start_frame,
-                        variant_record=source_first_variant,
-                        artifact_prefix="frame",
-                        include_advanced=advanced_frame_only,
-                    )
-                    if isinstance(source_first_variant_id, str) and source_first_variant_id:
-                        frame_by_variant[source_first_variant_id] = first_frame_qc
-
-                if end_frame and end_frame.get("captureKey"):
-                    end_variants = _variants_with_output(end_frame)
-                    for variant_index, variant_record in enumerate(end_variants):
-                        variant_id = str(variant_record["variantId"])
-                        if variant_id in frame_by_variant:
-                            continue
-                        variant_qc = _analyze_frame_variant(
-                            frame_record=end_frame,
-                            variant_record=variant_record,
-                            artifact_prefix=f"frame_end_{variant_index:03d}",
-                            include_advanced=advanced_frame_only,
-                        )
-                        frame_by_variant[variant_id] = variant_qc
-
-                    if (
-                        source_last_variant
-                        and source_last_variant.get("outputKey")
-                        and isinstance(source_last_variant_id, str)
-                        and source_last_variant_id
-                        and source_last_variant_id not in frame_by_variant
-                    ):
-                        last_frame_qc = _analyze_frame_variant(
-                            frame_record=end_frame,
-                            variant_record=source_last_variant,
-                            artifact_prefix="frame_last",
-                            include_advanced=advanced_frame_only,
-                        )
-                        frame_by_variant[source_last_variant_id] = last_frame_qc
-
-                frame_metrics = first_frame_qc["metrics"]
-                frame_heatmap_key = first_frame_qc["artifacts"]["heatmapKey"]
-                frame_overlay_key = first_frame_qc["artifacts"]["overlayKey"]
-                frame_binary_key = first_frame_qc["artifacts"]["binaryChangeKey"]
-                frame_boundary_overlay_key = first_frame_qc["artifacts"]["boundaryOverlayKey"]
-
-                if advanced_frame_only:
-                    existing_qc = generation.get("qc") if isinstance(generation.get("qc"), dict) else {}
-                    existing_frame_by_variant = existing_qc.get("frameByVariant") if isinstance(existing_qc.get("frameByVariant"), dict) else {}
-                    merged_frame_by_variant = {**existing_frame_by_variant, **frame_by_variant}
-                    advanced_variant_count = sum(
-                        1
-                        for value in merged_frame_by_variant.values()
-                        if isinstance(value, dict) and isinstance(value.get("advanced"), dict)
-                    )
-                    generation["qc"] = {
-                        **existing_qc,
-                        "status": "complete",
-                        "updatedAt": now_iso(),
-                        "analyzedAt": now_iso(),
-                        "frame": first_frame_qc,
-                        "frameByVariant": merged_frame_by_variant,
-                        "advancedFrame": {
-                            "status": "complete",
-                            "updatedAt": now_iso(),
-                            "analyzedAt": now_iso(),
-                            "variantCount": advanced_variant_count,
-                            "config": {
-                                "patchSize": ADV_QC_PATCH_SIZE,
-                                "stride": ADV_QC_STRIDE,
-                                "outerRingPx": ADV_QC_OUTER_RING_PX,
-                            },
-                        },
-                    }
-                    analyzed_ids.append(gen_id)
-                    store.save_task(task)
-                    progress = 10 + math.floor(85 * (index + 1) / max(1, len(generation_ids)))
-                    _job_progress(job, store, progress, "running", f"Advanced frame QC analyzed {index + 1}/{len(generation_ids)} generations")
-                    continue
-
-                original_segment_key = _ensure_segment_clip(
-                    s3=s3,
-                    asset_store=asset_store,
-                    asset_paths=paths,
-                    task=task,
-                    segment=segment,
-                    assets_bucket=settings.assets_bucket,
-                )
-                original_segment_path = td_path / "segment_original.mp4"
-                generated_segment_path = td_path / "segment_generated.mp4"
-                original_standard_path = td_path / "segment_original_qc.mp4"
-                generated_standard_path = td_path / "segment_generated_qc.mp4"
-                _download_s3(s3, settings.assets_bucket, original_segment_key, original_segment_path)
-                _download_s3(s3, settings.assets_bucket, generation["outputKey"], generated_segment_path)
-
-                transcode_to_cfr(
-                    str(original_segment_path),
-                    str(original_standard_path),
-                    target_fps,
-                    target_width=analysis_width,
-                    target_height=analysis_height,
-                    crf=20,
-                    preset="veryfast",
-                    audio_bitrate="96k",
-                )
-                transcode_to_cfr(
-                    str(generated_segment_path),
-                    str(generated_standard_path),
-                    target_fps,
-                    target_width=analysis_width,
-                    target_height=analysis_height,
-                    crf=20,
-                    preset="veryfast",
-                    audio_bitrate="96k",
-                )
-                original_probe = ffprobe_video(str(original_standard_path))
-                generated_probe = ffprobe_video(str(generated_standard_path))
-                common_duration_sec = max(
-                    0.1,
-                    min(float(original_probe.get("duration_sec") or 0.0), float(generated_probe.get("duration_sec") or 0.0)),
-                )
-
-                original_frames = _extract_sampled_frames(
-                    original_standard_path,
-                    td_path / "orig_frames",
-                    sample_fps=QC_SAMPLE_FPS,
-                    duration_sec=common_duration_sec,
-                )
-                generated_frames = _extract_sampled_frames(
-                    generated_standard_path,
-                    td_path / "gen_frames",
-                    sample_fps=QC_SAMPLE_FPS,
-                    duration_sec=common_duration_sec,
-                )
-                paired_count = min(len(original_frames), len(generated_frames))
-                if paired_count == 0:
-                    raise RuntimeError("No sampled frames available for QC analysis")
-
-                video_mask = _load_optional_mask(video_mask_bytes, (analysis_width, analysis_height))
-                per_frame_rows: list[dict[str, Any]] = []
-                for frame_idx in range(paired_count):
-                    orig_image = Image.open(original_frames[frame_idx]).convert("RGB")
-                    gen_image = Image.open(generated_frames[frame_idx]).convert("RGB")
-                    row_metrics, row_diff, row_binary, _ = _analyze_image_pair(
-                        orig_image,
-                        gen_image,
-                        mask_image=video_mask,
-                        threshold=QC_DIFF_THRESHOLD,
-                        boundary_ring_px=QC_BOUNDARY_RING_PX,
-                    )
-                    per_frame_rows.append(
-                        {
-                            "index": frame_idx,
-                            "timeSec": round(frame_idx / float(QC_SAMPLE_FPS), 4),
-                            **row_metrics,
-                            "_original": orig_image,
-                            "_diff": row_diff,
-                            "_binary": row_binary,
-                            "_edited": gen_image,
-                        }
-                    )
-
-                changed_total_values = [float(item.get("changedPctTotal") or 0.0) for item in per_frame_rows]
-                outside_values = [float(item.get("outsideLeakagePct") or 0.0) for item in per_frame_rows if item.get("outsideLeakagePct") is not None]
-                mean_diff_values = [float(item.get("meanDiffTotal") or 0.0) for item in per_frame_rows]
-                first_frame_metrics = (
-                    {key: value for key, value in per_frame_rows[0].items() if not key.startswith("_")}
-                    if per_frame_rows
-                    else None
-                )
-                last_frame_metrics = (
-                    {key: value for key, value in per_frame_rows[-1].items() if not key.startswith("_")}
-                    if per_frame_rows
-                    else None
-                )
-
-                ssim_log = td_path / "ssim.log"
-                psnr_log = td_path / "psnr.log"
-                _run_command(
-                    [
-                        FFMPEG_BIN,
-                        "-y",
-                        "-t",
-                        f"{common_duration_sec:.6f}",
-                        "-i",
-                        str(original_standard_path),
-                        "-t",
-                        f"{common_duration_sec:.6f}",
-                        "-i",
-                        str(generated_standard_path),
-                        "-lavfi",
-                        f"ssim=stats_file={ssim_log}",
-                        "-shortest",
-                        "-f",
-                        "null",
-                        "-",
-                    ]
-                )
-                _run_command(
-                    [
-                        FFMPEG_BIN,
-                        "-y",
-                        "-t",
-                        f"{common_duration_sec:.6f}",
-                        "-i",
-                        str(original_standard_path),
-                        "-t",
-                        f"{common_duration_sec:.6f}",
-                        "-i",
-                        str(generated_standard_path),
-                        "-lavfi",
-                        f"psnr=stats_file={psnr_log}",
-                        "-shortest",
-                        "-f",
-                        "null",
-                        "-",
-                    ]
-                )
-                ssim_values = _parse_metric_log(ssim_log, re.compile(r"All:(?P<value>[0-9.]+)"), "value")
-                psnr_values = _parse_metric_log(psnr_log, re.compile(r"psnr_avg:(?P<value>[0-9.]+)"), "value")
-                vmaf_metrics = _run_optional_vmaf(original_standard_path, generated_standard_path, td_path / "vmaf.json")
-
-                rank_key = (
-                    (lambda row: float(row.get("outsideLeakagePct") or 0.0))
-                    if video_mask is not None
-                    else (lambda row: float(row.get("changedPctTotal") or 0.0))
-                )
-                ranked_rows = sorted(per_frame_rows, key=rank_key, reverse=True)
-                selected_rows = ranked_rows[:5]
-                if per_frame_rows:
-                    selected_rows.append(per_frame_rows[len(per_frame_rows) // 2])
-                dedup_selected = {int(row["index"]): row for row in selected_rows}
-
-                selected_frame_artifacts: list[dict[str, Any]] = []
-                for frame_idx in sorted(dedup_selected):
-                    row = dedup_selected[frame_idx]
-                    heatmap_bytes, overlay_bytes, binary_bytes = _create_overlay_artifacts(
-                        edited_image=row["_edited"],
-                        diff_gray=row["_diff"],
-                        binary_change=row["_binary"],
-                        mask_bin=None,
-                    )
-                    heatmap_key = paths.qc_artifact(segment["segmentId"], gen_id, f"video_frame_{frame_idx:03d}_heatmap", ".png")
-                    overlay_key = paths.qc_artifact(segment["segmentId"], gen_id, f"video_frame_{frame_idx:03d}_overlay", ".png")
-                    binary_key = paths.qc_artifact(segment["segmentId"], gen_id, f"video_frame_{frame_idx:03d}_binary", ".png")
-                    asset_store.put_bytes(heatmap_key, heatmap_bytes, content_type="image/png")
-                    asset_store.put_bytes(overlay_key, overlay_bytes, content_type="image/png")
-                    asset_store.put_bytes(binary_key, binary_bytes, content_type="image/png")
-                    selected_frame_artifacts.append(
-                        {
-                        "index": frame_idx,
-                        "timeSec": row["timeSec"],
-                        "generatedTimeSec": row.get("generatedTimeSec"),
-                        "sourceFrameIndex": row.get("sourceFrameIndex"),
-                        "generatedFrameIndex": row.get("generatedFrameIndex"),
-                        "sourceFrameOffset": row.get("sourceFrameOffset"),
-                        "changedPctTotal": row["changedPctTotal"],
-                            "outsideLeakagePct": row.get("outsideLeakagePct"),
-                            "heatmapKey": heatmap_key,
-                            "overlayKey": overlay_key,
-                            "binaryChangeKey": binary_key,
-                        }
-                    )
-
-                diff_video_path = td_path / "diff_map.mp4"
-                _run_command(
-                    [
-                        FFMPEG_BIN,
-                        "-y",
-                        "-i",
-                        str(original_standard_path),
-                        "-i",
-                        str(generated_standard_path),
-                        "-filter_complex",
-                        "[0:v][1:v]blend=all_mode=difference,eq=contrast=2.0:brightness=0.02:saturation=1.5[v]",
-                        "-map",
-                        "[v]",
-                        "-an",
-                        "-c:v",
-                        "libx264",
-                        "-preset",
-                        "veryfast",
-                        "-crf",
-                        "18",
-                        "-pix_fmt",
-                        "yuv420p",
-                        "-shortest",
-                        str(diff_video_path),
-                    ]
-                )
-                diff_video_key = paths.qc_artifact(segment["segmentId"], gen_id, "video_diff_map", ".mp4")
-                _upload_s3(s3, settings.assets_bucket, diff_video_key, diff_video_path, "video/mp4")
-
-                timeline_rows = []
-                for row in per_frame_rows:
-                    timeline_rows.append(
-                        {
-                            key: value
-                            for key, value in row.items()
-                            if not key.startswith("_")
-                        }
-                    )
-                timeline_csv = "index,timeSec,changedPctTotal,outsideLeakagePct,meanDiffTotal,psnr\n" + "\n".join(
-                    f"{item.get('index')},{item.get('timeSec')},{item.get('changedPctTotal')},{item.get('outsideLeakagePct')},{item.get('meanDiffTotal')},{item.get('psnr')}"
-                    for item in timeline_rows
-                )
-                timeline_csv_key = paths.qc_artifact(segment["segmentId"], gen_id, "timeline", ".csv")
-                timeline_graph_key = paths.qc_artifact(segment["segmentId"], gen_id, "timeline_graph", ".png")
-                report_json_key = paths.qc_artifact(segment["segmentId"], gen_id, "report", ".json")
-                asset_store.put_bytes(timeline_csv_key, timeline_csv.encode("utf-8"), content_type="text/csv")
-                asset_store.put_bytes(timeline_graph_key, _build_timeline_graph_png(timeline_rows), content_type="image/png")
-
-                video_aggregates = {
-                    "sampledFrameCount": paired_count,
-                    "sampleFps": QC_SAMPLE_FPS,
-                    "analysisResolution": {"width": analysis_width, "height": analysis_height},
-                    "durationSec": round(common_duration_sec, 4),
-                    "changedPctTotalMean": round(sum(changed_total_values) / max(1, len(changed_total_values)), 4),
-                    "changedPctTotalP95": round(
-                        sorted(changed_total_values)[max(0, math.ceil(len(changed_total_values) * 0.95) - 1)],
-                        4,
-                    ),
-                    "meanDiffTotalMean": round(sum(mean_diff_values) / max(1, len(mean_diff_values)), 6),
-                    "outsideLeakagePctMean": round(sum(outside_values) / len(outside_values), 4) if outside_values else None,
-                    "outsideLeakagePctP95": round(
-                        sorted(outside_values)[max(0, math.ceil(len(outside_values) * 0.95) - 1)],
-                        4,
-                    )
-                    if outside_values
-                    else None,
-                    "outsideLeakBudgetPct": QC_OUTSIDE_LEAK_BUDGET_PCT if outside_values else None,
-                    "outsideLeakPass": (sum(outside_values) / len(outside_values)) <= QC_OUTSIDE_LEAK_BUDGET_PCT if outside_values else None,
-                    "ssimMean": round(sum(ssim_values) / len(ssim_values), 6) if ssim_values else None,
-                    "ssimMin": round(min(ssim_values), 6) if ssim_values else None,
-                    "psnrMean": round(sum(psnr_values) / len(psnr_values), 4) if psnr_values else None,
-                    "psnrMin": round(min(psnr_values), 4) if psnr_values else None,
-                    "firstFrame": first_frame_metrics,
-                    "lastFrame": last_frame_metrics,
-                    "vmaf": vmaf_metrics,
-                }
-
-                qc_report_payload = {
-                    "generationId": gen_id,
-                    "segmentId": segment["segmentId"],
-                    "analyzedAt": now_iso(),
-                    "config": {
-                        "sampleFps": QC_SAMPLE_FPS,
-                        "analysisResolution": {"width": analysis_width, "height": analysis_height},
-                        "diffThreshold": QC_DIFF_THRESHOLD,
-                        "boundaryRingPx": QC_BOUNDARY_RING_PX,
-                    },
-                    "frame": {
-                        "metrics": frame_metrics,
-                        "artifacts": {
-                            "heatmapKey": frame_heatmap_key,
-                            "overlayKey": frame_overlay_key,
-                            "binaryChangeKey": frame_binary_key,
-                            "boundaryOverlayKey": frame_boundary_overlay_key,
-                        },
-                    },
-                    "frameByVariant": frame_by_variant,
-                    "video": {
-                        "aggregates": video_aggregates,
-                        "selectedFrames": selected_frame_artifacts,
-                        "artifacts": {
-                            "diffVideoKey": diff_video_key,
-                            "timelineCsvKey": timeline_csv_key,
-                            "timelineGraphKey": timeline_graph_key,
-                        },
-                    },
-                }
-                asset_store.put_bytes(report_json_key, json.dumps(qc_report_payload).encode("utf-8"), content_type="application/json")
-                qc_report_payload["video"]["artifacts"]["reportJsonKey"] = report_json_key
-                generation["qc"] = {
-                    "status": "complete",
-                    "updatedAt": now_iso(),
-                    **qc_report_payload,
-                }
-                analyzed_ids.append(gen_id)
-        except Exception as exc:
-            logger.exception("QC analysis failed for generation", extra={"genId": gen_id, "taskId": task["taskId"]})
-            generation["qc"] = {
-                "status": "failed",
-                "updatedAt": now_iso(),
-                "error": str(exc),
-            }
-            failed_ids.append(gen_id)
-
-        store.save_task(task)
-        progress = 10 + math.floor(85 * (index + 1) / max(1, len(generation_ids)))
-        _job_progress(job, store, progress, "running", f"QC analyzed {index + 1}/{len(generation_ids)} generations")
-
-    task.setdefault("history", []).append(
-        {
-            "at": now_iso(),
-            "event": "task.qc.complete",
-            "jobId": job["jobId"],
-            "mode": analysis_mode,
-            "analyzed": analyzed_ids,
-            "failed": failed_ids,
-        }
-    )
-    store.save_task(task)
-    _job_progress(job, store, 100, "complete", "QC analysis complete")
-    job["resultRefs"] = {"analyzedGenerationIds": analyzed_ids, "failedGenerationIds": failed_ids}
-    store.save_job(job)
-    return job
 
 
 def _handle_qc_report_build(
@@ -8034,10 +8072,10 @@ def process_job_record(record: dict[str, Any], *, settings: Any) -> None:
             _handle_quality_match_sam(job=job, store=store, asset_store=asset_store, task=task, settings=settings)
         elif job_type == "segment_generate":
             _handle_segment_generate(job=job, store=store, asset_store=asset_store, task=task, settings=settings)
+        elif job_type == "chunked_generation_finalize":
+            _handle_chunked_generation_finalize(job=job, store=store, asset_store=asset_store, task=task, settings=settings)
         elif job_type == "merge_export":
             _handle_merge(job=job, store=store, asset_store=asset_store, task=task, settings=settings)
-        elif job_type == "qc_analysis":
-            _handle_qc_analysis(job=job, store=store, asset_store=asset_store, task=task, settings=settings)
         elif job_type == "qc_report_build":
             _handle_qc_report_build(job=job, store=store, asset_store=asset_store, task=task, settings=settings)
         elif job_type == "motion_sync_qc":
@@ -8125,6 +8163,15 @@ def process_job_record(record: dict[str, Any], *, settings: Any) -> None:
                 }
             )
             store.save_task(latest_task, merge_on_conflict=True)
+            return
+        elif job_type == "chunked_generation_finalize":
+            run_id = str((job.get("payload") or {}).get("runId") or "")
+            run = _find_chunked_generation_run(latest_task, run_id) if run_id else None
+            if isinstance(run, dict):
+                run["saveStatus"] = "failed"
+                run["saveError"] = str(exc)
+                run["updatedAt"] = now_iso()
+                store.save_task(latest_task, merge_on_conflict=True)
             return
         latest_task["status"] = "error"
         latest_task.setdefault("history", []).append({"at": now_iso(), "event": "job.failed", "jobId": job_id})

@@ -160,6 +160,136 @@ def transcode_to_cfr(
     _run(cmd)
 
 
+def transcode_preserving_frame_count(
+    input_path: str,
+    output_path: str,
+    *,
+    source_fps: Fraction,
+    target_fps: Fraction,
+    target_width: int | None = None,
+    target_height: int | None = None,
+    crf: int = 16,
+    preset: str = "medium",
+    audio_bitrate: str = "192k",
+) -> None:
+    src_num = source_fps.numerator if source_fps.numerator > 0 else 30
+    src_den = source_fps.denominator if source_fps.denominator > 0 else 1
+    dst_num = target_fps.numerator if target_fps.numerator > 0 else 30
+    dst_den = target_fps.denominator if target_fps.denominator > 0 else 1
+    if src_num == dst_num and src_den == dst_den:
+        transcode_to_cfr(
+            input_path,
+            output_path,
+            target_fps,
+            target_width=target_width,
+            target_height=target_height,
+            crf=crf,
+            preset=preset,
+            audio_bitrate=audio_bitrate,
+        )
+        return
+
+    duration_scale = float(source_fps / target_fps)
+    vf_parts = [f"setpts={duration_scale:.12f}*PTS"]
+    if target_width and target_height:
+        vf_parts.append(_scale_pad_filter(target_width, target_height))
+    vf_parts.append("setsar=1")
+    cmd = [
+        FFMPEG_BIN,
+        "-y",
+        "-i",
+        input_path,
+        "-vf",
+        ",".join(vf_parts),
+        "-r",
+        f"{dst_num}/{dst_den}",
+        "-fps_mode",
+        "cfr",
+        "-c:v",
+        "libx264",
+        "-preset",
+        preset,
+        "-crf",
+        str(crf),
+        "-pix_fmt",
+        "yuv420p",
+    ]
+    try:
+        probe = ffprobe_video(input_path)
+    except FFmpegError:
+        probe = {}
+    if bool(probe.get("has_audio")):
+        cmd.extend(["-filter:a", _atempo_chain(float(target_fps) / float(source_fps)), "-c:a", "aac", "-b:a", audio_bitrate])
+    else:
+        cmd.append("-an")
+    cmd.append(output_path)
+    _run(cmd)
+
+
+def trim_and_retime_video_uniform(
+    input_path: str,
+    output_path: str,
+    *,
+    fps: Fraction,
+    playback_rate: float,
+    trim_start_frames: int = 0,
+    trim_end_frames: int = 0,
+    target_width: int | None = None,
+    target_height: int | None = None,
+    crf: int = 16,
+    preset: str = "medium",
+    audio_bitrate: str = "192k",
+) -> list[str]:
+    probe = ffprobe_video(input_path)
+    fps_num = fps.numerator if fps.numerator > 0 else 30
+    fps_den = fps.denominator if fps.denominator > 0 else 1
+    fps_str = f"{fps_num}/{fps_den}"
+    one_frame_sec = float(Fraction(1, max(1, fps_num)))
+    input_duration_sec = max(one_frame_sec, float(probe.get("duration_sec") or one_frame_sec))
+    trim_start_sec = max(0.0, float(Fraction(max(0, trim_start_frames), 1) / fps))
+    trim_end_sec = max(0.0, float(Fraction(max(0, trim_end_frames), 1) / fps))
+    max_trim_sec = max(0.0, input_duration_sec - one_frame_sec)
+    trim_start_sec = min(trim_start_sec, max_trim_sec)
+    trim_end_sec = min(trim_end_sec, max(0.0, max_trim_sec - trim_start_sec))
+    input_start_sec = trim_start_sec
+    input_end_sec = max(input_start_sec + one_frame_sec, input_duration_sec - trim_end_sec)
+    effective_playback_rate = max(0.05, min(20.0, float(playback_rate or 1.0)))
+    video_setpts_scale = 1.0 / effective_playback_rate
+
+    vf_parts = [
+        f"trim={_format_seconds(input_start_sec)}:{_format_seconds(input_end_sec)}",
+        f"setpts={video_setpts_scale:.12f}*PTS",
+        f"fps={fps_str}",
+    ]
+    if target_width and target_height:
+        vf_parts.append(f"scale={target_width}:{target_height}:flags=lanczos")
+    vf_parts.extend(["setsar=1", "format=yuv420p"])
+
+    cmd = [
+        FFMPEG_BIN,
+        "-y",
+        "-i",
+        input_path,
+        "-vf",
+        ",".join(vf_parts),
+        "-c:v",
+        "libx264",
+        "-preset",
+        preset,
+        "-crf",
+        str(crf),
+        "-pix_fmt",
+        "yuv420p",
+    ]
+    if bool(probe.get("has_audio")):
+        cmd.extend(["-filter:a", _atempo_chain(effective_playback_rate), "-c:a", "aac", "-b:a", audio_bitrate])
+    else:
+        cmd.append("-an")
+    cmd.append(output_path)
+    _run(cmd)
+    return cmd
+
+
 def extract_frame_png(
     input_path: str,
     frame_index: int,
@@ -627,3 +757,72 @@ def merge_with_segment_replacement(
     cmd.append(output_path)
     _run(cmd)
     return cmd
+
+
+def stitch_video_segments(
+    input_paths: list[str],
+    output_path: str,
+    *,
+    fps_num: int,
+    fps_den: int,
+    output_width: int,
+    output_height: int,
+    trim_start_frames: list[int] | None = None,
+    trim_end_frames: list[int] | None = None,
+    crf: int = 16,
+    preset: str = "slow",
+) -> list[str]:
+    if not input_paths:
+        raise FFmpegError("No input segments provided for stitching")
+    trims = trim_start_frames or [0] * len(input_paths)
+    if len(trims) != len(input_paths):
+        raise FFmpegError("Trim list does not match input segment count")
+    end_trims = trim_end_frames or [0] * len(input_paths)
+    if len(end_trims) != len(input_paths):
+        raise FFmpegError("End trim list does not match input segment count")
+    fps = Fraction(fps_num if fps_num > 0 else 24, fps_den if fps_den > 0 else 1)
+    fps_str = f"{fps.numerator}/{fps.denominator}"
+    one_frame_sec = float(Fraction(1, fps))
+    filter_complex: list[str] = []
+    concat_inputs: list[str] = []
+    command = [FFMPEG_BIN, "-y"]
+    for path in input_paths:
+        command.extend(["-i", path])
+    for index, path in enumerate(input_paths):
+        probe = ffprobe_video(path)
+        start_trim_sec = max(0.0, float(Fraction(max(0, int(trims[index])), 1) / fps))
+        end_trim_sec = max(0.0, float(Fraction(max(0, int(end_trims[index])), 1) / fps))
+        duration_sec = max(one_frame_sec, float(probe.get("duration_sec") or one_frame_sec))
+        max_trim_sec = max(0.0, duration_sec - one_frame_sec)
+        start_trim_sec = min(start_trim_sec, max_trim_sec)
+        end_trim_sec = min(end_trim_sec, max(0.0, max_trim_sec - start_trim_sec))
+        end_sec = max(start_trim_sec + one_frame_sec, duration_sec - end_trim_sec)
+        filter_complex.append(
+            (
+                f"[{index}:v]trim=start={_format_seconds(start_trim_sec)}:end={_format_seconds(end_sec)},"
+                f"fps={fps_str},scale={output_width}:{output_height}:flags=lanczos,"
+                "setsar=1,format=yuv420p,setpts=PTS-STARTPTS"
+                f"[v{index}]"
+            )
+        )
+        concat_inputs.append(f"[v{index}]")
+    filter_complex.append(f"{''.join(concat_inputs)}concat=n={len(input_paths)}:v=1:a=0[vout]")
+    command.extend(
+        [
+            "-filter_complex",
+            ";".join(filter_complex),
+            "-map",
+            "[vout]",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-crf",
+            str(crf),
+            "-preset",
+            preset,
+            output_path,
+        ]
+    )
+    _run(command)
+    return command

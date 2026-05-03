@@ -1,8 +1,18 @@
 # AIVFX External API Readme
 
-This document describes the developer-facing API that sits alongside the main AIVFX task UI.
+This document describes the developer-facing API that sits alongside the main AIVFX UI.
 
-The API calls the same editing and first-frame-plus-video generation modules used by the application. It does not expose raw provider payloads directly. Incoming media is validated, normalized where needed, saved in user-scoped S3 folders, and then passed to the same provider adapters as the app.
+The API calls the same editing and generation modules used by the application. It does not expose raw provider payloads directly. Incoming media is validated, normalized where needed, saved in user-scoped S3 folders, and then passed to the same provider adapters as the app.
+
+The application UI is now organized around:
+
+- `Source`
+- `Create`
+- `Outputs`
+- `Post Process`
+- `Reports`
+
+The external API is intentionally more operation-oriented than wizard-oriented, but it shares the same model capability registry, media preparation, provider routing, and output normalization.
 
 ## Quick Start
 
@@ -69,6 +79,25 @@ Every generation/edit request creates:
 The backend saves the API request before enqueueing the worker job. This avoids the race where a worker starts before the request metadata exists. The worker also ignores duplicate SQS deliveries for already-complete jobs.
 
 Concurrent requests are expected. Multiple jobs for the same user, model, or input asset should complete independently.
+
+## Shared Pipeline Behavior
+
+The API and the main app share the same backend model capability registry and media-prep rules.
+
+That means API requests inherit the same behavior for:
+
+- model and mode validation
+- prompt marker validation
+- duration and frame-budget checks
+- FPS caps and preserve-frames behavior where supported
+- provider-specific video/reference-image preparation
+- output timeline conform back into the stored media format
+
+The core implementation lives in:
+
+- `backend/src/generation/capabilities.py`
+- `backend/src/api_handler.py`
+- `backend/src/workers/processor.py`
 
 ## Endpoint Summary
 
@@ -200,6 +229,8 @@ Processing:
 - Masks may be feathered and optionally edge-refined.
 - Output is composited back into the original image geometry.
 
+This matches the same patch-edit and contextual refine conventions used in the app’s `Edit frames` and `Refine Frames` tools.
+
 ## Reference Video Generation
 
 ```http
@@ -224,6 +255,7 @@ Supported models:
 - `ray-2`
 - `ray-flash-2`
 - `runway-gen4.5`
+- `runway-gen4-aleph`
 - `kling-2.6`
 - `kling-o1`
 - `kling-v3-omni-video`
@@ -240,6 +272,7 @@ Mode compatibility:
 | --- | --- |
 | `ray-2`, `ray-flash-2` | Luma modes such as `adhere_*`, `flex_*`, `reimagine_*` |
 | `runway-gen4.5` | `runway_i2v` |
+| `runway-gen4-aleph` | `runway_aleph_v2v` |
 | `kling-2.6` | `kling_start_only`, `kling_start_end` |
 | `veo-3.1`, `veo-3.1-fast` | `veo_start_only`, `veo_start_end` |
 | `wan2.2-a14b` | `wan_a14b_i2v` |
@@ -253,6 +286,8 @@ Provider-specific validation:
 
 - Seedance prompts must include `@Video1` and `@Image1`.
 - Seedance content-policy moderation is enforced by the provider and cannot be disabled.
+- Runway Gen-4 Aleph uses the source video plus the uploaded first-frame image as a reference and requires one of Runway's supported output ratios. The app selects the nearest supported ratio and Runway may center-crop inputs to fit it.
+- The app currently applies a conservative 10-second limit to Runway Gen-4 Aleph within this pipeline.
 - Kling O1 and Kling v3 prompts should include `<<<video_1>>>` and `<<<image_1>>>`.
 - Wan2.7 VideoEdit supports 720p or 1080p selection.
 - Some models enforce duration by seconds; others effectively enforce a frame budget at a fixed fps.
@@ -268,6 +303,7 @@ FPS and resolution behavior:
 
 - Input video is probed before provider submission.
 - Provider-prepared video may be resized/re-encoded to satisfy model constraints.
+- For relevant models, the pipeline can preserve source-frame count by retiming the prepared provider input instead of dropping/resampling frames.
 - Raw provider output is saved and probed.
 - If the provider output fps/resolution differs from the source timeline, a conformed stored output is generated for merge continuity.
 - Metadata records both raw and conformed output.

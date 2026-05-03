@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 
 import { apiClient } from "../api/client";
+import { StatusNotice } from "../components/layout/UiFeedback";
 import type { ApiRequestAssetRecord, ApiRequestRecord } from "../types/api";
 
 function formatTimestamp(value: string | undefined): string {
@@ -103,8 +104,20 @@ export default function ApiLogsPage() {
         <div className="space-y-3">
           <div className="rounded-xl border border-ink/10 bg-white p-3">
             <p className="text-sm font-semibold">Requests</p>
-            {requestsQuery.isLoading ? <p className="mt-2 text-sm text-ink/60">Loading API requests...</p> : null}
-            {requestsQuery.error ? <p className="mt-2 text-sm text-red-600">{requestsQuery.error.message}</p> : null}
+            {requestsQuery.isLoading ? (
+              <div className="mt-2">
+                <StatusNotice variant="loading">
+                  <p>Loading API requests...</p>
+                </StatusNotice>
+              </div>
+            ) : null}
+            {requestsQuery.error ? (
+              <div className="mt-2">
+                <StatusNotice variant="error">
+                  <p>{requestsQuery.error.message}</p>
+                </StatusNotice>
+              </div>
+            ) : null}
             <div className="mt-3 space-y-2">
               {requests.map((item) => (
                 <button
@@ -137,6 +150,11 @@ export default function ApiLogsPage() {
             <div className="rounded-xl border border-ink/10 bg-white p-4 text-sm text-ink/60">Select an API request to inspect it.</div>
           ) : (
             <>
+              {detailQuery.isPending ? (
+                <StatusNotice variant="loading">
+                  <p>Loading request details...</p>
+                </StatusNotice>
+              ) : null}
               <div className="rounded-xl border border-ink/10 bg-white p-4">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>

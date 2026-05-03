@@ -1,6 +1,6 @@
 # AI-assisted VFX Micro-Pipeline
 
-Production-oriented React + AWS serverless application for frame-accurate VFX experimentation. The app takes a source video, lets a user select frames and segments, edit/refine first frames, generate replacement video segments with multiple AI providers, QC the results, and merge the selected result back into the source timeline.
+Production-oriented React + AWS serverless application for frame-accurate VFX experimentation. The app takes a source video, lets a user define a reusable working range, edit/refine key frames, generate alternative outputs with multiple AI providers, QC the results, and merge the selected result back into the source timeline.
 
 ## Repository Layout
 
@@ -10,55 +10,63 @@ Production-oriented React + AWS serverless application for frame-accurate VFX ex
 - `api-readme.md`: developer-facing external API documentation
 - `README-charactertool.md`: notes for the current Wan Animate support and future character-animation workflow
 
-## Current Application Flow
+## Current UI Structure
 
-The main workflow is task-based. Assets and task metadata are private to the authenticated Cognito user.
+The underlying storage is still task-based, but the UI now presents each task as an uploaded source video. Assets and metadata remain private to the authenticated Cognito user.
 
-1. **Upload / Ingest**
-   - Upload a source video.
+1. **Source**
+   - Upload and ingest a source video.
    - The backend probes media with `ffprobe`, creates or records a constant-frame-rate edit source, generates a lightweight preview proxy, and creates timeline thumbnails.
-   - The app supports longer source uploads for selection, but model-specific generation requests still enforce provider duration and frame-budget limits later in the flow.
+   - The app creates a default full-video working range automatically. Users can also define and save shorter custom working ranges.
+   - Optional crop is configured here and is later merged back in Post Process.
 
-2. **Select Frames**
-   - Previously named Pick Frames.
-   - The user creates frame captures and frame-accurate video segments from the source timeline.
-   - Segment creation supports the current general 10-second application limit, with later model-specific validation when a model has a stricter hard limit.
+2. **Create**
+   - Users choose a creation route up front:
+     - source motion (`first frame + video`)
+     - animate between two frames (`start + end`)
+     - animate from start frame only
+   - The Create area then exposes only the inputs required for that route.
+   - `Edit frames` remains the main still-edit surface.
+   - `Refine Frames` is now a contextual workspace opened from edited outputs rather than a primary peer step.
 
-3. **Edit Frames**
-   - Previously named Edit Frame.
-   - The user edits selected frames with full-frame or patch-based image models.
-   - Supported frame-edit providers include Gemini Nano Banana / Nano Banana Pro, OpenAI ChatGPT-image 1.5, OpenAI ChatGPT-image 2.0, Runware Flux Fill, and Runware ACE++.
-   - The QA launch button was removed from Edit Frames thumbnail blocks; Quality Match is now launched from the Refine Frames step.
+3. **Outputs**
+   - Generated attempts are reviewed here for the current working range.
+   - The chosen output is compared against the source and handed forward into Post Process.
+   - Multiple overlapping generation jobs are supported. Jobs are tracked independently and completed results are added without overwriting earlier outputs.
+   - For long-video source-motion runs, chunked/continuation drafts stay inside their session UI until a stitched draft is saved back to Outputs.
 
-4. **Refine Frames**
-   - Runs Quality Match analysis and mask refinement between the original frame and edited frame.
-   - Produces diff maps, edge/change masks, restoration previews, and final refined frame variants.
-   - Supports SAM 2 assist through fal.ai, brush/lasso mask editing, and optional OpenCV seamless-clone compositing from Keep Mask Actions.
-   - The keep-mask convention is: white/kept areas preserve the edited frame; outside the mask is restored from the original frame.
+4. **Post Process**
+   - Acts on the currently chosen output from Outputs.
+   - Supports:
+     - extend/continuation for long videos
+     - merge alignment and export
+     - crop merge-back
+     - tracked keep-mask video cleanup / refine on eligible source-motion outputs
+   - Video cleanup is conceptually post-processing, but can be used before final merge while the user is still working on a selected working range.
 
-5. **Generate Video**
-   - Generates replacement video for a selected segment using the refined first frame and, where supported, a video guidance segment.
-   - Multiple overlapping generation jobs are supported. Jobs are logged independently and completed results are added to the grid without overwriting earlier outputs.
-   - The comparator is separated from background polling so selected generated previews do not flicker or resize during job refreshes.
-
-6. **Video Cleanup / Refine**
-   - Available from successful Luma-generated video thumbnails.
-   - Tracks the first-frame keep mask through the generated video using SAM 2 and lets users preview, edit, retrack, tune, and apply a cleaned segment.
-   - The cleanup composite restores original source pixels outside the tracked keep mask.
-
-7. **Merge / Export**
-   - Inserts the selected generated segment back into the edit-source timeline.
-   - Uses stored timing metadata and estimated source-frame offsets where available.
-   - Supports trims, start-frame override, temporal feathering, and generated crop compositing.
-
-8. **Reports**
-   - Quality reports compare original, edited, refined, and generated assets.
+5. **Reports**
+   - Quality reports compare original, edited, refined, generated, and merged assets.
+   - Reports are now scoped by working range by default.
    - Custom QC supports two uploaded images or two uploaded videos; video uploads are sampled from the first frame and then every two seconds.
-   - Video comparison reports compare selected generations from the same segment/start frame with aligned frame grids, diff grids, zoomed crops, model settings, input/output resolution, fps, duration, and frame counts.
+   - Video comparison reports compare selected generations from the same working range/start frame with aligned frame grids, diff grids, zoomed crops, model settings, input/output resolution, fps, duration, and frame counts.
 
-9. **API Playground / API Logs**
+6. **Assets / API Logs**
+   - The asset library shows uploads, frame outputs, generated video outputs, and merged exports.
    - The standalone API playground is served at `/experiments/aivfx/api-test.html`.
-   - A task-nav link opens the API logs page, showing external API jobs with input/output asset previews and errors.
+   - A nav link opens the API logs page, showing external API jobs with input/output asset previews and errors.
+
+## Current Workflow Model
+
+Internally, the app is moving toward these reusable concepts:
+
+- `Source Video`
+- `Working Range`
+- `Frame Edit Set`
+- `Generation Session`
+- `Post Process Session`
+- `Report Set`
+
+The UI has already been restructured around those concepts even though storage compatibility is still maintained through the existing task/segment/frame/generation records.
 
 ## Supported Generation Models
 
@@ -92,6 +100,13 @@ The application keeps the source timeline as the authority.
 
 This means the app can preserve timeline duration and merge alignment even when providers drop frames, change fps, or return a different resolution.
 
+Where a provider has lower FPS constraints than the source, the app can either:
+
+- preserve all source frames by retiming the prepared provider input, or
+- allow provider-side resampling/drop behavior
+
+That behavior is now exposed in the UI for relevant routes as `Preserve source frames`.
+
 ## Backend Execution Model
 
 The backend is split into a synchronous API Lambda and an async SQS worker.
@@ -115,6 +130,25 @@ The main persisted records are:
 
 Storage is currently S3 JSON based. DynamoDB remains a future migration candidate once the data model settles.
 
+## Model Capability Registry
+
+Video-model behavior is now centralized in a backend capability registry:
+
+- `backend/src/generation/capabilities.py`
+
+The registry is the canonical source for model-specific constraints and behavior, including:
+
+- provider identity
+- supported route/input modes
+- prompt requirements and required markers
+- duration and frame-budget limits
+- FPS policy
+- preserve-frames eligibility
+- chunk/extend support
+- provider input/preparation profile
+
+The current UI still uses the existing flows, but validation and media-prep decisions are now driven from that registry rather than scattered constants.
+
 ## Async Job Types
 
 Current worker job types include:
@@ -126,7 +160,6 @@ Current worker job types include:
 - `quality_match_sam`
 - `segment_generate`
 - `merge_export`
-- `qc_analysis`
 - `qc_report_build`
 - `motion_sync_qc`
 - `video_cleanup_init`

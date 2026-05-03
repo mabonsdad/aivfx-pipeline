@@ -27,6 +27,17 @@ from src.core.ids import deterministic_frame_id, new_id, prompt_hash
 from src.core.logger import Logger
 from src.core.secrets import load_secret
 from src.core.store import S3JsonStore, now_iso
+from src.generation import (
+    LUMA_API_ALLOWED_MODES,
+    get_video_model_capability,
+    get_video_model_label,
+    get_video_model_provider,
+    resolve_video_model_limit_error,
+    supports_chunked_generation,
+    supports_generation_extension,
+    validate_video_model_mode,
+    validate_video_model_prompt,
+)
 from src.jobs.queue import JobQueue
 from src.models.schemas import (
     ApiAssetUploadInitRequest,
@@ -34,13 +45,17 @@ from src.models.schemas import (
     ApiImageEditPatchRequest,
     ApiReferenceVideoGenerateRequest,
     AssetDeleteRequest,
+    ChunkedGenerationCancelRequest,
     ChunkedGenerationPauseRequest,
     ChunkedGenerationRestartRequest,
+    ChunkedGenerationSaveDraftRequest,
     ChunkedSegmentGenerateRequest,
     CustomReportCreateRequest,
     ExternalQcPairUploadRequest,
     FrameCaptureRequest,
     FullEditRequest,
+    ManualFrameUploadCompleteRequest,
+    ManualFrameUploadInitRequest,
     ManualRefineExportRequest,
     ManualRefineUploadCompleteRequest,
     ManualRefineUploadInitRequest,
@@ -51,7 +66,6 @@ from src.models.schemas import (
     QualityMatchMaskUploadRequest,
     QualityMatchPreviewRequest,
     QualityMatchSamRequest,
-    QcRunRequest,
     PatchInitRequest,
     PatchSubmitRequest,
     ReferenceUploadRequest,
@@ -74,43 +88,10 @@ from src.video_cleanup.schemas import (
     VideoCleanupSamAssistRequest,
 )
 from src.video_cleanup.service import add_or_replace_keyframe, get_cleanup_track, resolve_first_mask_key_from_analysis
+from src.workers.processor import compute_merge_alignment_suggestion
 
 logger = Logger()
 settings = load_settings()
-MODEL_FRAME_BUDGET_FPS = 24
-VIDEO_MODEL_MAX_SECONDS: dict[str, int] = {
-    "ray-2": 10,
-    "ray-flash-2": 15,
-    "runway-gen4.5": 10,
-    "kling-2.6": 10,
-    "kling-o1": 10,
-    "kling-v3-omni-video": 10,
-    "seedance-2.0-reference-to-video": 15,
-    "veo-3.1": 8,
-    "veo-3.1-fast": 8,
-    "wan2.2-a14b": 5,
-    "wan2.2-animate": 10,
-    "wan2.7-videoedit": 10,
-}
-VIDEO_MODEL_MIN_SECONDS: dict[str, int] = {
-    "kling-o1": 3,
-    "kling-v3-omni-video": 3,
-    "seedance-2.0-reference-to-video": 4,
-    "wan2.7-videoedit": 2,
-}
-VIDEO_MODEL_FRAME_BUDGET_FPS: dict[str, int] = {
-    "veo-3.1": MODEL_FRAME_BUDGET_FPS,
-    "veo-3.1-fast": MODEL_FRAME_BUDGET_FPS,
-}
-CHUNKED_GENERATION_SUPPORTED_MODELS = {
-    "ray-2",
-    "ray-flash-2",
-    "wan2.2-animate",
-    "kling-o1",
-    "kling-v3-omni-video",
-    "seedance-2.0-reference-to-video",
-    "wan2.7-videoedit",
-}
 CHUNKED_CONSERVATIVE_DURATION_SECONDS = 6
 CHUNKED_MIN_OVERLAP_SECONDS = 0.5
 PRESIGNED_GET_TTL_SECONDS = 3600
@@ -158,6 +139,7 @@ def _plan_chunk_windows(*, total_frames: int, fps: Fraction) -> tuple[int, list[
     chunk_duration_sec = CHUNKED_CONSERVATIVE_DURATION_SECONDS
     chunk_frames = max(1, int(round(float(fps) * chunk_duration_sec)))
     overlap_frames = min(max(2, _chunk_overlap_frames(fps)), max(2, chunk_frames - 2))
+    context_frames = min(overlap_frames, max(1, chunk_frames - 1))
     if total_frames <= chunk_frames:
         return overlap_frames, [
             {
@@ -166,40 +148,58 @@ def _plan_chunk_windows(*, total_frames: int, fps: Fraction) -> tuple[int, list[
                 "endFrameExclusive": total_frames,
                 "durationFrames": total_frames,
                 "durationSec": round(total_frames / float(fps), 4),
+                "coverageStartFrame": 0,
+                "coverageEndFrameExclusive": total_frames,
+                "coverageDurationFrames": total_frames,
+                "coverageTrimStartFrames": 0,
+                "coverageTrimEndFrames": 0,
                 "anchorFramesFromPrevious": 0,
                 "overlapFrames": 0,
             }
         ]
-
-    chunk_count = max(2, int(math.ceil((total_frames - overlap_frames) / float(chunk_frames - overlap_frames))))
-    last_start = max(0, total_frames - chunk_frames)
-    starts: list[int] = []
-    for idx in range(chunk_count):
-        if idx == chunk_count - 1:
-            start = last_start
-        else:
-            start = int(round((last_start * idx) / max(1, chunk_count - 1)))
-        if starts and start <= starts[-1]:
-            start = min(last_start, starts[-1] + 1)
-        starts.append(start)
-
+    coverage_frames = max(1, chunk_frames - context_frames)
     chunks: list[dict[str, int | float]] = []
-    previous_end = 0
-    for idx, start in enumerate(starts):
-        end_exclusive = total_frames if idx == len(starts) - 1 else min(total_frames, start + chunk_frames)
-        overlap_with_previous = max(0, previous_end - start) if idx > 0 else 0
+    coverage_start = 0
+    previous_source_end = 0
+    chunk_index = 0
+    while coverage_start < total_frames:
+        if chunk_index == 0:
+            source_start = 0
+        else:
+            source_start = max(0, coverage_start - context_frames)
+        remaining_coverage = total_frames - coverage_start
+        if remaining_coverage <= coverage_frames:
+            coverage_end = total_frames
+            source_end = total_frames
+            if chunk_index > 0:
+                source_start = max(0, total_frames - chunk_frames)
+        else:
+            coverage_end = min(total_frames, coverage_start + coverage_frames)
+            source_end = min(total_frames, source_start + chunk_frames)
+            if source_end < coverage_end:
+                source_end = coverage_end
+        overlap_with_previous = max(0, previous_source_end - source_start) if chunk_index > 0 else 0
+        coverage_trim_start = max(0, coverage_start - source_start)
+        coverage_trim_end = max(0, source_end - coverage_end)
         chunks.append(
             {
-                "chunkIndex": idx,
-                "startFrame": start,
-                "endFrameExclusive": end_exclusive,
-                "durationFrames": max(0, end_exclusive - start),
-                "durationSec": round(max(0, end_exclusive - start) / float(fps), 4),
+                "chunkIndex": chunk_index,
+                "startFrame": source_start,
+                "endFrameExclusive": source_end,
+                "durationFrames": max(0, source_end - source_start),
+                "durationSec": round(max(0, source_end - source_start) / float(fps), 4),
+                "coverageStartFrame": coverage_start,
+                "coverageEndFrameExclusive": coverage_end,
+                "coverageDurationFrames": max(0, coverage_end - coverage_start),
+                "coverageTrimStartFrames": coverage_trim_start,
+                "coverageTrimEndFrames": coverage_trim_end,
                 "anchorFramesFromPrevious": max(0, overlap_with_previous - 1),
                 "overlapFrames": overlap_with_previous,
             }
         )
-        previous_end = end_exclusive
+        previous_source_end = source_end
+        coverage_start = coverage_end
+        chunk_index += 1
     return overlap_frames, chunks
 
 
@@ -399,6 +399,32 @@ def _normalize_uploaded_refine_image(
     return out.getvalue()
 
 
+def _create_manual_uploaded_frame_variant(
+    *,
+    task: dict[str, Any],
+    frame_id: str,
+    filename: str,
+) -> dict[str, Any]:
+    paths = _asset_paths_for_task(task)
+    variant_id = new_id("var")
+    variant_key = paths.frame_variant(frame_id, variant_id)
+    return {
+        "variantId": variant_id,
+        "type": "full",
+        "variantKind": "edited",
+        "sourceVariantId": None,
+        "model": "manual_upload",
+        "promptHash": prompt_hash(f"manual_frame_upload:{filename}"),
+        "createdAt": now_iso(),
+        "outputKey": variant_key,
+        "generationSettings": {
+            "provider": "manual",
+            "workflow": "manual_frame_upload",
+            "uploadedFilename": filename,
+        },
+    }
+
+
 def _task_summary(task: dict[str, Any]) -> dict[str, Any]:
     status = task["status"]
     if status == "error" and task.get("video", {}).get("editSource", {}).get("s3Key"):
@@ -427,21 +453,7 @@ def _format_fps(fps: Fraction) -> str:
 
 
 def _video_model_label(model: str) -> str:
-    labels = {
-        "ray-2": "Luma Ray 2",
-        "ray-flash-2": "Luma Ray Flash 2",
-        "runway-gen4.5": "Runway Gen-4.5",
-        "kling-2.6": "Kling 2.6",
-        "kling-o1": "Kling O1 Edit",
-        "kling-v3-omni-video": "Kling v3 Omni Video",
-        "seedance-2.0-reference-to-video": "Seedance 2.0 Reference to Video",
-        "veo-3.1": "Veo 3.1",
-        "veo-3.1-fast": "Veo 3.1 Fast",
-        "wan2.2-a14b": "Wan 2.2 A14B",
-        "wan2.2-animate": "Wan 2.2 Animate",
-        "wan2.7-videoedit": "Wan 2.7 VideoEdit",
-    }
-    return labels.get(model, model)
+    return get_video_model_label(model)
 
 
 def _segment_duration_frames(segment: dict[str, Any]) -> int:
@@ -665,6 +677,27 @@ def _prune_stale_segment_generations(task: dict[str, Any], store: S3JsonStore) -
         }
     )
     return True
+
+
+def _cleanup_legacy_generation_qc(task: dict[str, Any]) -> bool:
+    generations = task.get("segmentGenerations")
+    if not isinstance(generations, dict) or not generations:
+        return False
+    changed = False
+    for generation in generations.values():
+        if not isinstance(generation, dict):
+            continue
+        if "qc" in generation:
+            generation.pop("qc", None)
+            changed = True
+    if changed:
+        task.setdefault("history", []).append(
+            {
+                "at": now_iso(),
+                "event": "task.legacy_generation_qc.removed",
+            }
+        )
+    return changed
 
 
 def _normalize_custom_report_refs(task: dict[str, Any], raw_refs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -925,42 +958,8 @@ def _audit_prompt(prompt: str) -> dict[str, Any]:
     }
 
 
-LUMA_API_ALLOWED_MODES = {
-    "adhere_1",
-    "adhere_2",
-    "adhere_3",
-    "flex_1",
-    "flex_2",
-    "flex_3",
-    "reimagine_1",
-    "reimagine_2",
-    "reimagine_3",
-}
-
-
-VIDEO_API_ALLOWED_MODES: dict[str, set[str]] = {
-    "ray-2": set(LUMA_API_ALLOWED_MODES),
-    "ray-flash-2": set(LUMA_API_ALLOWED_MODES),
-    "runway-gen4.5": {"runway_i2v"},
-    "kling-2.6": {"kling_start_only", "kling_start_end"},
-    "veo-3.1": {"veo_start_only", "veo_start_end"},
-    "veo-3.1-fast": {"veo_start_only", "veo_start_end"},
-    "wan2.2-a14b": {"wan_a14b_i2v"},
-    "wan2.2-animate": {"wan_animate_replace"},
-    "kling-o1": {"kling_o1_video_edit"},
-    "kling-v3-omni-video": {"kling_v3_omni_video_edit"},
-    "seedance-2.0-reference-to-video": {"seedance_reference_to_video"},
-    "wan2.7-videoedit": {"wan27_video_edit"},
-}
-
-
 def _validate_api_video_mode(model: str, mode: str) -> None:
-    allowed = VIDEO_API_ALLOWED_MODES.get(model)
-    if not allowed:
-        raise ValueError(f"Unsupported video model: {model}")
-    if mode not in allowed:
-        allowed_values = ", ".join(sorted(allowed))
-        raise ValueError(f"{_video_model_label(model)} requires one of: {allowed_values}.")
+    validate_video_model_mode(model, mode)
 
 
 def _decorate_embedded_s3_keys(
@@ -1063,31 +1062,17 @@ def _segment_duration_seconds(task: dict[str, Any], segment: dict[str, Any]) -> 
 
 
 def _segment_model_limit_error(task: dict[str, Any], segment: dict[str, Any], model: str) -> str | None:
-    max_seconds = VIDEO_MODEL_MAX_SECONDS.get(model)
-    if max_seconds is None:
-        return None
-    min_seconds = VIDEO_MODEL_MIN_SECONDS.get(model)
-    frame_budget_fps = VIDEO_MODEL_FRAME_BUDGET_FPS.get(model)
     duration_frames = _segment_duration_frames(segment)
     duration_seconds = _segment_duration_seconds(task, segment)
-    max_frames = int(round(max_seconds * (frame_budget_fps or float(_fps(task)))))
-    over_frames = duration_frames > max_frames
-    over_seconds = duration_seconds > float(max_seconds) + 1e-6
-    under_seconds = min_seconds is not None and duration_seconds + 1e-6 < float(min_seconds)
-    label = _video_model_label(model)
-    if under_seconds:
-        return f"{label} requires a source segment between {min_seconds}s and {max_seconds}s. Selected segment is {duration_seconds:.2f}s."
-    if not over_frames and not over_seconds:
-        return None
-    if frame_budget_fps is not None and over_frames and abs(float(_fps(task)) - frame_budget_fps) > 1e-3:
-        return (
-            f"{label} allows up to {max_seconds}s at {frame_budget_fps}fps ({max_frames} frames). "
-            f"Selected segment is {duration_frames} frames / {duration_seconds:.2f}s at {_format_fps(_fps(task))}fps, "
-            "so it exceeds this model's frame budget."
-        )
-    return (
-        f"{label} allows up to {max_seconds}s. Selected segment is {duration_frames} frames / {duration_seconds:.2f}s, which is over the limit."
+    limit_error = resolve_video_model_limit_error(
+        model=model,
+        duration_seconds=duration_seconds,
+        duration_frames=duration_frames,
+        source_fps=_fps(task),
     )
+    if not limit_error:
+        return None
+    return limit_error.replace(f"at {float(_fps(task)):.2f}fps", f"at {_format_fps(_fps(task))}fps")
 
 
 def _capture_segment_boundary_frames(
@@ -1133,17 +1118,7 @@ def _resolve_frame_source(frame: dict[str, Any], preferred_variant_id: str | Non
 
 
 def _segment_generation_provider_name(model: str) -> str:
-    if model == "runway-gen4.5":
-        return "runway"
-    if model == "kling-2.6":
-        return "kling"
-    if model in {"veo-3.1", "veo-3.1-fast", "wan2.2-a14b", "wan2.2-animate"}:
-        return "runware"
-    if model in {"kling-o1", "kling-v3-omni-video", "wan2.7-videoedit"}:
-        return "replicate"
-    if model == "seedance-2.0-reference-to-video":
-        return "fal"
-    return "luma"
+    return get_video_model_provider(model)
 
 
 def _create_segment_record(
@@ -1153,6 +1128,7 @@ def _create_segment_record(
     end_excl: int,
     dur_frames: int,
     asset_store: AssetStore,
+    internal_only: bool = False,
 ) -> dict[str, Any]:
     segment_id = new_id("seg")
     fps = _fps(task)
@@ -1170,6 +1146,7 @@ def _create_segment_record(
         "crop": None,
         "segmentClipKey": None,
         "segmentClipUpdatedAt": None,
+        "internalOnly": bool(internal_only),
     }
     start_capture, end_capture = _capture_segment_boundary_frames(task=task, segment=segment, asset_store=asset_store)
     segment["startFrameId"] = start_capture["frameId"]
@@ -1194,6 +1171,7 @@ def _queue_segment_generation_record(
     replicate_kling_mode: str | None = None,
     replicate_kling_v3_mode: str | None = None,
     wan27_resolution: str | None = None,
+    preserve_frames: bool = True,
     parent_generation_id: str | None = None,
     extension_metadata: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
@@ -1215,6 +1193,7 @@ def _queue_segment_generation_record(
             "replicateKlingMode": replicate_kling_mode,
             "replicateKlingV3Mode": replicate_kling_v3_mode,
             "wan27Resolution": wan27_resolution,
+            "preserveFrames": bool(preserve_frames),
             "parentGenerationId": parent_generation_id,
             "extensionMetadata": extension_metadata,
         },
@@ -1230,6 +1209,7 @@ def _queue_segment_generation_record(
             "prompt": prompt,
             "lumaGenerationId": None,
         },
+        "generationSettings": {"preserveFrames": bool(preserve_frames)},
         "status": "queued",
         "outputKey": None,
         "jobId": job_id,
@@ -1277,6 +1257,7 @@ def _queue_chunk_generation_for_run(
     replicate_kling_mode: str | None,
     replicate_kling_v3_mode: str | None,
     wan27_resolution: str | None,
+    preserve_frames: bool,
     parent_generation_id: str | None = None,
     extension_metadata: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
@@ -1295,10 +1276,16 @@ def _queue_chunk_generation_for_run(
         replicate_kling_mode=replicate_kling_mode,
         replicate_kling_v3_mode=replicate_kling_v3_mode,
         wan27_resolution=wan27_resolution,
+        preserve_frames=preserve_frames,
         parent_generation_id=parent_generation_id,
         extension_metadata=extension_metadata,
     )
     now = now_iso()
+    generation_record = task.setdefault("segmentGenerations", {}).get(gen_id)
+    if isinstance(generation_record, dict):
+        generation_record["isChunkInternal"] = True
+        generation_record["chunkedRunId"] = run.get("runId")
+        generation_record["chunkRole"] = "internal_chunk"
     chunk["generationId"] = gen_id
     chunk["jobId"] = job_id
     chunk["status"] = "queued"
@@ -1649,6 +1636,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
         try:
             prompt = _sanitize_prompt(req.prompt) if req.prompt else None
             _validate_api_video_mode(req.model, req.mode)
+            validate_video_model_prompt(req.model, prompt)
             video_asset = _validate_api_asset_key(
                 asset_store=asset_store,
                 user_id=user_id,
@@ -1671,14 +1659,6 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 if req.lastFrameAssetKey
                 else None
             )
-            if req.model == "seedance-2.0-reference-to-video" and prompt:
-                missing_refs: list[str] = []
-                if "@Video1" not in prompt:
-                    missing_refs.append("@Video1")
-                if "@Image1" not in prompt:
-                    missing_refs.append("@Image1")
-                if missing_refs:
-                    raise ValueError(f"{_video_model_label(req.model)} prompt must reference {' and '.join(missing_refs)}.")
         except ValueError as exc:
             return response(400, {"error": _api_request_error_payload("validation_error", str(exc))}, origin=origin)
         request_id_value = new_id("apireq")
@@ -1699,6 +1679,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 "replicateKlingMode": req.replicateKlingMode,
                 "replicateKlingV3Mode": req.replicateKlingV3Mode,
                 "wan27Resolution": req.wan27Resolution,
+                "preserveFrames": bool(req.preserveFrames),
             },
             enqueue=False,
         )
@@ -1718,6 +1699,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 "replicateKlingMode": req.replicateKlingMode,
                 "replicateKlingV3Mode": req.replicateKlingV3Mode,
                 "wan27Resolution": req.wan27Resolution,
+                "preserveFrames": bool(req.preserveFrames),
             },
             "inputAssets": {
                 "video": video_asset,
@@ -1773,6 +1755,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             changed = _reconcile_segment_generation_job_states(item, store)
             changed = _prune_stale_segment_generations(item, store) or changed
             changed = _backfill_segment_generation_preview_refs(item) or changed
+            changed = _cleanup_legacy_generation_qc(item) or changed
             changed = _cleanup_custom_reports(item) or changed
             if changed:
                 store.save_task(item)
@@ -1799,6 +1782,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
         changed = _reconcile_segment_generation_job_states(task, store)
         changed = _prune_stale_segment_generations(task, store) or changed
         changed = _backfill_segment_generation_preview_refs(task) or changed
+        changed = _cleanup_legacy_generation_qc(task) or changed
         changed = _cleanup_custom_reports(task) or changed
         if changed:
             store.save_task(task)
@@ -1860,8 +1844,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 generation["sourceLastFrameCaptureUrl"] = asset_store.presign_get(
                     generation["sourceLastFrameCaptureKey"], expires=PRESIGNED_GET_TTL_SECONDS
                 )
-            if generation.get("qc"):
-                _decorate_embedded_s3_keys(generation["qc"], asset_store)
+            generation.pop("qc", None)
         if decorated.get("chunkedGenerationRuns"):
             _decorate_embedded_s3_keys(decorated["chunkedGenerationRuns"], asset_store)
         for pair in decorated.get("externalQcPairs", []):
@@ -3016,6 +2999,77 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 origin=origin,
             )
 
+        if method == "POST" and len(parts) == 7 and parts[2] == "frames" and parts[4] == "manual-upload" and parts[5] == "upload" and parts[6] == "init":
+            frame_id = parts[3]
+            frame = task.get("frames", {}).get(frame_id)
+            if not frame:
+                return error_response(404, "Frame not found", origin=origin)
+            req = _json_model(ManualFrameUploadInitRequest, event)
+            upload_id = new_id("mfu")
+            paths = _asset_paths_for_task(task)
+            upload_key = paths.manual_frame_upload(frame_id, upload_id, req.filename)
+            return response(
+                200,
+                {
+                    "uploadKey": upload_key,
+                    "uploadUrl": asset_store.presign_put(upload_key, expires=900, content_type=req.contentType),
+                },
+                origin=origin,
+            )
+
+        if method == "POST" and len(parts) == 7 and parts[2] == "frames" and parts[4] == "manual-upload" and parts[5] == "upload" and parts[6] == "complete":
+            frame_id = parts[3]
+            frame = task.get("frames", {}).get(frame_id)
+            if not frame:
+                return error_response(404, "Frame not found", origin=origin)
+            req = _json_model(ManualFrameUploadCompleteRequest, event)
+            paths = _asset_paths_for_task(task)
+            expected_prefix = f"{paths.task_prefix()}/frames/{frame_id}/manual_uploads/"
+            if not req.uploadKey.startswith(expected_prefix):
+                return error_response(400, "Upload key is outside this frame manual-upload path", origin=origin)
+            try:
+                asset_store.head_object(req.uploadKey)
+            except ClientError:
+                return error_response(404, "Uploaded edited frame file not found", origin=origin)
+
+            original_bytes = asset_store.read_bytes(frame["captureKey"])
+            uploaded_bytes = asset_store.read_bytes(req.uploadKey)
+            normalized_png = _normalize_uploaded_refine_image(original_bytes=original_bytes, uploaded_bytes=uploaded_bytes)
+            variant = _create_manual_uploaded_frame_variant(
+                task=task,
+                frame_id=frame_id,
+                filename=req.filename,
+            )
+            asset_store.put_bytes(variant["outputKey"], normalized_png, content_type="image/png")
+            try:
+                asset_store.delete_object(req.uploadKey)
+            except Exception:
+                pass
+            frame.setdefault("variants", []).append(variant)
+            frame["selectedVariantId"] = variant["variantId"]
+            task.setdefault("history", []).append(
+                {
+                    "type": "MANUAL_FRAME_UPLOAD_APPLIED",
+                    "frameId": frame_id,
+                    "timestamp": now_iso(),
+                    "userId": user_id,
+                    "details": {
+                        "variantId": variant["variantId"],
+                        "filename": req.filename,
+                    },
+                }
+            )
+            return response(
+                200,
+                {
+                    "variant": {
+                        "variantId": variant["variantId"],
+                        "imageUrl": asset_store.presign_get(variant["outputKey"], expires=PRESIGNED_GET_TTL_SECONDS),
+                    }
+                },
+                origin=origin,
+            )
+
         if method == "POST" and len(parts) == 7 and parts[2] == "frames" and parts[4] == "manual-refine" and parts[5] == "upload" and parts[6] == "complete":
             frame_id = parts[3]
             frame = task.get("frames", {}).get(frame_id)
@@ -3252,49 +3306,15 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 prompt = _sanitize_prompt(req.prompt) if req.prompt else None
             except ValueError as exc:
                 return error_response(400, str(exc), origin=origin)
-            if req.lumaModel in {"kling-o1", "kling-v3-omni-video", "seedance-2.0-reference-to-video", "wan2.7-videoedit"} and not prompt:
-                return error_response(400, f"{_video_model_label(req.lumaModel)} requires a prompt.", origin=origin)
-            if req.lumaModel in {"kling-o1", "kling-v3-omni-video"} and prompt:
-                missing_refs: list[str] = []
-                if "<<<video_1>>>" not in prompt:
-                    missing_refs.append("<<<video_1>>>")
-                if "<<<image_1>>>" not in prompt:
-                    missing_refs.append("<<<image_1>>>")
-                if missing_refs:
-                    return error_response(
-                        400,
-                        f"{_video_model_label(req.lumaModel)} prompt must reference {' and '.join(missing_refs)}.",
-                        origin=origin,
-                    )
-            if req.lumaModel == "seedance-2.0-reference-to-video" and prompt:
-                missing_refs: list[str] = []
-                if "@Video1" not in prompt:
-                    missing_refs.append("@Video1")
-                if "@Image1" not in prompt:
-                    missing_refs.append("@Image1")
-                if missing_refs:
-                    return error_response(
-                        400,
-                        f"{_video_model_label(req.lumaModel)} prompt must reference {' and '.join(missing_refs)}.",
-                        origin=origin,
-                    )
+            try:
+                validate_video_model_prompt(req.lumaModel, prompt)
+            except ValueError as exc:
+                return error_response(400, str(exc), origin=origin)
             if prompt:
                 logger.info("Queueing segment generation", extra={**_audit_prompt(prompt), "taskId": task_id, "segmentId": segment_id})
 
             gen_id = new_id("gen")
-            provider_name = (
-                "runway"
-                if req.lumaModel == "runway-gen4.5"
-                else (
-                    "kling"
-                    if req.lumaModel == "kling-2.6"
-                    else (
-                        "runware"
-                        if req.lumaModel in {"veo-3.1", "veo-3.1-fast", "wan2.2-a14b", "wan2.2-animate"}
-                        else ("replicate" if req.lumaModel in {"kling-o1", "kling-v3-omni-video", "wan2.7-videoedit"} else ("fal" if req.lumaModel == "seedance-2.0-reference-to-video" else "luma"))
-                    )
-                )
-            )
+            provider_name = get_video_model_provider(req.lumaModel)
 
             job_id = _queue_job(
                 store=store,
@@ -3313,6 +3333,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                     "replicateKlingMode": req.replicateKlingMode,
                     "replicateKlingV3Mode": req.replicateKlingV3Mode,
                     "wan27Resolution": req.wan27Resolution,
+                    "preserveFrames": bool(req.preserveFrames),
                 },
             )
 
@@ -3326,6 +3347,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                     "prompt": prompt,
                     "lumaGenerationId": None,
                 },
+                "generationSettings": {"preserveFrames": bool(req.preserveFrames)},
                 "status": "queued",
                 "outputKey": None,
                 "jobId": job_id,
@@ -3356,7 +3378,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 return error_response(404, "Segment not found", origin=origin)
 
             req = _json_model(ChunkedSegmentGenerateRequest, event)
-            if req.lumaModel not in CHUNKED_GENERATION_SUPPORTED_MODELS:
+            if not supports_chunked_generation(req.lumaModel):
                 return error_response(400, "This model is not supported for chunked whole-video generation yet", origin=origin)
 
             total_frames = int(segment.get("durationFrames") or 0)
@@ -3376,35 +3398,21 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 return error_response(404, "Selected start frame variant not found", origin=origin)
 
             try:
-                prompt = _sanitize_prompt(req.prompt) if req.prompt else None
+                opening_prompt = _sanitize_prompt(req.openingPrompt) if req.openingPrompt else None
+                continuation_prompt = _sanitize_prompt(req.continuationPrompt) if req.continuationPrompt else None
             except ValueError as exc:
                 return error_response(400, str(exc), origin=origin)
-            if req.lumaModel in {"kling-o1", "kling-v3-omni-video", "seedance-2.0-reference-to-video", "wan2.7-videoedit"} and not prompt:
-                return error_response(400, f"{_video_model_label(req.lumaModel)} requires a prompt.", origin=origin)
-            if req.lumaModel in {"kling-o1", "kling-v3-omni-video"} and prompt:
-                missing_refs: list[str] = []
-                if "<<<video_1>>>" not in prompt:
-                    missing_refs.append("<<<video_1>>>")
-                if "<<<image_1>>>" not in prompt:
-                    missing_refs.append("<<<image_1>>>")
-                if missing_refs:
-                    return error_response(
-                        400,
-                        f"{_video_model_label(req.lumaModel)} prompt must reference {' and '.join(missing_refs)}.",
-                        origin=origin,
-                    )
-            if req.lumaModel == "seedance-2.0-reference-to-video" and prompt:
-                missing_refs: list[str] = []
-                if "@Video1" not in prompt:
-                    missing_refs.append("@Video1")
-                if "@Image1" not in prompt:
-                    missing_refs.append("@Image1")
-                if missing_refs:
-                    return error_response(
-                        400,
-                        f"{_video_model_label(req.lumaModel)} prompt must reference {' and '.join(missing_refs)}.",
-                        origin=origin,
-                    )
+            effective_continuation_prompt = continuation_prompt or opening_prompt
+            try:
+                validate_video_model_prompt(req.lumaModel, opening_prompt)
+                validate_video_model_prompt(req.lumaModel, effective_continuation_prompt, prompt_label="continuation prompt")
+            except ValueError as exc:
+                return error_response(400, str(exc), origin=origin)
+            if opening_prompt:
+                logger.info(
+                    "Queueing chunked generation",
+                    extra={**_audit_prompt(opening_prompt), "taskId": task_id, "segmentId": segment_id, "chunked": True},
+                )
 
             overlap_frames, chunk_windows = _plan_chunk_windows(total_frames=total_frames, fps=fps)
             chunk_segments: list[dict[str, Any]] = []
@@ -3418,6 +3426,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                         end_excl=end_excl,
                         dur_frames=int(window["durationFrames"]),
                         asset_store=asset_store,
+                        internal_only=True,
                     )
                 )
 
@@ -3429,11 +3438,13 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 "status": "created",
                 "model": req.lumaModel,
                 "mode": req.mode,
-                "prompt": prompt,
+                "openingPrompt": opening_prompt,
+                "continuationPrompt": effective_continuation_prompt,
                 "firstFrameVariantId": first_variant_id,
                 "replicateKlingMode": req.replicateKlingMode,
                 "replicateKlingV3Mode": req.replicateKlingV3Mode,
                 "wan27Resolution": req.wan27Resolution,
+                "preserveFrames": bool(req.preserveFrames),
                 "chunkDurationSec": CHUNKED_CONSERVATIVE_DURATION_SECONDS,
                 "minimumOverlapFrames": overlap_frames,
                 "createdAt": now,
@@ -3454,6 +3465,11 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                         "segmentDurationSec": round(float(chunk_segment.get("durationSec") or 0.0), 4),
                         "relativeStartFrame": int(window["startFrame"]),
                         "relativeEndFrameExclusive": int(window["endFrameExclusive"]),
+                        "coverageStartFrame": absolute_segment_start + int(window["coverageStartFrame"]),
+                        "coverageEndFrameExclusive": absolute_segment_start + int(window["coverageEndFrameExclusive"]),
+                        "coverageDurationFrames": int(window["coverageDurationFrames"]),
+                        "coverageTrimStartFrames": int(window["coverageTrimStartFrames"]),
+                        "coverageTrimEndFrames": int(window["coverageTrimEndFrames"]),
                         "overlapFrames": int(window["overlapFrames"]),
                         "anchorFramesFromPrevious": int(window["anchorFramesFromPrevious"]),
                         "alignmentFrameIndex": absolute_segment_start + int(window["startFrame"]),
@@ -3462,7 +3478,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                         "anchorVariantId": first_variant_id if idx == 0 else None,
                         "status": "planned",
                         "reviewStatus": "pending" if idx > 0 else "running",
-                        "prompt": prompt,
+                        "prompt": opening_prompt if idx == 0 else effective_continuation_prompt,
                         "createdAt": now,
                         "updatedAt": now,
                     }
@@ -3478,11 +3494,12 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 chunk=first_chunk,
                 model=req.lumaModel,
                 mode=req.mode,
-                prompt=prompt,
+                prompt=first_chunk.get("prompt"),
                 first_frame_variant_id=first_variant_id,
                 replicate_kling_mode=req.replicateKlingMode,
                 replicate_kling_v3_mode=req.replicateKlingV3Mode,
                 wan27_resolution=req.wan27Resolution,
+                preserve_frames=bool(req.preserveFrames),
                 extension_metadata={
                     "chunkedRunId": run_id,
                     "chunkIndex": 0,
@@ -3528,7 +3545,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 return error_response(400, "Previous generation must be complete before it can be extended", origin=origin)
             req = _json_model(SegmentGenerationExtendRequest, event)
             model = str(previous_generation.get("luma", {}).get("model") or "")
-            if model not in {"ray-2", "ray-flash-2", "wan2.2-animate", "kling-o1", "kling-v3-omni-video", "seedance-2.0-reference-to-video", "wan2.7-videoedit"}:
+            if not supports_generation_extension(model):
                 return error_response(400, "Only first-frame + video generation models can be extended in this flow", origin=origin)
 
             previous_segment = next((item for item in task.get("segments", []) if item.get("segmentId") == previous_generation.get("segmentId")), None)
@@ -3537,7 +3554,8 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             total_frames = int(task.get("video", {}).get("editSource", {}).get("frameCount") or 0)
             if req.alignmentFrameIndex >= total_frames:
                 return error_response(400, "Alignment frame is outside the source video", origin=origin)
-            model_max_seconds = VIDEO_MODEL_MAX_SECONDS.get(model, 10)
+            model_capability = get_video_model_capability(model)
+            model_max_seconds = int(model_capability.max_seconds or 10)
             requested_duration_seconds = req.durationSeconds or int(math.ceil(float(previous_segment.get("durationSec") or model_max_seconds)))
             requested_duration_seconds = max(1, min(model_max_seconds, int(requested_duration_seconds)))
             fps = _fps(task)
@@ -3546,7 +3564,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             if remaining_frames <= 0:
                 return error_response(400, "No source frames remain after the selected alignment frame", origin=origin)
             dur_frames = min(desired_frames, remaining_frames)
-            min_seconds = VIDEO_MODEL_MIN_SECONDS.get(model)
+            min_seconds = model_capability.min_seconds
             if min_seconds is not None and (dur_frames / float(fps)) + 1e-6 < float(min_seconds):
                 return error_response(
                     400,
@@ -3643,7 +3661,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             run["updatedAt"] = now_iso()
             if isinstance(pending_chunk, dict):
                 chunk_index = int(pending_chunk.get("chunkIndex") or 0)
-                prompt = run.get("prompt")
+                prompt = pending_chunk.get("prompt")
                 parent_generation_id: str | None = None
                 if chunk_index == 0:
                     first_frame_variant_id = str(run.get("firstFrameVariantId") or "")
@@ -3679,6 +3697,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                     replicate_kling_mode=run.get("replicateKlingMode"),
                     replicate_kling_v3_mode=run.get("replicateKlingV3Mode"),
                     wan27_resolution=run.get("wan27Resolution"),
+                    preserve_frames=bool(run.get("preserveFrames", True)),
                     parent_generation_id=parent_generation_id or None,
                     extension_metadata={
                         "chunkedRunId": run.get("runId"),
@@ -3707,23 +3726,29 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 if not isinstance(previous_generation, dict) or previous_generation.get("status") != "complete":
                     return error_response(400, "Restart requires the previous chunk generation to be complete", origin=origin)
 
-            prompt = _sanitize_prompt(req.prompt) if req.prompt is not None else run.get("prompt")
-            run["prompt"] = prompt
+            chunk = chunks[req.fromChunkIndex]
+            prompt = _sanitize_prompt(req.prompt) if req.prompt is not None else chunk.get("prompt")
+            if req.fromChunkIndex <= 0:
+                run["openingPrompt"] = prompt
+                run["continuationPrompt"] = run.get("continuationPrompt") or prompt
+            else:
+                run["continuationPrompt"] = prompt
             run["status"] = "running"
             run["activeChunkIndex"] = req.fromChunkIndex
             run["updatedAt"] = now_iso()
             run.pop("failureChunkIndex", None)
+            run.pop("pauseRequestedAt", None)
+            run.pop("pauseReason", None)
 
-            for chunk in chunks[req.fromChunkIndex + 1 :]:
-                chunk["status"] = "planned"
-                chunk["reviewStatus"] = "pending"
-                chunk["prompt"] = prompt
-                chunk.pop("generationId", None)
-                chunk.pop("jobId", None)
-                chunk.pop("error", None)
-                chunk["updatedAt"] = now_iso()
+            for restart_chunk in chunks[req.fromChunkIndex:]:
+                restart_chunk["status"] = "planned"
+                restart_chunk["reviewStatus"] = "pending"
+                restart_chunk["prompt"] = prompt
+                restart_chunk.pop("generationId", None)
+                restart_chunk.pop("jobId", None)
+                restart_chunk.pop("error", None)
+                restart_chunk["updatedAt"] = now_iso()
 
-            chunk = chunks[req.fromChunkIndex]
             first_frame_variant_id: str | None
             parent_generation_id: str | None = None
             if req.fromChunkIndex == 0:
@@ -3759,6 +3784,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 replicate_kling_mode=run.get("replicateKlingMode"),
                 replicate_kling_v3_mode=run.get("replicateKlingV3Mode"),
                 wan27_resolution=run.get("wan27Resolution"),
+                preserve_frames=bool(run.get("preserveFrames", True)),
                 parent_generation_id=parent_generation_id or None,
                 extension_metadata={
                     "chunkedRunId": run.get("runId"),
@@ -3773,33 +3799,71 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             store.save_task(task, merge_on_conflict=True)
             return response(202, {"ok": True, "jobId": chunk.get("jobId"), "genId": chunk.get("generationId")}, origin=origin)
 
-        if method == "POST" and len(parts) == 4 and parts[2] == "qc" and parts[3] == "run":
-            req = _json_model(QcRunRequest, event)
-            requested_ids = req.generationIds or []
-            existing_generations = task.get("segmentGenerations", {})
-            if requested_ids:
-                generation_ids = [gen_id for gen_id in requested_ids if gen_id in existing_generations]
-                if not generation_ids:
-                    return error_response(400, "No valid generation IDs provided", origin=origin)
-            else:
-                generation_ids = [
-                    gen_id
-                    for gen_id, generation in existing_generations.items()
-                    if generation.get("status") == "complete"
-                    and generation.get("outputKey")
-                ]
-            if not generation_ids:
-                return error_response(400, "No completed generations available for QC", origin=origin)
-
-            job_id = _queue_job(
+        if method == "POST" and len(parts) == 5 and parts[2] == "chunked-generations" and parts[4] == "save-draft":
+            run = _find_chunked_generation_run(task, parts[3])
+            if not isinstance(run, dict):
+                return error_response(404, "Chunked generation run not found", origin=origin)
+            _json_model(ChunkedGenerationSaveDraftRequest, event)
+            if run.get("status") != "complete":
+                return error_response(400, "Chunked generation must complete before it can be saved", origin=origin)
+            if run.get("saveStatus") in {"queued", "running"}:
+                return error_response(409, "Chunked generation draft save is already in progress", origin=origin)
+            save_job_id = _queue_job(
                 store=store,
                 queue=queue,
                 user_id=user_id,
                 task_id=task_id,
-                job_type="qc_analysis",
-                payload={"generationIds": generation_ids, "mode": req.mode},
+                job_type="chunked_generation_finalize",
+                payload={"runId": run.get("runId")},
             )
-            return response(202, {"jobId": job_id, "generationCount": len(generation_ids)}, origin=origin)
+            run["saveStatus"] = "queued"
+            run["saveJobId"] = save_job_id
+            run["saveError"] = None
+            run["updatedAt"] = now_iso()
+            store.save_task(task, merge_on_conflict=True)
+            return response(202, {"ok": True, "jobId": save_job_id}, origin=origin)
+
+        if method == "POST" and len(parts) == 5 and parts[2] == "chunked-generations" and parts[4] == "cancel":
+            run = _find_chunked_generation_run(task, parts[3])
+            if not isinstance(run, dict):
+                return error_response(404, "Chunked generation run not found", origin=origin)
+            req = _json_model(ChunkedGenerationCancelRequest, event)
+            if run.get("saveStatus") in {"queued", "running"}:
+                return error_response(409, "Cannot cancel while the stitched draft is being saved", origin=origin)
+            run["status"] = "canceled"
+            run["canceledAt"] = now_iso()
+            run["updatedAt"] = now_iso()
+            run["pauseReason"] = req.reason or "Canceled by user"
+            internal_generation_ids = {
+                str(chunk.get("generationId"))
+                for chunk in run.get("chunks", [])
+                if isinstance(chunk, dict) and chunk.get("generationId")
+            }
+            for generation_id in internal_generation_ids:
+                generation = task.get("segmentGenerations", {}).get(generation_id)
+                if not isinstance(generation, dict):
+                    continue
+                for key_name in ("outputKey", "inputMediaKey", "inputFirstFrameKey", "inputLastFrameKey"):
+                    key_value = generation.get(key_name)
+                    if isinstance(key_value, str) and key_value:
+                        try:
+                            asset_store.delete_object(key_value)
+                        except Exception:
+                            logger.exception("Failed to delete canceled chunk asset", extra={"taskId": task_id, "genId": generation_id, "key": key_value})
+                generation["status"] = "failed"
+                generation["error"] = "Canceled by user"
+                generation["updatedAt"] = now_iso()
+                generation["finishedAt"] = now_iso()
+            _append_history_event(
+                task,
+                {
+                    "at": now_iso(),
+                    "event": "chunked_generation.canceled",
+                    "runId": run.get("runId"),
+                },
+            )
+            store.save_task(task, merge_on_conflict=True)
+            return response(200, {"ok": True}, origin=origin)
 
         if method == "POST" and len(parts) == 3 and parts[2] == "merge":
             req = _json_model(MergeRequest, event)
@@ -3826,6 +3890,29 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 },
             )
             return response(202, {"jobId": job_id}, origin=origin)
+
+        if method == "POST" and len(parts) == 5 and parts[2] == "segment-generations" and parts[4] == "merge-alignment-suggestion":
+            generation = task.get("segmentGenerations", {}).get(parts[3])
+            if not isinstance(generation, dict):
+                return error_response(404, "Generation not found", origin=origin)
+            if generation.get("status") != "complete" or not generation.get("outputKey"):
+                return error_response(409, "Generation must be complete before alignment can be analysed", origin=origin)
+            segment_id = str(generation.get("segmentId") or "")
+            segment = next(
+                (item for item in task.get("segments", []) if isinstance(item, dict) and str(item.get("segmentId") or "") == segment_id),
+                None,
+            )
+            if not isinstance(segment, dict):
+                return error_response(404, "Segment not found for generation", origin=origin)
+            suggestion = compute_merge_alignment_suggestion(
+                task=task,
+                segment=segment,
+                generation=generation,
+                asset_store=asset_store,
+                paths=_asset_paths_for_task(task),
+                settings=settings,
+            )
+            return response(200, suggestion, origin=origin)
 
     if method == "GET" and path.startswith("/jobs/"):
         job_id = path.split("/")[2]

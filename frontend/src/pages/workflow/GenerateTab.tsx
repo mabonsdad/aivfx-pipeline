@@ -1,6 +1,7 @@
-import { ReactCompareSlider } from "react-compare-slider";
-import { useEffect, useRef, useState, type RefObject } from "react";
+import { useEffect, useRef, useState } from "react";
 
+import { CompareIcon, DeleteIcon, DownloadIcon, IconActionButton, PreviewIcon } from "../../components/layout/MediaActionButtons";
+import { PendingButtonLabel, StatusNotice } from "../../components/layout/UiFeedback";
 import type { ChunkedGenerationRun, CustomReportOutputRef, SegmentGeneration, SegmentRecord, TaskDetail } from "../../types/api";
 
 type GenerateInputMode = "start_video" | "start_end" | "start_only";
@@ -8,6 +9,7 @@ type VideoModel =
   | "ray-2"
   | "ray-flash-2"
   | "runway-gen4.5"
+  | "runway-gen4-aleph"
   | "kling-2.6"
   | "kling-o1"
   | "kling-v3-omni-video"
@@ -19,8 +21,10 @@ type VideoModel =
   | "wan2.7-videoedit";
 
 export type GenerateTabCtx = {
-  setGenerationInputMode: (mode: GenerateInputMode) => void;
-  setLumaModel: (model: VideoModel) => void;
+  viewMode: "create" | "outputs";
+  onNext: () => void;
+  nextDisabled: boolean;
+  nextWarning: string | null;
   generationModelByInput: Record<GenerateInputMode, VideoModel>;
   generationInputMode: GenerateInputMode;
   selectedSegment: SegmentRecord | null;
@@ -43,36 +47,36 @@ export type GenerateTabCtx = {
   setReplicateKlingV3Mode: (value: "standard" | "pro") => void;
   wan27Resolution: "720p" | "1080p";
   setWan27Resolution: (value: "720p" | "1080p") => void;
+  preserveFrames: boolean;
+  setPreserveFrames: (value: boolean) => void;
   lumaPrompt: string;
   setLumaPrompt: (value: string) => void;
+  lumaContinuationPrompt: string;
+  setLumaContinuationPrompt: (value: string) => void;
   generationPromptPlaceholder: string;
   generationPromptError: string | null;
+  missingRouteInputsMessage: string | null;
   generationInputNote: string;
   generationHelp: { title: string; lines: string[] };
   selectedStartSourceLabel: string;
   selectedEndSourceLabel: string | null;
   selectedSegmentOverLimit: boolean;
-  lumaHardLimitSeconds: number;
   selectedSegmentLimitMessage: string | null;
   selectedSegmentId: string | null;
-  generateSegmentMutation: { mutate: () => void };
+  generateSegmentMutation: { mutate: () => void; isPending?: boolean };
   generateChunkedSegmentMutation: { mutate: () => void; isPending?: boolean };
   selectedSegmentChunkedGenerationRuns: ChunkedGenerationRun[];
   pauseChunkedGeneration: (payload: { runId: string; reason?: string }) => void;
   resumeChunkedGeneration: (payload: { runId: string }) => void;
   restartChunkedGeneration: (payload: { runId: string; fromChunkIndex: number; prompt?: string }) => void;
+  saveChunkedGenerationDraft: (payload: { runId: string }) => void;
+  cancelChunkedGeneration: (payload: { runId: string; reason?: string }) => void;
   isChunkedGenerationMutationPending: boolean;
   frameVariantImageUrl: (frameId: string | null | undefined, variantId: string | null | undefined) => string | null;
   segmentWindow: { startSec: number; endSec: number; startLabel: string; endLabel: string } | null;
   originalSegmentPreviewUrl: string | null;
-  generatedSegmentPreviewUrl: string | null;
-  generatedSegmentPreviewPosterUrl: string | null;
   selectedPreviewGeneration: SegmentGeneration | null;
   task: TaskDetail | undefined;
-  compareOriginalRef: RefObject<HTMLVideoElement>;
-  keepOriginalWithinSegment: (video: HTMLVideoElement) => void;
-  compareVariantRef: RefObject<HTMLVideoElement>;
-  syncOriginalToGenerated: (generatedVideo: HTMLVideoElement) => void;
   originalPreviewIsSegmentClip: boolean;
   selectedSegmentGenerations: SegmentGeneration[];
   selectedReportOutputs: Record<string, { taskId: string; ref: CustomReportOutputRef }>;
@@ -85,6 +89,14 @@ export type GenerateTabCtx = {
   generationThumbnailUrl: (generation: SegmentGeneration) => string | null;
   formatCompactTimestamp: (iso: string | undefined) => string;
   setVideoPreviewModal: (value: { url: string; label: string } | null) => void;
+  setVideoCompareModal: (value: {
+    originalUrl: string;
+    compareUrl: string;
+    label: string;
+    posterUrl?: string | null;
+    segmentStartSec?: number;
+    originalIsSegmentClip?: boolean;
+  } | null) => void;
   openVideoCleanupModal: (generation: SegmentGeneration) => void;
   onAssetError: () => void;
   handleDeleteAsset: (item: {
@@ -107,8 +119,10 @@ type GenerateTabProps = {
 
 export default function GenerateTab({ ctx }: GenerateTabProps) {
   const {
-    setGenerationInputMode,
-    setLumaModel,
+    viewMode,
+    onNext,
+    nextDisabled,
+    nextWarning,
     generationModelByInput,
     generationInputMode,
     selectedSegment,
@@ -127,10 +141,15 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
     setReplicateKlingV3Mode,
     wan27Resolution,
     setWan27Resolution,
+    preserveFrames,
+    setPreserveFrames,
     lumaPrompt,
     setLumaPrompt,
+    lumaContinuationPrompt,
+    setLumaContinuationPrompt,
     generationPromptPlaceholder,
     generationPromptError,
+    missingRouteInputsMessage,
     generationInputNote,
     generationHelp,
     selectedSegmentOverLimit,
@@ -142,18 +161,14 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
     pauseChunkedGeneration,
     resumeChunkedGeneration,
     restartChunkedGeneration,
+    saveChunkedGenerationDraft,
+    cancelChunkedGeneration,
     isChunkedGenerationMutationPending,
     frameVariantImageUrl,
     segmentWindow,
     originalSegmentPreviewUrl,
-    generatedSegmentPreviewUrl,
-    generatedSegmentPreviewPosterUrl,
     selectedPreviewGeneration,
     task,
-    compareOriginalRef,
-    keepOriginalWithinSegment,
-    compareVariantRef,
-    syncOriginalToGenerated,
     originalPreviewIsSegmentClip,
     selectedSegmentGenerations,
     selectedReportOutputs,
@@ -166,165 +181,70 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
     generationThumbnailUrl,
     formatCompactTimestamp,
     setVideoPreviewModal,
+    setVideoCompareModal,
     openVideoCleanupModal,
     onAssetError,
     handleDeleteAsset,
     setGenerationCardsVisible,
   } = ctx;
-  const syncRafRef = useRef<number | null>(null);
   const latestChunkedRun = selectedSegmentChunkedGenerationRuns[0] ?? null;
-  const [restartChunkIndex, setRestartChunkIndex] = useState("0");
-  const [restartPrompt, setRestartPrompt] = useState("");
+  const [isChunkSessionOpen, setIsChunkSessionOpen] = useState(false);
+  const [chunkPromptDrafts, setChunkPromptDrafts] = useState<Record<number, string>>({});
+  const lastSavedRunRef = useRef<string | null>(null);
+  const promptDraftRunIdRef = useRef<string | null>(null);
   const isPreparingChunkPlan = Boolean(generateChunkedSegmentMutation.isPending);
-
-  useEffect(() => {
-    return () => {
-      if (syncRafRef.current !== null) {
-        window.cancelAnimationFrame(syncRafRef.current);
-        syncRafRef.current = null;
-      }
-    };
-  }, []);
+  const canStartChunkedGeneration =
+    Boolean(selectedSegmentId) &&
+    !generationPromptError &&
+    generationInputMode === "start_video" &&
+    ["ray-2", "ray-flash-2", "kling-o1", "kling-v3-omni-video", "seedance-2.0-reference-to-video", "wan2.2-animate", "wan2.7-videoedit"].includes(lumaModel);
+  const canStartSinglePassGeneration =
+    Boolean(selectedSegmentId) &&
+    !selectedSegmentOverLimit &&
+    !wholeVideoNeedsChunking &&
+    !generationPromptError;
 
   useEffect(() => {
     if (!latestChunkedRun) return;
-    setRestartChunkIndex(String(latestChunkedRun.failureChunkIndex ?? latestChunkedRun.activeChunkIndex ?? 0));
-    setRestartPrompt(latestChunkedRun.prompt ?? "");
-  }, [latestChunkedRun?.failureChunkIndex, latestChunkedRun?.activeChunkIndex, latestChunkedRun?.prompt, latestChunkedRun?.runId]);
+    if (promptDraftRunIdRef.current !== latestChunkedRun.runId) {
+      promptDraftRunIdRef.current = latestChunkedRun.runId;
+      const seededPrompts = Object.fromEntries(
+        latestChunkedRun.chunks.map((chunk) => [chunk.chunkIndex, chunk.prompt ?? ""]),
+      ) as Record<number, string>;
+      setChunkPromptDrafts(seededPrompts);
+      return;
+    }
+    setChunkPromptDrafts((previous) => {
+      const next = { ...previous };
+      for (const chunk of latestChunkedRun.chunks) {
+        if (typeof next[chunk.chunkIndex] !== "string") {
+          next[chunk.chunkIndex] = chunk.prompt ?? "";
+        }
+      }
+      return next;
+    });
+  }, [latestChunkedRun?.chunks, latestChunkedRun?.runId]);
 
   useEffect(() => {
-    const generated = compareVariantRef.current;
-    const original = compareOriginalRef.current;
-    if (!generated || !original) return;
-
-    const stopSyncLoop = () => {
-      if (syncRafRef.current !== null) {
-        window.cancelAnimationFrame(syncRafRef.current);
-        syncRafRef.current = null;
-      }
-    };
-
-    const loopSync = () => {
-      if (generated.paused || generated.ended) {
-        stopSyncLoop();
-        return;
-      }
-      syncOriginalToGenerated(generated);
-      syncRafRef.current = window.requestAnimationFrame(loopSync);
-    };
-
-    const startSync = () => {
-      syncOriginalToGenerated(generated);
-      original.playbackRate = generated.playbackRate || 1;
-      if (original.paused) {
-        original.play().catch(() => undefined);
-      }
-      if (syncRafRef.current === null) {
-        syncRafRef.current = window.requestAnimationFrame(loopSync);
-      }
-    };
-
-    const pauseSync = () => {
-      stopSyncLoop();
-      original.pause();
-    };
-
-    const seekSync = () => {
-      syncOriginalToGenerated(generated);
-    };
-
-    const onRateChange = () => {
-      original.playbackRate = generated.playbackRate || 1;
-      syncOriginalToGenerated(generated);
-    };
-
-    pauseSync();
-    try {
-      generated.currentTime = 0;
-      if (segmentWindow) {
-        original.currentTime = originalPreviewIsSegmentClip ? 0 : segmentWindow.startSec;
-      }
-    } catch {
-      // no-op: browsers may reject seek before metadata is ready
-    }
-    seekSync();
-
-    generated.addEventListener("play", startSync);
-    generated.addEventListener("playing", startSync);
-    generated.addEventListener("pause", pauseSync);
-    generated.addEventListener("ended", pauseSync);
-    generated.addEventListener("seeking", seekSync);
-    generated.addEventListener("ratechange", onRateChange);
-
-    return () => {
-      generated.removeEventListener("play", startSync);
-      generated.removeEventListener("playing", startSync);
-      generated.removeEventListener("pause", pauseSync);
-      generated.removeEventListener("ended", pauseSync);
-      generated.removeEventListener("seeking", seekSync);
-      generated.removeEventListener("ratechange", onRateChange);
-      stopSyncLoop();
-    };
-  }, [
-    compareOriginalRef,
-    compareVariantRef,
-    originalPreviewIsSegmentClip,
-    segmentWindow,
-    selectedPreviewGeneration?.genId,
-    syncOriginalToGenerated,
-  ]);
+    if (!latestChunkedRun?.runId || latestChunkedRun.saveStatus !== "complete" || !latestChunkedRun.savedGenerationId) return;
+    const saveMarker = `${latestChunkedRun.runId}:${latestChunkedRun.savedGenerationId}`;
+    if (lastSavedRunRef.current === saveMarker) return;
+    lastSavedRunRef.current = saveMarker;
+    selectSegmentGeneration(latestChunkedRun.savedGenerationId);
+    setIsChunkSessionOpen(false);
+  }, [latestChunkedRun?.runId, latestChunkedRun?.saveStatus, latestChunkedRun?.savedGenerationId, selectSegmentGeneration]);
 
   return (
     <div className="space-y-4">
-      <h3 className="text-lg font-semibold">Generate Video</h3>
       <div className="rounded-xl border border-ink/15 bg-white">
-        <div className="flex items-end gap-1 border-b border-ink/15 px-2 pt-2">
-          {[
-            { id: "start_video" as const, label: "start frame + video" },
-            { id: "start_end" as const, label: "start frame + end frame" },
-            { id: "start_only" as const, label: "start frame only" },
-          ].map((entry) => (
-            <button
-              key={entry.id}
-              type="button"
-              disabled={wholeVideoNeedsChunking && entry.id === "start_end"}
-              onClick={() => {
-                if (wholeVideoNeedsChunking && entry.id === "start_end") return;
-                setGenerationInputMode(entry.id);
-                setLumaModel(generationModelByInput[entry.id]);
-              }}
-              className={`rounded-t-md border px-3 py-2 text-xs ${
-                generationInputMode === entry.id
-                  ? "-mb-px border-ink/25 border-b-white bg-white font-semibold text-ink"
-                  : "border-ink/10 bg-bg text-ink/65"
-              } disabled:cursor-not-allowed disabled:opacity-50`}
-            >
-              {entry.label}
-            </button>
-          ))}
-        </div>
         <div className="grid gap-3 p-3 lg:grid-cols-[1.65fr_1fr]">
           <div className="space-y-3">
-            <div className="rounded-md border border-ink/20 bg-bg px-3 py-2 text-xs text-ink/70">
-              {isWholeVideoSelection ? "Video in use: whole uploaded video" : "Segment in use:"}{" "}
-              {selectedSegment ? describeSegment(selectedSegment) : "No working range selected. Go to Select Frames first."}
-            </div>
-            {wholeVideoNeedsChunking ? (
-              <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-                This whole-video selection is longer than the current {wholeVideoSinglePassLimitSeconds}s single-pass generation limit. The chunked flow uses conservative {6}s passes with overlap between chunks so later segments can survive models that drop early output frames. Start + end frame flows stay disabled here, and start frame only models are not used in this long-video path.
-              </div>
-            ) : null}
-            <div className="rounded-md border border-ink/20 bg-bg px-3 py-2 text-xs text-ink/70">
-              Source frames for generation: start uses {ctx.selectedStartSourceLabel}
-              {generationInputMode === "start_end" ? ` · end uses ${ctx.selectedEndSourceLabel ?? "no selection"}` : ""}
-            </div>
             <div className="grid gap-3 md:grid-cols-2">
               <select
                 value={lumaModel}
                 onChange={(e) => {
                   const nextModel = e.target.value as VideoModel;
                   setGenerationModelByInput((previous) => ({ ...previous, [generationInputMode]: nextModel }));
-                  setLumaModel(nextModel);
                 }}
                 className="rounded-md border border-ink/20 px-3 py-2"
               >
@@ -385,25 +305,65 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
                 </div>
               )}
             </div>
+            {generationInputMode === "start_video" ? (
+              <label className="flex items-start gap-3 rounded-md border border-ink/20 bg-bg px-3 py-2 text-sm text-ink/80">
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  checked={preserveFrames}
+                  onChange={(e) => setPreserveFrames(e.target.checked)}
+                />
+                <span>
+                  <span className="block font-medium text-ink">Preserve source frames</span>
+                  <span className="block text-xs text-ink/65">
+                    Change source fps to match AI model, to avoid dropping or resampling frames, then revert fps after generation.
+                  </span>
+                </span>
+              </label>
+            ) : null}
             {lumaModel === "wan2.2-animate" ? (
               <div className="rounded-md border border-ink/20 bg-bg px-3 py-2 text-xs text-ink/60">
-                Text prompt is unavailable for Wan2.2 Animate in this flow. Generation uses the selected start frame plus source segment motion.
+                Text prompt is unavailable for Wan2.2 Animate in this flow. Generation uses the selected start frame plus motion from the current working range.
               </div>
             ) : (
-              <textarea
-                value={lumaPrompt}
-                onChange={(e) => setLumaPrompt(e.target.value)}
-                placeholder={generationPromptPlaceholder}
-                className="h-20 w-full rounded-md border border-ink/20 p-2"
-              />
+              <div className="space-y-3">
+                <label className="block space-y-1">
+                  <span className="text-xs font-medium text-ink/75">Opening prompt</span>
+                  <textarea
+                    value={lumaPrompt}
+                    onChange={(e) => setLumaPrompt(e.target.value)}
+                    placeholder={generationPromptPlaceholder}
+                    className="h-20 w-full rounded-md border border-ink/20 p-2"
+                  />
+                </label>
+                {wholeVideoNeedsChunking ? (
+                  <label className="block space-y-1">
+                    <span className="text-xs font-medium text-ink/75">Continuation prompt for later chunks (optional)</span>
+                    <textarea
+                      value={lumaContinuationPrompt}
+                      onChange={(e) => setLumaContinuationPrompt(e.target.value)}
+                      placeholder="Optional. If left blank, later chunks reuse the opening prompt. Use this to soften the edit once the transformation is established."
+                      className="h-20 w-full rounded-md border border-ink/20 p-2"
+                    />
+                  </label>
+                ) : null}
+              </div>
             )}
-            {generationPromptError ? <p className="text-xs text-red-600">{generationPromptError}</p> : null}
-            <p className="text-xs text-ink/60">{generationInputNote}</p>
+            {generationPromptError ? (
+              <StatusNotice variant="error">
+                <p className="text-xs">{generationPromptError}</p>
+              </StatusNotice>
+            ) : null}
+            {missingRouteInputsMessage ? (
+              <StatusNotice variant="warning">
+                <p className="text-xs">{missingRouteInputsMessage}</p>
+              </StatusNotice>
+            ) : null}
           </div>
           <div className="rounded-lg border border-ink/15 bg-bg p-3">
             <p className="text-sm font-semibold">{generationHelp.title}</p>
             <div className="mt-2 space-y-2 text-xs text-ink/70">
-              {generationHelp.lines.map((line: string) => (
+              {generationHelp.lines.map((line) => (
                 <p key={line}>{line}</p>
               ))}
             </div>
@@ -411,8 +371,10 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
         </div>
       </div>
 
-      {selectedSegmentOverLimit ? (
-        <p className="text-xs text-red-600">{selectedSegmentLimitMessage}</p>
+      {selectedSegmentOverLimit && selectedSegmentLimitMessage ? (
+        <StatusNotice variant="warning">
+          <p className="text-xs">{selectedSegmentLimitMessage}</p>
+        </StatusNotice>
       ) : null}
 
       {wholeVideoNeedsChunking ? (
@@ -420,295 +382,371 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="space-y-1">
               <p className="text-sm font-semibold text-amber-950">Chunked Whole-Video Generation</p>
-              <p className="text-xs text-amber-900">
-                The app will split the working range into overlapping chunks, drive each later chunk from an anchor frame taken from the previous generated output, and let you pause or restart if quality drops.
-              </p>
+              <p className="text-xs text-amber-900">The app will split this range into overlapping chunks and reuse the continuation prompt unless you override it in the session.</p>
             </div>
-            <button
-              className="rounded-md bg-accent px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-50"
-              disabled={
-                !selectedSegmentId ||
-                Boolean(generationPromptError) ||
-                generationInputMode !== "start_video" ||
-                !["ray-2", "ray-flash-2", "kling-o1", "kling-v3-omni-video", "seedance-2.0-reference-to-video", "wan2.2-animate", "wan2.7-videoedit"].includes(lumaModel) ||
-                isChunkedGenerationMutationPending
-              }
-              onClick={() => generateChunkedSegmentMutation.mutate()}
-            >
-              Start Chunked Generation
-            </button>
+            <div className="flex flex-wrap gap-2">
+              <button
+                className="rounded-md bg-accent px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={
+                  !canStartChunkedGeneration ||
+                  isChunkedGenerationMutationPending
+                }
+                onClick={() => {
+                  setIsChunkSessionOpen(true);
+                  generateChunkedSegmentMutation.mutate();
+                }}
+              >
+                <PendingButtonLabel
+                  isPending={isChunkedGenerationMutationPending}
+                  idle="Start Chunked Generation"
+                  pending="Starting chunked generation..."
+                />
+              </button>
+              {latestChunkedRun ? (
+                <button
+                  type="button"
+                  className="rounded-md border border-ink/20 bg-white px-4 py-2 text-sm"
+                  onClick={() => setIsChunkSessionOpen(true)}
+                >
+                  Open Chunk Session
+                </button>
+              ) : null}
+            </div>
           </div>
           {isPreparingChunkPlan ? (
-            <div className="rounded-md border border-accent/20 bg-white/80 px-3 py-2 text-sm text-ink">
-              Preparing chunk plan and creating the first chunk. This can take a short while before the chunk list appears.
-            </div>
+            <StatusNotice variant="loading" title="Preparing chunked generation">
+              <p className="text-sm">Preparing chunk plan and creating the first chunk. This can take a short while before the chunk list appears.</p>
+            </StatusNotice>
           ) : null}
           {generationInputMode !== "start_video" ? (
-            <p className="text-xs text-red-700">Switch to `start frame + video` for the long-video chunked flow.</p>
+            <StatusNotice variant="warning">
+              <p className="text-xs">Switch to `start frame + video` for the long-video chunked flow.</p>
+            </StatusNotice>
           ) : null}
           {!["ray-2", "ray-flash-2", "kling-o1", "kling-v3-omni-video", "seedance-2.0-reference-to-video", "wan2.2-animate", "wan2.7-videoedit"].includes(lumaModel) ? (
-            <p className="text-xs text-red-700">This model is not in the first chunked-release set. Use one of the first-frame + source-video models for whole-video generation.</p>
+            <StatusNotice variant="warning">
+              <p className="text-xs">This model is not in the first chunked-release set. Use one of the first-frame + source-video models for whole-video generation.</p>
+            </StatusNotice>
           ) : null}
 
           {latestChunkedRun ? (
-            <div className="space-y-3 rounded-md border border-amber-300 bg-white/70 p-3">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <p className="text-sm font-semibold text-ink">Latest run: {latestChunkedRun.model}</p>
-                  <p className="text-xs text-ink/70">
-                    Status {latestChunkedRun.status.toUpperCase()} · {latestChunkedRun.chunks.length} chunks · overlap at least {latestChunkedRun.minimumOverlapFrames} frames
-                  </p>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    className="rounded-md border border-ink/20 px-3 py-2 text-xs disabled:cursor-not-allowed disabled:opacity-50"
-                    disabled={latestChunkedRun.status !== "running" || isChunkedGenerationMutationPending}
-                    onClick={() => pauseChunkedGeneration({ runId: latestChunkedRun.runId, reason: "Paused from Generate Video" })}
-                  >
-                    Pause
-                  </button>
-                  <button
-                    type="button"
-                    className="rounded-md border border-ink/20 px-3 py-2 text-xs disabled:cursor-not-allowed disabled:opacity-50"
-                    disabled={latestChunkedRun.status !== "paused" && latestChunkedRun.status !== "failed"}
-                    onClick={() => resumeChunkedGeneration({ runId: latestChunkedRun.runId })}
-                  >
-                    Resume
-                  </button>
-                </div>
-              </div>
-              <div className="rounded-md border border-ink/10 bg-bg px-3 py-2 text-xs text-ink/70">
-                Chunk videos can be previewed below as they complete. A stitched combined long-video output is not created yet in this step; that will come from the later stitch / merge pass.
-              </div>
-
-              <div className="space-y-2 rounded-md border border-ink/10 bg-bg p-3">
-                <p className="text-xs font-semibold uppercase tracking-wide text-ink/60">Restart From A Chunk</p>
-                <div className="grid gap-3 md:grid-cols-[140px_1fr_auto]">
-                  <label className="space-y-1 text-xs text-ink/70">
-                    <span className="block font-medium text-ink/80">Chunk index</span>
-                    <input
-                      type="number"
-                      min={0}
-                      max={Math.max(0, latestChunkedRun.chunks.length - 1)}
-                      value={restartChunkIndex}
-                      onChange={(e) => setRestartChunkIndex(e.target.value)}
-                      className="w-full rounded-md border border-ink/20 px-2 py-2 text-sm"
-                    />
-                  </label>
-                  <label className="space-y-1 text-xs text-ink/70">
-                    <span className="block font-medium text-ink/80">Prompt from this point</span>
-                    <input
-                      type="text"
-                      value={restartPrompt}
-                      onChange={(e) => setRestartPrompt(e.target.value)}
-                      className="w-full rounded-md border border-ink/20 px-2 py-2 text-sm"
-                    />
-                  </label>
-                  <div className="flex items-end">
-                    <button
-                      type="button"
-                      className="rounded-md border border-ink/20 px-3 py-2 text-xs disabled:cursor-not-allowed disabled:opacity-50"
-                      disabled={isChunkedGenerationMutationPending}
-                      onClick={() =>
-                        restartChunkedGeneration({
-                          runId: latestChunkedRun.runId,
-                          fromChunkIndex: Number(restartChunkIndex) || 0,
-                          prompt: restartPrompt.trim() || undefined,
-                        })
-                      }
-                    >
-                      Restart From Here
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                {latestChunkedRun.chunks.map((chunk) => {
-                  const anchorUrl = frameVariantImageUrl(chunk.anchorFrameId, chunk.anchorVariantId);
-                  const chunkGeneration = chunk.generationId ? task?.segmentGenerations?.[chunk.generationId] ?? null : null;
-                  const chunkThumbnail = chunkGeneration ? generationThumbnailUrl(chunkGeneration) : null;
-                  return (
-                    <div key={`${latestChunkedRun.runId}-${chunk.chunkIndex}`} className="rounded-md border border-ink/15 bg-white p-3">
-                      <div className="mb-2 flex items-center justify-between gap-2">
-                        <p className="text-sm font-semibold">Chunk {chunk.chunkIndex + 1}</p>
-                        <span className="text-[11px] uppercase tracking-wide text-ink/60">{chunk.status}</span>
-                      </div>
-                      {anchorUrl ? (
-                        <img src={anchorUrl} alt={`Chunk ${chunk.chunkIndex + 1} anchor`} className="aspect-video w-full rounded-md bg-bg object-contain" />
-                      ) : (
-                        <div className="flex aspect-video items-center justify-center rounded-md border border-dashed border-ink/20 bg-bg text-xs text-ink/55">
-                          Anchor frame pending
-                        </div>
-                      )}
-                      <div className="mt-2 space-y-1 text-xs text-ink/70">
-                        <p>Source frames f{chunk.segmentStartFrame} to f{Math.max(chunk.segmentStartFrame, chunk.segmentEndFrameExclusive - 1)}</p>
-                        <p>Overlap from previous: {chunk.overlapFrames} frames</p>
-                        <p>Anchor frame source: {chunk.anchorSource === "initial_variant" ? "selected edit frame" : `${chunk.anchorFramesFromPrevious} frames before previous chunk end`}</p>
-                        {chunk.sourceGeneratedFrameIndex != null ? <p>Extracted from previous output frame {chunk.sourceGeneratedFrameIndex}</p> : null}
-                        {chunk.error ? <p className="text-red-700">{chunk.error}</p> : null}
-                      </div>
-                      <div className="mt-3 rounded-md border border-ink/10 bg-bg p-2">
-                        <p className="text-[11px] font-semibold uppercase tracking-wide text-ink/55">Generated chunk output</p>
-                        {chunkGeneration?.downloadUrl ? (
-                          <>
-                            {chunkThumbnail ? (
-                              <img
-                                src={chunkThumbnail}
-                                alt={`Chunk ${chunk.chunkIndex + 1} generated preview`}
-                                className="mt-2 aspect-video w-full rounded-md bg-white object-contain"
-                                onError={onAssetError}
-                              />
-                            ) : (
-                              <div className="mt-2 flex aspect-video items-center justify-center rounded-md border border-dashed border-ink/20 bg-white text-xs text-ink/55">
-                                Video thumbnail unavailable
-                              </div>
-                            )}
-                            <div className="mt-2 flex items-center gap-2">
-                              <button
-                                type="button"
-                                className="rounded border border-ink/20 bg-white px-3 py-2 text-xs"
-                                onClick={() =>
-                                  setVideoPreviewModal({
-                                    url: chunkGeneration.downloadUrl as string,
-                                    label: `Chunk ${chunk.chunkIndex + 1} · ${chunkGeneration.luma.model}`,
-                                  })
-                                }
-                              >
-                                Preview chunk
-                              </button>
-                              <a
-                                href={chunkGeneration.downloadUrl}
-                                target="_blank"
-                                rel="noreferrer"
-                                download
-                                className="rounded border border-ink/20 bg-white px-3 py-2 text-xs"
-                              >
-                                Download
-                              </a>
-                            </div>
-                          </>
-                        ) : (
-                          <p className="mt-2 text-xs text-ink/55">
-                            {chunk.status === "failed"
-                              ? "No output was produced for this chunk."
-                              : chunk.status === "complete"
-                                ? "Output is being decorated with preview URLs."
-                                : "This chunk video will appear here once it has completed."}
-                          </p>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
+            <div className="rounded-md border border-amber-300 bg-white/70 p-3 text-xs text-ink/75">
+              Latest run: {latestChunkedRun.model} · {latestChunkedRun.chunks.length} chunks · status {latestChunkedRun.status.toUpperCase()}
+              {latestChunkedRun.savedGenerationId ? " · stitched draft saved to grid" : ""}
             </div>
           ) : null}
         </div>
       ) : null}
 
+      {isChunkSessionOpen ? (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-4">
+          <div className="flex max-h-[92vh] w-full max-w-7xl flex-col overflow-hidden rounded-2xl bg-white shadow-xl">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-ink/10 px-5 py-4">
+              <div className="space-y-1">
+                <p className="text-lg font-semibold text-ink">Chunked Generation Session</p>
+                <p className="text-sm text-ink/65">
+                  {latestChunkedRun
+                    ? `${latestChunkedRun.model} · ${latestChunkedRun.chunks.length} chunks · status ${latestChunkedRun.status.toUpperCase()}`
+                    : "Preparing chunk plan and first chunk"}
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                {latestChunkedRun ? (
+                  <>
+                    <button
+                      type="button"
+                      className="rounded-md border border-ink/20 px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50"
+                      disabled={latestChunkedRun.status !== "running" || isChunkedGenerationMutationPending}
+                      onClick={() => pauseChunkedGeneration({ runId: latestChunkedRun.runId, reason: "Paused from chunk session" })}
+                    >
+                      Pause
+                    </button>
+                    <button
+                      type="button"
+                      className="rounded-md border border-ink/20 px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50"
+                      disabled={latestChunkedRun.status !== "paused" && latestChunkedRun.status !== "failed"}
+                      onClick={() => resumeChunkedGeneration({ runId: latestChunkedRun.runId })}
+                    >
+                      Resume
+                    </button>
+                    <button
+                      type="button"
+                      className="rounded-md bg-accent px-4 py-2 text-sm text-white disabled:cursor-not-allowed disabled:opacity-50"
+                      disabled={latestChunkedRun.status !== "complete" || latestChunkedRun.saveStatus === "queued" || latestChunkedRun.saveStatus === "running"}
+                      onClick={() => saveChunkedGenerationDraft({ runId: latestChunkedRun.runId })}
+                    >
+                      <PendingButtonLabel
+                        isPending={latestChunkedRun.saveStatus === "queued" || latestChunkedRun.saveStatus === "running"}
+                        idle="Save Draft To Grid"
+                        pending="Saving draft..."
+                      />
+                    </button>
+                    <button
+                      type="button"
+                      className="rounded-md border border-red-200 px-4 py-2 text-sm text-red-700 disabled:cursor-not-allowed disabled:opacity-50"
+                      disabled={latestChunkedRun.saveStatus === "queued" || latestChunkedRun.saveStatus === "running"}
+                      onClick={() => {
+                        cancelChunkedGeneration({ runId: latestChunkedRun.runId, reason: "Canceled from chunk session" });
+                        setIsChunkSessionOpen(false);
+                      }}
+                    >
+                      Cancel
+                    </button>
+                  </>
+                ) : null}
+                <button type="button" className="rounded-md border border-ink/20 px-3 py-2 text-sm" onClick={() => setIsChunkSessionOpen(false)}>
+                  Close
+                </button>
+              </div>
+            </div>
+            <div className="space-y-3 overflow-y-auto px-5 py-4">
+              {!latestChunkedRun ? (
+                <StatusNotice variant="loading" title="Preparing chunk session" className="px-4 py-5">
+                  <p className="text-sm">Preparing the chunk plan and queuing the first chunk. This can take a short while before the timeline appears.</p>
+                </StatusNotice>
+              ) : (
+                <>
+                  <StatusNotice variant="info" title="Chunk session output">
+                    <p className="text-sm">Save only creates one stitched draft video back in Outputs. Individual chunks stay inside this session.</p>
+                  </StatusNotice>
+                  {latestChunkedRun.saveError ? (
+                    <StatusNotice variant="error">
+                      <p className="text-sm">Save failed: {latestChunkedRun.saveError}</p>
+                    </StatusNotice>
+                  ) : null}
+                  <div className="overflow-x-auto pb-2">
+                    <div className="flex min-w-max gap-4">
+                      {latestChunkedRun.chunks.map((chunk) => {
+                        const anchorUrl = frameVariantImageUrl(chunk.anchorFrameId, chunk.anchorVariantId);
+                        const chunkGeneration = chunk.generationId ? task?.segmentGenerations?.[chunk.generationId] ?? null : null;
+                        const chunkThumbnail = chunkGeneration ? generationThumbnailUrl(chunkGeneration) : null;
+                        const promptValue = chunkPromptDrafts[chunk.chunkIndex] ?? chunk.prompt ?? "";
+                        const providerInputTiming = chunkGeneration?.generationSettings?.providerInputTiming ?? null;
+                        const storedOutputTiming = chunkGeneration?.generationSettings?.storedOutput ?? null;
+                        const sourceClipLabel =
+                          providerInputTiming?.fps && providerInputTiming?.durationSec
+                            ? `${providerInputTiming.fps.num}/${providerInputTiming.fps.den} fps · ${providerInputTiming.durationSec.toFixed?.(2) ?? providerInputTiming.durationSec}s`
+                            : null;
+                        const storedClipLabel =
+                          storedOutputTiming?.fps && storedOutputTiming?.durationSec
+                            ? `${storedOutputTiming.fps.num}/${storedOutputTiming.fps.den} fps · ${storedOutputTiming.durationSec.toFixed?.(2) ?? storedOutputTiming.durationSec}s`
+                            : null;
+                        return (
+                          <div
+                            key={`${latestChunkedRun.runId}-${chunk.chunkIndex}`}
+                            className="flex w-[320px] shrink-0 flex-col rounded-xl border border-ink/15 bg-white p-4"
+                          >
+                            <div className="mb-3 flex items-start justify-between gap-3">
+                              <p className="text-sm font-semibold text-ink">
+                                Chunk {chunk.chunkIndex + 1} (f{chunk.segmentStartFrame} - f{Math.max(chunk.segmentStartFrame, chunk.segmentEndFrameExclusive - 1)})
+                              </p>
+                              <span className="rounded-full bg-bg px-2 py-1 text-[11px] uppercase tracking-wide text-ink/60">{chunk.status}</span>
+                            </div>
+                            {chunk.coverageStartFrame != null && chunk.coverageEndFrameExclusive != null ? (
+                              <p className="mb-2 text-xs text-ink/60">
+                                Keeps f{chunk.coverageStartFrame} - f{Math.max(chunk.coverageStartFrame, chunk.coverageEndFrameExclusive - 1)}
+                              </p>
+                            ) : null}
+                            {chunk.actualOutputStartFrame != null ? (
+                              <p className="mb-2 text-xs text-ink/55">Returned video appears to start at source f{chunk.actualOutputStartFrame}</p>
+                            ) : null}
+                        {anchorUrl ? (
+                              <img src={anchorUrl} alt={`Chunk ${chunk.chunkIndex + 1} anchor`} className="aspect-video w-full rounded-md bg-bg object-contain" loading="lazy" decoding="async" />
+                            ) : (
+                              <div className="flex aspect-video items-center justify-center rounded-md border border-dashed border-ink/20 bg-bg text-xs text-ink/55">
+                                Anchor frame pending
+                              </div>
+                            )}
+                            <label className="mt-3 block space-y-1">
+                              <span className="text-[11px] font-semibold uppercase tracking-wide text-ink/55">Prompt</span>
+                              <textarea
+                                value={promptValue}
+                                onChange={(e) =>
+                                  setChunkPromptDrafts((previous) => ({ ...previous, [chunk.chunkIndex]: e.target.value }))
+                                }
+                                className="h-28 w-full rounded-md border border-ink/15 p-2 text-sm"
+                              />
+                            </label>
+                            <div className="mt-3 rounded-md border border-ink/10 bg-bg p-2">
+                              <p className="text-[11px] font-semibold uppercase tracking-wide text-ink/55">Exact media sent</p>
+                              <div className="mt-2 flex flex-wrap gap-2">
+                                {chunkGeneration?.inputMediaUrl ? (
+                                  <button
+                                    type="button"
+                                    className="rounded border border-ink/20 bg-white px-3 py-2 text-xs"
+                                    onClick={() =>
+                                      setVideoPreviewModal({
+                                        url: chunkGeneration.inputMediaUrl as string,
+                                        label: `Chunk ${chunk.chunkIndex + 1} source clip sent to model`,
+                                      })
+                                    }
+                                  >
+                                    Preview source clip
+                                  </button>
+                                ) : null}
+                                {chunkGeneration?.inputMediaUrl ? (
+                                  <a
+                                    href={chunkGeneration.inputMediaUrl}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    download
+                                    className="rounded border border-ink/20 bg-white px-3 py-2 text-xs"
+                                  >
+                                    Download source clip
+                                  </a>
+                                ) : null}
+                              </div>
+                              {chunkGeneration?.inputFirstFrameUrl ? (
+                                <img
+                                  src={chunkGeneration.inputFirstFrameUrl}
+                                  alt={`Chunk ${chunk.chunkIndex + 1} prepared first frame`}
+                                  className="mt-2 aspect-video w-full rounded-md bg-white object-contain"
+                                  loading="lazy"
+                                  decoding="async"
+                                  onError={onAssetError}
+                                />
+                              ) : null}
+                              <div className="mt-2 space-y-1 text-[11px] text-ink/60">
+                                {sourceClipLabel ? <p>Prepared input: {sourceClipLabel}</p> : null}
+                                {storedClipLabel ? <p>Stored output: {storedClipLabel}</p> : null}
+                              </div>
+                            </div>
+                            <div className="mt-3 rounded-md border border-ink/10 bg-bg p-2">
+                              {chunkGeneration?.downloadUrl ? (
+                                <>
+                                  {chunkThumbnail ? (
+                                    <img
+                                      src={chunkThumbnail}
+                                      alt={`Chunk ${chunk.chunkIndex + 1} generated preview`}
+                                      className="aspect-video w-full rounded-md bg-white object-contain"
+                                      loading="lazy"
+                                      decoding="async"
+                                      onError={onAssetError}
+                                    />
+                                  ) : (
+                                    <div className="flex aspect-video items-center justify-center rounded-md border border-dashed border-ink/20 bg-white text-xs text-ink/55">
+                                      Video thumbnail unavailable
+                                    </div>
+                                  )}
+                                  <div className="mt-2 flex items-center gap-2">
+                                    <IconActionButton
+                                      title="Preview chunk"
+                                      onClick={() =>
+                                        setVideoPreviewModal({
+                                          url: chunkGeneration.downloadUrl as string,
+                                          label: `Chunk ${chunk.chunkIndex + 1} · ${chunkGeneration.luma.model}`,
+                                        })
+                                      }
+                                    >
+                                      <PreviewIcon />
+                                    </IconActionButton>
+                                    <IconActionButton href={chunkGeneration.downloadUrl} download title="Download chunk">
+                                      <DownloadIcon />
+                                    </IconActionButton>
+                                    <button
+                                      type="button"
+                                      className="ml-auto rounded-md border border-ink/20 px-3 py-2 text-xs disabled:cursor-not-allowed disabled:opacity-50"
+                                      disabled={isChunkedGenerationMutationPending}
+                                      onClick={() =>
+                                        restartChunkedGeneration({
+                                          runId: latestChunkedRun.runId,
+                                          fromChunkIndex: chunk.chunkIndex,
+                                          prompt: promptValue.trim() || undefined,
+                                        })
+                                      }
+                                    >
+                                      Restart From Here
+                                    </button>
+                                  </div>
+                                </>
+                              ) : (
+                                <div className="space-y-2">
+                                  <div className="flex aspect-video items-center justify-center rounded-md border border-dashed border-ink/20 bg-white text-xs text-ink/55">
+                                    {chunk.status === "failed"
+                                      ? "No output was produced for this chunk."
+                                      : chunk.status === "complete"
+                                        ? "Preview URLs are still being prepared."
+                                        : "Generated video will appear here when this chunk completes."}
+                                  </div>
+                                  <button
+                                    type="button"
+                                    className="w-full rounded-md border border-ink/20 px-3 py-2 text-xs disabled:cursor-not-allowed disabled:opacity-50"
+                                    disabled={isChunkedGenerationMutationPending}
+                                    onClick={() =>
+                                      restartChunkedGeneration({
+                                        runId: latestChunkedRun.runId,
+                                        fromChunkIndex: chunk.chunkIndex,
+                                        prompt: promptValue.trim() || undefined,
+                                      })
+                                    }
+                                  >
+                                    Restart From Here
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                            {chunk.error ? (
+                              <div className="mt-2">
+                                <StatusNotice variant="error">
+                                  <p className="text-xs">{chunk.error}</p>
+                                </StatusNotice>
+                              </div>
+                            ) : null}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       <button
         className="rounded-md bg-accent px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-50"
-        disabled={!selectedSegmentId || selectedSegmentOverLimit || wholeVideoNeedsChunking || Boolean(generationPromptError)}
+        disabled={!canStartSinglePassGeneration || Boolean(generateSegmentMutation.isPending)}
         onClick={() => generateSegmentMutation.mutate()}
       >
-        Generate Video Variant
+        <PendingButtonLabel
+          isPending={Boolean(generateSegmentMutation.isPending)}
+          idle="Generate Output"
+          pending="Starting generation..."
+        />
       </button>
 
       <div className="space-y-2 rounded-lg border border-ink/10 p-3">
-        <p className="font-medium">Video Comparison</p>
-        {segmentWindow ? (
-          <p className="text-xs text-ink/70">Showing selected segment only: {segmentWindow.startLabel}s to {segmentWindow.endLabel}s.</p>
-        ) : null}
-        {originalSegmentPreviewUrl && generatedSegmentPreviewUrl && selectedPreviewGeneration ? (
-          <div
-            className="overflow-hidden rounded-md border border-ink/10 bg-bg"
-            style={{
-              aspectRatio:
-                task?.video?.editSource?.width && task?.video?.editSource?.height
-                  ? `${task.video.editSource.width} / ${task.video.editSource.height}`
-                  : undefined,
-            }}
-          >
-            <ReactCompareSlider
-              className="h-full w-full"
-              itemOne={
-                <video
-                  key={`orig-${originalSegmentPreviewUrl ?? "none"}-${originalPreviewIsSegmentClip ? "segment" : "full"}`}
-                  ref={compareOriginalRef}
-                  src={originalSegmentPreviewUrl}
-                  muted
-                  playsInline
-                  preload="auto"
-                  className="h-full w-full object-contain"
-                  onLoadedMetadata={(e) => {
-                    if (segmentWindow) {
-                      e.currentTarget.currentTime = originalPreviewIsSegmentClip ? 0 : segmentWindow.startSec;
-                    }
-                  }}
-                  onTimeUpdate={(e) => keepOriginalWithinSegment(e.currentTarget)}
-                  onError={onAssetError}
-                />
-              }
-              itemTwo={
-                <video
-                  key={`gen-${selectedPreviewGeneration.genId}`}
-                  ref={compareVariantRef}
-                  src={generatedSegmentPreviewUrl}
-                  controls
-                  playsInline
-                  preload="metadata"
-                  poster={generatedSegmentPreviewPosterUrl ?? undefined}
-                  className="h-full w-full object-contain"
-                  onLoadedMetadata={(e) => {
-                    e.currentTarget.currentTime = 0;
-                    syncOriginalToGenerated(e.currentTarget);
-                  }}
-                  onLoadedData={(e) => {
-                    syncOriginalToGenerated(e.currentTarget);
-                  }}
-                  onSeeking={(e) => syncOriginalToGenerated(e.currentTarget)}
-                  onError={onAssetError}
-                />
-              }
-            />
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div>
+            <p className="font-medium">Generated outputs</p>
+            <p className="text-xs text-ink/60">
+              Select the output to carry forward. Use the compare action on any thumbnail to open source vs output review.
+            </p>
           </div>
-        ) : (
-          <p className="text-sm text-ink/60">Select a segment and generated variant to compare.</p>
-        )}
+          {selectedPreviewGeneration ? (
+            <div className="rounded-md border border-teal-500 bg-teal-50 px-3 py-2 text-xs text-ink/75">
+              Chosen: {selectedPreviewGeneration.luma.model} / {selectedPreviewGeneration.luma.mode}
+            </div>
+          ) : null}
+        </div>
         <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
           {selectedSegmentGenerations.slice(0, generationCardsVisible).map((gen, index) => {
-              const reportRef: CustomReportOutputRef = { assetType: "segment_generation", genId: gen.genId };
-              const reportSelectionKey = task?.taskId ? `${task.taskId}:${reportOutputRefKey(reportRef)}` : "";
-              const selectedForReport = Boolean(reportSelectionKey && selectedReportOutputs[reportSelectionKey]);
+              const isSelected = selectedPreviewGeneration?.genId === gen.genId;
               return (
             <div
               key={gen.genId}
               className={`rounded border p-2 ${
                 gen.status === "failed"
-                  ? "border-orange-400 bg-orange-50"
-                  : selectedPreviewGeneration?.genId === gen.genId
+                  ? "border-red-200 bg-red-50"
+                  : isSelected
                     ? "border-teal-500 bg-teal-50"
-                    : selectedForReport
-                      ? "border-sky-400 bg-sky-50"
-                      : "border-ink/10"
+                    : "border-ink/10"
               }`}
             >
               <div className="mb-2 flex items-center justify-between gap-2 text-xs">
                 <span className={`uppercase text-ink/60 ${index === 0 ? "font-semibold" : ""}`}>{gen.status}</span>
                 <div className="flex items-center gap-2">
-                  {gen.status === "complete" ? (
-                    <label className="flex items-center gap-1 text-[11px] text-ink/60" title="Include this video in a report">
-                      <input
-                        type="checkbox"
-                        checked={selectedForReport}
-                        disabled={!task?.taskId}
-                        onChange={() => task?.taskId && toggleCustomReportOutput(task.taskId, reportRef)}
-                      />
-                      QC
-                    </label>
-                  ) : null}
                   <span className="text-[11px] text-ink/50">{truncateIdentifier(gen.genId, 14)}</span>
                 </div>
               </div>
@@ -724,6 +762,8 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
                     src={generationThumbnailUrl(gen) as string}
                     alt={describeGeneration(gen)}
                     className="aspect-video w-full rounded-md bg-bg object-contain"
+                    loading="lazy"
+                    decoding="async"
                     onError={onAssetError}
                   />
                 ) : (
@@ -735,56 +775,56 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
               <p className="mt-2 text-xs font-medium text-ink/80">{gen.luma.model} / {gen.luma.mode}</p>
               <p className="text-[11px] text-ink/60">{formatCompactTimestamp(gen.finishedAt ?? gen.createdAt)}</p>
               {gen.status === "failed" && gen.error ? (
-                <p className="mt-1 line-clamp-3 text-[11px] text-orange-700" title={gen.error}>
+                <p className="mt-1 line-clamp-3 text-[11px] text-red-700" title={gen.error}>
                   {gen.error}
                 </p>
               ) : null}
               <div className="mt-2 flex items-center gap-2">
                 <button
                   type="button"
-                  className="rounded border border-ink/20 bg-white p-2 text-xs disabled:cursor-not-allowed disabled:opacity-60"
+                  className={`rounded border px-3 py-2 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-60 ${
+                    isSelected ? "border-teal-500 bg-teal-50 text-ink" : "border-ink/20 bg-white text-ink"
+                  }`}
                   disabled={!gen.downloadUrl}
+                  onClick={() => selectSegmentGeneration(gen.genId)}
+                >
+                  {isSelected ? "Selected" : "Select"}
+                </button>
+                <IconActionButton
                   title="Preview"
+                  disabled={!gen.downloadUrl}
                   onClick={() => {
                     if (!gen.downloadUrl) return;
                     setVideoPreviewModal({ url: gen.downloadUrl, label: describeGeneration(gen) });
                   }}
                 >
-                  <svg viewBox="0 0 24 24" className="h-5 w-5" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6Z" />
-                    <circle cx="12" cy="12" r="3" />
-                  </svg>
-                </button>
+                  <PreviewIcon />
+                </IconActionButton>
+                <IconActionButton
+                  title={!originalSegmentPreviewUrl || !gen.downloadUrl ? "Compare is unavailable until both source and output previews are ready" : "Compare against source"}
+                  disabled={!originalSegmentPreviewUrl || !gen.downloadUrl}
+                  onClick={() => {
+                    if (!originalSegmentPreviewUrl || !gen.downloadUrl) return;
+                    setVideoCompareModal({
+                      originalUrl: originalSegmentPreviewUrl,
+                      compareUrl: gen.downloadUrl,
+                      label: describeGeneration(gen),
+                      posterUrl: generationThumbnailUrl(gen),
+                      segmentStartSec: segmentWindow?.startSec,
+                      originalIsSegmentClip: originalPreviewIsSegmentClip,
+                    });
+                  }}
+                >
+                  <CompareIcon />
+                </IconActionButton>
                 {gen.downloadUrl ? (
-                  <a
-                    href={gen.downloadUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    download
-                    className="rounded border border-ink/20 bg-white p-2 text-xs"
-                    title="Download full quality video"
-                  >
-                    <svg viewBox="0 0 24 24" className="h-5 w-5" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2">
-                      <path d="M12 3v12" />
-                      <path d="m7 10 5 5 5-5" />
-                      <path d="M4 21h16" />
-                    </svg>
-                  </a>
+                  <IconActionButton href={gen.downloadUrl} download title="Download full quality video">
+                    <DownloadIcon />
+                  </IconActionButton>
                 ) : null}
-                {gen.status === "complete" && gen.downloadUrl && gen.luma.provider === "luma" && !gen.derivedFromGenerationId ? (
-                  <button
-                    type="button"
-                    className="rounded border border-accent/25 bg-white px-3 py-2 text-xs font-medium text-accent"
-                    title="Refine this Luma generation with tracked keep-mask cleanup"
-                    onClick={() => openVideoCleanupModal(gen)}
-                  >
-                    Refine
-                  </button>
-                ) : null}
-                <button
-                  type="button"
-                  className="rounded border border-red-200 bg-white p-2 text-xs text-red-700"
-                  title="Delete generated video"
+                <IconActionButton
+                  title="Delete output"
+                  tone="danger"
                   disabled={!task?.taskId}
                   onClick={() =>
                     handleDeleteAsset({
@@ -800,13 +840,8 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
                     })
                   }
                 >
-                  <svg viewBox="0 0 24 24" className="h-5 w-5" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M3 6h18" />
-                    <path d="M8 6V4h8v2" />
-                    <path d="m6 6 1 14h10l1-14" />
-                    <path d="M10 11v6M14 11v6" />
-                  </svg>
-                </button>
+                  <DeleteIcon />
+                </IconActionButton>
               </div>
             </div>
               );
@@ -818,7 +853,22 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
             More...
           </button>
         ) : null}
-        {selectedSegmentGenerations.length === 0 ? <p className="text-sm text-ink/60">No generated variants for this segment yet.</p> : null}
+        {selectedSegmentGenerations.length === 0 ? <p className="text-sm text-ink/60">No generated outputs for this working range yet.</p> : null}
+        {nextWarning ? (
+          <StatusNotice variant="warning">
+            <p className="text-xs">{nextWarning}</p>
+          </StatusNotice>
+        ) : null}
+        <div className="flex justify-end">
+          <button
+            type="button"
+            className="rounded-md bg-teal-600 px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={nextDisabled}
+            onClick={onNext}
+          >
+            Next
+          </button>
+        </div>
       </div>
     </div>
   );

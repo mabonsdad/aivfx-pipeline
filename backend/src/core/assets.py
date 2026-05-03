@@ -148,6 +148,14 @@ class AssetPaths:
             f"{self._filename(f'upload{short_upload}', ext)}"
         )
 
+    def manual_frame_upload(self, frame_id: str, upload_id: str, filename: str) -> str:
+        short_upload = re.sub(r"[^a-zA-Z0-9]+", "", upload_id)[-12:]
+        ext = Path(filename).suffix or ".png"
+        return (
+            f"{self.task_prefix()}/frames/{frame_id}/manual_uploads/"
+            f"{self._filename(f'upload{short_upload}', ext)}"
+        )
+
     def cleanup_track_prefix(self, track_id: str) -> str:
         return f"{self.task_prefix()}/cleanup_tracks/{track_id}"
 

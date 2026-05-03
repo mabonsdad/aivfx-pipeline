@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { PendingButtonLabel } from "../layout/UiFeedback";
 
 export const FRAME_TEST_OPTIONS = [
   { id: "frame_diff", label: "Frame diff set", description: "Diff heatmap, overlay, binary/boundary map and standard still metrics." },
@@ -164,7 +165,7 @@ export function ReportCreateModal(props: {
             disabled={isPending || selectedCount === 0 || selectedTests.length === 0}
             onClick={onCreate}
           >
-            {isPending ? "Creating..." : "Create Report"}
+            <PendingButtonLabel isPending={isPending} idle="Create Report" pending="Creating report..." />
           </button>
         </div>
       </div>

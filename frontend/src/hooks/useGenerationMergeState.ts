@@ -59,7 +59,8 @@ export function useGenerationMergeState({ task, selectedSegmentId, segmentsById 
           (gen) =>
             (!selectedSegmentId || gen.segmentId === selectedSegmentId) &&
             gen.status === "complete" &&
-            Boolean(gen.outputKey),
+            Boolean(gen.outputKey) &&
+            !gen.isChunkInternal,
         )
         .sort((a, b) => generationSortTimestamp(b) - generationSortTimestamp(a)),
     [segmentGenerations, selectedSegmentId],

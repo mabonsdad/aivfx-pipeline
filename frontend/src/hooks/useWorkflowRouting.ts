@@ -1,7 +1,7 @@
 import { useEffect, useMemo } from "react";
 import type { NavigateFunction } from "react-router-dom";
 
-export type TabId = "timeline" | "frames" | "refine" | "generate" | "merge" | "assets" | "report" | "custom_qc" | "api_logs";
+export type TabId = "timeline" | "frames" | "refine" | "generate" | "outputs" | "merge" | "assets" | "report" | "custom_qc" | "api_logs";
 export type ReportView = "frames" | "videos" | "reports";
 
 export type WorkflowRouteState = {
@@ -14,6 +14,7 @@ export const TAB_ROUTE_SEGMENT: Record<TabId, string> = {
   frames: "edit-frame",
   refine: "refine-frames",
   generate: "generate-video",
+  outputs: "outputs",
   merge: "merge-video",
   assets: "download-assets",
   report: "reports",
@@ -26,6 +27,7 @@ export const ROUTE_SEGMENT_TO_TAB: Record<string, TabId> = {
   "edit-frame": "frames",
   "refine-frames": "refine",
   "generate-video": "generate",
+  outputs: "outputs",
   "merge-video": "merge",
   "download-assets": "assets",
   reports: "report",

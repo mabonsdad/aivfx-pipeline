@@ -1,4 +1,5 @@
 import type { JobStatus } from "../../types/api";
+import { Spinner } from "../../components/layout/UiFeedback";
 
 export type JobsPanelCtx = {
   sortedJobs: JobStatus[];
@@ -22,12 +23,13 @@ export default function JobsPanel({ ctx }: JobsPanelProps) {
           return (
             <div
               key={job.jobId}
-              className={`rounded border p-2 ${job.status === "failed" ? "border-orange-400 bg-orange-50" : "border-ink/10"}`}
+              className={`rounded border p-2 ${job.status === "failed" ? "border-red-200 bg-red-50" : "border-ink/10"}`}
             >
               <p className="font-medium">
                 {job.jobId} <span className="text-ink/60">({job.type})</span>
               </p>
-              <p className="text-xs uppercase">
+              <p className="inline-flex items-center gap-1.5 text-xs uppercase">
+                {job.status === "queued" || job.status === "running" ? <Spinner className="h-3 w-3" /> : null}
                 {job.status} - {job.progress}%
               </p>
               {job.error ? <p className="text-xs text-red-600">{job.error}</p> : null}

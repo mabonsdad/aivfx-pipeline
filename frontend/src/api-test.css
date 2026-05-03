@@ -122,6 +122,22 @@ body {
   resize: vertical;
 }
 
+.api-checkbox {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  text-transform: none !important;
+  letter-spacing: 0 !important;
+  font-size: 0.9rem !important;
+  font-weight: 600 !important;
+  color: #1c1612 !important;
+}
+
+.api-checkbox input {
+  width: auto;
+  margin-top: 2px;
+}
+
 .api-field small {
   color: rgba(28, 22, 18, 0.62);
   line-height: 1.45;

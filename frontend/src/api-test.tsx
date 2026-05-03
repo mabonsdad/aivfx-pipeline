@@ -45,6 +45,7 @@ const VIDEO_MODELS: readonly VideoModelOption[] = [
   { value: "ray-flash-2", label: "Luma Ray 2 Flash", mode: "flex_1" },
   { value: "ray-2", label: "Luma Ray 2", mode: "adhere_1" },
   { value: "runway-gen4.5", label: "Runway Gen-4.5", mode: "runway_i2v" },
+  { value: "runway-gen4-aleph", label: "Runway Gen-4 Aleph", mode: "runway_aleph_v2v", note: "Uses source video plus a reference image. Prompt should describe the intended transformation while preserving timing and motion." },
   { value: "kling-2.6", label: "Kling 2.6", mode: "kling_start_only" },
   { value: "kling-o1", label: "Kling O1 Edit", mode: "kling_o1_video_edit", note: "Prompt should reference <<<video_1>>> and <<<image_1>>>." },
   { value: "kling-v3-omni-video", label: "Kling V3 Omni Video", mode: "kling_v3_omni_video_edit", note: "Prompt should reference <<<video_1>>> and <<<image_1>>>." },
@@ -185,6 +186,7 @@ function App() {
   const [klingMode, setKlingMode] = useState<"std" | "pro">("pro");
   const [klingV3Mode, setKlingV3Mode] = useState<"standard" | "pro">("pro");
   const [wan27Resolution, setWan27Resolution] = useState<"720p" | "1080p">("720p");
+  const [preserveFrames, setPreserveFrames] = useState(true);
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [videoFile, setVideoFile] = useState<File | null>(null);
   const [maskFile, setMaskFile] = useState<File | null>(null);
@@ -399,6 +401,7 @@ function App() {
             replicateKlingMode: selectedVideoModel.value === "kling-o1" ? klingMode : undefined,
             replicateKlingV3Mode: selectedVideoModel.value === "kling-v3-omni-video" ? klingV3Mode : undefined,
             wan27Resolution: selectedVideoModel.value === "wan2.7-videoedit" ? wan27Resolution : undefined,
+            preserveFrames,
           }),
         });
         setRequestId(created.requestId);
@@ -575,6 +578,15 @@ function App() {
                   <option value="720p">720p</option>
                   <option value="1080p">1080p</option>
                 </select>
+              </div>
+            ) : null}
+
+            {workflow === "video_reference" ? (
+              <div className="api-field">
+                <label className="api-checkbox">
+                  <input type="checkbox" checked={preserveFrames} onChange={(event) => setPreserveFrames(event.target.checked)} />
+                  <span>Preserve source frames when model input FPS is lower than source FPS</span>
+                </label>
               </div>
             ) : null}
 

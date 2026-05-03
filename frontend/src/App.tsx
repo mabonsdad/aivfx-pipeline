@@ -5,11 +5,14 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { apiClient } from "./api/client";
 import VideoCleanupModal from "./components/cleanup/VideoCleanupModal";
 import PreviewModals from "./components/layout/PreviewModals";
+import { StatusNotice } from "./components/layout/UiFeedback";
 import TaskSidebar from "./components/layout/TaskSidebar";
 import WorkflowTabs from "./components/layout/WorkflowTabs";
 import MotionSyncModal from "./components/quality/MotionSyncModal";
 import QualityMatchModal from "./components/quality/QualityMatchModal";
 import NewTaskModal from "./components/tasks/NewTaskModal";
+import CreateRoutePicker from "./components/workflow/CreateRoutePicker";
+import { CurrentWorkingReferencePanel } from "./components/workflow/WorkingRangePanel";
 import {
   taskRoute,
   type ReportView,
@@ -44,6 +47,7 @@ type VideoModel =
   | "ray-2"
   | "ray-flash-2"
   | "runway-gen4.5"
+  | "runway-gen4-aleph"
   | "kling-2.6"
   | "kling-o1"
   | "kling-v3-omni-video"
@@ -183,6 +187,7 @@ const VIDEO_WORK_MODE_STORAGE_KEY = "aivfx:videoWorkModeByTask:v1";
 const WHOLE_VIDEO_SINGLE_PASS_LIMIT_SECONDS = 10;
 
 type VideoWorkMode = "whole_video" | "custom_segment";
+type PrimaryWorkflowSection = "source" | "create" | "outputs" | "post" | "reports" | "assets";
 
 type VideoFrameStripItem = {
   frameIndex: number;
@@ -253,6 +258,16 @@ function generationThumbnailUrl(generation: SegmentGeneration): string | null {
     generation.sourceLastFrameCaptureUrl ??
     null
   );
+}
+
+function workflowSectionForTab(tab: TabId): PrimaryWorkflowSection | null {
+  if (tab === "timeline") return "source";
+  if (tab === "frames" || tab === "refine") return "create";
+  if (tab === "generate" || tab === "outputs") return "outputs";
+  if (tab === "merge") return "post";
+  if (tab === "report") return "reports";
+  if (tab === "assets") return "assets";
+  return null;
 }
 
 function appendTrackedJobId(previous: string[], jobId: string): string[] {
@@ -381,6 +396,7 @@ function videoModelLabel(model: VideoModel): string {
   if (model === "ray-2") return "Luma Ray 2";
   if (model === "ray-flash-2") return "Luma Ray Flash 2";
   if (model === "runway-gen4.5") return "Runway Gen-4.5";
+  if (model === "runway-gen4-aleph") return "Runway Gen-4 Aleph";
   if (model === "kling-2.6") return "Kling 2.6";
   if (model === "kling-o1") return "Kling O1 Edit";
   if (model === "kling-v3-omni-video") return "Kling v3 Omni Video";
@@ -391,6 +407,22 @@ function videoModelLabel(model: VideoModel): string {
   if (model === "wan2.2-animate") return "Wan 2.2 Animate";
   if (model === "wan2.7-videoedit") return "Wan 2.7 VideoEdit";
   return model;
+}
+
+function generationRouteLabel(mode: GenerateInputMode): string {
+  if (mode === "start_end") return "Animate between two frames";
+  if (mode === "start_only") return "Animate from start frame";
+  return "Use source motion";
+}
+
+function generationRouteDescription(mode: GenerateInputMode): string {
+  if (mode === "start_end") {
+    return "This route uses edited start and end frames to generate a transition between them.";
+  }
+  if (mode === "start_only") {
+    return "This route generates a new clip from the edited start frame without using source-motion video guidance.";
+  }
+  return "This route uses the source video motion from the working range together with the edited start frame.";
 }
 
 function formatFps(value: number): string {
@@ -406,6 +438,7 @@ function videoModelDurationConstraints(model: VideoModel): {
   if (model === "ray-2") return { maxSeconds: 10 };
   if (model === "ray-flash-2") return { maxSeconds: 15 };
   if (model === "runway-gen4.5") return { maxSeconds: 10 };
+  if (model === "runway-gen4-aleph") return { maxSeconds: 10 };
   if (model === "kling-2.6") return { maxSeconds: 10 };
   if (model === "kling-o1") return { minSeconds: 3, maxSeconds: 10 };
   if (model === "kling-v3-omni-video") return { minSeconds: 3, maxSeconds: 10 };
@@ -444,7 +477,7 @@ function assessVideoModelDurationLimit(
       maxSeconds,
       maxFrames,
       overLimit: true,
-      message: `${label} requires a source segment between ${minSeconds}s and ${maxSeconds}s. Your selection is ${durationSec.toFixed(2)}s.`,
+      message: `${label} requires a source working range between ${minSeconds}s and ${maxSeconds}s. Your selection is ${durationSec.toFixed(2)}s.`,
     };
   }
   if (!overFrames && !overSeconds) {
@@ -472,6 +505,7 @@ const GENERATION_MODELS_BY_INPUT: Record<GenerateInputMode, Array<{ value: Video
   start_video: [
     { value: "ray-flash-2", label: "Luma Ray Flash 2" },
     { value: "ray-2", label: "Luma Ray 2" },
+    { value: "runway-gen4-aleph", label: "Runway Gen-4 Aleph" },
     { value: "kling-o1", label: "Kling O1 Edit" },
     { value: "kling-v3-omni-video", label: "Kling v3 Omni Video" },
     { value: "seedance-2.0-reference-to-video", label: "Seedance 2.0 Reference to Video" },
@@ -495,6 +529,7 @@ const GENERATION_MODELS_BY_INPUT: Record<GenerateInputMode, Array<{ value: Video
 const AUTOMATION_VIDEO_OPTIONS: AutomationVideoOption[] = [
   { id: "ray-flash-2:start_video:flex_1", label: "Luma Ray Flash 2 (Start frame + video)", inputMode: "start_video", lumaModel: "ray-flash-2", mode: "flex_1" },
   { id: "ray-2:start_video:flex_1", label: "Luma Ray 2 (Start frame + video)", inputMode: "start_video", lumaModel: "ray-2", mode: "flex_1" },
+  { id: "runway-gen4-aleph:start_video:runway_aleph_v2v", label: "Runway Gen-4 Aleph (Start frame + video)", inputMode: "start_video", lumaModel: "runway-gen4-aleph", mode: "runway_aleph_v2v" },
   { id: "kling-v3-omni-video:start_video:kling_v3_omni_video_edit", label: "Kling v3 Omni Video (Start frame + video)", inputMode: "start_video", lumaModel: "kling-v3-omni-video", mode: "kling_v3_omni_video_edit" },
   { id: "seedance-2.0-reference-to-video:start_video:seedance_reference_to_video", label: "Seedance 2.0 Reference to Video (Start frame + video)", inputMode: "start_video", lumaModel: "seedance-2.0-reference-to-video", mode: "seedance_reference_to_video" },
   { id: "wan2.2-animate:start_video:wan_animate_replace", label: "Wan 2.2 Animate (Start frame + video)", inputMode: "start_video", lumaModel: "wan2.2-animate", mode: "wan_animate_replace" },
@@ -526,7 +561,7 @@ function FrameSelectCard({
       <p className="mb-2 text-sm font-semibold">{title}</p>
       {frame?.imageUrl ? (
         <div>
-          <img src={frame.imageUrl} alt={`${title} preview`} className="max-h-28 w-full rounded-md bg-bg object-contain" />
+          <img src={frame.imageUrl} alt={`${title} preview`} className="max-h-28 w-full rounded-md bg-bg object-contain" loading="lazy" decoding="async" />
           <div className="mt-2 flex items-center justify-between gap-2">
             <p className="text-xs text-ink/70">
               frame {frame.frameIndex} ({frame.timecode})
@@ -878,6 +913,8 @@ export default function App() {
   const [lumaModel, setLumaModel] = useState<VideoModel>("ray-flash-2");
   const [advancedMode, setAdvancedMode] = useState("flex_1");
   const [lumaPrompt, setLumaPrompt] = useState("");
+  const [lumaContinuationPrompt, setLumaContinuationPrompt] = useState("");
+  const [preserveFrames, setPreserveFrames] = useState(true);
   const [replicateKlingMode, setReplicateKlingMode] = useState<"std" | "pro">("pro");
   const [replicateKlingV3Mode, setReplicateKlingV3Mode] = useState<"standard" | "pro">("pro");
   const [wan27Resolution, setWan27Resolution] = useState<"720p" | "1080p">("720p");
@@ -895,6 +932,15 @@ export default function App() {
   });
   const [imagePreviewModal, setImagePreviewModal] = useState<{ url: string; label: string } | null>(null);
   const [videoPreviewModal, setVideoPreviewModal] = useState<{ url: string; label: string } | null>(null);
+  const [imageCompareModal, setImageCompareModal] = useState<{ originalUrl: string; compareUrl: string; label: string } | null>(null);
+  const [videoCompareModal, setVideoCompareModal] = useState<{
+    originalUrl: string;
+    compareUrl: string;
+    label: string;
+    posterUrl?: string | null;
+    segmentStartSec?: number;
+    originalIsSegmentClip?: boolean;
+  } | null>(null);
   const [reportGraphModal, setReportGraphModal] = useState<{ url: string; label: string } | null>(null);
   const [motionSyncModalExportId, setMotionSyncModalExportId] = useState<string | null>(null);
   const [qualityMatchModal, setQualityMatchModal] = useState<QualityMatchModalState>({
@@ -919,6 +965,29 @@ export default function App() {
     AUTOMATION_VIDEO_OPTIONS.map((option) => option.id),
   );
   const [automationUiError, setAutomationUiError] = useState<string | null>(null);
+  const [appUiError, setAppUiError] = useState<string | null>(null);
+  const [mergeApplyRetime, setMergeApplyRetime] = useState(false);
+  const [mergePlaybackRate, setMergePlaybackRate] = useState(1);
+  const [mergeAlignmentSuggestion, setMergeAlignmentSuggestion] = useState<{
+    suggested: {
+      startFrameOverride: number;
+      trimStartFrames: number;
+      trimEndFrames: number;
+    };
+    analysis: {
+      sourceFrameOffset: number;
+      sourceOffsetSec: number;
+      earlyMedianDriftFrames: number;
+      lateMedianDriftFrames: number;
+      residualEndFrames: number;
+      meanAbsDriftFrames: number;
+      residualMeanAbsDriftFrames: number;
+      suggestedPlaybackRate: number;
+      recommendation: string;
+      confidence: number;
+      notes: string[];
+    };
+  } | null>(null);
   const [automationRunState, setAutomationRunState] = useState<AutomationRunState>({
     isOpen: false,
     taskId: null,
@@ -932,12 +1001,11 @@ export default function App() {
   const [firstFrameId, setFirstFrameId] = useState<string | null>(null);
   const [lastFrameId, setLastFrameId] = useState<string | null>(null);
   const [videoWorkMode, setVideoWorkModeState] = useState<VideoWorkMode | null>(null);
+  const [segmentDraftActive, setSegmentDraftActive] = useState(false);
+  const [segmentDraftFallbackId, setSegmentDraftFallbackId] = useState<string | null>(null);
   const [editFrameTab, setEditFrameTab] = useState<"first" | "last">("first");
   const [refineFrameTab, setRefineFrameTab] = useState<"first" | "last">("first");
   const timelineVideoRef = useRef<HTMLVideoElement | null>(null);
-  const compareOriginalRef = useRef<HTMLVideoElement | null>(null);
-  const compareVariantRef = useRef<HTMLVideoElement | null>(null);
-  const syncLockRef = useRef(false);
   const patchOverlayCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const patchMaskCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const patchDrawStateRef = useRef<{ tool: PatchToolMode; points: MaskPoint[]; last: MaskPoint | null } | null>(null);
@@ -978,6 +1046,8 @@ export default function App() {
   }, [generationInputMode, generationModelByInput, lumaModel]);
 
   const tab: TabId = routeState.tab ?? "timeline";
+  const activeWorkflowSection = workflowSectionForTab(tab);
+  const activePostTab: TabId = tab === "merge" ? tab : "merge";
   const isReportTab = tab === "report";
   const selectedTaskId = routeState.taskId ?? storeSelectedTaskId;
   const reportTaskId = selectedTaskId;
@@ -1041,6 +1111,34 @@ export default function App() {
       goToReport(selectedTaskId, "reports", reportId);
     },
     [goToReport, selectedTaskId],
+  );
+
+  const handlePrimaryWorkflowSectionChange = useCallback(
+    (section: PrimaryWorkflowSection) => {
+      if (section === "source") {
+        setTab("timeline");
+        return;
+      }
+      if (section === "create") {
+        setTab("frames");
+        return;
+      }
+      if (section === "outputs") {
+        setTab("outputs");
+        return;
+      }
+      if (section === "post") {
+        setTab(activePostTab);
+        return;
+      }
+      if (section === "reports") {
+        if (!selectedTaskId) return;
+        goToReport(selectedTaskId, reportView, reportView === "reports" ? activeCustomReportId : null);
+        return;
+      }
+      setTab("assets");
+    },
+    [activeCustomReportId, activePostTab, goToReport, reportView, selectedTaskId, setTab],
   );
 
   useCanonicalTaskRoute({
@@ -1174,7 +1272,7 @@ export default function App() {
   const defaultVideoSegment = useMemo(
     () =>
       (task?.segments ?? []).find(
-        (segment) => segment.startFrame === 0 && totalVideoFrames > 0 && segment.endFrameExclusive === totalVideoFrames,
+        (segment) => !segment.internalOnly && segment.startFrame === 0 && totalVideoFrames > 0 && segment.endFrameExclusive === totalVideoFrames,
       ) ?? null,
     [task?.segments, totalVideoFrames],
   );
@@ -1188,18 +1286,22 @@ export default function App() {
     isWholeVideoSelection && selectedSegment && selectedSegment.durationSec > WHOLE_VIDEO_SINGLE_PASS_LIMIT_SECONDS + 1e-6,
   );
   useEffect(() => {
-    if (wholeVideoNeedsChunking && generationInputMode === "start_end") {
-      setGenerationInputMode("start_video");
+    if (generationInputMode === "start_end") return;
+    if (editFrameTab === "last") {
+      setEditFrameTab("first");
     }
-  }, [generationInputMode, wholeVideoNeedsChunking]);
+    if (refineFrameTab === "last") {
+      setRefineFrameTab("first");
+    }
+  }, [editFrameTab, generationInputMode, refineFrameTab]);
   const completeGenerations = useMemo(
-    () => segmentGenerations.filter((generation) => generation.status === "complete" && Boolean(generation.outputKey)),
+    () => segmentGenerations.filter((generation) => generation.status === "complete" && Boolean(generation.outputKey) && !generation.isChunkInternal),
     [segmentGenerations],
   );
   const selectedSegmentChunkedGenerationRuns = useMemo(
     () =>
       [...(task?.chunkedGenerationRuns ?? [])]
-        .filter((run) => run.sourceSegmentId === selectedSegmentId)
+        .filter((run) => run.sourceSegmentId === selectedSegmentId && run.status !== "canceled")
         .sort((a, b) => new Date(b.updatedAt ?? b.createdAt).getTime() - new Date(a.updatedAt ?? a.createdAt).getTime()),
     [selectedSegmentId, task?.chunkedGenerationRuns],
   );
@@ -1222,17 +1324,16 @@ export default function App() {
   }, [task?.segmentGenerations, videoCleanupModal.generationId]);
   const firstFrame = task && firstFrameId ? task.frames[firstFrameId] ?? null : null;
   const lastFrame = task && lastFrameId ? task.frames[lastFrameId] ?? null : null;
+  const lastHydratedSegmentIdRef = useRef<string | null>(null);
   const editFirstFrame = (firstFrameId ? task?.frames[firstFrameId] : null) ?? (selectedSegment ? task?.frames[selectedSegment.startFrameId] : null) ?? null;
   const editLastFrame = (lastFrameId ? task?.frames[lastFrameId] : null) ?? (selectedSegment ? task?.frames[selectedSegment.endFrameId] : null) ?? null;
   const activeEditFrame = editFrameTab === "first" ? editFirstFrame : editLastFrame;
   const activeRefineFrame = refineFrameTab === "first" ? editFirstFrame : editLastFrame;
   const activeEditVariants = useMemo(
     () =>
-      [...(activeEditFrame?.variants ?? [])]
-        .filter((variant) => variant.variantKind !== "refined")
-        .sort(
+      [...(activeEditFrame?.variants ?? [])].sort(
         (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
-        ),
+      ),
     [activeEditFrame?.variants],
   );
   const activeRefineVariants = useMemo(
@@ -1244,6 +1345,7 @@ export default function App() {
   );
   const activeEditSourceVariantId = editSourceVariantIds[editFrameTab];
   const activeCompareVariantId = compareVariantIds[editFrameTab];
+  const activeChosenVariantId = refineSourceVariantIds[editFrameTab] || activeCompareVariantId;
   const activeSelectedVariant = useMemo(
     () =>
       activeEditSourceVariantId
@@ -1251,15 +1353,7 @@ export default function App() {
         : null,
     [activeEditSourceVariantId, activeEditVariants],
   );
-  const activeCompareVariant = useMemo(
-    () =>
-      activeCompareVariantId
-        ? activeEditVariants.find((variant) => variant.variantId === activeCompareVariantId) ?? null
-        : null,
-    [activeCompareVariantId, activeEditVariants],
-  );
   const activeEditSourceImageUrl = activeSelectedVariant?.imageUrl ?? activeEditFrame?.imageUrl ?? null;
-  const activeCompareImageUrl = activeCompareVariant?.imageUrl ?? activeEditFrame?.imageUrl ?? null;
   const activeEditCandidates = useMemo<EditFrameCandidate[]>(() => {
     if (!activeEditFrame?.imageUrl) return [];
     const candidates: EditFrameCandidate[] = [
@@ -1270,7 +1364,7 @@ export default function App() {
         label: "Original frame",
         createdAt: activeEditFrame.createdAt,
         qualityMatched: Boolean(activeEditFrame.qualityMatched || activeEditFrame.qualityMatchStatus?.qualityMatched),
-        isSelected: !activeCompareVariantId,
+        isSelected: !activeChosenVariantId,
       },
     ];
     for (const variant of activeEditVariants) {
@@ -1279,16 +1373,19 @@ export default function App() {
         id: variant.variantId,
         kind: "variant",
         imageUrl: variant.imageUrl,
-        label: `${variant.model} / ${variant.type}`,
+        label:
+          variant.generationSettings?.workflow === "manual_frame_upload"
+            ? "Manual upload"
+            : `${variant.model} / ${variant.type}`,
         createdAt: variant.createdAt,
         variantId: variant.variantId,
         variant,
         qualityMatched: Boolean(variant.qualityMatch?.analysisId),
-        isSelected: activeCompareVariantId === variant.variantId,
+        isSelected: activeChosenVariantId === variant.variantId,
       });
     }
     return candidates;
-  }, [activeCompareVariantId, activeEditFrame, activeEditVariants]);
+  }, [activeChosenVariantId, activeEditFrame, activeEditVariants]);
   const activeRefineGroups = useMemo<RefineVariantGroup[]>(() => {
     const selectedSourceVariantId = refineSourceVariantIds[refineFrameTab];
     const editedVariants = activeRefineVariants.filter((variant) => variant.variantKind !== "refined");
@@ -1370,6 +1467,8 @@ export default function App() {
     setLastFrameId(null);
     setSelectedSegmentId(null);
     setVideoWorkModeState(null);
+    setSegmentDraftActive(false);
+    setSegmentDraftFallbackId(null);
     setQualityMatchModal({
       isOpen: false,
       frameId: null,
@@ -1403,7 +1502,7 @@ export default function App() {
   }, [editFrameTab, tab]);
 
   useEffect(() => {
-    if (!selectedTaskId || selectedSegmentId) return;
+    if (!selectedTaskId || selectedSegmentId || segmentDraftActive) return;
     const rememberedByTask = readSegmentSelectionMap();
     const rememberedSegmentId = rememberedByTask[selectedTaskId];
     if (rememberedSegmentId && task?.segments?.length) {
@@ -1423,7 +1522,7 @@ export default function App() {
     if (rememberedSegmentId && task?.segments?.length) {
       setSelectedSegmentId(rememberedSegmentId);
     }
-  }, [defaultVideoSegment, selectedSegmentId, selectedTaskId, setSelectedSegmentId, task?.segments, videoWorkMode]);
+  }, [defaultVideoSegment, segmentDraftActive, selectedSegmentId, selectedTaskId, setSelectedSegmentId, task?.segments, videoWorkMode]);
 
   useEffect(() => {
     if (!selectedTaskId || !selectedSegmentId) return;
@@ -1434,14 +1533,32 @@ export default function App() {
   }, [selectedSegmentId, selectedTaskId]);
 
   useEffect(() => {
-    if (!selectedSegment) return;
-    if (!firstFrameId || videoWorkMode === "whole_video") {
+    if (segmentDraftActive) return;
+    if (!selectedSegmentId) {
+      setSegmentDraftFallbackId(null);
+      return;
+    }
+    setSegmentDraftFallbackId(selectedSegmentId);
+  }, [segmentDraftActive, selectedSegmentId]);
+
+  useEffect(() => {
+    if (segmentDraftActive && selectedSegmentId) {
+      setSegmentDraftActive(false);
+    }
+  }, [segmentDraftActive, selectedSegmentId]);
+
+  useEffect(() => {
+    if (!selectedSegment) {
+      lastHydratedSegmentIdRef.current = null;
+      return;
+    }
+    const segmentChanged = lastHydratedSegmentIdRef.current !== selectedSegment.segmentId;
+    if (segmentChanged || videoWorkMode === "whole_video") {
       setFirstFrameId(selectedSegment.startFrameId);
-    }
-    if (!lastFrameId || videoWorkMode === "whole_video") {
       setLastFrameId(selectedSegment.endFrameId);
+      lastHydratedSegmentIdRef.current = selectedSegment.segmentId;
     }
-  }, [firstFrameId, lastFrameId, selectedSegment, videoWorkMode]);
+  }, [selectedSegment, videoWorkMode]);
 
   useEffect(() => {
     if (!selectedSegment) return;
@@ -1702,6 +1819,8 @@ export default function App() {
     },
     onSuccess: async (result, variables) => {
       setSelectedSegmentId(variables.segmentId);
+      setSegmentDraftActive(false);
+      setSegmentDraftFallbackId(variables.segmentId);
       if (result.segment?.startFrameId) {
         setFirstFrameId(result.segment.startFrameId);
       }
@@ -1844,6 +1963,8 @@ export default function App() {
       const selectedMode =
         lumaModel === "runway-gen4.5"
           ? "runway_i2v"
+          : lumaModel === "runway-gen4-aleph"
+            ? "runway_aleph_v2v"
           : lumaModel === "kling-2.6"
             ? generationInputMode === "start_only"
               ? "kling_start_only"
@@ -1874,6 +1995,7 @@ export default function App() {
         replicateKlingMode: lumaModel === "kling-o1" ? replicateKlingMode : undefined,
         replicateKlingV3Mode: lumaModel === "kling-v3-omni-video" ? replicateKlingV3Mode : undefined,
         wan27Resolution: lumaModel === "wan2.7-videoedit" ? wan27Resolution : undefined,
+        preserveFrames,
       });
     },
     onSuccess: async (result) => {
@@ -1881,7 +2003,7 @@ export default function App() {
       await queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
       await queryClient.invalidateQueries({ queryKey: ["task", "report", selectedTaskId] });
       await queryClient.invalidateQueries({ queryKey: ["task", "assets", selectedTaskId] });
-      setTab("generate");
+      setTab("outputs");
     },
   });
 
@@ -1894,6 +2016,8 @@ export default function App() {
           ? "kling_o1_video_edit"
           : lumaModel === "kling-v3-omni-video"
             ? "kling_v3_omni_video_edit"
+            : lumaModel === "runway-gen4-aleph"
+              ? "runway_aleph_v2v"
             : lumaModel === "seedance-2.0-reference-to-video"
               ? "seedance_reference_to_video"
               : lumaModel === "wan2.2-animate"
@@ -1902,13 +2026,29 @@ export default function App() {
                   ? "wan27_video_edit"
                   : advancedMode;
       return apiClient.generateSegmentChunked(selectedTaskId, selectedSegmentId, {
-        lumaModel: lumaModel as "ray-2" | "ray-flash-2" | "kling-o1" | "kling-v3-omni-video" | "seedance-2.0-reference-to-video" | "wan2.2-animate" | "wan2.7-videoedit",
+        lumaModel:
+          lumaModel as
+            | "ray-2"
+            | "ray-flash-2"
+            | "runway-gen4-aleph"
+            | "kling-o1"
+            | "kling-v3-omni-video"
+            | "seedance-2.0-reference-to-video"
+            | "wan2.2-animate"
+            | "wan2.7-videoedit",
         mode: selectedMode,
-        prompt: lumaModel === "wan2.2-animate" ? undefined : trimmedPrompt || undefined,
+        openingPrompt: lumaModel === "wan2.2-animate" ? undefined : trimmedPrompt || undefined,
+        continuationPrompt:
+          lumaModel === "wan2.2-animate"
+            ? undefined
+            : lumaContinuationPrompt.trim()
+              ? lumaContinuationPrompt.trim()
+              : undefined,
         firstFrameVariantId: refineSourceVariantIds.first || compareVariantIds.first || undefined,
         replicateKlingMode: lumaModel === "kling-o1" ? replicateKlingMode : undefined,
         replicateKlingV3Mode: lumaModel === "kling-v3-omni-video" ? replicateKlingV3Mode : undefined,
         wan27Resolution: lumaModel === "wan2.7-videoedit" ? wan27Resolution : undefined,
+        preserveFrames,
       });
     },
     onSuccess: async (result) => {
@@ -1918,7 +2058,7 @@ export default function App() {
       await queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
       await queryClient.invalidateQueries({ queryKey: ["task", "report", selectedTaskId] });
       await queryClient.invalidateQueries({ queryKey: ["task", "assets", selectedTaskId] });
-      setTab("generate");
+      setTab("outputs");
     },
   });
 
@@ -1958,6 +2098,30 @@ export default function App() {
     },
   });
 
+  const saveChunkedGenerationDraftMutation = useMutation({
+    mutationFn: async ({ runId }: { runId: string }) => {
+      if (!selectedTaskId) throw new Error("Select a task");
+      return apiClient.saveChunkedGenerationDraft(selectedTaskId, runId);
+    },
+    onSuccess: async (result) => {
+      if (result.jobId) {
+        setJobIds((prev) => appendTrackedJobId(prev, result.jobId as string));
+      }
+      await queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
+    },
+  });
+
+  const cancelChunkedGenerationMutation = useMutation({
+    mutationFn: async ({ runId, reason }: { runId: string; reason?: string }) => {
+      if (!selectedTaskId) throw new Error("Select a task");
+      return apiClient.cancelChunkedGeneration(selectedTaskId, runId, { reason });
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
+      await queryClient.invalidateQueries({ queryKey: ["task", "assets", selectedTaskId] });
+    },
+  });
+
   const extendSegmentGenerationMutation = useMutation({
     mutationFn: async ({
       generationId,
@@ -1986,7 +2150,7 @@ export default function App() {
       await queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
       await queryClient.invalidateQueries({ queryKey: ["task", "report", selectedTaskId] });
       await queryClient.invalidateQueries({ queryKey: ["task", "assets", selectedTaskId] });
-      setTab("generate");
+      setTab("outputs");
     },
   });
 
@@ -2000,6 +2164,7 @@ export default function App() {
                 startFrameOverride: mergeInsertStartFrameClamped,
                 trimStartFrames: mergeTrimStartClamped,
                 trimEndFrames: mergeTrimEndClamped,
+                playbackRate: mergeApplyRetime ? mergePlaybackRate : undefined,
               },
             }
           : undefined;
@@ -2015,6 +2180,21 @@ export default function App() {
     },
   });
 
+  const suggestMergeAlignmentMutation = useMutation({
+    mutationFn: async () => {
+      if (!selectedTaskId || !mergeTargetGeneration?.genId) throw new Error("Choose a completed output first");
+      return apiClient.suggestMergeAlignment(selectedTaskId, mergeTargetGeneration.genId);
+    },
+    onSuccess: (result) => {
+      setMergeInsertStartFrame(result.suggested.startFrameOverride);
+      setMergeTrimStartFrames(result.suggested.trimStartFrames);
+      setMergeTrimEndFrames(result.suggested.trimEndFrames);
+      setMergePlaybackRate(result.analysis.suggestedPlaybackRate || 1);
+      setMergeApplyRetime(result.analysis.recommendation === "retime_recommended");
+      setMergeAlignmentSuggestion(result);
+    },
+  });
+
   const runMotionSyncMutation = useMutation({
     mutationFn: async ({ exportId, force }: { exportId: string; force?: boolean }) => {
       if (!selectedTaskId) throw new Error("Select a task");
@@ -2026,24 +2206,6 @@ export default function App() {
         await queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
         await queryClient.invalidateQueries({ queryKey: ["task", "report", selectedTaskId] });
       }
-    },
-  });
-
-  const runQcMutation = useMutation({
-    mutationFn: async ({
-      taskId,
-      generationIds,
-      mode,
-    }: {
-      taskId: string;
-      generationIds?: string[];
-      mode?: "standard" | "advanced_frame";
-    }) =>
-      apiClient.runQc(taskId, generationIds?.length || mode ? { generationIds, mode } : undefined),
-    onSuccess: async (result, variables) => {
-      setJobIds((previous) => appendTrackedJobId(previous, result.jobId));
-      await queryClient.invalidateQueries({ queryKey: ["task", variables.taskId] });
-      await queryClient.invalidateQueries({ queryKey: ["task", "report", variables.taskId] });
     },
   });
 
@@ -2197,6 +2359,8 @@ export default function App() {
   const mergeFeatherClamped = clampInteger(temporalFeatherFrames, 0, 30);
   const mergeOriginalVideoForPreview = task?.video?.previewSource?.downloadUrl ?? task?.video?.editSource?.downloadUrl ?? null;
   const mergeGeneratedVideoForPreview = mergeTargetGeneration?.downloadUrl ?? null;
+  const mergeSourceWidth = task?.video?.editSource?.width ?? task?.video?.previewSource?.width ?? 0;
+  const mergeSourceHeight = task?.video?.editSource?.height ?? task?.video?.previewSource?.height ?? 0;
   const mergeOriginalSourceCacheKey = task?.video?.previewSource?.s3Key ?? task?.video?.editSource?.s3Key ?? "merge:original";
   const mergeGeneratedSourceCacheKey = mergeTargetGeneration?.outputKey ?? mergeTargetGeneration?.genId ?? "merge:generated";
   const mergeFrameStripEnabled = tab === "merge" && Boolean(mergeTargetGeneration && mergeTargetSegment);
@@ -2308,24 +2472,41 @@ export default function App() {
     () => generationModelHelp(lumaModel, advancedMode, generationInputMode),
     [advancedMode, generationInputMode, lumaModel],
   );
+  const requiresEndFrameForRoute = generationInputMode === "start_end";
+  const hasCompleteOutputForSelectedRange = completeGenerations.length > 0;
+  const missingRouteInputsMessage = useMemo(() => {
+    if (!editFirstFrame && requiresEndFrameForRoute && !editLastFrame) {
+      return "No edited start or end frame selected. Generation will use the original source start and end frames.";
+    }
+    if (!editFirstFrame) {
+      return "No edited start frame selected. Generation will use the original source start frame.";
+    }
+    if (requiresEndFrameForRoute && !editLastFrame) {
+      return "No edited end frame selected. Generation will use the original source end frame.";
+    }
+    return null;
+  }, [editFirstFrame, editLastFrame, requiresEndFrameForRoute]);
   const generationInputNote = useMemo(() => {
     if (lumaModel === "kling-o1") {
-      return "Uses the selected segment video as <<<video_1>>> and the selected edited start frame as <<<image_1>>>. Prompt must reference both.";
+      return "Uses the selected working-range video as <<<video_1>>> and the selected edited start frame as <<<image_1>>>. Prompt must reference both.";
     }
     if (lumaModel === "kling-v3-omni-video") {
-      return "Uses the selected segment video as <<<video_1>>> and the selected edited start frame as <<<image_1>>> for base video editing. Prompt must reference both.";
+      return "Uses the selected working-range video as <<<video_1>>> and the selected edited start frame as <<<image_1>>> for base video editing. Prompt must reference both.";
     }
     if (lumaModel === "seedance-2.0-reference-to-video") {
-      return "Uses the selected segment video as @Video1 and the selected edited start frame as @Image1. Prompt must reference both. The segment is conformed to Seedance's smaller reference-video bounds, then the result is upscaled back to the segment size.";
+      return "Uses the selected working-range video as @Video1 and the selected edited start frame as @Image1. Prompt must reference both. The working range is conformed to Seedance's smaller reference-video bounds, then the result is upscaled back to the working-range size.";
     }
     if (lumaModel === "wan2.7-videoedit") {
-      return "Uses the selected segment video plus the selected edited start frame as reference_image. Prompt should describe only the intended edit.";
+      return "Uses the selected working-range video plus the selected edited start frame as reference_image. Prompt should describe only the intended edit.";
+    }
+    if (lumaModel === "runway-gen4-aleph") {
+      return "Uses the selected working-range video plus the selected edited start frame as an image reference. Prompt should describe the intended transformation while preserving motion and camera continuity. Runway may center-crop to the chosen output ratio.";
     }
     if (lumaModel === "wan2.2-a14b" || lumaModel === "runway-gen4.5") {
       return "Start frame variant is taken automatically from your Edit frames selection.";
     }
     if (lumaModel === "wan2.2-animate") {
-      return "Wan2.2 Animate uses start frame + source segment video. Text prompt is disabled in this flow unless LoRA inputs are used.";
+      return "Wan2.2 Animate uses start frame + source working-range video. Text prompt is disabled in this flow unless LoRA inputs are used.";
     }
     if (generationInputMode === "start_only" && (lumaModel === "kling-2.6" || lumaModel === "veo-3.1" || lumaModel === "veo-3.1-fast")) {
       return "Start frame only is enforced in this tab; the end frame is not sent.";
@@ -2341,6 +2522,9 @@ export default function App() {
     }
     if (lumaModel === "wan2.7-videoedit") {
       return "Change the horse into the white unicorn, keep the background and motion the same.";
+    }
+    if (lumaModel === "runway-gen4-aleph") {
+      return "Transform the horse into the white unicorn from the reference image while preserving camera movement, timing and background continuity.";
     }
     return "Optional generation prompt";
   }, [lumaModel]);
@@ -2365,6 +2549,9 @@ export default function App() {
     }
     if (lumaModel === "wan2.7-videoedit" && !promptValue) {
       return "Wan 2.7 VideoEdit requires a prompt describing the change you want to make.";
+    }
+    if (lumaModel === "runway-gen4-aleph" && !promptValue) {
+      return "Runway Gen-4 Aleph requires a prompt describing the intended transformation.";
     }
     return null;
   }, [lumaModel, lumaPrompt]);
@@ -2432,6 +2619,7 @@ export default function App() {
       for (const generation of Object.values(taskItem.segmentGenerations ?? {})) {
         if (generation.status === "failed") continue;
         if (!generation.downloadUrl) continue;
+        if (generation.isChunkInternal) continue;
           assets.push({
             id: `generation:${taskItem.taskId}:${generation.genId}`,
             taskId: taskItem.taskId,
@@ -2504,39 +2692,6 @@ export default function App() {
       setStableOriginalSegmentPreviewUrl(originalSegmentPreviewUrl);
     }
   }, [originalSegmentPreviewIdentity, originalSegmentPreviewUrl, stableOriginalSegmentPreviewUrl]);
-  const generatedSegmentPreviewIdentity = useMemo(() => {
-    if (!selectedPreviewGeneration) return null;
-    return selectedPreviewGeneration.outputKey || selectedPreviewGeneration.genId;
-  }, [selectedPreviewGeneration]);
-  const generatedSegmentPreviewUrl = selectedPreviewGeneration?.downloadUrl ?? null;
-  const generatedSegmentPreviewPosterUrl = useMemo(
-    () => (selectedPreviewGeneration ? generationThumbnailUrl(selectedPreviewGeneration) : null),
-    [selectedPreviewGeneration],
-  );
-  const [stableGeneratedSegmentPreviewUrl, setStableGeneratedSegmentPreviewUrl] = useState<string | null>(null);
-  const [stableGeneratedSegmentPreviewPosterUrl, setStableGeneratedSegmentPreviewPosterUrl] = useState<string | null>(null);
-  const stableGeneratedSegmentPreviewIdentityRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (!generatedSegmentPreviewIdentity || !generatedSegmentPreviewUrl) {
-      stableGeneratedSegmentPreviewIdentityRef.current = null;
-      setStableGeneratedSegmentPreviewUrl(null);
-      setStableGeneratedSegmentPreviewPosterUrl(null);
-      return;
-    }
-    if (
-      stableGeneratedSegmentPreviewIdentityRef.current !== generatedSegmentPreviewIdentity ||
-      !stableGeneratedSegmentPreviewUrl
-    ) {
-      stableGeneratedSegmentPreviewIdentityRef.current = generatedSegmentPreviewIdentity;
-      setStableGeneratedSegmentPreviewUrl(generatedSegmentPreviewUrl);
-      setStableGeneratedSegmentPreviewPosterUrl(generatedSegmentPreviewPosterUrl);
-    }
-  }, [
-    generatedSegmentPreviewIdentity,
-    generatedSegmentPreviewPosterUrl,
-    generatedSegmentPreviewUrl,
-    stableGeneratedSegmentPreviewUrl,
-  ]);
   const timelinePlaybackUrl = task?.video?.previewSource?.downloadUrl ?? task?.video?.editSource?.downloadUrl ?? "";
 
   useEffect(() => {
@@ -2558,43 +2713,11 @@ export default function App() {
     mergeTrimStartFrames,
   ]);
 
-  const syncOriginalToGenerated = useCallback((generatedVideo: HTMLVideoElement) => {
-    const originalVideo = compareOriginalRef.current;
-    if (!originalVideo || !segmentWindow) return;
-    const targetTime = originalPreviewIsSegmentClip ? generatedVideo.currentTime : segmentWindow.startSec + generatedVideo.currentTime;
-    if (syncLockRef.current) return;
-    if (originalVideo.readyState < 2) return;
-    syncLockRef.current = true;
-    if (Math.abs(originalVideo.currentTime - targetTime) > 0.18) {
-      originalVideo.currentTime = targetTime;
-    }
-    window.setTimeout(() => {
-      syncLockRef.current = false;
-    }, 0);
-  }, [originalPreviewIsSegmentClip, segmentWindow]);
-
-  const keepOriginalWithinSegment = useCallback((video: HTMLVideoElement) => {
-    if (!segmentWindow) return;
-    if (originalPreviewIsSegmentClip) {
-      if (video.currentTime < 0) {
-        video.currentTime = 0;
-        return;
-      }
-      if (Number.isFinite(video.duration) && video.duration > 0) {
-        const maxTime = Math.max(0, video.duration - 0.001);
-        if (video.currentTime > maxTime) {
-          video.currentTime = maxTime;
-        }
-      }
-      return;
-    }
-    if (video.currentTime < segmentWindow.startSec) {
-      video.currentTime = segmentWindow.startSec;
-    }
-    if (video.currentTime >= segmentWindow.endSec) {
-      video.currentTime = segmentWindow.startSec;
-    }
-  }, [originalPreviewIsSegmentClip, segmentWindow]);
+  useEffect(() => {
+    setMergeAlignmentSuggestion(null);
+    setMergeApplyRetime(false);
+    setMergePlaybackRate(1);
+  }, [mergeTargetGeneration?.genId]);
 
   function mapPointerToMaskCoordinates(event: PointerEvent<HTMLCanvasElement>, canvas: HTMLCanvasElement) {
     const maskCanvas = patchMaskCanvasRef.current;
@@ -2833,7 +2956,7 @@ export default function App() {
       return {
         title: "Kling O1 Edit",
         lines: [
-          "Uses the selected segment video as the base edit input and the selected edited first frame as a reference image.",
+          "Uses the selected working-range video as the base edit input and the selected edited first frame as a reference image.",
           "Prompt must include both <<<video_1>>> and <<<image_1>>> so the model knows which video and reference image to use.",
           'Example prompt: "Transform the horse in <<<video_1>>> into the unicorn in <<<image_1>>>. keep motions, camera movement and background the same".',
         ],
@@ -2843,7 +2966,7 @@ export default function App() {
       return {
         title: "Kling v3 Omni Video",
         lines: [
-          "Uses the selected segment video as the base edit input and the selected edited first frame as a reference image.",
+          "Uses the selected working-range video as the base edit input and the selected edited first frame as a reference image.",
           "Prompt must include both <<<video_1>>> and <<<image_1>>> so the model knows which video and reference image to use.",
           'Example prompt: "Transform the horse in <<<video_1>>> into the unicorn in <<<image_1>>>. keep motions, camera movement and background the same".',
         ],
@@ -2853,9 +2976,9 @@ export default function App() {
       return {
         title: "Seedance 2.0 Reference to Video",
         lines: [
-          "Uses the selected segment video as the motion reference and the selected edited first frame as the image reference.",
+          "Uses the selected working-range video as the motion reference and the selected edited first frame as the image reference.",
           "Prompt must include both @Video1 and @Image1 so Seedance knows which uploaded video and image to follow.",
-          "The source clip is conformed into Seedance's smaller reference-video bounds, then the generated result is upscaled back to the segment size for the rest of the app.",
+          "The source clip is conformed into Seedance's smaller reference-video bounds, then the generated result is upscaled back to the working-range size for the rest of the app.",
           "Limitation: Fal/Seedance may reject clips or reference frames that appear to contain real-person likenesses or private information; this app cannot disable that provider moderation check.",
           'Example prompt: "Transform the horse in @Video1 into the unicorn in @Image1. Keep the motion, camera movement and background the same."',
         ],
@@ -2865,7 +2988,7 @@ export default function App() {
       return {
         title: "Wan 2.7 VideoEdit",
         lines: [
-          "Uses the selected segment video for motion and structure, with the selected edited first frame sent as reference_image.",
+          "Uses the selected working-range video for motion and structure, with the selected edited first frame sent as reference_image.",
           "720p is faster. 1080p is slower but can preserve more detail on cleaner source clips.",
           'Example prompt: "Change the horse into the white unicorn, keep the background and motion the same".',
         ],
@@ -2876,8 +2999,8 @@ export default function App() {
         title: inputMode === "start_only" ? "Kling 2.6 (Start Frame)" : "Kling 2.6 Start/End",
         lines: [
           inputMode === "start_only"
-            ? "Uses only the selected start frame in this tab. It does not use source segment video."
-            : "Uses start frame + end frame + segment duration. It does not use the source segment video for motion.",
+            ? "Uses only the selected start frame in this tab. It does not use source working-range video."
+            : "Uses start frame + end frame + working-range duration. It does not use the source working-range video for motion.",
           inputMode === "start_only"
             ? "Best prompt style: describe motion evolution from the start frame while preserving identity."
             : "Best prompt style: describe camera motion and action between start and end frames.",
@@ -2889,9 +3012,20 @@ export default function App() {
       return {
         title: "Runway Gen-4.5",
         lines: [
-          "Uses only the selected start frame as the initial frame. It does not use source segment motion.",
+          "Uses only the selected start frame as the initial frame. It does not use source working-range motion.",
           "Best prompt style: describe the motion and evolution from frame one while preserving composition.",
           "Avoid conflicting scene changes in one prompt; short and specific prompts usually hold frame identity better.",
+        ],
+      };
+    }
+    if (modelName === "runway-gen4-aleph") {
+      return {
+        title: "Runway Gen-4 Aleph",
+        lines: [
+          "Uses the selected working-range video for motion and timing, plus the selected edited start frame as an image reference.",
+          "Best prompt style: describe the visual transformation while preserving timing, camera movement and scene continuity.",
+          "Runway suggests prompts start with a clear verb and reference the first frame, for example: 'edit the video to start on the input image as the first frame. add motion so that the car floats weightlessly, as if in zero gravity, throughout the video'.",
+          "Runway only supports specific output ratios and may center-crop the video and reference image to fit the chosen ratio.",
         ],
       };
     }
@@ -2907,8 +3041,8 @@ export default function App() {
               : "Runware Veo 3.1 (No Audio)",
         lines: [
           inputMode === "start_only"
-            ? "Uses only the selected start frame in this tab. No source segment video is sent."
-            : "Uses selected start and end frames as keyframes. No source segment video is sent.",
+            ? "Uses only the selected start frame in this tab. No source working-range video is sent."
+            : "Uses selected start and end frames as keyframes. No source working-range video is sent.",
           "Duration is fixed at 8 seconds for Veo 3.1 API runs; merged output may be time-adjusted at insert.",
           inputMode === "start_only"
             ? "Prompting works best with clear motion direction and continuity constraints from the start frame."
@@ -2921,7 +3055,7 @@ export default function App() {
         title: "Runware Wan2.2 A14B",
         lines: [
           "Best for high-quality image-to-video from the selected start frame.",
-          "Uses the start frame as the anchor image; this flow does not consume the source segment video.",
+          "Uses the start frame as the anchor image; this flow does not consume the source working-range video.",
           "Prompt tips: describe camera motion and subject movement clearly, keep style constraints concise and specific.",
         ],
       };
@@ -2931,7 +3065,7 @@ export default function App() {
         title: "Runware Wan2.2 Animate",
         lines: [
           "Best for realistic character replacement/animation using reference image + reference video motion.",
-          "This flow uses selected start frame plus the source segment video as motion reference.",
+          "This flow uses selected start frame plus the source working-range video as motion reference.",
           "Runware currently rejects positivePrompt for this model unless LoRA inputs are supplied, so this app uses reference-driven generation only.",
         ],
       };
@@ -2939,7 +3073,7 @@ export default function App() {
     return {
       title: modelName === "ray-flash-2" ? "Luma Ray Flash 2" : "Luma Ray 2",
       lines: [
-        "Uses source segment video + selected start frame. The start frame anchors look/style while segment drives motion.",
+        "Uses source working-range video + selected start frame. The start frame anchors look/style while the working range drives motion.",
         "Mode dropdown (Luma only): adhere = closest to source, flex = moderate change, reimagine = strongest change.",
         `Current mode: ${modeValue}. For stronger style shifts raise mode; for shot continuity lower mode and keep prompts concise.`,
       ],
@@ -2967,7 +3101,7 @@ export default function App() {
         goToReport(taskId, "reports", null, true);
       }
     } catch (error) {
-      window.alert(error instanceof Error ? error.message : "Failed to delete report.");
+      setAppUiError(error instanceof Error ? error.message : "Failed to delete report.");
     }
   }
 
@@ -3525,6 +3659,8 @@ export default function App() {
     );
     if (existing) {
       setSelectedSegmentId(existing.segmentId);
+      setSegmentDraftActive(false);
+      setSegmentDraftFallbackId(existing.segmentId);
       return existing.segmentId;
     }
     const created = await createSegmentMutation.mutateAsync({
@@ -3532,6 +3668,8 @@ export default function App() {
       endFrameExclusive: selectedRange.endFrameExclusive,
     });
     setSelectedSegmentId(created.segmentId);
+    setSegmentDraftActive(false);
+    setSegmentDraftFallbackId(created.segmentId);
     await taskQuery.refetch();
     return created.segmentId;
   }
@@ -3540,6 +3678,8 @@ export default function App() {
     if (!task) return null;
     if (defaultVideoSegment) {
       setSelectedSegmentId(defaultVideoSegment.segmentId);
+      setSegmentDraftActive(false);
+      setSegmentDraftFallbackId(defaultVideoSegment.segmentId);
       return defaultVideoSegment.segmentId;
     }
     const totalFrames = frameCount(task);
@@ -3549,6 +3689,8 @@ export default function App() {
       endFrameExclusive: totalFrames,
     });
     setSelectedSegmentId(created.segmentId);
+    setSegmentDraftActive(false);
+    setSegmentDraftFallbackId(created.segmentId);
     await taskQuery.refetch();
     return created.segmentId;
   }
@@ -3564,12 +3706,38 @@ export default function App() {
       setLastFrameId(defaultSegment.endFrameId);
       setCurrentFrameIndex(defaultSegment.startFrame);
     }
+    setSegmentDraftActive(false);
+    setSegmentDraftFallbackId(segmentId);
     setVideoWorkMode("whole_video");
     setTab("frames");
   }
 
+  function cancelWorkingRangeDraft() {
+    const fallbackSegment =
+      (segmentDraftFallbackId && task?.segments.find((segment) => segment.segmentId === segmentDraftFallbackId)) ??
+      defaultVideoSegment ??
+      null;
+    if (fallbackSegment) {
+      setSelectedSegmentId(fallbackSegment.segmentId);
+      setFirstFrameId(fallbackSegment.startFrameId);
+      setLastFrameId(fallbackSegment.endFrameId);
+      setCurrentFrameIndex(fallbackSegment.startFrame);
+      setVideoWorkMode(
+        totalVideoFrames > 0 && fallbackSegment.startFrame === 0 && fallbackSegment.endFrameExclusive === totalVideoFrames
+          ? "whole_video"
+          : "custom_segment",
+      );
+    } else {
+      setSelectedSegmentId(null);
+      setVideoWorkMode(null);
+    }
+    setSegmentDraftActive(false);
+  }
+
   function chooseCustomSegmentWorkMode() {
     setVideoWorkMode("custom_segment");
+    setSegmentDraftActive(true);
+    setSegmentDraftFallbackId(selectedSegmentId ?? defaultVideoSegment?.segmentId ?? null);
     setSelectedSegmentId(null);
     if (defaultVideoSegment) {
       setFirstFrameId(defaultVideoSegment.startFrameId);
@@ -3578,19 +3746,89 @@ export default function App() {
     }
   }
 
+  function beginCustomSegmentEdit() {
+    setVideoWorkMode("custom_segment");
+    setSegmentDraftActive(true);
+    setSegmentDraftFallbackId(selectedSegmentId ?? segmentDraftFallbackId ?? defaultVideoSegment?.segmentId ?? null);
+    if (selectedSegmentId) {
+      setSelectedSegmentId(null);
+    }
+    if (selectedSegment) {
+      setFirstFrameId((current) => current ?? selectedSegment.startFrameId);
+      setLastFrameId((current) => current ?? selectedSegment.endFrameId);
+      setCurrentFrameIndex(selectedSegment.startFrame);
+    }
+  }
+
   const saveSegmentCrop = useCallback(
     async (crop: { aspect: "16:9" | "9:16"; x: number; y: number; width: number; height: number; featherPx?: number } | null) => {
       if (!selectedTaskId) throw new Error("Select a task first.");
-      let segmentId = selectedSegmentId;
-      if (!segmentId) {
-        segmentId = await ensureSegmentForSelectedFrames();
+      let sourceSegment = selectedSegment;
+      if (!sourceSegment) {
+        const segmentId = await ensureSegmentForSelectedFrames();
+        if (!segmentId) {
+          throw new Error("You need to pick start and end frames before cropping.");
+        }
+        sourceSegment = task?.segments.find((segment) => segment.segmentId === segmentId) ?? null;
       }
-      if (!segmentId) {
-        throw new Error("You need to pick start and end frames before cropping.");
+      if (!sourceSegment) {
+        throw new Error("Working range not found.");
       }
-      await saveSegmentCropMutation.mutateAsync({ segmentId, crop });
+      const normalizedCrop = crop
+        ? {
+            aspect: crop.aspect,
+            x: crop.x,
+            y: crop.y,
+            width: crop.width,
+            height: crop.height,
+            featherPx: crop.featherPx,
+          }
+        : null;
+      const sameRangeSegments = (task?.segments ?? []).filter(
+        (segment) =>
+          !segment.internalOnly &&
+          segment.startFrame === sourceSegment?.startFrame &&
+          segment.endFrameExclusive === sourceSegment?.endFrameExclusive,
+      );
+      const existing = sameRangeSegments.find((segment) => {
+        const segmentCrop = segment.crop?.enabled ? segment.crop : null;
+        if (!normalizedCrop && !segmentCrop) return true;
+        if (!normalizedCrop || !segmentCrop) return false;
+        return (
+          segmentCrop.aspect === normalizedCrop.aspect &&
+          segmentCrop.x === normalizedCrop.x &&
+          segmentCrop.y === normalizedCrop.y &&
+          segmentCrop.width === normalizedCrop.width &&
+          segmentCrop.height === normalizedCrop.height &&
+          (segmentCrop.featherPx ?? 0) === (normalizedCrop.featherPx ?? 0)
+        );
+      });
+      if (existing) {
+        setSelectedSegmentId(existing.segmentId);
+        setFirstFrameId(existing.startFrameId);
+        setLastFrameId(existing.endFrameId);
+        setCurrentFrameIndex(existing.startFrame);
+        return existing.segmentId;
+      }
+      if (!normalizedCrop) {
+        return sourceSegment.segmentId;
+      }
+      const created = await apiClient.createSegment(selectedTaskId, {
+        startFrameIndex: sourceSegment.startFrame,
+        endFrameExclusive: sourceSegment.endFrameExclusive,
+      });
+      const patched = await saveSegmentCropMutation.mutateAsync({ segmentId: created.segmentId, crop: normalizedCrop });
+      const resolvedSegment = patched.segment ?? task?.segments.find((segment) => segment.segmentId === created.segmentId) ?? null;
+      if (resolvedSegment?.segmentId) {
+        setSelectedSegmentId(resolvedSegment.segmentId);
+        setFirstFrameId(resolvedSegment.startFrameId);
+        setLastFrameId(resolvedSegment.endFrameId);
+        setCurrentFrameIndex(resolvedSegment.startFrame);
+        return resolvedSegment.segmentId;
+      }
+      return created.segmentId;
     },
-    [ensureSegmentForSelectedFrames, saveSegmentCropMutation, selectedSegmentId, selectedTaskId],
+    [ensureSegmentForSelectedFrames, saveSegmentCropMutation, selectedSegment, selectedTaskId, setCurrentFrameIndex, task?.segments],
   );
 
   async function handleTabChange(nextTab: TabId) {
@@ -3604,30 +3842,60 @@ export default function App() {
             setVideoWorkMode("whole_video");
           }
         } catch (error) {
-          const message = error instanceof Error ? error.message : "Failed to prepare the full video range.";
-          window.alert(message);
+          setAppUiError(error instanceof Error ? error.message : "Failed to prepare the full video range.");
           return;
         }
       } else {
         if (selectedSegmentId) {
+          setSegmentDraftActive(false);
           setVideoWorkMode("custom_segment");
         } else {
           if (!selectedRange) {
-            try {
-              await ensureDefaultVideoSegment();
-              setVideoWorkMode("whole_video");
-            } catch (error) {
-              const message = error instanceof Error ? error.message : "Failed to prepare the full video range.";
-              window.alert(message);
-              return;
+            const fallbackSegment =
+              (segmentDraftFallbackId && task?.segments.find((segment) => segment.segmentId === segmentDraftFallbackId)) ?? null;
+            if (fallbackSegment) {
+              setSelectedSegmentId(fallbackSegment.segmentId);
+              setFirstFrameId(fallbackSegment.startFrameId);
+              setLastFrameId(fallbackSegment.endFrameId);
+              setCurrentFrameIndex(fallbackSegment.startFrame);
+              setSegmentDraftActive(false);
+              setVideoWorkMode(
+                totalVideoFrames > 0 && fallbackSegment.startFrame === 0 && fallbackSegment.endFrameExclusive === totalVideoFrames
+                  ? "whole_video"
+                  : "custom_segment",
+              );
+            } else {
+              try {
+                await ensureDefaultVideoSegment();
+                setVideoWorkMode("whole_video");
+              } catch (error) {
+                setAppUiError(error instanceof Error ? error.message : "Failed to prepare the full video range.");
+                return;
+              }
             }
           } else {
-            try {
-              await ensureSegmentForSelectedFrames();
-            } catch (error) {
-              const message = error instanceof Error ? error.message : "Failed to create segment from selected frames.";
-              window.alert(message);
-              return;
+            const fallbackSegment =
+              (segmentDraftFallbackId && task?.segments.find((segment) => segment.segmentId === segmentDraftFallbackId)) ?? null;
+            if (
+              fallbackSegment &&
+              fallbackSegment.startFrame === selectedRange.startFrame &&
+              fallbackSegment.endFrameExclusive === selectedRange.endFrameExclusive
+            ) {
+              setSelectedSegmentId(fallbackSegment.segmentId);
+              setSegmentDraftActive(false);
+              setVideoWorkMode(
+                totalVideoFrames > 0 && fallbackSegment.startFrame === 0 && fallbackSegment.endFrameExclusive === totalVideoFrames
+                  ? "whole_video"
+                  : "custom_segment",
+              );
+            } else {
+              try {
+                await ensureSegmentForSelectedFrames();
+                setVideoWorkMode("custom_segment");
+              } catch (error) {
+                setAppUiError(error instanceof Error ? error.message : "Failed to create segment from selected frames.");
+                return;
+              }
             }
           }
         }
@@ -3637,8 +3905,17 @@ export default function App() {
   }
 
   function selectCompareCandidate(frameId: string, tabKey: "first" | "last", candidate: EditFrameCandidate) {
+    const isRefined = candidate.kind === "variant" && candidate.variant?.variantKind === "refined";
     const sourceVariantId = candidate.kind === "variant" ? candidate.variantId ?? null : null;
-    setCompareVariantIds((previous) => ({ ...previous, [tabKey]: sourceVariantId }));
+    const parentVariantId = candidate.kind === "variant" ? candidate.variant?.sourceVariantId ?? null : null;
+    setCompareVariantIds((previous) => ({
+      ...previous,
+      [tabKey]: candidate.kind === "original" ? null : isRefined ? parentVariantId : sourceVariantId,
+    }));
+    setRefineSourceVariantIds((previous) => ({
+      ...previous,
+      [tabKey]: candidate.kind === "variant" && isRefined ? sourceVariantId : null,
+    }));
     const targetVariantId = candidate.kind === "original" ? "original" : candidate.variantId;
     if (!targetVariantId) return;
     selectVariantMutation.mutate({ frameId, variantId: targetVariantId });
@@ -3651,6 +3928,36 @@ export default function App() {
 
   function selectRefineSourceVariant(tabKey: "first" | "last", variantId: string) {
     setRefineSourceVariantIds((previous) => ({ ...previous, [tabKey]: variantId }));
+  }
+
+  async function uploadManualEditedFrame(tabKey: "first" | "last", file: File): Promise<string> {
+    if (!selectedTaskId) throw new Error("No task selected");
+    const frameRecord = tabKey === "first" ? editFirstFrame : editLastFrame;
+    if (!frameRecord?.frameId) throw new Error("No source frame selected");
+    const init = await apiClient.initManualFrameUpload(selectedTaskId, frameRecord.frameId, {
+      filename: file.name,
+      contentType: file.type || "image/png",
+    });
+    const uploadResponse = await fetch(init.uploadUrl, {
+      method: "PUT",
+      headers: {
+        "content-type": file.type || "application/octet-stream",
+      },
+      body: file,
+    });
+    if (!uploadResponse.ok) {
+      throw new Error(`Upload failed: ${uploadResponse.status}`);
+    }
+    const completed = await apiClient.completeManualFrameUpload(selectedTaskId, frameRecord.frameId, {
+      uploadKey: init.uploadKey,
+      filename: file.name,
+    });
+    setCompareVariantIds((previous) => ({ ...previous, [tabKey]: completed.variant.variantId ?? previous[tabKey] }));
+    setRefineSourceVariantIds((previous) => ({ ...previous, [tabKey]: null }));
+    setEditSourceVariantIds((previous) => ({ ...previous, [tabKey]: completed.variant.variantId ?? previous[tabKey] }));
+    await queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
+    await queryClient.invalidateQueries({ queryKey: ["task", "assets", selectedTaskId] });
+    return completed.variant.variantId;
   }
 
   function openQualityMatchForVariant(frameRecord: typeof activeEditFrame, variantId: string) {
@@ -3696,7 +4003,7 @@ export default function App() {
         });
       }
     } catch (error) {
-      window.alert(error instanceof Error ? error.message : "Failed to delete asset");
+      setAppUiError(error instanceof Error ? error.message : "Failed to delete asset");
     }
   }
 
@@ -3711,14 +4018,62 @@ export default function App() {
       setLastFrameId(result.frameId);
     }
   }
-  const tabs: Array<{ id: TabId; label: string }> = [
-    { id: "timeline", label: "Select Frames" },
-    { id: "frames", label: "Edit frames" },
-    { id: "refine", label: "Refine Frames" },
-    { id: "generate", label: "Generate Video" },
-    { id: "merge", label: "Merge Video" },
-    { id: "assets", label: "Download Assets" },
+  const primaryTabs: Array<{ id: PrimaryWorkflowSection; label: string }> = [
+    { id: "source", label: "Select" },
+    { id: "create", label: "Edit" },
+    { id: "outputs", label: "Generate" },
+    { id: "post", label: "Post Process" },
+    { id: "reports", label: "Reports" },
+    { id: "assets", label: "Assets" },
   ];
+  const currentReferenceSegment = selectedSegment ?? defaultVideoSegment ?? null;
+  const currentReferenceStartImageUrl = currentReferenceSegment ? task?.frames?.[currentReferenceSegment.startFrameId]?.imageUrl ?? null : null;
+  const currentReferenceEndImageUrl = currentReferenceSegment ? task?.frames?.[currentReferenceSegment.endFrameId]?.imageUrl ?? null : null;
+  const currentReferenceAssets = useMemo(() => {
+    const assets: Array<{ label: string; imageUrl?: string | null; videoUrl?: string | null; posterUrl?: string | null }> = [];
+    const useGenerationBoundInputs =
+      (activeWorkflowSection === "outputs" || activeWorkflowSection === "post") && Boolean(selectedPreviewGeneration);
+    const firstFrameVariantId = useGenerationBoundInputs
+      ? selectedPreviewGeneration?.sourceFirstFrameVariantId ?? null
+      : refineSourceVariantIds.first || compareVariantIds.first;
+    const lastFrameVariantId = useGenerationBoundInputs
+      ? selectedPreviewGeneration?.sourceLastFrameVariantId ?? null
+      : refineSourceVariantIds.last || compareVariantIds.last;
+    const firstFrameEditUrl = frameVariantImageUrl(editFirstFrame?.frameId, firstFrameVariantId);
+    const lastFrameEditUrl =
+      generationInputMode === "start_end" ? frameVariantImageUrl(editLastFrame?.frameId, lastFrameVariantId) : null;
+
+    if (firstFrameEditUrl) {
+      assets.push({ label: "First frame edit", imageUrl: firstFrameEditUrl });
+    }
+    if (lastFrameEditUrl) {
+      assets.push({ label: "Last frame edit", imageUrl: lastFrameEditUrl });
+    }
+    if (selectedPreviewGeneration?.downloadUrl) {
+      assets.push({
+        label: "Generated video",
+        videoUrl: selectedPreviewGeneration.downloadUrl,
+        posterUrl: generationThumbnailUrl(selectedPreviewGeneration),
+      });
+    }
+    return assets;
+  }, [
+    compareVariantIds.first,
+    compareVariantIds.last,
+    editFirstFrame?.frameId,
+    editLastFrame?.frameId,
+    frameVariantImageUrl,
+    generationInputMode,
+    generationThumbnailUrl,
+    activeWorkflowSection,
+    refineSourceVariantIds.first,
+    refineSourceVariantIds.last,
+    selectedPreviewGeneration,
+  ]);
+  const currentReferenceWarning =
+    wholeVideoNeedsChunking && currentReferenceSegment?.segmentId === defaultVideoSegment?.segmentId
+      ? "This video is longer than single-pass generation limit and will require chunking."
+      : undefined;
 
   function renderCustomReportBox(taskId: string | null, reports: CustomReportRecord[] | undefined) {
     return (
@@ -3792,6 +4147,7 @@ export default function App() {
       lastFrame,
       setLastFrameId,
       selectedRange,
+      generationInputMode,
       lumaModel,
       videoWorkMode,
       defaultVideoSegment,
@@ -3801,11 +4157,14 @@ export default function App() {
         void chooseWholeVideoWorkMode();
       },
       onChooseCustomSegment: chooseCustomSegmentWorkMode,
+      onBeginCustomSegmentEdit: beginCustomSegmentEdit,
+      onCancelWorkingRangeDraft: cancelWorkingRangeDraft,
       onContinueToEditFrames: () => {
         void handleTabChange("frames");
       },
       selectedSegmentId,
       selectedSegment,
+      segmentDraftFallbackAvailable: Boolean(segmentDraftFallbackId),
       setSelectedSegmentId,
       ensureSegmentForSelectedFrames,
       saveSegmentCrop,
@@ -3822,13 +4181,17 @@ export default function App() {
       lumaHardLimitSeconds,
       lastFrame,
       selectedRange,
+      generationInputMode,
       lumaModel,
       videoWorkMode,
       defaultVideoSegment,
       wholeVideoNeedsChunking,
       selectedSegmentId,
       selectedSegment,
+      segmentDraftFallbackId,
       chooseCustomSegmentWorkMode,
+      beginCustomSegmentEdit,
+      cancelWorkingRangeDraft,
       chooseWholeVideoWorkMode,
       handleTabChange,
       captureCurrentFrameFor,
@@ -3843,6 +4206,14 @@ export default function App() {
   const editFrameTabCtx = useMemo<EditFrameTabCtx>(
     () => ({
       setEditFrameTab,
+      allowEndFrameTab: generationInputMode === "start_end",
+      openRefineModalForVariant: (variantId) => {
+        openQualityMatchForVariant(activeEditFrame, variantId);
+      },
+      onNext: () => {
+        void handleTabChange("outputs");
+      },
+      nextWarning: missingRouteInputsMessage,
       editFrameTab,
       activeEditFrame,
       prompt,
@@ -3850,14 +4221,14 @@ export default function App() {
       model,
       setModel,
       fullEditMutation,
-      task,
       activeEditSourceImageUrl,
-      activeCompareImageUrl,
       activeEditCandidates,
       selectCompareCandidate,
       setImagePreviewModal,
+      setImageCompareModal,
       setEditSourceCandidate,
       selectedTaskId,
+      uploadManualEditedFrame,
       handleDeleteAsset,
       activeFrameDimensions,
       patchOverlayCanvasRef,
@@ -3894,17 +4265,21 @@ export default function App() {
       formatCompactTimestamp,
     }),
     [
+      generationInputMode,
+      activeEditFrame,
+      handleTabChange,
+      missingRouteInputsMessage,
       editFrameTab,
       activeEditFrame,
       prompt,
       model,
       fullEditMutation,
-      task,
       activeEditSourceImageUrl,
-      activeCompareImageUrl,
       activeEditCandidates,
       selectCompareCandidate,
+      setImageCompareModal,
       selectedTaskId,
+      uploadManualEditedFrame,
       handleDeleteAsset,
       activeFrameDimensions,
       patchEngine,
@@ -3928,6 +4303,7 @@ export default function App() {
     () => ({
       refineFrameTab,
       setRefineFrameTab,
+      allowEndFrameTab: generationInputMode === "start_end",
       activeRefineFrame,
       refineGroups: activeRefineGroups,
       focusedEditedVariantId: activeRefineFocusedEditedVariantId,
@@ -3949,6 +4325,7 @@ export default function App() {
       activeRefineFocusedEditedVariantId,
       activeRefineGroups,
       formatCompactTimestamp,
+      generationInputMode,
       handleDeleteAsset,
       queryClient,
       refineFrameTab,
@@ -3960,8 +4337,15 @@ export default function App() {
 
   const generateTabCtx = useMemo<GenerateTabCtx>(
     () => ({
-      setGenerationInputMode,
-      setLumaModel,
+      viewMode: "outputs",
+      onNext: () => {
+        void handleTabChange("merge");
+      },
+      nextDisabled: !selectedPreviewGeneration || selectedPreviewGeneration.status !== "complete" || !selectedPreviewGeneration.downloadUrl,
+      nextWarning:
+        !selectedPreviewGeneration || selectedPreviewGeneration.status !== "complete" || !selectedPreviewGeneration.downloadUrl
+          ? "Choose a completed output before continuing to Post Process."
+          : null,
       generationModelByInput,
       generationInputMode,
       selectedSegment,
@@ -3985,14 +4369,18 @@ export default function App() {
       setReplicateKlingV3Mode,
       wan27Resolution,
       setWan27Resolution,
+      preserveFrames,
+      setPreserveFrames,
       lumaPrompt,
       setLumaPrompt,
+      lumaContinuationPrompt,
+      setLumaContinuationPrompt,
       generationPromptPlaceholder,
       generationPromptError,
+      missingRouteInputsMessage,
       generationInputNote,
       generationHelp,
       selectedSegmentOverLimit,
-      lumaHardLimitSeconds,
       selectedSegmentLimitMessage,
       selectedSegmentId,
       generateSegmentMutation,
@@ -4001,22 +4389,20 @@ export default function App() {
       pauseChunkedGeneration: pauseChunkedGenerationMutation.mutate,
       resumeChunkedGeneration: resumeChunkedGenerationMutation.mutate,
       restartChunkedGeneration: restartChunkedGenerationMutation.mutate,
+      saveChunkedGenerationDraft: saveChunkedGenerationDraftMutation.mutate,
+      cancelChunkedGeneration: cancelChunkedGenerationMutation.mutate,
       isChunkedGenerationMutationPending:
         generateChunkedSegmentMutation.isPending ||
         pauseChunkedGenerationMutation.isPending ||
         resumeChunkedGenerationMutation.isPending ||
-        restartChunkedGenerationMutation.isPending,
+        restartChunkedGenerationMutation.isPending ||
+        saveChunkedGenerationDraftMutation.isPending ||
+        cancelChunkedGenerationMutation.isPending,
       frameVariantImageUrl,
       segmentWindow,
       originalSegmentPreviewUrl: stableOriginalSegmentPreviewUrl,
-      generatedSegmentPreviewUrl: stableGeneratedSegmentPreviewUrl,
-      generatedSegmentPreviewPosterUrl: stableGeneratedSegmentPreviewPosterUrl,
       selectedPreviewGeneration,
       task,
-      compareOriginalRef,
-      keepOriginalWithinSegment,
-      compareVariantRef,
-      syncOriginalToGenerated,
       originalPreviewIsSegmentClip,
       selectedSegmentGenerations,
       selectedReportOutputs,
@@ -4029,12 +4415,14 @@ export default function App() {
       generationThumbnailUrl,
       formatCompactTimestamp,
       setVideoPreviewModal,
+      setVideoCompareModal,
       openVideoCleanupModal: openVideoCleanupModalForGeneration,
       onAssetError: () => refreshSignedUrlsForTask(selectedTaskId),
       handleDeleteAsset,
       setGenerationCardsVisible,
     }),
     [
+      handleTabChange,
       generationModelByInput,
       generationInputMode,
       selectedSegment,
@@ -4051,13 +4439,15 @@ export default function App() {
       replicateKlingMode,
       replicateKlingV3Mode,
       wan27Resolution,
+      preserveFrames,
       lumaPrompt,
+      lumaContinuationPrompt,
       generationPromptPlaceholder,
       generationPromptError,
+      missingRouteInputsMessage,
       generationInputNote,
       generationHelp,
       selectedSegmentOverLimit,
-      lumaHardLimitSeconds,
       selectedSegmentLimitMessage,
       selectedSegmentId,
       generateSegmentMutation,
@@ -4066,15 +4456,17 @@ export default function App() {
       pauseChunkedGenerationMutation.mutate,
       resumeChunkedGenerationMutation.mutate,
       restartChunkedGenerationMutation.mutate,
+      saveChunkedGenerationDraftMutation.mutate,
+      cancelChunkedGenerationMutation.mutate,
       generateChunkedSegmentMutation.isPending,
       pauseChunkedGenerationMutation.isPending,
       resumeChunkedGenerationMutation.isPending,
       restartChunkedGenerationMutation.isPending,
+      saveChunkedGenerationDraftMutation.isPending,
+      cancelChunkedGenerationMutation.isPending,
       frameVariantImageUrl,
       segmentWindow,
       stableOriginalSegmentPreviewUrl,
-      stableGeneratedSegmentPreviewUrl,
-      stableGeneratedSegmentPreviewPosterUrl,
       selectedPreviewGeneration,
       task,
       originalPreviewIsSegmentClip,
@@ -4082,6 +4474,7 @@ export default function App() {
       selectedReportOutputs,
       generationCardsVisible,
       selectSegmentGeneration,
+      setVideoCompareModal,
       openVideoCleanupModalForGeneration,
       selectedTaskId,
       refreshSignedUrlsForTask,
@@ -4091,6 +4484,17 @@ export default function App() {
 
   const mergeTabCtx = useMemo<MergeTabCtx>(
     () => ({
+      onNext: () => {
+        if (selectedTaskId) {
+          goToReport(selectedTaskId, "videos", null);
+        }
+      },
+      nextDisabled: !mergeTargetGeneration || mergeTargetGeneration.status !== "complete" || !mergeTargetGeneration.downloadUrl,
+      nextWarning:
+        !mergeTargetGeneration || mergeTargetGeneration.status !== "complete" || !mergeTargetGeneration.downloadUrl
+          ? "Choose a completed output in Outputs before continuing to Reports."
+          : null,
+      generationInputMode,
       mergeTargetGeneration,
       mergeTargetSegment,
       completeGenerations,
@@ -4125,7 +4529,18 @@ export default function App() {
       mergeGeneratedEndAnchor,
       endBoundaryGeneratedThumbs,
       endBoundaryOriginalThumbs,
+      mergeSourceWidth,
+      mergeSourceHeight,
       mergeMutation,
+      mergeApplyRetime,
+      setMergeApplyRetime,
+      mergePlaybackRate,
+      setMergePlaybackRate,
+      suggestMergeAlignment: suggestMergeAlignmentMutation.mutate,
+      isSuggestingMergeAlignment: suggestMergeAlignmentMutation.isPending,
+      mergeAlignmentSuggestion,
+      mergeAlignmentSuggestionError:
+        suggestMergeAlignmentMutation.error instanceof Error ? suggestMergeAlignmentMutation.error.message : null,
       extendGeneration: extendSegmentGenerationMutation.mutate,
       isExtendingGeneration: extendSegmentGenerationMutation.isPending,
       extendGenerationError:
@@ -4135,8 +4550,13 @@ export default function App() {
       keyBasenameFromS3Key,
       formatCompactTimestamp,
       openMotionSyncModal,
+      openVideoCleanupModal: openVideoCleanupModalForGeneration,
     }),
     [
+      selectedTaskId,
+      goToReport,
+      mergeTargetGeneration,
+      generationInputMode,
       mergeTargetGeneration,
       mergeTargetSegment,
       completeGenerations,
@@ -4163,12 +4583,21 @@ export default function App() {
       mergeGeneratedEndAnchor,
       endBoundaryGeneratedThumbs,
       endBoundaryOriginalThumbs,
+      mergeSourceWidth,
+      mergeSourceHeight,
       mergeMutation,
+      mergeApplyRetime,
+      mergePlaybackRate,
+      suggestMergeAlignmentMutation.mutate,
+      suggestMergeAlignmentMutation.isPending,
+      mergeAlignmentSuggestion,
+      suggestMergeAlignmentMutation.error,
       extendSegmentGenerationMutation.mutate,
       extendSegmentGenerationMutation.isPending,
       extendSegmentGenerationMutation.error,
       sortedExports,
       openMotionSyncModal,
+      openVideoCleanupModalForGeneration,
     ],
   );
 
@@ -4231,49 +4660,6 @@ export default function App() {
     );
   }
 
-  if (tab === "report") {
-    return (
-      <>
-        <Suspense fallback={<main className="min-h-screen bg-bg p-8 text-ink">Loading report...</main>}>
-          <ReportsPage
-            ctx={{
-              reportTask,
-              reportTaskId,
-              sortedJobs,
-              selectedOutputRefsByTask,
-              reportOutputRefKey,
-              reportView,
-              setReportView,
-              setActiveCustomReportId,
-              activeCustomReportId,
-              goToTaskTimeline: (taskId: string) => setTab("timeline", taskId),
-              logout,
-              formatAssetDate,
-              truncateIdentifier,
-              reportTaskQuery,
-              createCustomReportMutation,
-              deleteCustomReportMutation,
-              toggleCustomReportOutput,
-              setVideoPreviewModal,
-              setImagePreviewModal,
-              formatCompactTimestamp,
-              asNumber,
-              describeSegment,
-              setReportGraphModal,
-            }}
-          />
-        </Suspense>
-        <PreviewModals
-          imagePreview={imagePreviewModal}
-          videoPreview={videoPreviewModal}
-          onCloseImage={() => setImagePreviewModal(null)}
-          onCloseVideo={() => setVideoPreviewModal(null)}
-          onMediaError={() => refreshSignedUrlsForTask(reportTaskId ?? selectedTaskId)}
-        />
-      </>
-    );
-  }
-
   return (
     <main className="min-h-screen bg-bg text-ink">
       <div className="mx-auto grid max-w-[1500px] grid-cols-12 gap-4 p-4 md:p-6">
@@ -4299,19 +4685,55 @@ export default function App() {
         />
 
         <section className="col-span-12 space-y-4 md:col-span-10">
+          {appUiError ? (
+            <StatusNotice variant="error">
+              <div className="flex items-start justify-between gap-3">
+                <p>{appUiError}</p>
+                <button type="button" className="rounded border border-red-200 bg-white px-2 py-1 text-xs text-red-700" onClick={() => setAppUiError(null)}>
+                  Dismiss
+                </button>
+              </div>
+            </StatusNotice>
+          ) : null}
           <div className="rounded-2xl border border-ink/10 bg-card p-4">
             {tab !== "custom_qc" && tab !== "api_logs" ? (
-              <WorkflowTabs
-                tabs={tabs}
-                activeTab={tab}
-                onSelect={(tabId) => {
-                  void handleTabChange(tabId);
-                }}
-              />
+              <div className="space-y-3">
+                <WorkflowTabs
+                  tabs={primaryTabs}
+                  activeTab={activeWorkflowSection ?? "source"}
+                  onSelect={(sectionId) => {
+                    handlePrimaryWorkflowSectionChange(sectionId as PrimaryWorkflowSection);
+                  }}
+                  variant="primary"
+                />
+                {activeWorkflowSection === "create" || activeWorkflowSection === "outputs" || activeWorkflowSection === "post" ? (
+                  <div className="mb-4">
+                    <CurrentWorkingReferencePanel
+                      segment={currentReferenceSegment}
+                      startFrameImageUrl={currentReferenceStartImageUrl}
+                      endFrameImageUrl={currentReferenceEndImageUrl}
+                      warning={currentReferenceWarning}
+                      assets={currentReferenceAssets}
+                      onPreviewImage={({ url, label }) => setImagePreviewModal({ url, label })}
+                      onPreviewVideo={({ url, label }) => setVideoPreviewModal({ url, label })}
+                    />
+                  </div>
+                ) : null}
+                {activeWorkflowSection === "source" ? (
+                  <div className="rounded-xl border border-ink/10 bg-bg p-3">
+                    <CreateRoutePicker
+                      activeMode={generationInputMode}
+                      onSelect={(mode) => {
+                        setGenerationInputMode(mode);
+                      }}
+                    />
+                  </div>
+                ) : null}
+              </div>
             ) : null}
 
             {tab === "timeline" && (
-              <Suspense fallback={<p className="text-sm text-ink/60">Loading Select Frames...</p>}>
+              <Suspense fallback={<p className="text-sm text-ink/60">Loading Source...</p>}>
                 <PickFrameTab ctx={pickFrameTabCtx} />
               </Suspense>
             )}
@@ -4334,8 +4756,48 @@ export default function App() {
               </Suspense>
             )}
 
+            {tab === "outputs" && (
+              <Suspense fallback={<p className="text-sm text-ink/60">Loading Outputs...</p>}>
+                <GenerateTab ctx={generateTabCtx} />
+              </Suspense>
+            )}
+
+            {tab === "report" && (
+              <Suspense fallback={<p className="text-sm text-ink/60">Loading Reports...</p>}>
+                <ReportsPage
+                  ctx={{
+                    reportTask,
+                    reportTaskId,
+                    sortedJobs,
+                    selectedOutputRefsByTask,
+                    reportOutputRefKey,
+                    reportView,
+                    setReportView,
+                    setActiveCustomReportId,
+                    activeCustomReportId,
+                    formatAssetDate,
+                    truncateIdentifier,
+                    reportTaskQuery,
+                    createCustomReportMutation,
+                    deleteCustomReportMutation,
+                    toggleCustomReportOutput,
+                    setVideoPreviewModal,
+                    setImagePreviewModal,
+                    formatCompactTimestamp,
+                    asNumber,
+                    describeSegment,
+                    setReportGraphModal,
+                    openSource: (taskId: string) => setTab("timeline", taskId),
+                    openOutputs: (taskId: string) => setTab("outputs", taskId),
+                    currentWorkingRangeLabel: selectedSegment ? describeSegment(selectedSegment) : "Whole video",
+                    currentWorkingRangeSegment: selectedSegment,
+                  }}
+                />
+              </Suspense>
+            )}
+
             {tab === "merge" && (
-              <Suspense fallback={<p className="text-sm text-ink/60">Loading Merge Video...</p>}>
+              <Suspense fallback={<p className="text-sm text-ink/60">Loading Post Process...</p>}>
                 <MergeTab ctx={mergeTabCtx} />
               </Suspense>
             )}
@@ -4377,8 +4839,12 @@ export default function App() {
       <PreviewModals
         imagePreview={imagePreviewModal}
         videoPreview={videoPreviewModal}
+        imageCompare={imageCompareModal}
+        videoCompare={videoCompareModal}
         onCloseImage={() => setImagePreviewModal(null)}
         onCloseVideo={() => setVideoPreviewModal(null)}
+        onCloseImageCompare={() => setImageCompareModal(null)}
+        onCloseVideoCompare={() => setVideoCompareModal(null)}
         onMediaError={() => refreshSignedUrlsForTask(selectedTaskId)}
       />
       {automationRunState.isOpen ? (
@@ -4591,18 +5057,17 @@ export default function App() {
             ...previous,
             isOpen: false,
           }));
-          if (selectedTaskId) {
-            setTab("refine", selectedTaskId);
-          }
           if (result?.frameId && result?.variantId) {
             const frameId = result.frameId;
             if (editFirstFrame?.frameId === frameId) {
               setRefineFrameTab("first");
               setRefineSourceVariantIds((previous) => ({ ...previous, first: result.variantId ?? previous.first }));
+              setEditSourceVariantIds((previous) => ({ ...previous, first: result.variantId ?? previous.first }));
             }
             if (editLastFrame?.frameId === frameId) {
               setRefineFrameTab((current) => (editFirstFrame?.frameId === frameId ? current : "last"));
               setRefineSourceVariantIds((previous) => ({ ...previous, last: result.variantId ?? previous.last }));
+              setEditSourceVariantIds((previous) => ({ ...previous, last: result.variantId ?? previous.last }));
             }
           }
           if (selectedTaskId) {

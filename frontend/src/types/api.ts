@@ -13,7 +13,15 @@ export type FrameVariant = {
   variantKind?: "edited" | "refined";
   sourceVariantId?: string | null;
   refinedVariantIds?: string[];
-  model: "nano_banana" | "nano_banana_pro" | "chatgpt" | "chatgpt_latest" | "runware_flux_fill" | "runware_ace_pp" | "generated_extension_anchor";
+  model:
+    | "nano_banana"
+    | "nano_banana_pro"
+    | "chatgpt"
+    | "chatgpt_latest"
+    | "runware_flux_fill"
+    | "runware_ace_pp"
+    | "generated_extension_anchor"
+    | "manual_upload";
   promptHash: string;
   createdAt: string;
   jobId?: string | null;
@@ -316,6 +324,7 @@ export type SegmentRecord = {
   selectedGenerationId?: string | null;
   segmentClipKey?: string;
   segmentClipUrl?: string;
+  internalOnly?: boolean;
   crop?: {
     enabled: boolean;
     aspect: "16:9" | "9:16";
@@ -338,6 +347,7 @@ export type SegmentGeneration = {
       | "ray-2"
       | "ray-flash-2"
       | "runway-gen4.5"
+      | "runway-gen4-aleph"
       | "kling-2.6"
       | "kling-o1"
       | "kling-v3-omni-video"
@@ -352,6 +362,9 @@ export type SegmentGeneration = {
     lumaGenerationId?: string | null;
   };
   status: "queued" | "running" | "complete" | "failed";
+  isChunkInternal?: boolean;
+  chunkedRunId?: string | null;
+  chunkRole?: "internal_chunk" | "draft_stitched" | string | null;
   jobId?: string | null;
   error?: string | null;
   outputKey?: string | null;
@@ -461,150 +474,6 @@ export type SegmentGeneration = {
     } | null;
     [key: string]: unknown;
   };
-  qc?: {
-    status: "running" | "complete" | "failed" | "skipped";
-    updatedAt?: string;
-    analyzedAt?: string;
-    error?: string;
-    reason?: string;
-    frame?: {
-      metrics?: Record<string, number | string | null>;
-      artifacts?: {
-        heatmapKey?: string;
-        heatmapUrl?: string;
-        overlayKey?: string;
-        overlayUrl?: string;
-        binaryChangeKey?: string;
-        binaryChangeUrl?: string;
-        boundaryOverlayKey?: string;
-        boundaryOverlayUrl?: string;
-        [key: string]: unknown;
-      };
-      advanced?: {
-        status?: "pass" | "warn" | "fail" | string;
-        metrics?: Record<string, number | string | null>;
-        topRegions?: Array<{
-          x: number;
-          y: number;
-          width: number;
-          height: number;
-          score: number;
-          coveragePct: number;
-        }>;
-        tooltips?: Record<string, string>;
-        artifacts?: {
-          compositeMapKey?: string;
-          compositeMapUrl?: string;
-          compositeOverlayKey?: string;
-          compositeOverlayUrl?: string;
-          lpipsMapKey?: string;
-          lpipsMapUrl?: string;
-          lpipsOverlayKey?: string;
-          lpipsOverlayUrl?: string;
-          sharpnessMapKey?: string;
-          sharpnessMapUrl?: string;
-          naturalnessMapKey?: string;
-          naturalnessMapUrl?: string;
-          textureMapKey?: string;
-          textureMapUrl?: string;
-          boundaryMapKey?: string;
-          boundaryMapUrl?: string;
-          maskUsedKey?: string;
-          maskUsedUrl?: string;
-          [key: string]: unknown;
-        };
-      };
-    };
-    frameByVariant?: Record<
-      string,
-      {
-        metrics?: Record<string, number | string | null>;
-        artifacts?: {
-          heatmapKey?: string;
-          heatmapUrl?: string;
-          overlayKey?: string;
-          overlayUrl?: string;
-          binaryChangeKey?: string;
-          binaryChangeUrl?: string;
-          boundaryOverlayKey?: string;
-          boundaryOverlayUrl?: string;
-          [key: string]: unknown;
-        };
-        advanced?: {
-          status?: "pass" | "warn" | "fail" | string;
-          metrics?: Record<string, number | string | null>;
-          topRegions?: Array<{
-            x: number;
-            y: number;
-            width: number;
-            height: number;
-            score: number;
-            coveragePct: number;
-          }>;
-          tooltips?: Record<string, string>;
-          artifacts?: {
-            compositeMapKey?: string;
-            compositeMapUrl?: string;
-            compositeOverlayKey?: string;
-            compositeOverlayUrl?: string;
-            lpipsMapKey?: string;
-            lpipsMapUrl?: string;
-            lpipsOverlayKey?: string;
-            lpipsOverlayUrl?: string;
-            sharpnessMapKey?: string;
-            sharpnessMapUrl?: string;
-            naturalnessMapKey?: string;
-            naturalnessMapUrl?: string;
-            textureMapKey?: string;
-            textureMapUrl?: string;
-            boundaryMapKey?: string;
-            boundaryMapUrl?: string;
-            maskUsedKey?: string;
-            maskUsedUrl?: string;
-            [key: string]: unknown;
-          };
-        };
-      }
-    >;
-    advancedFrame?: {
-      status?: "running" | "complete" | "failed" | string;
-      updatedAt?: string;
-      analyzedAt?: string;
-      variantCount?: number;
-      config?: {
-        patchSize?: number;
-        stride?: number;
-        outerRingPx?: number;
-        [key: string]: unknown;
-      };
-    };
-    video?: {
-      aggregates?: Record<string, number | string | boolean | null | Record<string, number | null>>;
-      selectedFrames?: Array<{
-        index: number;
-        timeSec: number;
-        changedPctTotal?: number;
-        outsideLeakagePct?: number | null;
-        heatmapKey?: string;
-        heatmapUrl?: string;
-        overlayKey?: string;
-        overlayUrl?: string;
-        binaryChangeKey?: string;
-        binaryChangeUrl?: string;
-      }>;
-      artifacts?: {
-        diffVideoKey?: string;
-        diffVideoUrl?: string;
-        timelineCsvKey?: string;
-        timelineCsvUrl?: string;
-        timelineGraphKey?: string;
-        timelineGraphUrl?: string;
-        reportJsonKey?: string;
-        reportJsonUrl?: string;
-        [key: string]: unknown;
-      };
-    };
-  };
 };
 
 export type ChunkedGenerationChunk = {
@@ -616,6 +485,11 @@ export type ChunkedGenerationChunk = {
   segmentDurationSec: number;
   relativeStartFrame: number;
   relativeEndFrameExclusive: number;
+  coverageStartFrame?: number;
+  coverageEndFrameExclusive?: number;
+  coverageDurationFrames?: number;
+  coverageTrimStartFrames?: number;
+  coverageTrimEndFrames?: number;
   overlapFrames: number;
   anchorFramesFromPrevious: number;
   alignmentFrameIndex: number;
@@ -623,6 +497,8 @@ export type ChunkedGenerationChunk = {
   anchorFrameId?: string | null;
   anchorVariantId?: string | null;
   sourceGeneratedFrameIndex?: number | null;
+  actualOutputStartFrame?: number | null;
+  actualCoverageTrimStartFrames?: number | null;
   generationId?: string | null;
   jobId?: string | null;
   status: "planned" | "queued" | "running" | "complete" | "failed";
@@ -638,17 +514,19 @@ export type ChunkedGenerationChunk = {
 export type ChunkedGenerationRun = {
   runId: string;
   sourceSegmentId: string;
-  status: "created" | "running" | "paused" | "failed" | "complete";
+  status: "created" | "running" | "paused" | "failed" | "complete" | "canceled";
   model:
     | "ray-2"
     | "ray-flash-2"
+    | "runway-gen4-aleph"
     | "kling-o1"
     | "kling-v3-omni-video"
     | "seedance-2.0-reference-to-video"
     | "wan2.2-animate"
     | "wan2.7-videoedit";
   mode: string;
-  prompt?: string | null;
+  openingPrompt?: string | null;
+  continuationPrompt?: string | null;
   firstFrameVariantId?: string | null;
   replicateKlingMode?: "std" | "pro" | null;
   replicateKlingV3Mode?: "standard" | "pro" | null;
@@ -659,6 +537,11 @@ export type ChunkedGenerationRun = {
   failureChunkIndex?: number;
   pauseRequestedAt?: string;
   pauseReason?: string;
+  saveStatus?: "idle" | "queued" | "running" | "complete" | "failed";
+  savedGenerationId?: string | null;
+  saveJobId?: string | null;
+  saveError?: string | null;
+  canceledAt?: string;
   createdAt: string;
   startedAt?: string;
   finishedAt?: string;

@@ -1,7 +1,10 @@
-import { ReactCompareSlider, ReactCompareSliderImage } from "react-compare-slider";
-import { useEffect, useState, type PointerEvent, type RefObject } from "react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type PointerEvent, type RefObject } from "react";
 
-import type { TaskDetail } from "../../types/api";
+import { apiClient } from "../../api/client";
+
+import { CompareIcon, DeleteIcon, DownloadIcon, EditIcon, IconActionButton, PreviewIcon } from "../../components/layout/MediaActionButtons";
+import { PendingButtonLabel, StatusNotice } from "../../components/layout/UiFeedback";
+import type { FrameVariant } from "../../types/api";
 
 type EditFrameCandidate = {
   id: string;
@@ -10,6 +13,7 @@ type EditFrameCandidate = {
   label: string;
   createdAt?: string;
   variantId?: string;
+  variant?: FrameVariant;
   qualityMatched?: boolean;
   isSelected: boolean;
 };
@@ -21,6 +25,10 @@ type PatchReferenceImage = {
 
 export type EditFrameTabCtx = {
   setEditFrameTab: (tab: "first" | "last") => void;
+  allowEndFrameTab: boolean;
+  openRefineModalForVariant: (variantId: string) => void;
+  onNext: () => void;
+  nextWarning: string | null;
   editFrameTab: "first" | "last";
   activeEditFrame:
     | {
@@ -35,14 +43,14 @@ export type EditFrameTabCtx = {
   model: "nano_banana" | "nano_banana_pro" | "chatgpt" | "chatgpt_latest";
   setModel: (value: "nano_banana" | "nano_banana_pro" | "chatgpt" | "chatgpt_latest") => void;
   fullEditMutation: { isPending: boolean; mutate: (frameId: string) => void };
-  task: TaskDetail | undefined;
   activeEditSourceImageUrl: string | null;
-  activeCompareImageUrl: string | null;
   activeEditCandidates: EditFrameCandidate[];
   selectCompareCandidate: (frameId: string, tabKey: "first" | "last", candidate: EditFrameCandidate) => void;
   setImagePreviewModal: (value: { url: string; label: string } | null) => void;
+  setImageCompareModal: (value: { originalUrl: string; compareUrl: string; label: string } | null) => void;
   setEditSourceCandidate: (tabKey: "first" | "last", candidate: EditFrameCandidate) => void;
   selectedTaskId: string | null;
+  uploadManualEditedFrame: (tabKey: "first" | "last", file: File) => Promise<string>;
   handleDeleteAsset: (item: {
     id: string;
     taskId: string;
@@ -93,9 +101,21 @@ type EditFrameTabProps = {
   ctx: EditFrameTabCtx;
 };
 
+function QaTickIcon() {
+  return (
+    <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2">
+      <path d="m3 8 3 3 7-7" />
+    </svg>
+  );
+}
+
 export default function EditFrameTab({ ctx }: EditFrameTabProps) {
   const {
     setEditFrameTab,
+    allowEndFrameTab,
+    openRefineModalForVariant,
+    onNext,
+    nextWarning,
     editFrameTab,
     activeEditFrame,
     prompt,
@@ -103,14 +123,14 @@ export default function EditFrameTab({ ctx }: EditFrameTabProps) {
     model,
     setModel,
     fullEditMutation,
-    task,
     activeEditSourceImageUrl,
-    activeCompareImageUrl,
     activeEditCandidates,
     selectCompareCandidate,
     setImagePreviewModal,
+    setImageCompareModal,
     setEditSourceCandidate,
     selectedTaskId,
+    uploadManualEditedFrame,
     handleDeleteAsset,
     activeFrameDimensions,
     patchOverlayCanvasRef,
@@ -147,6 +167,15 @@ export default function EditFrameTab({ ctx }: EditFrameTabProps) {
     formatCompactTimestamp,
   } = ctx;
   const [isPatchModalOpen, setPatchModalOpen] = useState(false);
+  const [patchQueuedNotice, setPatchQueuedNotice] = useState(false);
+  const [downloadCandidate, setDownloadCandidate] = useState<EditFrameCandidate | null>(null);
+  const [downloadBusy, setDownloadBusy] = useState<"psd" | "png_zip" | null>(null);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [manualUploadPending, setManualUploadPending] = useState(false);
+  const uploadInputRef = useRef<HTMLInputElement | null>(null);
+
+  const canDownloadSourceFrame = Boolean(activeEditFrame?.imageUrl);
+  const activeTabLabel = editFrameTab === "first" ? "Start Frame" : "End Frame";
 
   useEffect(() => {
     if (!isPatchModalOpen) return;
@@ -156,34 +185,120 @@ export default function EditFrameTab({ ctx }: EditFrameTabProps) {
     return () => window.clearTimeout(refreshTimer);
   }, [isPatchModalOpen, refreshPatchOverlay]);
 
+  useEffect(() => {
+    if (!patchEditMutation.isPending) {
+      setPatchQueuedNotice(false);
+    }
+  }, [patchEditMutation.isPending]);
+
+  const downloadMenuSupportsLayers = Boolean(downloadCandidate?.variantId && selectedTaskId && activeEditFrame?.frameId);
+  const refineableVariantIds = useMemo(
+    () =>
+      new Set(
+        activeEditCandidates
+          .filter((candidate) => candidate.kind === "variant" && candidate.variantId && candidate.variant?.variantKind !== "refined")
+          .map((candidate) => candidate.variantId as string),
+      ),
+    [activeEditCandidates],
+  );
+
+  function triggerDirectDownload(url: string, filename?: string) {
+    const link = document.createElement("a");
+    link.href = url;
+    if (filename) link.download = filename;
+    link.rel = "noreferrer";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  }
+
+  function openInNewTab(url: string) {
+    window.open(url, "_blank", "noopener,noreferrer");
+  }
+
+  async function handleLayerExport(format: "psd" | "png_zip") {
+    if (!downloadCandidate?.variantId || !selectedTaskId || !activeEditFrame?.frameId) return;
+    setDownloadBusy(format);
+    setDownloadError(null);
+    try {
+      const exported = await apiClient.exportManualRefinePsd(selectedTaskId, activeEditFrame.frameId, {
+        sourceVariantId: downloadCandidate.variantId,
+        format,
+      });
+      triggerDirectDownload(exported.downloadUrl, exported.filename);
+    } catch (error) {
+      setDownloadError(error instanceof Error ? error.message : "Failed to prepare download");
+    } finally {
+      setDownloadBusy(null);
+    }
+  }
+
+  async function handleManualEditedFrameUpload(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setManualUploadPending(true);
+    try {
+      await uploadManualEditedFrame(editFrameTab, file);
+    } catch (error) {
+      setDownloadError(error instanceof Error ? error.message : "Failed to upload edited frame");
+    } finally {
+      setManualUploadPending(false);
+    }
+  }
+
   return (
               <div className="space-y-4">
-                <h3 className="text-lg font-semibold">Edit frames</h3>
-
-                <div className="flex gap-2">
+                <input ref={uploadInputRef} type="file" accept="image/*" className="hidden" onChange={(event) => void handleManualEditedFrameUpload(event)} />
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex gap-2">
                   <button
                     onClick={() => setEditFrameTab("first")}
                     className={`rounded-md px-3 py-2 text-sm ${editFrameTab === "first" ? "bg-ink text-white" : "bg-ink/10"}`}
                   >
                     Start Frame
                   </button>
-                  <button
-                    onClick={() => setEditFrameTab("last")}
-                    className={`rounded-md px-3 py-2 text-sm ${editFrameTab === "last" ? "bg-ink text-white" : "bg-ink/10"}`}
-                  >
-                    End Frame (Optional)
-                  </button>
+                  {allowEndFrameTab ? (
+                    <button
+                      onClick={() => setEditFrameTab("last")}
+                      className={`rounded-md px-3 py-2 text-sm ${editFrameTab === "last" ? "bg-ink text-white" : "bg-ink/10"}`}
+                    >
+                      End Frame
+                    </button>
+                  ) : null}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      className="rounded-md border border-ink/20 bg-white px-4 py-2 text-sm font-medium text-ink disabled:cursor-not-allowed disabled:opacity-50"
+                      disabled={!canDownloadSourceFrame}
+                      onClick={() => {
+                        if (!activeEditFrame?.imageUrl) return;
+                        openInNewTab(activeEditFrame.imageUrl);
+                      }}
+                    >
+                      Download Source Frame
+                    </button>
+                    <button
+                      type="button"
+                      className="rounded-md border border-ink/20 bg-white px-4 py-2 text-sm font-medium text-ink disabled:cursor-not-allowed disabled:opacity-50"
+                      disabled={!activeEditFrame || manualUploadPending}
+                      onClick={() => uploadInputRef.current?.click()}
+                    >
+                      <PendingButtonLabel isPending={manualUploadPending} idle="Upload Edited Frame" pending="Uploading frame..." />
+                    </button>
+                  </div>
                 </div>
 
                 <div className="space-y-3 rounded-lg border border-ink/10 bg-white p-3">
                   <p className="text-sm text-ink/70">
-                    Working on: {editFrameTab === "first" ? "Start Frame" : "End Frame"}
-                    {activeEditFrame ? ` (frame ${activeEditFrame.frameIndex}, ${activeEditFrame.timecode})` : ""}
+                    {editFrameTab === "first" ? "Start frame" : "End frame"}
+                    {activeEditFrame ? ` · frame ${activeEditFrame.frameIndex} · ${activeEditFrame.timecode}` : ""}
                   </p>
 
                   {!activeEditFrame ? (
                     <div className="rounded-md border border-dashed border-ink/20 bg-bg p-6 text-sm text-ink/60">
-                      Select frames in Select Frames first, then return here to edit.
+                      Choose a working range in Source first, then return here to edit.
                     </div>
                   ) : null}
                   <div className="space-y-3">
@@ -221,47 +336,22 @@ export default function EditFrameTab({ ctx }: EditFrameTabProps) {
                         disabled={!activeEditFrame || fullEditMutation.isPending || !prompt.trim()}
                         onClick={() => activeEditFrame && fullEditMutation.mutate(activeEditFrame.frameId)}
                       >
-                        Edit
+                        <PendingButtonLabel isPending={fullEditMutation.isPending} idle="Edit" pending="Queueing edit..." />
                       </button>
                     </div>
                   </div>
                 </div>
 
                 <div className="space-y-2 rounded-lg border border-ink/10 p-3">
-                  <p className="font-medium">Comparison</p>
-                  {activeEditFrame?.imageUrl ? (
-                    <div
-                      className="overflow-hidden rounded-md border border-ink/10 bg-bg"
-                      style={{
-                        aspectRatio:
-                          task?.video?.editSource?.width && task?.video?.editSource?.height
-                            ? `${task.video.editSource.width} / ${task.video.editSource.height}`
-                            : undefined,
-                      }}
-                    >
-                      <ReactCompareSlider
-                        className="h-full w-full"
-                        itemOne={
-                          <ReactCompareSliderImage
-                            src={activeEditSourceImageUrl ?? activeEditFrame.imageUrl}
-                            alt="Edit source"
-                            style={{ height: "100%", width: "100%", objectFit: "contain", objectPosition: "center" }}
-                          />
-                        }
-                        itemTwo={
-                          <ReactCompareSliderImage
-                            src={activeCompareImageUrl ?? activeEditFrame.imageUrl}
-                            alt="Selected variant"
-                            style={{ height: "100%", width: "100%", objectFit: "contain", objectPosition: "center" }}
-                          />
-                        }
-                      />
-                    </div>
-                  ) : (
-                    <div className="rounded-md border border-dashed border-ink/20 bg-bg p-6 text-sm text-ink/60">
-                      Select a frame in Select Frames to start comparing edits.
-                    </div>
-                  )}
+                  <p className="font-medium">Frame variants</p>
+                  {patchQueuedNotice ? (
+                    <StatusNotice variant="loading">
+                      <p className="text-xs">Patch edit queued. Track progress in Jobs while the new frame variant is generated.</p>
+                    </StatusNotice>
+                  ) : null}
+                  {!activeEditFrame ? (
+                    <p className="text-xs text-ink/60">Choose a frame in Source first.</p>
+                  ) : null}
                   <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
                     {activeEditCandidates.map((candidate) => (
                       <div
@@ -279,53 +369,74 @@ export default function EditFrameTab({ ctx }: EditFrameTabProps) {
                           }}
                           title="Select for comparison and generation"
                         >
-                          <img src={candidate.imageUrl} className="mb-2 w-full rounded bg-bg object-contain" />
+                          <img src={candidate.imageUrl} className="mb-2 w-full rounded bg-bg object-contain" loading="lazy" decoding="async" />
                         </button>
                         <p className="text-xs font-medium text-ink/80">{candidate.label}</p>
                         <p className="text-[11px] text-ink/60">{formatCompactTimestamp(candidate.createdAt)}</p>
                         <div className="mt-2 flex items-center gap-2">
-                          <button
-                            type="button"
-                            className="rounded border border-ink/20 bg-white p-2 text-xs"
-                            title="Preview"
-                            onClick={() => setImagePreviewModal({ url: candidate.imageUrl, label: candidate.label })}
+                          <IconActionButton title="Preview" onClick={() => setImagePreviewModal({ url: candidate.imageUrl, label: candidate.label })}>
+                            <PreviewIcon />
+                          </IconActionButton>
+                          <IconActionButton
+                            title={candidate.kind === "original" || !activeEditFrame?.imageUrl ? "Compare is only available for edited variants" : "Compare against original"}
+                            disabled={candidate.kind === "original" || !activeEditFrame?.imageUrl}
+                            onClick={() => {
+                              if (candidate.kind === "original" || !activeEditFrame?.imageUrl) return;
+                              setImageCompareModal({
+                                originalUrl: activeEditFrame.imageUrl,
+                                compareUrl: candidate.imageUrl,
+                                label: candidate.label,
+                              });
+                            }}
                           >
-                            <svg viewBox="0 0 24 24" className="h-5 w-5" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2">
-                              <path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6Z" />
-                              <circle cx="12" cy="12" r="3" />
-                            </svg>
-                          </button>
-                          <button
-                            type="button"
-                            className="rounded border border-ink/20 bg-white p-2 text-xs"
+                            <CompareIcon />
+                          </IconActionButton>
+                          <IconActionButton
                             title="Use for editing"
                             onClick={() => {
                               setEditSourceCandidate(editFrameTab, candidate);
                             }}
                           >
-                            <svg viewBox="0 0 24 24" className="h-5 w-5" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2">
-                              <path d="M12 20h9" />
-                              <path d="m16.5 3.5 4 4L8 20H4v-4L16.5 3.5Z" />
-                            </svg>
-                          </button>
-                          <a
-                            href={candidate.imageUrl}
-                            target="_blank"
-                            rel="noreferrer"
-                            download
-                            className="rounded border border-ink/20 bg-white p-2 text-xs"
-                            title="Download full quality image"
+                            <EditIcon />
+                          </IconActionButton>
+                          <IconActionButton
+                            title="Download options"
+                            onClick={() => {
+                              setDownloadError(null);
+                              setDownloadBusy(null);
+                              setDownloadCandidate(candidate);
+                            }}
                           >
-                            <svg viewBox="0 0 24 24" className="h-5 w-5" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2">
-                              <path d="M12 3v12" />
-                              <path d="m7 10 5 5 5-5" />
-                              <path d="M4 21h16" />
-                            </svg>
-                          </a>
-                          <button
-                            type="button"
-                            className="rounded border border-red-200 bg-white p-2 text-xs text-red-700 disabled:cursor-not-allowed disabled:opacity-50"
+                            <DownloadIcon />
+                          </IconActionButton>
+                          {candidate.kind === "variant" ? (
+                            candidate.variant?.variantKind === "refined" ? (
+                              <button
+                                type="button"
+                                className="inline-flex items-center gap-1 rounded border border-teal-300 bg-teal-50 px-2 py-2 text-[11px] font-medium text-teal-700"
+                                disabled
+                              >
+                                <QaTickIcon />
+                                <span>QA</span>
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                className="rounded border border-ink/20 bg-white px-2 py-2 text-[11px] font-medium text-ink disabled:cursor-not-allowed disabled:opacity-50"
+                                disabled={!candidate.variantId || !refineableVariantIds.has(candidate.variantId)}
+                                title={candidate.variantId ? "Open QA refine tools for this edited frame" : "Only generated variants can be refined"}
+                                onClick={() => {
+                                  if (!candidate.variantId) return;
+                                  openRefineModalForVariant(candidate.variantId);
+                                }}
+                              >
+                                QA
+                              </button>
+                            )
+                          ) : null}
+                          <IconActionButton
                             title={candidate.kind === "original" ? "Original frame cannot be deleted" : "Delete variant"}
+                            tone="danger"
                             disabled={candidate.kind === "original" || !activeEditFrame || !candidate.variantId}
                             onClick={() => {
                               if (!activeEditFrame || !candidate.variantId) return;
@@ -342,18 +453,86 @@ export default function EditFrameTab({ ctx }: EditFrameTabProps) {
                               });
                             }}
                           >
-                            <svg viewBox="0 0 24 24" className="h-5 w-5" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2">
-                              <path d="M3 6h18" />
-                              <path d="M8 6V4h8v2" />
-                              <path d="m6 6 1 14h10l1-14" />
-                              <path d="M10 11v6M14 11v6" />
-                            </svg>
-                          </button>
+                            <DeleteIcon />
+                          </IconActionButton>
                         </div>
                       </div>
                     ))}
                   </div>
                 </div>
+
+                {nextWarning ? (
+                  <StatusNotice variant="warning">
+                    <p className="text-xs">{nextWarning}</p>
+                  </StatusNotice>
+                ) : null}
+                <div className="flex justify-end">
+                  <button
+                    type="button"
+                    className="rounded-md bg-teal-600 px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+                    disabled={Boolean(nextWarning)}
+                    onClick={onNext}
+                  >
+                    Next
+                  </button>
+                </div>
+
+                {downloadCandidate ? (
+                  <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-4" onClick={() => setDownloadCandidate(null)}>
+                    <div className="w-full max-w-md rounded-2xl border border-ink/15 bg-card p-4" onClick={(event) => event.stopPropagation()}>
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <h4 className="text-base font-semibold text-ink">Download Options</h4>
+                          <p className="text-sm text-ink/65">{downloadCandidate.label}</p>
+                        </div>
+                        <button type="button" className="rounded border border-ink/20 bg-white px-3 py-1 text-sm" onClick={() => setDownloadCandidate(null)}>
+                          Close
+                        </button>
+                      </div>
+                      <div className="mt-4 space-y-2">
+                        {downloadError ? (
+                          <StatusNotice variant="error">
+                            <p className="text-sm">{downloadError}</p>
+                          </StatusNotice>
+                        ) : null}
+                        {downloadBusy ? (
+                          <StatusNotice variant="loading">
+                            <p className="text-sm">
+                              {downloadBusy === "psd" ? "Preparing PSD with QA layers." : "Preparing PNG QA layer bundle."} This can take a moment before the download starts.
+                            </p>
+                          </StatusNotice>
+                        ) : null}
+                        <button
+                          type="button"
+                          className="w-full rounded-md border border-ink/20 bg-white px-4 py-2 text-left text-sm font-medium text-ink"
+                          onClick={() => triggerDirectDownload(downloadCandidate.imageUrl, `${downloadCandidate.label.toLowerCase().replace(/\s+/g, "_")}.png`)}
+                        >
+                          PNG
+                        </button>
+                        <button
+                          type="button"
+                          className="w-full rounded-md border border-ink/20 bg-white px-4 py-2 text-left text-sm font-medium text-ink disabled:cursor-not-allowed disabled:opacity-50"
+                          disabled={!downloadMenuSupportsLayers || Boolean(downloadBusy)}
+                          onClick={() => {
+                            void handleLayerExport("psd");
+                          }}
+                        >
+                          <PendingButtonLabel isPending={downloadBusy === "psd"} idle="PSD (with QA layers)" pending="Preparing PSD..." />
+                        </button>
+                        <button
+                          type="button"
+                          className="w-full rounded-md border border-ink/20 bg-white px-4 py-2 text-left text-sm font-medium text-ink disabled:cursor-not-allowed disabled:opacity-50"
+                          disabled={!downloadMenuSupportsLayers || Boolean(downloadBusy)}
+                          onClick={() => {
+                            void handleLayerExport("png_zip");
+                          }}
+                        >
+                          <PendingButtonLabel isPending={downloadBusy === "png_zip"} idle="PNG (with QA layers)" pending="Preparing layers..." />
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
 
               {isPatchModalOpen ? (
                 <div className="fixed inset-0 z-[65] flex items-center justify-center bg-black/60 p-4">
@@ -601,12 +780,12 @@ export default function EditFrameTab({ ctx }: EditFrameTabProps) {
                           }
                           onClick={() => {
                             if (!activeEditFrame) return;
-                            window.alert("Generating frame from patch edit. You can track progress in Jobs.");
+                            setPatchQueuedNotice(true);
                             patchEditMutation.mutate(activeEditFrame.frameId);
                             setPatchModalOpen(false);
                           }}
                         >
-                          Edit
+                          <PendingButtonLabel isPending={patchEditMutation.isPending} idle="Edit" pending="Queueing patch edit..." />
                         </button>
                         <button
                           type="button"
@@ -620,7 +799,11 @@ export default function EditFrameTab({ ctx }: EditFrameTabProps) {
                       {patchEngine === "runware_ace_pp" && !activePatchReference?.file ? (
                         <p className="text-xs text-ink/60">Select one reference image to use ACE++ local editing.</p>
                       ) : null}
-                      {patchEditMutation.error ? <p className="text-xs text-red-600">{patchEditMutation.error.message}</p> : null}
+                      {patchEditMutation.error ? (
+                        <StatusNotice variant="error">
+                          <p className="text-xs">{patchEditMutation.error.message}</p>
+                        </StatusNotice>
+                      ) : null}
                     </div>
                   </div>
                 </div>
