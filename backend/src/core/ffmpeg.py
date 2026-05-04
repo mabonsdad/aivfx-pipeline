@@ -42,7 +42,17 @@ def _target_for_orientation(source_width: int, source_height: int, *, landscape:
     return landscape if landscape_delta <= portrait_delta else portrait
 
 
-def _scale_pad_filter(target_width: int, target_height: int) -> str:
+def _resize_filter(target_width: int, target_height: int, *, mode: str = "pad") -> str:
+    if mode == "crop":
+        return (
+            f"scale={target_width}:{target_height}:force_original_aspect_ratio=increase,"
+            f"crop={target_width}:{target_height}"
+        )
+    if mode == "scale":
+        return (
+            f"scale={target_width}:{target_height}:force_original_aspect_ratio=decrease:"
+            "force_divisible_by=2"
+        )
     return (
         f"scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,"
         f"pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2:color=black"
@@ -123,6 +133,7 @@ def transcode_to_cfr(
     *,
     target_width: int | None = None,
     target_height: int | None = None,
+    resize_mode: str = "pad",
     crf: int = 16,
     preset: str = "medium",
     audio_bitrate: str = "192k",
@@ -131,7 +142,7 @@ def transcode_to_cfr(
     fps_den = fps.denominator if fps.denominator > 0 else 1
     vf_parts = [f"fps={fps_num}/{fps_den}"]
     if target_width and target_height:
-        vf_parts.append(_scale_pad_filter(target_width, target_height))
+        vf_parts.append(_resize_filter(target_width, target_height, mode=resize_mode))
     vf_parts.append("setsar=1")
 
     cmd = [
@@ -168,6 +179,7 @@ def transcode_preserving_frame_count(
     target_fps: Fraction,
     target_width: int | None = None,
     target_height: int | None = None,
+    resize_mode: str = "pad",
     crf: int = 16,
     preset: str = "medium",
     audio_bitrate: str = "192k",
@@ -183,6 +195,7 @@ def transcode_preserving_frame_count(
             target_fps,
             target_width=target_width,
             target_height=target_height,
+            resize_mode=resize_mode,
             crf=crf,
             preset=preset,
             audio_bitrate=audio_bitrate,
@@ -192,7 +205,7 @@ def transcode_preserving_frame_count(
     duration_scale = float(source_fps / target_fps)
     vf_parts = [f"setpts={duration_scale:.12f}*PTS"]
     if target_width and target_height:
-        vf_parts.append(_scale_pad_filter(target_width, target_height))
+        vf_parts.append(_resize_filter(target_width, target_height, mode=resize_mode))
     vf_parts.append("setsar=1")
     cmd = [
         FFMPEG_BIN,
@@ -552,6 +565,7 @@ def transcode_for_provider(
     source_height: int,
     landscape_target: tuple[int, int],
     portrait_target: tuple[int, int],
+    resize_mode: str = "pad",
     crf: int = 22,
 ) -> tuple[int, int]:
     target_w, target_h = _target_for_orientation(
@@ -566,11 +580,13 @@ def transcode_for_provider(
         fps,
         target_width=target_w,
         target_height=target_h,
+        resize_mode=resize_mode,
         crf=crf,
         preset="medium",
         audio_bitrate="128k",
     )
-    return target_w, target_h
+    probe = ffprobe_video(output_path)
+    return int(probe.get("width") or target_w), int(probe.get("height") or target_h)
 
 
 def generate_thumbnail_strip(input_path: str, output_dir: str, fps: int = 1, width: int = 320) -> list[dict[str, Any]]:

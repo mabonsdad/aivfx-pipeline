@@ -132,9 +132,10 @@ type FrameReportRow = {
 };
 
 type VideoReportRow = {
-  assetType: "segment_generation";
-  genId: string;
-  segmentId: string;
+  assetType: "segment_generation" | "export";
+  genId?: string;
+  exportId?: string;
+  segmentId?: string;
   createdAt?: string;
   model?: string;
   mode?: string;
@@ -617,7 +618,7 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
     (row): row is FrameReportRow => row.assetType === "frame_variant" || row.assetType === "external_frame_pair",
   );
   const videoReportRows = ((activeResult?.rows as Array<Record<string, unknown>> | undefined) ?? []).filter(
-    (row): row is VideoReportRow => row.assetType === "segment_generation",
+    (row): row is VideoReportRow => row.assetType === "segment_generation" || row.assetType === "export",
   );
 
   return (
@@ -1006,7 +1007,10 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
 
         {reportView === "reports" ? (
           <section className="space-y-4 rounded-2xl border border-ink/10 bg-card p-4">
-            <h3 className="text-lg font-semibold">Saved Reports</h3>
+            <div className="space-y-1">
+              <h3 className="text-lg font-semibold">Saved Reports</h3>
+              <p className="text-xs text-ink/60">Create new reports from the Assets step. Older reports remain available here.</p>
+            </div>
             {!activeReportMeta ? (
               !scopedReports.length ? (
                 <p className="text-sm text-ink/60">No reports created yet.</p>
@@ -1440,6 +1444,7 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                 {activeResult && activeReportMeta.reportType === "qc_video" ? (
                   <div className="space-y-3">
                     {videoReportRows.map((row) => {
+                      const rowLabel = row.assetType === "export" ? row.exportId ?? "merged export" : row.genId ?? "generation";
                       const videoAggregates = row.standard?.aggregates;
                       const videoArtifacts = row.standard?.artifacts;
                       const timelineGraphUrl = videoArtifacts?.timelineGraphUrl as string | undefined;
@@ -1448,7 +1453,7 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                       const diffVideoPosterUrl = videoArtifacts?.diffVideoPosterUrl as string | undefined;
                       const selectedFrames = (row.standard?.selectedFrames ?? []) as Array<Record<string, unknown>>;
                       return (
-                        <article key={row.genId} className="space-y-3 rounded-lg border border-ink/10 bg-bg/20 p-3">
+                        <article key={row.assetType === "export" ? `export:${row.exportId}` : `generation:${row.genId}`} className="space-y-3 rounded-lg border border-ink/10 bg-bg/20 p-3">
                           <div className="grid gap-3 overflow-x-auto xl:grid-cols-5">
                             <div>
                               <p className="text-xs font-medium text-ink/70">Original start frame</p>
@@ -1503,7 +1508,7 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                             <div>
                               <p className="text-xs font-medium text-ink/70">Generated video</p>
                               {row.generatedVideoUrl ? (
-                                <button type="button" className="block w-full" onClick={() => setVideoPreviewModal({ url: row.generatedVideoUrl as string, label: row.genId })}>
+                                <button type="button" className="block w-full" onClick={() => setVideoPreviewModal({ url: row.generatedVideoUrl as string, label: rowLabel })}>
                                   <img src={row.editedStartFrameUrl ?? row.originalFrameUrl ?? ""} alt="Generated video" className="aspect-video w-full rounded border border-ink/10 bg-white object-contain" />
                                 </button>
                               ) : null}
@@ -1578,7 +1583,7 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                           {(row.standard?.selectedTests ?? []).includes("video_frame_evidence") && selectedFrames.length ? (
                             <div className="grid gap-3">
                               {selectedFrames.slice(0, 3).map((frame) => (
-                                <div key={`video-frame-${row.genId}-${frame.index}`} className="space-y-2 rounded border border-ink/10 bg-white p-3">
+                                <div key={`video-frame-${rowLabel}-${frame.index}`} className="space-y-2 rounded border border-ink/10 bg-white p-3">
                                   <div className="flex items-center gap-2">
                                     <p className="text-xs font-medium text-ink/70">
                                       Evidence original frame {String(frame.sourceFrameIndex ?? frame.index)}

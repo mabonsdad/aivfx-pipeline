@@ -21,6 +21,7 @@ import {
   useReportRouteState,
   useWorkflowRouteState,
 } from "./hooks/useWorkflowRouting";
+import { useVideoFrameStrip, type VideoFrameStripItem } from "./hooks/useVideoFrameStrip";
 import { useTaskLifecycle } from "./hooks/useTaskLifecycle";
 import { useGenerationMergeState } from "./hooks/useGenerationMergeState";
 import { getGenerationModeConfig, type GenerateInputMode } from "./lib/generationModeRegistry";
@@ -181,7 +182,6 @@ const MergeTab = lazy(() => import("./pages/workflow/MergeTab"));
 const AssetsTab = lazy(() => import("./pages/workflow/AssetsTab"));
 const JobsPanel = lazy(() => import("./pages/workflow/JobsPanel"));
 
-const VIDEO_FRAME_THUMBNAIL_CACHE = new Map<string, string | null>();
 const MAX_TRACKED_JOB_IDS = 40;
 const TASK_URL_REFRESH_MS = 15 * 60 * 1000;
 const ACTIVE_TASK_POLL_MS = 3000;
@@ -193,12 +193,6 @@ const WHOLE_VIDEO_SINGLE_PASS_LIMIT_SECONDS = 10;
 
 type VideoWorkMode = "whole_video" | "custom_segment";
 type PrimaryWorkflowSection = "source" | "create" | "outputs" | "post" | "reports" | "assets";
-
-type VideoFrameStripItem = {
-  frameIndex: number;
-  imageUrl: string | null;
-  sourceFrameIndex?: number;
-};
 
 function clampInteger(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, Math.round(value)));
@@ -258,16 +252,6 @@ function remapGeneratedStripItems(
       imageUrl: imageBySourceFrame.get(sourceFrameIndex) ?? null,
     };
   });
-}
-
-function isValidHttpUrl(value: string | null | undefined): value is string {
-  if (!value) return false;
-  try {
-    const parsed = new URL(value);
-    return parsed.protocol === "https:" || parsed.protocol === "http:";
-  } catch {
-    return false;
-  }
 }
 
 function hasActiveTaskWork(task: TaskDetail | undefined): boolean {
@@ -386,6 +370,9 @@ function keyBasenameFromS3Key(key: string): string {
 function reportOutputRefKey(ref: CustomReportOutputRef): string {
   if (ref.assetType === "segment_generation") {
     return `segment_generation:${ref.genId}`;
+  }
+  if (ref.assetType === "export") {
+    return `export:${ref.exportId}`;
   }
   if (ref.assetType === "external_frame_pair") {
     return `external_frame_pair:${ref.pairId}`;
@@ -542,7 +529,6 @@ const GENERATION_MODELS_BY_INPUT: Record<GenerateInputMode, Array<{ value: Video
     { value: "kling-o1", label: "Kling O1 Edit" },
     { value: "kling-v3-omni-video", label: "Kling v3 Omni Video" },
     { value: "seedance-2.0-reference-to-video", label: "Seedance 2.0 Reference to Video" },
-    { value: "wan2.2-animate", label: "Wan 2.2 Animate" },
     { value: "wan2.7-videoedit", label: "Wan 2.7 VideoEdit" },
   ],
   start_end: [
@@ -570,7 +556,6 @@ const AUTOMATION_VIDEO_OPTIONS: AutomationVideoOption[] = [
   { id: "runway-gen4-aleph:start_video:runway_aleph_v2v", label: "Runway Gen-4 Aleph (Start frame + video)", inputMode: "start_video", lumaModel: "runway-gen4-aleph", mode: "runway_aleph_v2v" },
   { id: "kling-v3-omni-video:start_video:kling_v3_omni_video_edit", label: "Kling v3 Omni Video (Start frame + video)", inputMode: "start_video", lumaModel: "kling-v3-omni-video", mode: "kling_v3_omni_video_edit" },
   { id: "seedance-2.0-reference-to-video:start_video:seedance_reference_to_video", label: "Seedance 2.0 Reference to Video (Start frame + video)", inputMode: "start_video", lumaModel: "seedance-2.0-reference-to-video", mode: "seedance_reference_to_video" },
-  { id: "wan2.2-animate:start_video:wan_animate_replace", label: "Wan 2.2 Animate (Start frame + video)", inputMode: "start_video", lumaModel: "wan2.2-animate", mode: "wan_animate_replace" },
   { id: "kling-2.6:start_end:kling_start_end", label: "Kling 2.6 (Start/End frame)", inputMode: "start_end", lumaModel: "kling-2.6", mode: "kling_start_end" },
   { id: "kling-2.6:start_only:kling_start_only", label: "Kling 2.6 (Start frame only)", inputMode: "start_only", lumaModel: "kling-2.6", mode: "kling_start_only" },
   { id: "veo-3.1:start_end:veo_start_end", label: "Veo 3.1 (Start/End frame)", inputMode: "start_end", lumaModel: "veo-3.1", mode: "veo_start_end" },
@@ -628,228 +613,102 @@ function FrameSelectCard({
   );
 }
 
-function useVideoFrameStrip({
-  videoUrl,
-  fps,
-  frameIndices,
-  cachePrefix,
-  sourceCacheKey,
-}: {
-  videoUrl?: string | null;
-  fps: number;
-  frameIndices: number[];
-  cachePrefix: string;
-  sourceCacheKey?: string | null;
-}): VideoFrameStripItem[] {
-  const [items, setItems] = useState<VideoFrameStripItem[]>([]);
-  const signature = useMemo(() => frameIndices.join(","), [frameIndices]);
-
-  useEffect(() => {
-    let cancelled = false;
-    if (!isValidHttpUrl(videoUrl) || !Number.isFinite(fps) || fps <= 0 || frameIndices.length === 0) {
-      setItems([]);
-      return;
-    }
-
-    const safeFps = fps;
-    const uniqueFrames = Array.from(new Set(frameIndices)).sort((a, b) => a - b);
-    const sourceKey = sourceCacheKey || videoUrl;
-    const frameCacheKey = (frameIndex: number) => `${cachePrefix}:${sourceKey}:${frameIndex}`;
-    const initial = uniqueFrames.map((frameIndex) => {
-      const key = frameCacheKey(frameIndex);
-      return { frameIndex, imageUrl: VIDEO_FRAME_THUMBNAIL_CACHE.get(key) ?? null };
-    });
-    setItems(initial);
-    const allCached = uniqueFrames.every((frameIndex) => VIDEO_FRAME_THUMBNAIL_CACHE.has(frameCacheKey(frameIndex)));
-    if (allCached) {
-      return;
-    }
-
-    const run = async () => {
-      const video = document.createElement("video");
-      video.crossOrigin = "anonymous";
-      video.preload = "auto";
-      video.muted = true;
-      video.playsInline = true;
-      video.src = videoUrl;
-
-      const waitForMetadata = new Promise<void>((resolve, reject) => {
-        const handleLoaded = () => {
-          cleanup();
-          resolve();
-        };
-        const handleError = () => {
-          cleanup();
-          reject(new Error("Could not read video metadata"));
-        };
-        const cleanup = () => {
-          video.removeEventListener("loadedmetadata", handleLoaded);
-          video.removeEventListener("error", handleError);
-        };
-        video.addEventListener("loadedmetadata", handleLoaded);
-        video.addEventListener("error", handleError);
-      });
-
-      try {
-        video.load();
-        await waitForMetadata;
-      } catch {
-        if (!cancelled) {
-          setItems(uniqueFrames.map((frameIndex) => ({ frameIndex, imageUrl: null })));
-        }
-        video.pause();
-        video.src = "";
-        return;
-      }
-
-      const canvas = document.createElement("canvas");
-      canvas.width = Math.max(1, video.videoWidth || 1);
-      canvas.height = Math.max(1, video.videoHeight || 1);
-      const ctx = canvas.getContext("2d");
-      if (!ctx) {
-        if (!cancelled) {
-          setItems(uniqueFrames.map((frameIndex) => ({ frameIndex, imageUrl: null })));
-        }
-        video.pause();
-        video.src = "";
-        return;
-      }
-
-      const results: VideoFrameStripItem[] = [];
-      const durationSec = Number.isFinite(video.duration) ? Math.max(0, video.duration) : 0;
-      const maxSeekSec = Math.max(0, durationSec - 0.001);
-
-      for (const frameIndex of uniqueFrames) {
-        if (cancelled) break;
-        const cacheKey = frameCacheKey(frameIndex);
-        if (VIDEO_FRAME_THUMBNAIL_CACHE.has(cacheKey)) {
-          results.push({ frameIndex, imageUrl: VIDEO_FRAME_THUMBNAIL_CACHE.get(cacheKey) ?? null });
-          continue;
-        }
-
-        const targetSec = Math.max(0, Math.min(maxSeekSec, frameIndex / safeFps));
-        try {
-          if (Math.abs(video.currentTime - targetSec) > 0.0005) {
-            const seekPromise = new Promise<void>((resolve, reject) => {
-              const handleSeeked = () => {
-                cleanup();
-                resolve();
-              };
-              const handleError = () => {
-                cleanup();
-                reject(new Error("seek failed"));
-              };
-              const cleanup = () => {
-                video.removeEventListener("seeked", handleSeeked);
-                video.removeEventListener("error", handleError);
-              };
-              video.addEventListener("seeked", handleSeeked);
-              video.addEventListener("error", handleError);
-            });
-            video.currentTime = targetSec;
-            await seekPromise;
-          }
-          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-          const dataUrl = canvas.toDataURL("image/jpeg", 0.82);
-          VIDEO_FRAME_THUMBNAIL_CACHE.set(cacheKey, dataUrl);
-          results.push({ frameIndex, imageUrl: dataUrl });
-        } catch {
-          VIDEO_FRAME_THUMBNAIL_CACHE.set(cacheKey, null);
-          results.push({ frameIndex, imageUrl: null });
-        }
-      }
-
-      video.pause();
-      video.src = "";
-      if (!cancelled) {
-        setItems(results);
-      }
-    };
-
-    run();
-    return () => {
-      cancelled = true;
-    };
-  }, [cachePrefix, fps, frameIndices, signature, sourceCacheKey, videoUrl]);
-
-  return items;
-}
-
 function MergeTrackStrip({
   title,
   items,
   anchorFrame,
   anchorEdge = "start",
+  anchorSlotIndex = 3,
   overlapStart,
   overlapEnd,
   prefix,
+  frameLabelPosition = "bottom",
 }: {
   title: string;
   items: VideoFrameStripItem[];
   anchorFrame: number;
   anchorEdge?: "start" | "end";
+  anchorSlotIndex?: number;
   overlapStart?: number;
   overlapEnd?: number;
   prefix: string;
+  frameLabelPosition?: "top" | "bottom";
 }) {
   const itemWidthPx = 96;
-  const anchorIndex = items.findIndex((item) => item.frameIndex === anchorFrame);
   const overlapMin = overlapStart != null && overlapEnd != null ? Math.min(overlapStart, overlapEnd) : null;
   const overlapMax = overlapStart != null && overlapEnd != null ? Math.max(overlapStart, overlapEnd) : null;
-  const overlapStartIndex = overlapMin != null ? items.findIndex((item) => item.frameIndex === overlapMin) : -1;
-  const overlapEndIndex = overlapMax != null ? items.findIndex((item) => item.frameIndex === overlapMax) : -1;
+  const clampedAnchorSlotIndex = clampInteger(anchorSlotIndex, 0, 6);
+  const slotOffsets = Array.from({ length: 7 }, (_, idx) => idx - clampedAnchorSlotIndex);
+  const itemsByFrame = new Map(items.map((item) => [item.frameIndex, item]));
+  const slots = slotOffsets.map((offset) => ({
+    offset,
+    frameIndex: anchorFrame + offset,
+    item: itemsByFrame.get(anchorFrame + offset) ?? null,
+  }));
+  const overlapStartSlot = overlapMin != null ? overlapMin - anchorFrame + clampedAnchorSlotIndex : -1;
+  const overlapEndSlot = overlapMax != null ? overlapMax - anchorFrame + clampedAnchorSlotIndex : -1;
+  const cutPx = (clampedAnchorSlotIndex + (anchorEdge === "end" ? 1 : 0)) * itemWidthPx;
+  const overlapStartPx = overlapStartSlot * itemWidthPx;
+  const overlapEndPx = (overlapEndSlot + 1) * itemWidthPx;
+  const showOverlapStartGuide =
+    overlapMin != null && overlapMax != null && overlapStartSlot >= 0 && overlapStartSlot <= slotOffsets.length && Math.abs(overlapStartPx - cutPx) > 0.5;
+  const showOverlapEndGuide =
+    overlapMin != null && overlapMax != null && overlapEndSlot >= -1 && overlapEndSlot < slotOffsets.length && Math.abs(overlapEndPx - cutPx) > 0.5;
 
   return (
-    <div className="space-y-1">
-      <div className="flex items-center justify-between text-[11px] text-ink/70">
-        <p className="font-medium text-ink/80">{title}</p>
-        <p>
-          cut {prefix}
-          {anchorFrame}
-        </p>
+    <div className="flex items-start gap-2">
+      <div className="w-14 shrink-0 pt-1 text-[11px] font-medium leading-4 text-ink/75">
+        {title}
       </div>
-      <div className="overflow-x-auto rounded border border-ink/15 bg-white">
+      <div className="min-w-0 flex-1 overflow-x-auto rounded border border-ink/15 bg-white">
         <div className="relative inline-flex min-w-full">
-          {items.map((item) => {
-            const inOverlap = overlapMin != null && overlapMax != null && item.frameIndex >= overlapMin && item.frameIndex <= overlapMax;
+          {slots.map((slot) => {
+            const item = slot.item;
+            const inOverlap = overlapMin != null && overlapMax != null && slot.frameIndex >= overlapMin && slot.frameIndex <= overlapMax;
             return (
               <div
-                key={`${title}:${item.frameIndex}`}
+                key={`${title}:${slot.frameIndex}`}
                 className={`shrink-0 border-r border-ink/15 ${
-                  inOverlap ? "bg-amber-50" : "bg-bg"
+                  inOverlap ? "bg-amber-50" : item ? "bg-bg" : "bg-ink/5"
                 } last:border-r-0`}
                 style={{ width: `${itemWidthPx}px` }}
               >
-                {item.imageUrl ? (
-                  <img src={item.imageUrl} alt={`${prefix}${item.frameIndex}`} className="h-16 w-full object-contain" />
+                {frameLabelPosition === "top" ? (
+                  <p className="truncate px-1 py-1 text-[10px] text-ink/70">
+                    {slot.frameIndex >= 0 ? `${prefix}${slot.frameIndex}` : ""}
+                  </p>
+                ) : null}
+                {item?.imageUrl ? (
+                  <img src={item.imageUrl} alt={`${prefix}${slot.frameIndex}`} className="h-16 w-full object-contain" />
+                ) : item ? (
+                  <div className="flex h-16 w-full items-center justify-center text-[10px] text-ink/60">loading…</div>
                 ) : (
-                  <div className="flex h-16 w-full items-center justify-center text-[10px] text-ink/60">no frame</div>
+                  <div className="flex h-16 w-full items-center justify-center text-[10px] text-ink/35">out of range</div>
                 )}
-                <p className="truncate px-1 py-1 text-[10px] text-ink/70">
-                  {prefix}
-                  {item.frameIndex}
-                </p>
+                {frameLabelPosition === "bottom" ? (
+                  <p className="truncate px-1 py-1 text-[10px] text-ink/70">
+                    {slot.frameIndex >= 0 ? `${prefix}${slot.frameIndex}` : ""}
+                  </p>
+                ) : null}
               </div>
             );
           })}
-          {anchorIndex >= 0 ? (
-            <div
-              className="pointer-events-none absolute bottom-0 top-0 w-[2px] bg-teal-600"
-              style={{ left: `${(anchorIndex + (anchorEdge === "end" ? 1 : 0)) * itemWidthPx}px` }}
-              title="Merge cut"
-            />
-          ) : null}
-          {overlapStartIndex >= 0 ? (
+          <div
+            className="pointer-events-none absolute bottom-0 top-0 w-[2px] bg-teal-600"
+            style={{ left: `${cutPx}px` }}
+            title="Merge cut"
+          />
+          {showOverlapStartGuide ? (
             <div
               className="pointer-events-none absolute bottom-0 top-0 w-px border-l border-dashed border-amber-500"
-              style={{ left: `${overlapStartIndex * itemWidthPx}px` }}
+              style={{ left: `${overlapStartPx}px` }}
               title="Feather start"
             />
           ) : null}
-          {overlapEndIndex >= 0 ? (
+          {showOverlapEndGuide ? (
             <div
               className="pointer-events-none absolute bottom-0 top-0 w-px border-l border-dashed border-amber-500"
-              style={{ left: `${(overlapEndIndex + 1) * itemWidthPx}px` }}
+              style={{ left: `${overlapEndPx}px` }}
               title="Feather end"
             />
           ) : null}
@@ -861,38 +720,50 @@ function MergeTrackStrip({
 
 function MergeBoundaryPreview({
   title,
-  subtitle,
+  actionLabel,
+  onAction,
   firstTrack,
   secondTrack,
 }: {
   title: string;
-  subtitle: string;
+  actionLabel: string;
+  onAction: () => void;
   firstTrack: {
     title: string;
     items: VideoFrameStripItem[];
     anchorFrame: number;
     anchorEdge?: "start" | "end";
+    anchorSlotIndex?: number;
     overlapStart?: number;
     overlapEnd?: number;
     prefix: string;
+    frameLabelPosition?: "top" | "bottom";
   };
   secondTrack: {
     title: string;
     items: VideoFrameStripItem[];
     anchorFrame: number;
     anchorEdge?: "start" | "end";
+    anchorSlotIndex?: number;
     overlapStart?: number;
     overlapEnd?: number;
     prefix: string;
+    frameLabelPosition?: "top" | "bottom";
   };
 }) {
   return (
-    <div className="space-y-2 rounded-lg border border-ink/10 p-3">
+    <div className="space-y-1 rounded-lg border border-ink/10 p-3">
       <div className="flex items-center justify-between">
         <p className="text-sm font-medium">{title}</p>
-        <p className="text-xs text-ink/60">{subtitle}</p>
+        <button
+          type="button"
+          className="rounded-md border border-ink/20 bg-white px-3 py-1.5 text-xs text-ink transition hover:border-teal-500 hover:text-teal-700"
+          onClick={onAction}
+        >
+          {actionLabel}
+        </button>
       </div>
-      <div className="space-y-2">
+      <div className="space-y-1">
         <MergeTrackStrip {...firstTrack} />
         <MergeTrackStrip {...secondTrack} />
         <p className="text-[11px] text-ink/60">
@@ -925,10 +796,12 @@ export default function App() {
   const routeState = useWorkflowRouteState(location.pathname);
   const { reportView, activeCustomReportId } = useReportRouteState(location.search);
   const [selectedReportOutputs, setSelectedReportOutputs] = useState<Record<string, { taskId: string; ref: CustomReportOutputRef }>>({});
-  const [customReportNotice, setCustomReportNotice] = useState<string | null>(null);
-  const [uploadAssetsVisible, setUploadAssetsVisible] = useState(6);
-  const [frameAssetsVisible, setFrameAssetsVisible] = useState(6);
-  const [videoAssetsVisible, setVideoAssetsVisible] = useState(6);
+  const [mergedAssetsVisible, setMergedAssetsVisible] = useState(6);
+  const [editedFrameAssetsVisible, setEditedFrameAssetsVisible] = useState(6);
+  const [generatedAssetsVisible, setGeneratedAssetsVisible] = useState(6);
+  const [libraryMergedAssetsVisible, setLibraryMergedAssetsVisible] = useState(6);
+  const [libraryEditedFrameAssetsVisible, setLibraryEditedFrameAssetsVisible] = useState(6);
+  const [libraryGeneratedAssetsVisible, setLibraryGeneratedAssetsVisible] = useState(6);
   const [generationCardsVisible, setGenerationCardsVisible] = useState(6);
   const [jobsVisible, setJobsVisible] = useState(6);
   const [prompt, setPrompt] = useState("");
@@ -1184,12 +1057,12 @@ export default function App() {
       }
       if (section === "reports") {
         if (!selectedTaskId) return;
-        goToReport(selectedTaskId, reportView, reportView === "reports" ? activeCustomReportId : null);
+        goToReport(selectedTaskId, "reports", activeCustomReportId);
         return;
       }
       setTab("assets");
     },
-    [activeCustomReportId, activePostTab, goToReport, reportView, selectedTaskId, setTab],
+    [activeCustomReportId, activePostTab, goToReport, selectedTaskId, setTab],
   );
 
   useCanonicalTaskRoute({
@@ -1275,21 +1148,20 @@ export default function App() {
     queries: (tasksQuery.data ?? []).map((taskItem) => ({
       queryKey: ["task", "assets", taskItem.taskId],
       queryFn: () => apiClient.getTask(taskItem.taskId),
-      enabled: isAuthed && tab === "assets" && isPageVisible,
+      enabled: isAuthed && tab === "asset_library" && isPageVisible,
       refetchOnWindowFocus: false as const,
     })),
   });
-
   const task = taskQuery.data;
   const reportTask = reportTaskQuery.data;
-  const selectedMotionSyncExport = useMemo<ExportRecord | null>(() => {
-    if (!motionSyncModalExportId) return null;
-    return (task?.exports ?? []).find((item) => item.exportId === motionSyncModalExportId) ?? null;
-  }, [motionSyncModalExportId, task?.exports]);
   const assetTasks = useMemo(
     () => assetTaskQueries.map((query) => query.data).filter((item): item is TaskDetail => Boolean(item)),
     [assetTaskQueries],
   );
+  const selectedMotionSyncExport = useMemo<ExportRecord | null>(() => {
+    if (!motionSyncModalExportId) return null;
+    return (task?.exports ?? []).find((item) => item.exportId === motionSyncModalExportId) ?? null;
+  }, [motionSyncModalExportId, task?.exports]);
   const segmentsById = useMemo(
     () => new Map((task?.segments ?? []).map((segment) => [segment.segmentId, segment])),
     [task?.segments],
@@ -1317,7 +1189,8 @@ export default function App() {
     segmentsById,
   });
 
-  const assetsLoading = tab === "assets" && assetTaskQueries.some((query) => query.isPending || query.isFetching) && assetTasks.length === 0;
+  const assetsLoading = tab === "assets" && (taskQuery.isPending || taskQuery.isFetching) && !task;
+  const assetLibraryLoading = tab === "asset_library" && assetTaskQueries.some((query) => query.isPending || query.isFetching) && assetTasks.length === 0;
   const selectedSegment = task?.segments.find((s) => s.segmentId === selectedSegmentId) ?? null;
   const totalVideoFrames = frameCount(task);
   const defaultVideoSegment = useMemo(
@@ -1712,9 +1585,14 @@ export default function App() {
 
   useEffect(() => {
     if (tab === "assets") {
-      setUploadAssetsVisible(6);
-      setFrameAssetsVisible(6);
-      setVideoAssetsVisible(6);
+      setMergedAssetsVisible(6);
+      setEditedFrameAssetsVisible(6);
+      setGeneratedAssetsVisible(6);
+    }
+    if (tab === "asset_library") {
+      setLibraryMergedAssetsVisible(6);
+      setLibraryEditedFrameAssetsVisible(6);
+      setLibraryGeneratedAssetsVisible(6);
     }
   }, [tab]);
 
@@ -2007,46 +1885,49 @@ export default function App() {
     },
   });
 
+  const resolveSelectedGenerationMode = useCallback((): string => {
+    return lumaModel === "runway-gen4.5"
+      ? "runway_i2v"
+      : lumaModel === "sora-2-image-to-video"
+        ? "sora_i2v"
+      : lumaModel === "happy-horse-video-edit"
+        ? "happy_horse_video_edit"
+      : lumaModel === "happy-horse-image-to-video"
+        ? "happy_horse_i2v"
+      : lumaModel === "runway-gen4-aleph"
+        ? "runway_aleph_v2v"
+      : lumaModel === "kling-2.6"
+        ? generationInputMode === "start_only"
+          ? "kling_start_only"
+          : "kling_start_end"
+      : lumaModel === "kling-o1"
+        ? "kling_o1_video_edit"
+      : lumaModel === "kling-v3-omni-video"
+        ? "kling_v3_omni_video_edit"
+      : lumaModel === "seedance-2.0-reference-to-video"
+        ? "seedance_reference_to_video"
+      : lumaModel === "veo-3.1" || lumaModel === "veo-3.1-fast"
+        ? generationInputMode === "start_only"
+          ? "veo_start_only"
+          : "veo_start_end"
+      : lumaModel === "wan2.2-a14b"
+        ? "wan_a14b_i2v"
+      : lumaModel === "wan2.2-animate"
+        ? "wan_animate_replace"
+      : lumaModel === "wan2.7-i2v"
+        ? generationInputMode === "start_end"
+          ? "wan27_i2v_start_end"
+          : "wan27_i2v_start_only"
+      : lumaModel === "wan2.7-videoedit"
+        ? "wan27_video_edit"
+      : advancedMode;
+  }, [advancedMode, generationInputMode, lumaModel]);
+
   const generateSegmentMutation = useMutation({
     mutationFn: async () => {
       if (!selectedTaskId || !selectedSegmentId) throw new Error("Select a segment");
       const trimmedPrompt = lumaPrompt.trim();
-      const selectedMode =
-        lumaModel === "runway-gen4.5"
-          ? "runway_i2v"
-          : lumaModel === "sora-2-image-to-video"
-            ? "sora_i2v"
-          : lumaModel === "happy-horse-video-edit"
-            ? "happy_horse_video_edit"
-          : lumaModel === "happy-horse-image-to-video"
-            ? "happy_horse_i2v"
-          : lumaModel === "runway-gen4-aleph"
-            ? "runway_aleph_v2v"
-          : lumaModel === "kling-2.6"
-            ? generationInputMode === "start_only"
-              ? "kling_start_only"
-              : "kling_start_end"
-            : lumaModel === "kling-o1"
-              ? "kling_o1_video_edit"
-            : lumaModel === "kling-v3-omni-video"
-              ? "kling_v3_omni_video_edit"
-            : lumaModel === "seedance-2.0-reference-to-video"
-              ? "seedance_reference_to_video"
-            : lumaModel === "veo-3.1" || lumaModel === "veo-3.1-fast"
-              ? generationInputMode === "start_only"
-                ? "veo_start_only"
-                : "veo_start_end"
-              : lumaModel === "wan2.2-a14b"
-                ? "wan_a14b_i2v"
-                : lumaModel === "wan2.2-animate"
-                  ? "wan_animate_replace"
-                  : lumaModel === "wan2.7-i2v"
-                    ? generationInputMode === "start_end"
-                      ? "wan27_i2v_start_end"
-                      : "wan27_i2v_start_only"
-                  : lumaModel === "wan2.7-videoedit"
-                    ? "wan27_video_edit"
-                  : advancedMode;
+      const selectedMode = resolveSelectedGenerationMode();
       return apiClient.generateSegment(selectedTaskId, selectedSegmentId, {
         lumaModel,
         mode: selectedMode,
@@ -2793,43 +2674,78 @@ export default function App() {
     return null;
   }, [generationInputMode, lumaModel, lumaPrompt]);
 
-  const uploadAssets = useMemo<LibraryAsset[]>(() => {
+  const editedFrameAssets = useMemo<LibraryAsset[]>(() => {
     const assets: LibraryAsset[] = [];
-    for (const taskItem of assetTasks) {
-      const original = taskItem.video?.original;
-      if (!original?.downloadUrl) continue;
+    if (!task || !selectedTaskId) return assets;
+    for (const frame of Object.values(task.frames ?? {})) {
+      for (const variant of frame.variants ?? []) {
+        if (!variant.imageUrl) continue;
+        assets.push({
+          id: `variant:${selectedTaskId}:${frame.frameId}:${variant.variantId}`,
+          taskId: selectedTaskId,
+          title: humanizeFilename(keyBasenameFromS3Key(variant.outputKey)),
+          subtitle: `${task.name} · frame ${frame.frameIndex} · ${variant.model}/${variant.type}`,
+          createdAt: variant.createdAt,
+          previewUrl: variant.imageUrl,
+          downloadUrl: variant.imageUrl,
+          mediaType: "image",
+          customReportRef: { assetType: "frame_variant", frameId: frame.frameId, variantId: variant.variantId },
+          deletePayload: { assetType: "frame_variant", frameId: frame.frameId, variantId: variant.variantId },
+        });
+      }
+    }
+    return assets.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }, [keyBasenameFromS3Key, selectedTaskId, task]);
+
+  const generatedVideoAssets = useMemo<LibraryAsset[]>(() => {
+    const assets: LibraryAsset[] = [];
+    if (!task || !selectedTaskId) return assets;
+    for (const generation of Object.values(task.segmentGenerations ?? {})) {
+      if (generation.status === "failed") continue;
+      if (!generation.downloadUrl) continue;
+      if (generation.isChunkInternal) continue;
       assets.push({
-        id: `upload:${taskItem.taskId}`,
-        taskId: taskItem.taskId,
-        title: humanizeFilename(keyBasenameFromS3Key(original.s3Key || original.filename || "orig.mp4")),
-        subtitle: taskItem.name,
-        createdAt: taskItem.createdAt,
-        previewUrl: original.downloadUrl,
-        downloadUrl: original.downloadUrl,
+        id: `generation:${selectedTaskId}:${generation.genId}`,
+        taskId: selectedTaskId,
+        title: humanizeFilename(keyBasenameFromS3Key(generation.outputKey || `${generation.genId}.mp4`)),
+        subtitle: `${task.name} · ${generation.luma.model} · ${generation.luma.mode}${generation.manualUpload ? " · manual upload" : ""}`,
+        createdAt: generation.createdAt,
+        previewUrl: generation.downloadUrl,
+        downloadUrl: generation.downloadUrl,
+        thumbnailUrl: generationThumbnailUrl(generation) ?? undefined,
         mediaType: "video",
-        deletePayload: { assetType: "upload" },
+        customReportRef: { assetType: "segment_generation", genId: generation.genId },
+        deletePayload: { assetType: "segment_generation", genId: generation.genId },
       });
     }
     return assets.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-  }, [assetTasks]);
+  }, [generationThumbnailUrl, keyBasenameFromS3Key, selectedTaskId, task]);
 
-  const frameAssets = useMemo<LibraryAsset[]>(() => {
+  const mergedVideoAssets = useMemo<LibraryAsset[]>(() => {
+    const assets: LibraryAsset[] = [];
+    if (!task || !selectedTaskId) return assets;
+    for (const exportItem of task.exports ?? []) {
+      if (!exportItem.downloadUrl) continue;
+      assets.push({
+        id: `export:${selectedTaskId}:${exportItem.exportId}`,
+        taskId: selectedTaskId,
+        title: humanizeFilename(keyBasenameFromS3Key(exportItem.outputKey || `${exportItem.exportId}.mp4`)),
+        subtitle: `${task.name} · merged export`,
+        createdAt: exportItem.createdAt,
+        previewUrl: exportItem.downloadUrl,
+        downloadUrl: exportItem.downloadUrl,
+        mediaType: "video",
+        customReportRef: { assetType: "export", exportId: exportItem.exportId },
+        deletePayload: { assetType: "export", exportId: exportItem.exportId },
+      });
+    }
+    return assets.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }, [keyBasenameFromS3Key, selectedTaskId, task]);
+
+  const libraryEditedFrameAssets = useMemo<LibraryAsset[]>(() => {
     const assets: LibraryAsset[] = [];
     for (const taskItem of assetTasks) {
       for (const frame of Object.values(taskItem.frames ?? {})) {
-        if (frame.imageUrl) {
-          assets.push({
-            id: `capture:${taskItem.taskId}:${frame.frameId}`,
-            taskId: taskItem.taskId,
-            title: humanizeFilename(keyBasenameFromS3Key(frame.captureKey)),
-            subtitle: `${taskItem.name} · ${frame.timecode}`,
-            createdAt: frame.createdAt ?? taskItem.updatedAt,
-            previewUrl: frame.imageUrl,
-            downloadUrl: frame.imageUrl,
-            mediaType: "image",
-            deletePayload: { assetType: "frame_capture", frameId: frame.frameId },
-          });
-        }
         for (const variant of frame.variants ?? []) {
           if (!variant.imageUrl) continue;
           assets.push({
@@ -2850,44 +2766,50 @@ export default function App() {
     return assets.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   }, [assetTasks]);
 
-  const outputVideoAssets = useMemo<LibraryAsset[]>(() => {
+  const libraryGeneratedVideoAssets = useMemo<LibraryAsset[]>(() => {
     const assets: LibraryAsset[] = [];
     for (const taskItem of assetTasks) {
       for (const generation of Object.values(taskItem.segmentGenerations ?? {})) {
-        if (generation.status === "failed") continue;
-        if (!generation.downloadUrl) continue;
-        if (generation.isChunkInternal) continue;
-          assets.push({
-            id: `generation:${taskItem.taskId}:${generation.genId}`,
-            taskId: taskItem.taskId,
-            title: humanizeFilename(keyBasenameFromS3Key(generation.outputKey || `${generation.genId}.mp4`)),
-          subtitle: `${taskItem.name} · ${generation.luma.model} · ${generation.luma.mode}`,
+        if (generation.status === "failed" || generation.isChunkInternal || !generation.downloadUrl) continue;
+        assets.push({
+          id: `generation:${taskItem.taskId}:${generation.genId}`,
+          taskId: taskItem.taskId,
+          title: humanizeFilename(keyBasenameFromS3Key(generation.outputKey || `${generation.genId}.mp4`)),
+          subtitle: `${taskItem.name} · ${generation.luma.model} · ${generation.luma.mode}${generation.manualUpload ? " · manual upload" : ""}`,
           createdAt: generation.createdAt,
-            previewUrl: generation.downloadUrl,
-            downloadUrl: generation.downloadUrl,
-            thumbnailUrl: generationThumbnailUrl(generation) ?? undefined,
-            mediaType: "video",
-            customReportRef: { assetType: "segment_generation", genId: generation.genId },
-            deletePayload: { assetType: "segment_generation", genId: generation.genId },
-          });
-        }
+          previewUrl: generation.downloadUrl,
+          downloadUrl: generation.downloadUrl,
+          thumbnailUrl: generationThumbnailUrl(generation) ?? undefined,
+          mediaType: "video",
+          customReportRef: { assetType: "segment_generation", genId: generation.genId },
+          deletePayload: { assetType: "segment_generation", genId: generation.genId },
+        });
+      }
+    }
+    return assets.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }, [assetTasks, generationThumbnailUrl, keyBasenameFromS3Key]);
+
+  const libraryMergedVideoAssets = useMemo<LibraryAsset[]>(() => {
+    const assets: LibraryAsset[] = [];
+    for (const taskItem of assetTasks) {
       for (const exportItem of taskItem.exports ?? []) {
         if (!exportItem.downloadUrl) continue;
         assets.push({
           id: `export:${taskItem.taskId}:${exportItem.exportId}`,
           taskId: taskItem.taskId,
           title: humanizeFilename(keyBasenameFromS3Key(exportItem.outputKey || `${exportItem.exportId}.mp4`)),
-          subtitle: taskItem.name,
+          subtitle: `${taskItem.name} · merged export`,
           createdAt: exportItem.createdAt,
           previewUrl: exportItem.downloadUrl,
           downloadUrl: exportItem.downloadUrl,
           mediaType: "video",
+          customReportRef: { assetType: "export", exportId: exportItem.exportId },
           deletePayload: { assetType: "export", exportId: exportItem.exportId },
         });
       }
     }
     return assets.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-  }, [assetTasks]);
+  }, [assetTasks, keyBasenameFromS3Key]);
 
   const segmentWindow = useMemo(() => {
     if (!selectedSegment || !task) return null;
@@ -2904,9 +2826,9 @@ export default function App() {
 
   const originalSegmentPreviewUrl = useMemo(() => {
     if (selectedSegment?.segmentClipUrl) return selectedSegment.segmentClipUrl;
-    if (!task?.video?.editSource?.downloadUrl || !segmentWindow) return null;
-    return `${task.video.editSource.downloadUrl}#t=${segmentWindow.startSec},${segmentWindow.endSec}`;
-  }, [selectedSegment?.segmentClipUrl, segmentWindow, task?.video?.editSource?.downloadUrl]);
+    if (!task?.video?.editSource?.downloadUrl) return null;
+    return task.video.editSource.downloadUrl;
+  }, [selectedSegment?.segmentClipUrl, task?.video?.editSource?.downloadUrl]);
   const originalSegmentPreviewIdentity = useMemo(() => {
     if (selectedSegment?.segmentClipKey) return `segment:${selectedSegment.segmentClipKey}`;
     if (!task?.video?.editSource?.s3Key || !segmentWindow) return null;
@@ -3299,7 +3221,8 @@ export default function App() {
     const outputLabel = generation.outputKey
       ? humanizeFilename(keyBasenameFromS3Key(generation.outputKey))
       : truncateIdentifier(generation.genId, 12);
-    return `${outputLabel} · ${generation.luma.model}/${generation.luma.mode} · ${segmentText} · ${formatCompactTimestamp(generation.createdAt)}`;
+    const manualLabel = generation.manualUpload ? " · manual upload" : "";
+    return `${outputLabel} · ${generation.luma.model}/${generation.luma.mode}${manualLabel} · ${segmentText} · ${formatCompactTimestamp(generation.createdAt)}`;
   }
 
   function asNumber(value: unknown): number | null {
@@ -3316,9 +3239,9 @@ export default function App() {
       return {
         title: "Kling O1 Edit",
         lines: [
-          "Uses the selected working-range video as the base edit input and the selected edited first frame as a reference image.",
-          "Prompt must include both <<<video_1>>> and <<<image_1>>> so the model knows which video and reference image to use.",
-          'Example prompt: "Transform the horse in <<<video_1>>> into the unicorn in <<<image_1>>>. keep motions, camera movement and background the same".',
+          "Uses the working-range video plus the selected edited start frame.",
+          "Prompt must include both <<<video_1>>> and <<<image_1>>>.",
+          'Example: "Transform the horse in <<<video_1>>> into the unicorn in <<<image_1>>>. Keep motion and background the same."',
         ],
       };
     }
@@ -3326,9 +3249,9 @@ export default function App() {
       return {
         title: "Kling v3 Omni Video",
         lines: [
-          "Uses the selected working-range video as the base edit input and the selected edited first frame as a reference image.",
-          "Prompt must include both <<<video_1>>> and <<<image_1>>> so the model knows which video and reference image to use.",
-          'Example prompt: "Transform the horse in <<<video_1>>> into the unicorn in <<<image_1>>>. keep motions, camera movement and background the same".',
+          "Uses the working-range video plus the selected edited start frame.",
+          "Prompt must include both <<<video_1>>> and <<<image_1>>>.",
+          'Example: "Transform the horse in <<<video_1>>> into the unicorn in <<<image_1>>>. Keep motion and background the same."',
         ],
       };
     }
@@ -3336,11 +3259,10 @@ export default function App() {
       return {
         title: "Seedance 2.0 Reference to Video",
         lines: [
-          "Uses the selected working-range video as the motion reference and the selected edited first frame as the image reference.",
-          "Prompt must include both @Video1 and @Image1 so Seedance knows which uploaded video and image to follow.",
-          "The source clip is conformed into Seedance's smaller reference-video bounds, then the generated result is upscaled back to the working-range size for the rest of the app.",
-          "Limitation: Fal/Seedance may reject clips or reference frames that appear to contain real-person likenesses or private information; this app cannot disable that provider moderation check.",
-          'Example prompt: "Transform the horse in @Video1 into the unicorn in @Image1. Keep the motion, camera movement and background the same."',
+          "Uses the working-range video as @Video1 and the selected edited start frame as @Image1.",
+          "Prompt must include both @Video1 and @Image1.",
+          "The app conforms the input to Seedance reference-video bounds, then scales the result back to the working range.",
+          'Example: "Transform the horse in @Video1 into the unicorn in @Image1. Keep motion and background the same."',
         ],
       };
     }
@@ -3348,9 +3270,9 @@ export default function App() {
       return {
         title: "Wan 2.7 VideoEdit",
         lines: [
-          "Uses the selected working-range video for motion and structure, with the selected edited first frame sent as reference_image.",
-          "720p is faster. 1080p is slower but can preserve more detail on cleaner source clips.",
-          'Example prompt: "Change the horse into the white unicorn, keep the background and motion the same".',
+          "Uses the working-range video plus the selected edited start frame.",
+          "Prompt should focus on the visual change, not restate motion or camera behavior.",
+          "Resolution can be 720p or 1080p.",
         ],
       };
     }
@@ -3358,9 +3280,9 @@ export default function App() {
       return {
         title: "Happy Horse 1.0 Video Edit",
         lines: [
-          "Uses the selected working-range video for motion and the selected edited start frame as @Image1.",
-          "Prompt must reference @Image1 so the model uses the supplied edited frame as the visual target.",
-          "Example prompt: change the horse into the white unicorn in @Image1 and keep the background and motion exactly the same",
+          "Uses the working-range video plus the selected edited start frame as @Image1.",
+          "Prompt must include @Image1.",
+          'Example: "change the horse into the white unicorn in @Image1 and keep the background and motion exactly the same".',
         ],
       };
     }
@@ -3426,10 +3348,10 @@ export default function App() {
       return {
         title: "Runway Gen-4 Aleph",
         lines: [
-          "Uses the selected working-range video for motion and timing, plus the selected edited start frame as an image reference.",
-          "Best prompt style: describe the visual transformation while preserving timing, camera movement and scene continuity.",
-          "Runway suggests prompts start with a clear verb and reference the first frame, for example: 'edit the video to start on the input image as the first frame. add motion so that the car floats weightlessly, as if in zero gravity, throughout the video'.",
-          "Runway only supports specific output ratios and may center-crop the video and reference image to fit the chosen ratio.",
+          "Uses the working-range video plus the selected edited start frame as an image reference.",
+          "Prompts work best when they start with a clear verb and reference the first frame.",
+          'Example: "edit the video to start on the input image as the first frame. add motion so that the car floats weightlessly, as if in zero gravity, throughout the video".',
+          "Runway may center-crop to fit supported output ratios.",
         ],
       };
     }
@@ -3464,22 +3386,12 @@ export default function App() {
         ],
       };
     }
-    if (modelName === "wan2.2-animate") {
-      return {
-        title: "Runware Wan2.2 Animate",
-        lines: [
-          "Best for realistic character replacement/animation using reference image + reference video motion.",
-          "This flow uses selected start frame plus the source working-range video as motion reference.",
-          "Runware currently rejects positivePrompt for this model unless LoRA inputs are supplied, so this app uses reference-driven generation only.",
-        ],
-      };
-    }
     return {
       title: modelName === "ray-flash-2" ? "Luma Ray Flash 2" : "Luma Ray 2",
       lines: [
-        "Uses source working-range video + selected start frame. The start frame anchors look/style while the working range drives motion.",
-        "Mode dropdown (Luma only): adhere = closest to source, flex = moderate change, reimagine = strongest change.",
-        `Current mode: ${modeValue}. For stronger style shifts raise mode; for shot continuity lower mode and keep prompts concise.`,
+        "Uses the working-range video plus the selected edited start frame.",
+        "Luma modes: adhere = closest to source, flex = moderate change, reimagine = strongest change.",
+        `Current mode: ${modeValue}. Use lower modes for continuity and higher modes for stronger visual change.`,
       ],
     };
   }
@@ -3493,6 +3405,31 @@ export default function App() {
         return next;
       }
       return { ...previous, [key]: { taskId, ref } };
+    });
+  }
+
+  function clearCustomReportOutputs(taskId: string, refs?: CustomReportOutputRef[]) {
+    setSelectedReportOutputs((previous) => {
+      if (!Object.keys(previous).length) return previous;
+      if (!refs?.length) {
+        const next = { ...previous };
+        for (const key of Object.keys(next)) {
+          if (next[key]?.taskId === taskId) {
+            delete next[key];
+          }
+        }
+        return next;
+      }
+      const keysToDelete = new Set(refs.map((ref) => `${taskId}:${reportOutputRefKey(ref)}`));
+      const next = { ...previous };
+      let changed = false;
+      for (const key of keysToDelete) {
+        if (next[key]) {
+          delete next[key];
+          changed = true;
+        }
+      }
+      return changed ? next : previous;
     });
   }
 
@@ -4237,7 +4174,7 @@ export default function App() {
 
   async function handleTabChange(nextTab: TabId) {
     if (nextTab === tab) return;
-    if (tab === "timeline" && nextTab !== "timeline" && nextTab !== "report" && nextTab !== "custom_qc" && nextTab !== "api_logs") {
+    if (tab === "timeline" && nextTab !== "timeline" && nextTab !== "report" && nextTab !== "custom_qc" && nextTab !== "api_logs" && nextTab !== "asset_library") {
       const shouldUseWholeVideo = videoWorkMode !== "custom_segment" || (!selectedSegmentId && !selectedRange);
       if (shouldUseWholeVideo) {
         try {
@@ -4364,6 +4301,45 @@ export default function App() {
     return completed.variant.variantId;
   }
 
+  async function uploadManualGeneratedVideo(file: File): Promise<string> {
+    if (!selectedTaskId) throw new Error("No task selected");
+    if (!selectedSegmentId) throw new Error("No working range selected");
+    const init = await apiClient.initManualSegmentGenerationUpload(selectedTaskId, selectedSegmentId, {
+      filename: file.name,
+      contentType: file.type || "video/mp4",
+    });
+    const uploadResponse = await fetch(init.uploadUrl, {
+      method: "PUT",
+      headers: {
+        "content-type": file.type || "application/octet-stream",
+      },
+      body: file,
+    });
+    if (!uploadResponse.ok) {
+      throw new Error(`Upload failed: ${uploadResponse.status}`);
+    }
+    const trimmedPrompt = lumaPrompt.trim();
+    const completed = await apiClient.completeManualSegmentGenerationUpload(selectedTaskId, selectedSegmentId, {
+      uploadKey: init.uploadKey,
+      filename: file.name,
+      model: lumaModel,
+      mode: resolveSelectedGenerationMode(),
+      prompt: lumaModel === "wan2.2-animate" ? undefined : trimmedPrompt || undefined,
+      negativePrompt: lumaModel === "wan2.7-i2v" ? wan27NegativePrompt.trim() || undefined : undefined,
+      firstFrameVariantId: refineSourceVariantIds.first || compareVariantIds.first || undefined,
+      lastFrameVariantId: generationInputMode === "start_end" ? refineSourceVariantIds.last || compareVariantIds.last || undefined : undefined,
+    });
+    await queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
+    await queryClient.invalidateQueries({ queryKey: ["task", "report", selectedTaskId] });
+    await queryClient.invalidateQueries({ queryKey: ["task", "assets", selectedTaskId] });
+    if (completed.generation?.genId) {
+      selectSegmentGeneration(completed.generation.genId);
+      setTab("outputs");
+      return completed.generation.genId;
+    }
+    throw new Error("Uploaded video did not return a generation id");
+  }
+
   function openQualityMatchForVariant(frameRecord: typeof activeEditFrame, variantId: string) {
     if (!frameRecord) return;
     const fullFrameRecord = task?.frames?.[frameRecord.frameId];
@@ -4427,8 +4403,8 @@ export default function App() {
     { id: "create", label: "Edit" },
     { id: "outputs", label: "Generate" },
     { id: "post", label: "Post Process" },
-    { id: "reports", label: "Reports" },
     { id: "assets", label: "Assets" },
+    { id: "reports", label: "Reports" },
   ];
   const currentReferenceSegment = selectedSegment ?? defaultVideoSegment ?? null;
   const currentReferenceStartImageUrl = currentReferenceSegment ? task?.frames?.[currentReferenceSegment.startFrameId]?.imageUrl ?? null : null;
@@ -4478,58 +4454,6 @@ export default function App() {
     wholeVideoNeedsChunking && currentReferenceSegment?.segmentId === defaultVideoSegment?.segmentId
       ? "This video is longer than single-pass generation limit and will require chunking."
       : undefined;
-
-  function renderCustomReportBox(taskId: string | null, reports: CustomReportRecord[] | undefined) {
-    return (
-      <section className="space-y-3 rounded-2xl border border-ink/10 bg-card p-4">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div>
-            <h3 className="text-lg font-semibold">QC Reports</h3>
-            <p className="text-xs text-ink/60">Report creation now lives on the Reports page.</p>
-          </div>
-          <button
-            type="button"
-            className="rounded border border-ink/20 bg-white px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50"
-            disabled={!taskId}
-            onClick={() => taskId && goToReport(taskId, "frames", null)}
-          >
-            Open Reports
-          </button>
-        </div>
-        {customReportNotice ? <p className="text-xs text-ink/70">{customReportNotice}</p> : null}
-        {!reports?.length ? (
-          <p className="text-sm text-ink/60">No custom reports yet.</p>
-        ) : (
-          <div className="space-y-2">
-            {reports.map((report) => (
-              <div key={report.reportId} className="flex items-center justify-between rounded border border-ink/10 bg-white p-2 text-sm">
-                <a
-                  className="text-left text-ink underline"
-                  href={taskId ? `${taskRoute(taskId, "report")}?view=reports&reportId=${encodeURIComponent(report.reportId)}` : "#"}
-                  onClick={(event) => {
-                    event.preventDefault();
-                    if (taskId) {
-                      openCustomReport(taskId, report);
-                    }
-                  }}
-                >
-                  {report.name} ({report.reportType === "qc_frame" ? "QC Frame" : report.reportType === "video_compare" ? "Video Compare" : "QC Video"}) - {report.status}
-                </a>
-                <button
-                  type="button"
-                  className="text-xs text-red-600 underline"
-                  disabled={!taskId || deleteCustomReportMutation.isPending}
-                  onClick={() => taskId && deleteCustomReport(taskId, report)}
-                >
-                  Delete
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-      </section>
-    );
-  }
 
   const pickFrameTabCtx = useMemo<PickFrameTabCtx>(
     () => ({
@@ -4811,6 +4735,7 @@ export default function App() {
       frameVariantImageUrl,
       segmentWindow,
       originalSegmentPreviewUrl: stableOriginalSegmentPreviewUrl,
+      uploadManualGeneratedVideo,
       selectedPreviewGeneration,
       task,
       originalPreviewIsSegmentClip,
@@ -4880,6 +4805,7 @@ export default function App() {
       frameVariantImageUrl,
       segmentWindow,
       stableOriginalSegmentPreviewUrl,
+      uploadManualGeneratedVideo,
       selectedPreviewGeneration,
       task,
       originalPreviewIsSegmentClip,
@@ -4899,7 +4825,7 @@ export default function App() {
     () => ({
       onNext: () => {
         if (selectedTaskId) {
-          goToReport(selectedTaskId, "videos", null);
+          setTab("assets");
         }
       },
       nextDisabled: !mergeTargetGeneration || mergeTargetGeneration.status !== "complete" || !mergeTargetGeneration.downloadUrl,
@@ -4939,7 +4865,13 @@ export default function App() {
       mergeEffectiveEndFrameInclusive,
       mergeEndOffsetFrames,
       mergeGeneratedStartAnchor,
+      mergeGeneratedMaxFrameIndex: generatedMaxFrameIndex,
       mergeFeatherClamped,
+      mergeTrimStartFramesEffective: mergeTrimStartClamped,
+      mergeOriginalVideoForPreview,
+      mergeGeneratedVideoForPreview,
+      mergeOriginalSourceCacheKey,
+      mergeGeneratedSourceCacheKey,
       startBoundaryOriginalThumbs,
       startBoundaryGeneratedThumbs: startBoundaryGeneratedDisplayThumbs,
       MergeBoundaryPreview,
@@ -4977,7 +4909,7 @@ export default function App() {
     }),
     [
       selectedTaskId,
-      goToReport,
+      setTab,
       mergeTargetGeneration,
       generationInputMode,
       mergeTargetGeneration,
@@ -5004,7 +4936,13 @@ export default function App() {
       mergeEffectiveEndFrameInclusive,
       mergeEndOffsetFrames,
       mergeGeneratedStartAnchor,
+      generatedMaxFrameIndex,
       mergeFeatherClamped,
+      mergeTrimStartClamped,
+      mergeOriginalVideoForPreview,
+      mergeGeneratedVideoForPreview,
+      mergeOriginalSourceCacheKey,
+      mergeGeneratedSourceCacheKey,
       startBoundaryOriginalThumbs,
       startBoundaryGeneratedDisplayThumbs,
       mergeGeneratedEndAnchor,
@@ -5036,35 +4974,95 @@ export default function App() {
     () => ({
       selectedTaskId,
       task,
-      renderCustomReportBox,
       assetsLoading,
-      uploadAssets,
-      uploadAssetsVisible,
-      formatAssetDate,
+      mergedVideoAssets,
+      mergedAssetsVisible,
+      setMergedAssetsVisible,
+      generatedVideoAssets,
+      generatedAssetsVisible,
+      setGeneratedAssetsVisible,
+      editedFrameAssets,
+      editedFrameAssetsVisible,
+      setEditedFrameAssetsVisible,
       selectedReportOutputs,
       reportOutputRefKey,
       toggleCustomReportOutput,
+      clearCustomReportOutputs,
       handleDeleteAsset,
-      setUploadAssetsVisible,
-      frameAssets,
-      frameAssetsVisible,
-      setFrameAssetsVisible,
-      outputVideoAssets,
-      videoAssetsVisible,
-      setVideoAssetsVisible,
+      createCustomReport: createCustomReportMutation.mutateAsync,
+      isCreatingCustomReport: createCustomReportMutation.isPending,
+      formatAssetDate,
+      onNext: () => {
+        if (selectedTaskId) {
+          goToReport(selectedTaskId, "reports", null);
+        }
+      },
+      nextDisabled: !selectedTaskId,
+      nextWarning: !selectedTaskId ? "Select a task before opening reports." : null,
     }),
     [
       selectedTaskId,
       task,
       assetsLoading,
-      uploadAssets,
-      uploadAssetsVisible,
+      mergedVideoAssets,
+      mergedAssetsVisible,
+      generatedVideoAssets,
+      generatedAssetsVisible,
+      editedFrameAssets,
+      editedFrameAssetsVisible,
       selectedReportOutputs,
       handleDeleteAsset,
-      frameAssets,
-      frameAssetsVisible,
-      outputVideoAssets,
-      videoAssetsVisible,
+      createCustomReportMutation.mutateAsync,
+      createCustomReportMutation.isPending,
+      goToReport,
+      clearCustomReportOutputs,
+    ],
+  );
+
+  const assetLibraryTabCtx = useMemo<AssetsTabCtx>(
+    () => ({
+      selectedTaskId,
+      task,
+      assetsLoading: assetLibraryLoading,
+      pageTitle: "Asset Library",
+      pageDescription: "Latest merged videos, generated videos, and edited frames across all source videos for this account.",
+      showNext: false,
+      mergedVideoAssets: libraryMergedVideoAssets,
+      mergedAssetsVisible: libraryMergedAssetsVisible,
+      setMergedAssetsVisible: setLibraryMergedAssetsVisible,
+      generatedVideoAssets: libraryGeneratedVideoAssets,
+      generatedAssetsVisible: libraryGeneratedAssetsVisible,
+      setGeneratedAssetsVisible: setLibraryGeneratedAssetsVisible,
+      editedFrameAssets: libraryEditedFrameAssets,
+      editedFrameAssetsVisible: libraryEditedFrameAssetsVisible,
+      setEditedFrameAssetsVisible: setLibraryEditedFrameAssetsVisible,
+      selectedReportOutputs,
+      reportOutputRefKey,
+      toggleCustomReportOutput,
+      clearCustomReportOutputs,
+      handleDeleteAsset,
+      createCustomReport: createCustomReportMutation.mutateAsync,
+      isCreatingCustomReport: createCustomReportMutation.isPending,
+      formatAssetDate,
+      onNext: () => undefined,
+      nextDisabled: true,
+      nextWarning: null,
+    }),
+    [
+      selectedTaskId,
+      task,
+      assetLibraryLoading,
+      libraryMergedVideoAssets,
+      libraryMergedAssetsVisible,
+      libraryGeneratedVideoAssets,
+      libraryGeneratedAssetsVisible,
+      libraryEditedFrameAssets,
+      libraryEditedFrameAssetsVisible,
+      selectedReportOutputs,
+      handleDeleteAsset,
+      createCustomReportMutation.mutateAsync,
+      createCustomReportMutation.isPending,
+      clearCustomReportOutputs,
     ],
   );
 
@@ -5105,7 +5103,7 @@ export default function App() {
           onSelectTask={(taskId) => setTab(tab, taskId)}
           onDeleteTask={(taskId) => deleteTaskMutation.mutate(taskId)}
           onOpenAssetLibrary={() => {
-            void handleTabChange("assets");
+            void handleTabChange("asset_library");
           }}
           onOpenCustomQc={() => {
             void handleTabChange("custom_qc");
@@ -5127,7 +5125,7 @@ export default function App() {
             </StatusNotice>
           ) : null}
           <div className="rounded-2xl border border-ink/10 bg-card p-4">
-            {tab !== "custom_qc" && tab !== "api_logs" ? (
+            {tab !== "custom_qc" && tab !== "api_logs" && tab !== "asset_library" ? (
               <div className="space-y-3">
                 <WorkflowTabs
                   tabs={primaryTabs}
@@ -5239,6 +5237,12 @@ export default function App() {
               </Suspense>
             )}
 
+            {tab === "asset_library" && (
+              <Suspense fallback={<p className="text-sm text-ink/60">Loading Asset Library...</p>}>
+                <AssetsTab ctx={assetLibraryTabCtx} />
+              </Suspense>
+            )}
+
             {tab === "custom_qc" && (
               <Suspense fallback={<p className="text-sm text-ink/60">Loading Custom QC...</p>}>
                 <CustomQcPage
@@ -5260,7 +5264,7 @@ export default function App() {
             )}
           </div>
 
-          {tab !== "api_logs" ? (
+          {tab !== "api_logs" && tab !== "asset_library" ? (
             <Suspense fallback={<div className="rounded-2xl border border-ink/10 bg-card p-4 text-sm text-ink/60">Loading jobs...</div>}>
               <JobsPanel ctx={jobsPanelCtx} />
             </Suspense>

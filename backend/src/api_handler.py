@@ -21,7 +21,7 @@ from PIL import Image, ImageOps
 from src.core.assets import ApiAssetPaths, AssetPaths, AssetStore
 from src.core.auth import UnauthorizedError, get_user_claims, get_user_id
 from src.core.config import load_settings
-from src.core.ffmpeg import extract_frame_png, ffprobe_video
+from src.core.ffmpeg import extract_frame_png, ffprobe_video, transcode_to_cfr
 from src.core.http import error_response, parse_json_body, response
 from src.core.ids import deterministic_frame_id, new_id, prompt_hash
 from src.core.logger import Logger
@@ -56,6 +56,8 @@ from src.models.schemas import (
     FullEditRequest,
     ManualFrameUploadCompleteRequest,
     ManualFrameUploadInitRequest,
+    ManualSegmentGenerationUploadCompleteRequest,
+    ManualSegmentGenerationUploadInitRequest,
     ManualRefineExportRequest,
     ManualRefineUploadCompleteRequest,
     ManualRefineUploadInitRequest,
@@ -398,6 +400,50 @@ def _normalize_uploaded_refine_image(
     return out.getvalue()
 
 
+def _video_probe_payload(probe: dict[str, Any]) -> dict[str, Any]:
+    fps = Fraction(int(probe.get("fps_num") or 0), int(probe.get("fps_den") or 1))
+    if fps.numerator <= 0 or fps.denominator <= 0:
+        fps = Fraction(30, 1)
+    return {
+        "width": int(probe.get("width") or 0),
+        "height": int(probe.get("height") or 0),
+        "fps": {"num": fps.numerator, "den": fps.denominator},
+        "durationSec": round(float(probe.get("duration_sec") or 0.0), 4),
+        "frameCount": int(probe.get("frame_count") or 0),
+        "isVfr": bool(probe.get("is_vfr_input")),
+    }
+
+
+def _normalize_uploaded_generated_video(
+    *,
+    asset_store: AssetStore,
+    upload_key: str,
+    output_key: str,
+    target_width: int,
+    target_height: int,
+    target_fps: Fraction,
+) -> dict[str, Any]:
+    with tempfile.TemporaryDirectory() as td:
+        td_path = Path(td)
+        uploaded_path = td_path / "uploaded_source"
+        normalized_path = td_path / "normalized_output.mp4"
+        asset_store.s3.download_file(asset_store.assets_bucket, upload_key, str(uploaded_path))
+        transcode_to_cfr(
+            str(uploaded_path),
+            str(normalized_path),
+            target_fps,
+            target_width=target_width,
+            target_height=target_height,
+            resize_mode="pad",
+            crf=16,
+            preset="medium",
+            audio_bitrate="192k",
+        )
+        probe = ffprobe_video(str(normalized_path))
+        asset_store.put_bytes(output_key, normalized_path.read_bytes(), content_type="video/mp4")
+        return probe
+
+
 def _create_manual_uploaded_frame_variant(
     *,
     task: dict[str, Any],
@@ -422,6 +468,77 @@ def _create_manual_uploaded_frame_variant(
             "uploadedFilename": filename,
         },
     }
+
+
+def _create_manual_uploaded_segment_generation(
+    *,
+    task: dict[str, Any],
+    segment: dict[str, Any],
+    filename: str,
+    model: str,
+    mode: str,
+    prompt: str | None,
+    negative_prompt: str | None,
+    first_frame_variant_id: str | None,
+    last_frame_variant_id: str | None,
+) -> dict[str, Any]:
+    gen_id = new_id("gen")
+    now = now_iso()
+    paths = _asset_paths_for_task(task)
+    normalized_filename = f"{Path(filename).stem or 'manual_upload'}.mp4"
+    output_key = paths.manual_segment_generation_output(str(segment["segmentId"]), gen_id, normalized_filename)
+    start_frame = task.get("frames", {}).get(segment.get("startFrameId") or "")
+    end_frame = task.get("frames", {}).get(segment.get("endFrameId") or "")
+    source_first_frame_key, resolved_first_variant_id = _resolve_frame_source(start_frame, first_frame_variant_id) if isinstance(start_frame, dict) else (None, None)
+    source_last_frame_key, resolved_last_variant_id = _resolve_frame_source(end_frame, last_frame_variant_id) if isinstance(end_frame, dict) else (None, None)
+    generation_record: dict[str, Any] = {
+        "genId": gen_id,
+        "segmentId": segment["segmentId"],
+        "luma": {
+            "provider": _segment_generation_provider_name(model),
+            "model": model,
+            "mode": mode,
+            "prompt": prompt,
+            "negativePrompt": negative_prompt,
+            "lumaGenerationId": None,
+        },
+        "status": "complete",
+        "outputKey": output_key,
+        "jobId": None,
+        "error": None,
+        "createdAt": now,
+        "updatedAt": now,
+        "startedAt": now,
+        "finishedAt": now,
+        "processingDurationSec": 0,
+        "requestedDurationSec": segment.get("durationSec"),
+        "providerDurationSec": segment.get("durationSec"),
+        "segmentCrop": segment.get("crop"),
+        "manualUpload": {
+            "filename": filename,
+            "uploadedAt": now,
+        },
+        "generationSettings": {
+            "provider": "manual",
+            "requestedModel": model,
+            "model": "manual_upload",
+            "mode": mode,
+            "requestedDurationSec": segment.get("durationSec"),
+            "providerDurationSec": segment.get("durationSec"),
+        },
+    }
+    if isinstance(start_frame, dict):
+        generation_record["sourceFirstFrameCaptureKey"] = start_frame.get("captureKey")
+        generation_record["sourceFirstFrameVariantId"] = resolved_first_variant_id
+        generation_record["sourceFirstFrameResolvedKey"] = source_first_frame_key
+        generation_record["inputFirstFrameKey"] = source_first_frame_key
+    if isinstance(end_frame, dict):
+        generation_record["sourceLastFrameCaptureKey"] = end_frame.get("captureKey")
+        generation_record["sourceLastFrameVariantId"] = resolved_last_variant_id
+        generation_record["sourceLastFrameResolvedKey"] = source_last_frame_key
+        if source_last_frame_key:
+            generation_record["inputLastFrameKey"] = source_last_frame_key
+    return generation_record
 
 
 def _task_summary(task: dict[str, Any]) -> dict[str, Any]:
@@ -704,6 +821,11 @@ def _normalize_custom_report_refs(task: dict[str, Any], raw_refs: list[dict[str,
     seen: set[str] = set()
     frames = task.get("frames", {})
     generations = task.get("segmentGenerations", {})
+    exports = {
+        str(item.get("exportId")): item
+        for item in task.get("exports", [])
+        if isinstance(item, dict) and item.get("exportId")
+    }
     external_pairs = {
         str(item.get("pairId")): item
         for item in task.get("externalQcPairs", [])
@@ -730,6 +852,11 @@ def _normalize_custom_report_refs(task: dict[str, Any], raw_refs: list[dict[str,
             generation = generations.get(gen_id) if isinstance(generations, dict) else None
             if isinstance(generation, dict):
                 normalized_ref = {"assetType": "segment_generation", "genId": gen_id}
+        elif asset_type == "export":
+            export_id = str(ref.get("exportId") or "")
+            export_item = exports.get(export_id)
+            if isinstance(export_item, dict):
+                normalized_ref = {"assetType": "export", "exportId": export_id}
         elif asset_type == "external_frame_pair":
             pair_id = str(ref.get("pairId") or "")
             pair = external_pairs.get(pair_id)
@@ -3396,6 +3523,107 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             )
             store.save_task(task, merge_on_conflict=True)
             return response(202, {"jobId": job_id, "genId": gen_id}, origin=origin)
+
+        if method == "POST" and len(parts) == 7 and parts[2] == "segments" and parts[4] == "manual-generation" and parts[5] == "upload" and parts[6] == "init":
+            segment_id = parts[3]
+            segment = next((s for s in task.get("segments", []) if s["segmentId"] == segment_id), None)
+            if not segment:
+                return error_response(404, "Segment not found", origin=origin)
+            req = _json_model(ManualSegmentGenerationUploadInitRequest, event)
+            upload_id = new_id("msgu")
+            paths = _asset_paths_for_task(task)
+            upload_key = paths.manual_segment_generation_upload(segment_id, upload_id, req.filename)
+            return response(
+                200,
+                {
+                    "uploadKey": upload_key,
+                    "uploadUrl": asset_store.presign_put(upload_key, expires=900, content_type=req.contentType),
+                },
+                origin=origin,
+            )
+
+        if method == "POST" and len(parts) == 7 and parts[2] == "segments" and parts[4] == "manual-generation" and parts[5] == "upload" and parts[6] == "complete":
+            segment_id = parts[3]
+            segment = next((s for s in task.get("segments", []) if s["segmentId"] == segment_id), None)
+            if not segment:
+                return error_response(404, "Segment not found", origin=origin)
+            req = _json_model(ManualSegmentGenerationUploadCompleteRequest, event)
+            paths = _asset_paths_for_task(task)
+            expected_prefix = f"{paths.task_prefix()}/segments/{segment_id}/manual_uploads/"
+            if not req.uploadKey.startswith(expected_prefix):
+                return error_response(400, "Upload key is outside this segment manual-upload path", origin=origin)
+            try:
+                head = asset_store.head_object(req.uploadKey)
+            except ClientError:
+                return error_response(404, "Uploaded generated video file not found", origin=origin)
+
+            generation = _create_manual_uploaded_segment_generation(
+                task=task,
+                segment=segment,
+                filename=req.filename,
+                model=req.model,
+                mode=req.mode,
+                prompt=_sanitize_prompt(req.prompt) if req.prompt else None,
+                negative_prompt=_sanitize_prompt(req.negativePrompt) if req.negativePrompt else None,
+                first_frame_variant_id=req.firstFrameVariantId,
+                last_frame_variant_id=req.lastFrameVariantId,
+            )
+            crop = segment.get("crop") if isinstance(segment.get("crop"), dict) and segment.get("crop", {}).get("enabled") else None
+            target_width = int(crop.get("outputWidth")) if crop and crop.get("outputWidth") else int(task.get("video", {}).get("editSource", {}).get("width") or 0)
+            target_height = int(crop.get("outputHeight")) if crop and crop.get("outputHeight") else int(task.get("video", {}).get("editSource", {}).get("height") or 0)
+            fps_info = task.get("video", {}).get("editSource", {}).get("fps", {})
+            target_fps = Fraction(int(fps_info.get("num") or 30), int(fps_info.get("den") or 1))
+            normalized_probe = _normalize_uploaded_generated_video(
+                asset_store=asset_store,
+                upload_key=req.uploadKey,
+                output_key=generation["outputKey"],
+                target_width=target_width,
+                target_height=target_height,
+                target_fps=target_fps,
+            )
+            generation["providerDurationSec"] = round(float(normalized_probe.get("duration_sec") or segment.get("durationSec") or 0.0), 3)
+            generation["generationSettings"] = {
+                **(generation.get("generationSettings") or {}),
+                "mediaHasAudio": bool(normalized_probe.get("has_audio")),
+                "sourceSegmentTiming": {
+                    "startFrame": int(segment.get("startFrame") or 0),
+                    "endFrameExclusive": int(segment.get("endFrameExclusive") or 0),
+                    "durationFrames": int(segment.get("durationFrames") or 0),
+                    "durationSec": round(float(segment.get("durationSec") or 0.0), 4),
+                    "fps": {"num": target_fps.numerator, "den": target_fps.denominator},
+                    "width": target_width,
+                    "height": target_height,
+                },
+                "storedOutput": _video_probe_payload(normalized_probe),
+                "timelineConform": {
+                    "policy": "manual_upload_normalize",
+                    "applied": True,
+                    "durationDeltaSec": round(float(normalized_probe.get("duration_sec") or 0.0) - float(segment.get("durationSec") or 0.0), 4),
+                    "frameDelta": int(normalized_probe.get("frame_count") or 0) - int(segment.get("durationFrames") or 0),
+                    "fpsConformed": True,
+                    "resolutionConformed": True,
+                },
+            }
+            try:
+                asset_store.delete_object(req.uploadKey)
+            except Exception:
+                pass
+            task.setdefault("segmentGenerations", {})[generation["genId"]] = generation
+            segment["selectedGenerationId"] = generation["genId"]
+            _append_history_event(
+                task,
+                {
+                    "at": now_iso(),
+                    "event": "segment_generation.manual_upload",
+                    "genId": generation["genId"],
+                    "segmentId": segment_id,
+                    "model": req.model,
+                    "filename": req.filename,
+                    "userId": user_id,
+                },
+            )
+            store.save_task(task, merge_on_conflict=True)
+            return response(200, {"generation": generation}, origin=origin)
 
         if method == "POST" and len(parts) == 5 and parts[2] == "segments" and parts[4] == "chunked-generate":
             segment_id = parts[3]

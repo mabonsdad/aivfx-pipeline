@@ -156,6 +156,22 @@ class AssetPaths:
             f"{self._filename(f'upload{short_upload}', ext)}"
         )
 
+    def manual_segment_generation_upload(self, segment_id: str, upload_id: str, filename: str) -> str:
+        short_upload = re.sub(r"[^a-zA-Z0-9]+", "", upload_id)[-12:]
+        ext = Path(filename).suffix or ".mp4"
+        return (
+            f"{self.task_prefix()}/segments/{segment_id}/manual_uploads/"
+            f"{self._filename(f'upload{short_upload}', ext)}"
+        )
+
+    def manual_segment_generation_output(self, segment_id: str, generation_id: str, filename: str) -> str:
+        short_gen = re.sub(r"[^a-zA-Z0-9]+", "", generation_id)[-8:]
+        ext = Path(filename).suffix or ".mp4"
+        return (
+            f"{self.task_prefix()}/segments/{segment_id}/generated/manual/"
+            f"{self._filename(f'output{short_gen}', ext)}"
+        )
+
     def cleanup_track_prefix(self, track_id: str) -> str:
         return f"{self.task_prefix()}/cleanup_tracks/{track_id}"
 

@@ -301,7 +301,9 @@ def _dimensions_for_aspect_ratio_within_box(
     return width, height
 
 
-def _fit_image_to_canvas(image: Image.Image, target_w: int, target_h: int) -> Image.Image:
+def _fit_image_to_canvas(image: Image.Image, target_w: int, target_h: int, *, mode: str = "contain") -> Image.Image:
+    if mode == "cover":
+        return ImageOps.fit(image, (target_w, target_h), Image.Resampling.LANCZOS, centering=(0.5, 0.5))
     fitted = ImageOps.contain(image, (target_w, target_h), Image.Resampling.LANCZOS)
     canvas = Image.new("RGB", (target_w, target_h), (0, 0, 0))
     offset_x = max(0, (target_w - fitted.width) // 2)
@@ -345,9 +347,10 @@ def _prepare_first_frame_image_payload(
     target_width: int,
     target_height: int,
     max_bytes: int,
+    fit_mode: str = "contain",
 ) -> tuple[bytes, str, str]:
     image = ImageOps.exif_transpose(Image.open(BytesIO(frame_bytes))).convert("RGB")
-    canvas = _fit_image_to_canvas(image, target_width, target_height)
+    canvas = _fit_image_to_canvas(image, target_width, target_height, mode=fit_mode)
     png_payload = _encode_png_with_limit(canvas, max_bytes)
     if png_payload is not None:
         return png_payload, "image/png", ".png"
@@ -364,6 +367,7 @@ def _prepare_replicate_image_data_url(
     target_width: int,
     target_height: int,
     max_bytes: int = 900_000,
+    fit_mode: str = "contain",
 ) -> str:
     image = ImageOps.exif_transpose(Image.open(BytesIO(frame_bytes))).convert("RGB")
     width = target_width
@@ -375,7 +379,7 @@ def _prepare_replicate_image_data_url(
         height = max(1, int(round(height * scale)))
 
     for _ in range(6):
-        canvas = _fit_image_to_canvas(image, width, height)
+        canvas = _fit_image_to_canvas(image, width, height, mode=fit_mode)
         payload = _encode_jpeg_with_limit(canvas, max_bytes)
         if len(payload) <= max_bytes:
             encoded = base64.b64encode(payload).decode("ascii")
@@ -395,6 +399,7 @@ def _prepare_replicate_video_data_url(
     preserve_frame_count: bool = False,
     target_width: int,
     target_height: int,
+    resize_mode: str = "pad",
     max_bytes: int = WAN27_DATA_URL_MAX_BYTES,
 ) -> tuple[str, int]:
     last_size = 0
@@ -405,12 +410,13 @@ def _prepare_replicate_video_data_url(
                     input_path,
                     output_path,
                     source_fps=source_fps,
-                    target_fps=fps,
-                    target_width=target_width,
-                    target_height=target_height,
-                    crf=crf,
-                    preset="medium",
-                    audio_bitrate=audio_bitrate,
+                target_fps=fps,
+                target_width=target_width,
+                target_height=target_height,
+                resize_mode=resize_mode,
+                crf=crf,
+                preset="medium",
+                audio_bitrate=audio_bitrate,
                 )
             else:
                 transcode_to_cfr(
@@ -419,6 +425,7 @@ def _prepare_replicate_video_data_url(
                     fps,
                     target_width=target_width,
                     target_height=target_height,
+                    resize_mode=resize_mode,
                     crf=crf,
                     preset="medium",
                     audio_bitrate=audio_bitrate,
@@ -440,6 +447,7 @@ def _transcode_with_size_limit(
     source_height: int,
     landscape_target: tuple[int, int],
     portrait_target: tuple[int, int],
+    resize_mode: str = "pad",
     max_bytes: int,
 ) -> tuple[int, int, int]:
     last_size = 0
@@ -452,6 +460,7 @@ def _transcode_with_size_limit(
             source_height=source_height,
             landscape_target=landscape_target,
             portrait_target=portrait_target,
+            resize_mode=resize_mode,
             crf=crf,
         )
         output_size = Path(output_path).stat().st_size
@@ -470,6 +479,7 @@ def _transcode_exact_with_size_limit(
     preserve_frame_count: bool = False,
     target_width: int,
     target_height: int,
+    resize_mode: str = "pad",
     max_bytes: int,
 ) -> tuple[int, int, int]:
     last_size = 0
@@ -482,6 +492,7 @@ def _transcode_exact_with_size_limit(
                 target_fps=fps,
                 target_width=target_width,
                 target_height=target_height,
+                resize_mode=resize_mode,
                 crf=crf,
                 preset="medium",
                 audio_bitrate="192k",
@@ -493,6 +504,7 @@ def _transcode_exact_with_size_limit(
                 fps,
                 target_width=target_width,
                 target_height=target_height,
+                resize_mode=resize_mode,
                 crf=crf,
                 preset="medium",
                 audio_bitrate="192k",
@@ -2517,6 +2529,7 @@ def _handle_api_video_generate_reference(
         sora2_provider_duration_sec: float | None = None
         replicate_aspect_ratio: str | None = None
         seedance_aspect_ratio: str | None = None
+        wan27_aspect_ratio: str | None = None
         seedance_requested_duration_sec: float | None = None
         seedance_raw_output_width: int | None = None
         seedance_raw_output_height: int | None = None
@@ -2547,6 +2560,7 @@ def _handle_api_video_generate_reference(
                 preserve_frame_count=False,
                 target_width=target_w,
                 target_height=target_h,
+                resize_mode="crop",
                 max_bytes=REPLICATE_VIDEO_MAX_BYTES,
             )
             provider_media_fps = fps
@@ -2575,6 +2589,7 @@ def _handle_api_video_generate_reference(
                 preserve_frame_count=False,
                 target_width=target_w,
                 target_height=target_h,
+                resize_mode="crop",
                 max_bytes=SEEDANCE_REFERENCE_VIDEO_MAX_BYTES,
             )
             provider_media_fps = fps
@@ -2583,11 +2598,15 @@ def _handle_api_video_generate_reference(
             asset_store.put_bytes(media_key_for_provider, local_provider_segment.read_bytes(), content_type="video/mp4")
         elif capability.source_video_profile == "wan27_edit":
             wan_edge = 1080 if wan27_resolution == "1080p" else 720
-            target_w, target_h = _target_by_orientation(
+            wan27_aspect_ratio = _nearest_allowed_aspect_ratio(
                 src_width,
                 src_height,
-                landscape=(int(round(wan_edge * 16 / 9)), wan_edge),
-                portrait=(wan_edge, int(round(wan_edge * 16 / 9))),
+                allowed=("16:9", "9:16", "1:1", "4:3", "3:4"),
+            )
+            target_w, target_h = _dimensions_for_aspect_ratio(
+                wan27_aspect_ratio,
+                long_edge=1920 if wan27_resolution == "1080p" else 1280,
+                square_edge=wan_edge,
             )
             wan_provider_fps, provider_input_timing_policy = _resolved_provider_fps(
                 model_name=model_name,
@@ -2604,6 +2623,7 @@ def _handle_api_video_generate_reference(
                 preserve_frame_count=preserve_frames,
                 target_width=target_w,
                 target_height=target_h,
+                resize_mode="crop",
                 max_bytes=WAN27_DATA_URL_MAX_BYTES,
             )
             provider_media_width = target_w
@@ -2624,6 +2644,7 @@ def _handle_api_video_generate_reference(
                 source_height=src_height,
                 landscape_target=(1920, 1080),
                 portrait_target=(1080, 1920),
+                resize_mode="scale",
                 max_bytes=FULL_VIDEO_MAX_BYTES,
             )
             provider_media_fps = fps
@@ -2638,6 +2659,7 @@ def _handle_api_video_generate_reference(
                 provider_media_fps = fps
                 provider_input_duration_sec = round(segment_duration_sec, 3)
 
+        first_frame_fit_mode = "contain"
         if capability.first_frame_profile == "runware_wan22":
             first_target_w, first_target_h = _nearest_runware_wan22_resolution(first_source_width, first_source_height)
         elif capability.first_frame_profile == "sora_i2v":
@@ -2656,6 +2678,7 @@ def _handle_api_video_generate_reference(
                 long_edge=happy_horse_long_edge,
             )
         elif capability.first_frame_profile == "kling_edit":
+            first_frame_fit_mode = "cover"
             if not replicate_aspect_ratio:
                 replicate_aspect_ratio = _nearest_allowed_aspect_ratio(
                     first_source_width,
@@ -2671,14 +2694,21 @@ def _handle_api_video_generate_reference(
                 square_edge=kling_square_edge,
             )
         elif capability.first_frame_profile == "wan27_edit":
+            first_frame_fit_mode = "cover"
             wan_edge = 1080 if wan27_resolution == "1080p" else 720
-            first_target_w, first_target_h = _target_by_orientation(
-                first_source_width,
-                first_source_height,
-                landscape=(int(round(wan_edge * 16 / 9)), wan_edge),
-                portrait=(wan_edge, int(round(wan_edge * 16 / 9))),
+            if not wan27_aspect_ratio:
+                wan27_aspect_ratio = _nearest_allowed_aspect_ratio(
+                    first_source_width,
+                    first_source_height,
+                    allowed=("16:9", "9:16", "1:1", "4:3", "3:4"),
+                )
+            first_target_w, first_target_h = _dimensions_for_aspect_ratio(
+                wan27_aspect_ratio,
+                long_edge=1920 if wan27_resolution == "1080p" else 1280,
+                square_edge=wan_edge,
             )
         elif capability.first_frame_profile == "seedance_reference":
+            first_frame_fit_mode = "cover"
             if not seedance_aspect_ratio:
                 seedance_aspect_ratio = _nearest_allowed_aspect_ratio(
                     first_source_width,
@@ -2713,6 +2743,7 @@ def _handle_api_video_generate_reference(
             target_width=first_target_w,
             target_height=first_target_h,
             max_bytes=MAX_PROVIDER_IMAGE_BYTES,
+            fit_mode=first_frame_fit_mode,
         )
         first_frame_input_key = paths.request_artifact(request_id, "prepared", "first_frame", first_frame_ext)
         asset_store.put_bytes(first_frame_input_key, prepared_first_frame, content_type=first_frame_content_type)
@@ -2724,6 +2755,7 @@ def _handle_api_video_generate_reference(
                 target_width=first_target_w,
                 target_height=first_target_h,
                 max_bytes=MAX_PROVIDER_IMAGE_BYTES,
+                fit_mode=first_frame_fit_mode,
             )
             last_frame_input_key = paths.request_artifact(request_id, "prepared", "last_frame", last_frame_ext)
             asset_store.put_bytes(last_frame_input_key, prepared_last_frame, content_type=last_frame_content_type)
@@ -2934,6 +2966,7 @@ def _handle_api_video_generate_reference(
                 first_frame_bytes,
                 target_width=first_target_w,
                 target_height=first_target_h,
+                fit_mode=first_frame_fit_mode,
             )
             wan27_reference_transport = "data_url"
             wan27_last_frame_data_url = (
@@ -2941,6 +2974,7 @@ def _handle_api_video_generate_reference(
                     last_frame_bytes or first_frame_bytes,
                     target_width=first_target_w,
                     target_height=first_target_h,
+                    fit_mode=first_frame_fit_mode,
                 )
                 if uses_end_keyframe
                 else None
@@ -3079,6 +3113,7 @@ def _handle_api_video_generate_reference(
                 first_frame_bytes,
                 target_width=first_target_w,
                 target_height=first_target_h,
+                fit_mode=first_frame_fit_mode,
             )
             wan27_reference_transport = "data_url"
             generation_id, result = _run_wan27_prediction(
@@ -3087,7 +3122,7 @@ def _handle_api_video_generate_reference(
                 media_url=wan27_video_data_url,
                 reference_image=wan27_reference_data_url,
                 resolution=wan27_resolution if wan27_resolution in {"720p", "1080p"} else "720p",
-                aspect_ratio="auto",
+                aspect_ratio=wan27_aspect_ratio or "auto",
                 audio_setting="origin" if provider_media_has_audio else "auto",
                 job=job,
                 store=store,
@@ -3232,7 +3267,7 @@ def _handle_api_video_generate_reference(
         "providerOutputRaw": _video_timing_payload(raw_output_probe),
         "storedOutput": _video_timing_payload(output_probe),
         "timelineConform": timeline_conform,
-        "aspectRatio": replicate_aspect_ratio or seedance_aspect_ratio or ("auto" if model_name == "wan2.7-videoedit" else None),
+        "aspectRatio": replicate_aspect_ratio or seedance_aspect_ratio or (wan27_aspect_ratio if model_name == "wan2.7-videoedit" else None),
         "sora2Resolution": sora2_resolution if model_name == "sora-2-image-to-video" else None,
         "happyHorseResolution": happy_horse_resolution if model_name in {"happy-horse-video-edit", "happy-horse-image-to-video"} else None,
         "sora2RequestedDurationSec": sora2_requested_duration_sec if model_name == "sora-2-image-to-video" else None,
@@ -3495,6 +3530,7 @@ def _handle_segment_generate(
     sora2_provider_duration_sec: float | None = None
     replicate_aspect_ratio: str | None = None
     seedance_aspect_ratio: str | None = None
+    wan27_aspect_ratio: str | None = None
     seedance_requested_duration_sec: float | None = None
     source_segment_width: int | None = None
     source_segment_height: int | None = None
@@ -3539,6 +3575,7 @@ def _handle_segment_generate(
                     preserve_frame_count=False,
                     target_width=target_w,
                     target_height=target_h,
+                    resize_mode="crop",
                     max_bytes=REPLICATE_VIDEO_MAX_BYTES,
                 )
                 provider_media_fps = fps
@@ -3567,6 +3604,7 @@ def _handle_segment_generate(
                     preserve_frame_count=False,
                     target_width=target_w,
                     target_height=target_h,
+                    resize_mode="crop",
                     max_bytes=SEEDANCE_REFERENCE_VIDEO_MAX_BYTES,
                 )
                 provider_media_fps = fps
@@ -3575,11 +3613,15 @@ def _handle_segment_generate(
                 _upload_s3(s3, settings.assets_bucket, media_key_for_provider, local_provider_segment, "video/mp4")
             elif capability.source_video_profile == "wan27_edit":
                 wan_edge = 1080 if wan27_resolution == "1080p" else 720
-                target_w, target_h = _target_by_orientation(
+                wan27_aspect_ratio = _nearest_allowed_aspect_ratio(
                     segment_src_width,
                     segment_src_height,
-                    landscape=(int(round(wan_edge * 16 / 9)), wan_edge),
-                    portrait=(wan_edge, int(round(wan_edge * 16 / 9))),
+                    allowed=("16:9", "9:16", "1:1", "4:3", "3:4"),
+                )
+                target_w, target_h = _dimensions_for_aspect_ratio(
+                    wan27_aspect_ratio,
+                    long_edge=1920 if wan27_resolution == "1080p" else 1280,
+                    square_edge=wan_edge,
                 )
                 wan_provider_fps, provider_input_timing_policy = _resolved_provider_fps(
                     model_name=model_name,
@@ -3596,6 +3638,7 @@ def _handle_segment_generate(
                     preserve_frame_count=preserve_frames,
                     target_width=target_w,
                     target_height=target_h,
+                    resize_mode="crop",
                     max_bytes=WAN27_DATA_URL_MAX_BYTES,
                 )
                 provider_media_width = target_w
@@ -3616,6 +3659,7 @@ def _handle_segment_generate(
                     source_height=segment_src_height,
                     landscape_target=(1920, 1080),
                     portrait_target=(1080, 1920),
+                    resize_mode="scale",
                     max_bytes=FULL_VIDEO_MAX_BYTES,
                 )
                 provider_media_width = luma_w
@@ -3634,6 +3678,7 @@ def _handle_segment_generate(
         frame_bytes = asset_store.read_bytes(first_frame_key)
         with Image.open(BytesIO(frame_bytes)) as first_image_probe:
             first_source_width, first_source_height = first_image_probe.size
+        first_frame_fit_mode = "contain"
         if capability.first_frame_profile == "runware_wan22":
             first_target_w, first_target_h = _nearest_runware_wan22_resolution(first_source_width, first_source_height)
         elif capability.first_frame_profile == "sora_i2v":
@@ -3652,6 +3697,7 @@ def _handle_segment_generate(
                 long_edge=happy_horse_long_edge,
             )
         elif capability.first_frame_profile == "kling_edit":
+            first_frame_fit_mode = "cover"
             if not replicate_aspect_ratio:
                 replicate_aspect_ratio = _nearest_allowed_aspect_ratio(
                     first_source_width,
@@ -3667,14 +3713,21 @@ def _handle_segment_generate(
                 square_edge=kling_square_edge,
             )
         elif capability.first_frame_profile == "wan27_edit":
+            first_frame_fit_mode = "cover"
             wan_edge = 1080 if wan27_resolution == "1080p" else 720
-            first_target_w, first_target_h = _target_by_orientation(
-                first_source_width,
-                first_source_height,
-                landscape=(int(round(wan_edge * 16 / 9)), wan_edge),
-                portrait=(wan_edge, int(round(wan_edge * 16 / 9))),
+            if not wan27_aspect_ratio:
+                wan27_aspect_ratio = _nearest_allowed_aspect_ratio(
+                    first_source_width,
+                    first_source_height,
+                    allowed=("16:9", "9:16", "1:1", "4:3", "3:4"),
+                )
+            first_target_w, first_target_h = _dimensions_for_aspect_ratio(
+                wan27_aspect_ratio,
+                long_edge=1920 if wan27_resolution == "1080p" else 1280,
+                square_edge=wan_edge,
             )
         elif capability.first_frame_profile == "seedance_reference":
+            first_frame_fit_mode = "cover"
             if not seedance_aspect_ratio:
                 seedance_aspect_ratio = _nearest_allowed_aspect_ratio(
                     first_source_width,
@@ -3708,6 +3761,7 @@ def _handle_segment_generate(
             target_width=first_target_w,
             target_height=first_target_h,
             max_bytes=MAX_PROVIDER_IMAGE_BYTES,
+            fit_mode=first_frame_fit_mode,
         )
         local_first_frame = td_path / f"first_frame{first_frame_ext}"
         local_first_frame.write_bytes(prepared_first_frame)
@@ -3727,6 +3781,7 @@ def _handle_segment_generate(
                 target_width=first_target_w,
                 target_height=first_target_h,
                 max_bytes=MAX_PROVIDER_IMAGE_BYTES,
+                fit_mode=first_frame_fit_mode,
             )
             local_last_frame = td_path / f"last_frame{last_frame_ext}"
             local_last_frame.write_bytes(prepared_last_frame)
@@ -3970,6 +4025,7 @@ def _handle_segment_generate(
             frame_bytes,
             target_width=first_target_w,
             target_height=first_target_h,
+            fit_mode=first_frame_fit_mode,
         )
         wan27_reference_transport = "data_url"
         wan27_last_frame_data_url: str | None = None
@@ -3979,6 +4035,7 @@ def _handle_segment_generate(
                 last_frame_bytes,
                 target_width=first_target_w,
                 target_height=first_target_h,
+                fit_mode=first_frame_fit_mode,
             )
         generation_id, result = _run_wan27_i2v_prediction(
             api_key=replicate_key,
@@ -4129,6 +4186,7 @@ def _handle_segment_generate(
             frame_bytes,
             target_width=first_target_w,
             target_height=first_target_h,
+            fit_mode=first_frame_fit_mode,
         )
         wan27_reference_transport = "data_url"
         generation_id, result = _run_wan27_prediction(
@@ -4137,7 +4195,7 @@ def _handle_segment_generate(
             media_url=wan27_video_data_url,
             reference_image=wan27_reference_data_url,
             resolution=wan27_resolution if wan27_resolution in {"720p", "1080p"} else "720p",
-            aspect_ratio="auto",
+            aspect_ratio=wan27_aspect_ratio or "auto",
             audio_setting="origin" if provider_media_has_audio else "auto",
             job=job,
             store=store,
@@ -4320,7 +4378,7 @@ def _handle_segment_generate(
                 "aspectRatio": (
                     replicate_aspect_ratio
                     if model_name in {"kling-o1", "kling-v3-omni-video"}
-                    else (seedance_aspect_ratio if model_name == "seedance-2.0-reference-to-video" else ("auto" if model_name == "wan2.7-videoedit" else None))
+                    else (seedance_aspect_ratio if model_name == "seedance-2.0-reference-to-video" else (wan27_aspect_ratio if model_name == "wan2.7-videoedit" else None))
                 ),
                 "replicateKlingMode": replicate_kling_mode if model_name == "kling-o1" else None,
                 "replicateKlingV3Mode": replicate_kling_v3_mode if model_name == "kling-v3-omni-video" else None,
@@ -6080,6 +6138,429 @@ def _build_video_report_row(
     }
 
 
+def _source_video_asset_key(task: dict[str, Any]) -> str | None:
+    preview_source = task.get("video", {}).get("previewSource", {})
+    edit_source = task.get("video", {}).get("editSource", {})
+    for source in (preview_source, edit_source):
+        if isinstance(source, dict):
+            key = source.get("s3Key")
+            if isinstance(key, str) and key:
+                return key
+    return None
+
+
+def _task_first_frame_key(task: dict[str, Any]) -> str | None:
+    frames = [item for item in (task.get("frames", {}) or {}).values() if isinstance(item, dict) and item.get("captureKey")]
+    if not frames:
+        return None
+    frames.sort(key=lambda item: int(item.get("frameIndex") or 0))
+    first_key = frames[0].get("captureKey")
+    return str(first_key) if isinstance(first_key, str) and first_key else None
+
+
+def _build_export_video_report_row(
+    *,
+    task: dict[str, Any],
+    asset_store: AssetStore,
+    store: S3JsonStore,
+    paths: AssetPaths,
+    report_id: str,
+    export_id: str,
+    tests: set[str],
+    settings: Any,
+) -> dict[str, Any]:
+    export_item = next(
+        (
+            item
+            for item in task.get("exports", [])
+            if isinstance(item, dict) and str(item.get("exportId") or "") == export_id
+        ),
+        None,
+    )
+    if not isinstance(export_item, dict):
+        raise RuntimeError(f"Export {export_id} not found")
+    output_key = str(export_item.get("outputKey") or "")
+    if not output_key:
+        raise RuntimeError(f"Export {export_id} is incomplete")
+    source_video_key = _source_video_asset_key(task)
+    if not source_video_key:
+        raise RuntimeError("Original source video missing for export report build")
+
+    run_standard_video = bool({"video_diff", "video_frame_evidence"} & tests)
+    standard_payload: dict[str, Any] | None = None
+    if run_standard_video:
+        fps_info = task["video"]["editSource"]["fps"]
+        target_fps = Fraction(int(fps_info["num"]), int(fps_info["den"]))
+        source_width = int(task["video"]["editSource"]["width"])
+        source_height = int(task["video"]["editSource"]["height"])
+        analysis_width, analysis_height = _target_by_orientation(
+            source_width,
+            source_height,
+            landscape=(960, 540),
+            portrait=(540, 960),
+        )
+
+        s3 = boto3.client("s3")
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            original_video_path = td_path / "source_original.mp4"
+            export_video_path = td_path / "merged_export.mp4"
+            original_standard_path = td_path / "source_original_qc.mp4"
+            export_standard_path = td_path / "merged_export_qc.mp4"
+            _download_s3(s3, settings.assets_bucket, source_video_key, original_video_path)
+            _download_s3(s3, settings.assets_bucket, output_key, export_video_path)
+
+            transcode_to_cfr(
+                str(original_video_path),
+                str(original_standard_path),
+                target_fps,
+                target_width=analysis_width,
+                target_height=analysis_height,
+                crf=20,
+                preset="veryfast",
+                audio_bitrate="96k",
+            )
+            transcode_to_cfr(
+                str(export_video_path),
+                str(export_standard_path),
+                target_fps,
+                target_width=analysis_width,
+                target_height=analysis_height,
+                crf=20,
+                preset="veryfast",
+                audio_bitrate="96k",
+            )
+            original_probe = ffprobe_video(str(original_standard_path))
+            export_probe = ffprobe_video(str(export_standard_path))
+            alignment_source_frames = _load_video_alignment_source_frames(
+                original_standard_path,
+                td_path / "export_alignment",
+                max_frames=VIDEO_COMPARE_ALIGNMENT_SCAN_FRAMES,
+            )
+            video_alignment = _estimate_generated_source_offset(
+                source_frames=alignment_source_frames,
+                generated_path=export_standard_path,
+                generated_probe=export_probe,
+                source_fps=target_fps,
+                work_dir=td_path / "export_alignment",
+                prefix="export",
+            )
+            source_frame_offset = max(0, int(video_alignment.get("sourceFrameOffset") or 0))
+            source_offset_sec = source_frame_offset / float(target_fps)
+            common_duration_sec = max(
+                0.1,
+                min(
+                    max(0.0, float(original_probe.get("duration_sec") or 0.0) - source_offset_sec),
+                    float(export_probe.get("duration_sec") or 0.0),
+                ),
+            )
+
+            original_frames = _extract_sampled_frames(
+                original_standard_path,
+                td_path / "orig_frames",
+                sample_fps=QC_SAMPLE_FPS,
+                duration_sec=common_duration_sec,
+                start_sec=source_offset_sec,
+            )
+            export_frames = _extract_sampled_frames(
+                export_standard_path,
+                td_path / "export_frames",
+                sample_fps=QC_SAMPLE_FPS,
+                duration_sec=common_duration_sec,
+            )
+            paired_count = min(len(original_frames), len(export_frames))
+            if paired_count == 0:
+                raise RuntimeError("No sampled frames available for export QC analysis")
+
+            per_frame_rows: list[dict[str, Any]] = []
+            for frame_idx in range(paired_count):
+                orig_image = Image.open(original_frames[frame_idx]).convert("RGB")
+                export_image = Image.open(export_frames[frame_idx]).convert("RGB")
+                sample_time_sec = frame_idx / float(QC_SAMPLE_FPS)
+                source_frame_index = int(round((source_offset_sec + sample_time_sec) * float(target_fps)))
+                generated_frame_index = int(round(sample_time_sec * float(target_fps)))
+                row_metrics, row_diff, row_binary, _ = _analyze_image_pair(
+                    orig_image,
+                    export_image,
+                    mask_image=None,
+                    threshold=QC_DIFF_THRESHOLD,
+                    boundary_ring_px=QC_BOUNDARY_RING_PX,
+                )
+                per_frame_rows.append(
+                    {
+                        "index": frame_idx,
+                        "timeSec": round(source_offset_sec + sample_time_sec, 4),
+                        "generatedTimeSec": round(sample_time_sec, 4),
+                        "sourceFrameIndex": source_frame_index,
+                        "generatedFrameIndex": generated_frame_index,
+                        "sourceFrameOffset": source_frame_offset,
+                        **row_metrics,
+                        "_original": orig_image,
+                        "_diff": row_diff,
+                        "_binary": row_binary,
+                        "_edited": export_image,
+                    }
+                )
+
+            changed_total_values = [float(item.get("changedPctTotal") or 0.0) for item in per_frame_rows]
+            outside_values = [float(item.get("outsideLeakagePct") or 0.0) for item in per_frame_rows if item.get("outsideLeakagePct") is not None]
+            mean_diff_values = [float(item.get("meanDiffTotal") or 0.0) for item in per_frame_rows]
+            first_frame_metrics = (
+                {key: value for key, value in per_frame_rows[0].items() if not key.startswith("_")}
+                if per_frame_rows
+                else None
+            )
+            last_frame_metrics = (
+                {key: value for key, value in per_frame_rows[-1].items() if not key.startswith("_")}
+                if per_frame_rows
+                else None
+            )
+
+            ssim_log = td_path / "ssim.log"
+            psnr_log = td_path / "psnr.log"
+            _run_command(
+                [
+                    FFMPEG_BIN,
+                    "-y",
+                    "-ss",
+                    f"{source_offset_sec:.6f}",
+                    "-t",
+                    f"{common_duration_sec:.6f}",
+                    "-i",
+                    str(original_standard_path),
+                    "-t",
+                    f"{common_duration_sec:.6f}",
+                    "-i",
+                    str(export_standard_path),
+                    "-lavfi",
+                    f"ssim=stats_file={ssim_log}",
+                    "-shortest",
+                    "-f",
+                    "null",
+                    "-",
+                ]
+            )
+            _run_command(
+                [
+                    FFMPEG_BIN,
+                    "-y",
+                    "-ss",
+                    f"{source_offset_sec:.6f}",
+                    "-t",
+                    f"{common_duration_sec:.6f}",
+                    "-i",
+                    str(original_standard_path),
+                    "-t",
+                    f"{common_duration_sec:.6f}",
+                    "-i",
+                    str(export_standard_path),
+                    "-lavfi",
+                    f"psnr=stats_file={psnr_log}",
+                    "-shortest",
+                    "-f",
+                    "null",
+                    "-",
+                ]
+            )
+            ssim_values = _parse_metric_log(ssim_log, re.compile(r"All:(?P<value>[0-9.]+)"), "value")
+            psnr_values = _parse_metric_log(psnr_log, re.compile(r"psnr_avg:(?P<value>[0-9.]+)"), "value")
+            vmaf_metrics = _run_optional_vmaf(original_standard_path, export_standard_path, td_path / "vmaf.json")
+
+            ranked_rows = sorted(per_frame_rows, key=lambda row: float(row.get("changedPctTotal") or 0.0), reverse=True)
+            selected_rows = ranked_rows[:5]
+            if per_frame_rows:
+                selected_rows.append(per_frame_rows[len(per_frame_rows) // 2])
+            dedup_selected = {int(row["index"]): row for row in selected_rows}
+
+            drift_rows: list[dict[str, Any]] = []
+            drift_frame_count = int(export_probe.get("frame_count") or 0)
+            for row in per_frame_rows:
+                expected_generated_frame_index = max(0, min(drift_frame_count - 1, int(row.get("generatedFrameIndex") or 0)))
+                matched_generated_frame_index, matched_generated_image, match_similarity = _best_aligned_generated_frame_index(
+                    generated_path=export_standard_path,
+                    source_image=row["_original"],
+                    expected_frame_index=expected_generated_frame_index,
+                    frame_count=drift_frame_count,
+                    work_dir=td_path / "export_drift",
+                    prefix=f"{export_id}_{int(row.get('index') or 0):04d}",
+                    search_radius=3,
+                )
+                drift_delta_frames = int(matched_generated_frame_index - expected_generated_frame_index)
+                row["expectedGeneratedFrameIndex"] = expected_generated_frame_index
+                row["matchedGeneratedFrameIndex"] = matched_generated_frame_index
+                row["frameDeltaDrift"] = drift_delta_frames
+                row["frameDeltaDriftSec"] = round(drift_delta_frames / float(target_fps), 4)
+                row["matchSimilarity"] = match_similarity
+                row["_matchedGenerated"] = matched_generated_image
+                drift_rows.append(
+                    {
+                        "index": int(row.get("index") or 0),
+                        "sourceFrameIndex": int(row.get("sourceFrameIndex") or 0),
+                        "generatedFrameIndex": expected_generated_frame_index,
+                        "matchedGeneratedFrameIndex": matched_generated_frame_index,
+                        "frameDeltaDrift": drift_delta_frames,
+                        "frameDeltaDriftSec": round(drift_delta_frames / float(target_fps), 4),
+                        "matchSimilarity": match_similarity,
+                    }
+                )
+
+            selected_frame_artifacts: list[dict[str, Any]] = []
+            for frame_idx in sorted(dedup_selected):
+                row = dedup_selected[frame_idx]
+                matched_generated_image = row.get("_matchedGenerated") or row["_edited"]
+                if isinstance(matched_generated_image, Image.Image) and matched_generated_image.size != row["_original"].size:
+                    matched_generated_image = matched_generated_image.resize(row["_original"].size, Image.Resampling.LANCZOS)
+                matched_diff_gray, _matched_diff_heatmap = _diff_heatmap_image(row["_original"], matched_generated_image)
+                heatmap_bytes, overlay_bytes, binary_bytes = _create_overlay_artifacts(
+                    edited_image=matched_generated_image,
+                    diff_gray=matched_diff_gray,
+                    binary_change=row["_binary"],
+                    mask_bin=None,
+                )
+                stem_base = _report_safe_stem("export", export_id[-8:], f"frame{frame_idx:03d}")
+                original_frame_key = paths.report_artifact(report_id, f"{stem_base}_source", ".png")
+                generated_frame_key = paths.report_artifact(report_id, f"{stem_base}_generated", ".png")
+                heatmap_key = paths.report_artifact(report_id, f"{stem_base}_heatmap", ".png")
+                overlay_key = paths.report_artifact(report_id, f"{stem_base}_overlay", ".png")
+                binary_key = paths.report_artifact(report_id, f"{stem_base}_binary", ".png")
+                asset_store.put_bytes(original_frame_key, _image_to_png_bytes(row["_original"]), content_type="image/png")
+                asset_store.put_bytes(generated_frame_key, _image_to_png_bytes(matched_generated_image), content_type="image/png")
+                asset_store.put_bytes(heatmap_key, heatmap_bytes, content_type="image/png")
+                asset_store.put_bytes(overlay_key, overlay_bytes, content_type="image/png")
+                asset_store.put_bytes(binary_key, binary_bytes, content_type="image/png")
+                selected_frame_artifacts.append(
+                    {
+                        "index": frame_idx,
+                        "timeSec": row["timeSec"],
+                        "generatedTimeSec": row.get("generatedTimeSec"),
+                        "sourceFrameIndex": row.get("sourceFrameIndex"),
+                        "generatedFrameIndex": row.get("generatedFrameIndex"),
+                        "matchedGeneratedFrameIndex": row.get("matchedGeneratedFrameIndex"),
+                        "expectedGeneratedFrameIndex": row.get("expectedGeneratedFrameIndex"),
+                        "frameDeltaDrift": row.get("frameDeltaDrift"),
+                        "frameDeltaDriftSec": row.get("frameDeltaDriftSec"),
+                        "matchSimilarity": row.get("matchSimilarity"),
+                        "sourceFrameOffset": row.get("sourceFrameOffset"),
+                        "changedPctTotal": row["changedPctTotal"],
+                        "outsideLeakagePct": row.get("outsideLeakagePct"),
+                        "originalFrameKey": original_frame_key,
+                        "generatedFrameKey": generated_frame_key,
+                        "heatmapKey": heatmap_key,
+                        "overlayKey": overlay_key,
+                        "binaryChangeKey": binary_key,
+                    }
+                )
+
+            diff_video_path = td_path / "diff_map.mp4"
+            _run_command(
+                [
+                    FFMPEG_BIN,
+                    "-y",
+                    "-ss",
+                    f"{source_offset_sec:.6f}",
+                    "-i",
+                    str(original_standard_path),
+                    "-i",
+                    str(export_standard_path),
+                    "-filter_complex",
+                    "[0:v][1:v]blend=all_mode=difference,eq=contrast=2.0:brightness=0.02:saturation=1.5[v]",
+                    "-map",
+                    "[v]",
+                    "-an",
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "veryfast",
+                    "-crf",
+                    "18",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-shortest",
+                    str(diff_video_path),
+                ]
+            )
+            diff_video_key = paths.report_artifact(report_id, _report_safe_stem("export", export_id[-8:], "diff_map"), ".mp4")
+            _upload_s3(s3, settings.assets_bucket, diff_video_key, diff_video_path, "video/mp4")
+            diff_video_poster_path = td_path / "diff_map_poster.png"
+            _run_command([FFMPEG_BIN, "-y", "-i", str(diff_video_path), "-frames:v", "1", str(diff_video_poster_path)])
+            diff_video_poster_key = paths.report_artifact(report_id, _report_safe_stem("export", export_id[-8:], "diff_map_poster"), ".png")
+            _upload_s3(s3, settings.assets_bucket, diff_video_poster_key, diff_video_poster_path, "image/png")
+
+            timeline_rows = [{key: value for key, value in row.items() if not key.startswith("_")} for row in per_frame_rows]
+            timeline_csv = "index,timeSec,generatedTimeSec,sourceFrameIndex,generatedFrameIndex,matchedGeneratedFrameIndex,frameDeltaDrift,frameDeltaDriftSec,matchSimilarity,sourceFrameOffset,changedPctTotal,outsideLeakagePct,meanDiffTotal,psnr\n" + "\n".join(
+                f"{item.get('index')},{item.get('timeSec')},{item.get('generatedTimeSec')},{item.get('sourceFrameIndex')},{item.get('generatedFrameIndex')},{item.get('matchedGeneratedFrameIndex')},{item.get('frameDeltaDrift')},{item.get('frameDeltaDriftSec')},{item.get('matchSimilarity')},{item.get('sourceFrameOffset')},{item.get('changedPctTotal')},{item.get('outsideLeakagePct')},{item.get('meanDiffTotal')},{item.get('psnr')}"
+                for item in timeline_rows
+            )
+            timeline_csv_key = paths.report_artifact(report_id, _report_safe_stem("export", export_id[-8:], "timeline"), ".csv")
+            timeline_graph_key = paths.report_artifact(report_id, _report_safe_stem("export", export_id[-8:], "timeline_graph"), ".png")
+            asset_store.put_bytes(timeline_csv_key, timeline_csv.encode("utf-8"), content_type="text/csv")
+            asset_store.put_bytes(timeline_graph_key, _build_timeline_graph_png(timeline_rows), content_type="image/png")
+
+            video_aggregates = {
+                "sampledFrameCount": paired_count,
+                "sampleFps": QC_SAMPLE_FPS,
+                "analysisResolution": {"width": analysis_width, "height": analysis_height},
+                "durationSec": round(common_duration_sec, 4),
+                "alignment": {
+                    **video_alignment,
+                    "sourceFrameOffset": source_frame_offset,
+                    "sourceOffsetSec": round(source_offset_sec, 4),
+                    "scanFrameCount": len(alignment_source_frames),
+                },
+                "changedPctTotalMean": round(sum(changed_total_values) / max(1, len(changed_total_values)), 4),
+                "changedPctTotalP95": round(sorted(changed_total_values)[max(0, math.ceil(len(changed_total_values) * 0.95) - 1)], 4),
+                "meanDiffTotalMean": round(sum(mean_diff_values) / max(1, len(mean_diff_values)), 6),
+                "outsideLeakagePctMean": round(sum(outside_values) / len(outside_values), 4) if outside_values else None,
+                "outsideLeakagePctP95": round(sorted(outside_values)[max(0, math.ceil(len(outside_values) * 0.95) - 1)], 4) if outside_values else None,
+                "outsideLeakBudgetPct": QC_OUTSIDE_LEAK_BUDGET_PCT if outside_values else None,
+                "outsideLeakPass": (sum(outside_values) / len(outside_values)) <= QC_OUTSIDE_LEAK_BUDGET_PCT if outside_values else None,
+                "ssimMean": round(sum(ssim_values) / len(ssim_values), 6) if ssim_values else None,
+                "ssimMin": round(min(ssim_values), 6) if ssim_values else None,
+                "psnrMean": round(sum(psnr_values) / len(psnr_values), 4) if psnr_values else None,
+                "psnrMin": round(min(psnr_values), 4) if psnr_values else None,
+                "frameDrift": {
+                    "sampleCount": len(drift_rows),
+                    "meanDeltaFrames": round(sum(float(item.get("frameDeltaDrift") or 0.0) for item in drift_rows) / max(1, len(drift_rows)), 4) if drift_rows else None,
+                    "meanAbsDeltaFrames": round(sum(abs(float(item.get("frameDeltaDrift") or 0.0)) for item in drift_rows) / max(1, len(drift_rows)), 4) if drift_rows else None,
+                    "maxAbsDeltaFrames": round(max((abs(float(item.get("frameDeltaDrift") or 0.0)) for item in drift_rows), default=0.0), 4),
+                    "p95AbsDeltaFrames": round(sorted(abs(float(item.get("frameDeltaDrift") or 0.0)) for item in drift_rows)[max(0, math.ceil(len(drift_rows) * 0.95) - 1)], 4) if drift_rows else None,
+                    "driftedFrameCount": sum(1 for item in drift_rows if int(item.get("frameDeltaDrift") or 0) != 0),
+                    "meanSimilarity": round(sum(float(item.get("matchSimilarity") or 0.0) for item in drift_rows) / max(1, len(drift_rows)), 4) if drift_rows else None,
+                },
+                "firstFrame": first_frame_metrics,
+                "lastFrame": last_frame_metrics,
+                "vmaf": vmaf_metrics,
+            }
+
+            standard_payload = {
+                "selectedTests": sorted(test_name for test_name in tests if test_name in {"video_diff", "video_frame_evidence"}),
+                "aggregates": video_aggregates,
+                "selectedFrames": selected_frame_artifacts,
+                "artifacts": {
+                    "diffVideoKey": diff_video_key,
+                    "diffVideoPosterKey": diff_video_poster_key,
+                    "timelineCsvKey": timeline_csv_key,
+                    "timelineGraphKey": timeline_graph_key,
+                },
+            }
+
+    return {
+        "assetType": "export",
+        "exportId": export_id,
+        "createdAt": export_item.get("createdAt"),
+        "model": "merged_export",
+        "mode": "post_process_export",
+        "processingDurationSec": None,
+        "prompt": "Merged export from post process",
+        "originalFrameKey": _task_first_frame_key(task),
+        "editedStartFrameKey": None,
+        "maskKey": None,
+        "endFrameKey": None,
+        "generatedVideoKey": output_key,
+        "standard": standard_payload,
+    }
+
+
 VIDEO_COMPARE_FRAME_INDICES = (0, 60, 120, 180)
 VIDEO_COMPARE_ZOOM_FACTOR = 3
 VIDEO_COMPARE_ALIGNMENT_SCAN_FRAMES = 48
@@ -6417,6 +6898,21 @@ def compute_merge_alignment_suggestion(
     paths: AssetPaths,
     settings: Any,
 ) -> dict[str, Any]:
+    def _window_bounds(count: int, start_fraction: float, end_fraction: float) -> tuple[int, int]:
+        if count <= 0:
+            return 0, 0
+        start_index = max(0, min(count - 1, int(math.floor(count * start_fraction))))
+        end_index = max(start_index + 1, int(math.ceil(count * end_fraction)))
+        end_index = min(count, end_index)
+        return start_index, end_index
+
+    def _window_median(values: list[int], start_fraction: float, end_fraction: float) -> int:
+        start_index, end_index = _window_bounds(len(values), start_fraction, end_fraction)
+        window = values[start_index:end_index]
+        if not window:
+            return 0
+        return int(round(median(window)))
+
     crop_settings = segment.get("crop") if isinstance(segment.get("crop"), dict) and segment.get("crop", {}).get("enabled") else None
     fps_info = task["video"]["editSource"]["fps"]
     target_fps = Fraction(int(fps_info["num"]), int(fps_info["den"]))
@@ -6562,39 +7058,57 @@ def compute_merge_alignment_suggestion(
     early_median = int(round(median(early_deltas))) if early_deltas else 0
     late_median = int(round(median(late_deltas))) if late_deltas else 0
     drift_values = [int(item.get("frameDeltaDrift") or 0) for item in drift_rows]
+    quarter_median = _window_median(drift_values, 0.2, 0.4)
+    middle_median = _window_median(drift_values, 0.4, 0.6)
+    three_quarter_median = _window_median(drift_values, 0.6, 0.8)
+    stable_candidates = [quarter_median, middle_median, three_quarter_median] if drift_values else [0]
+    stable_baseline_drift = int(round(median(stable_candidates))) if stable_candidates else 0
+    startup_trim_frames = max(0, early_median - stable_baseline_drift)
     mean_abs_drift = (
         round(sum(abs(value) for value in drift_values) / max(1, len(drift_values)), 4)
         if drift_values
         else 0.0
     )
 
-    trim_start_frames = max(anchor_offset_frames, max(0, early_median))
-    residual_end_frames = late_median - trim_start_frames
-    trim_end_frames = max(0, residual_end_frames)
-    suggested_insert_start = int(segment.get("startFrame") or 0)
+    suggested_insert_offset_frames = anchor_offset_frames - stable_baseline_drift
+    suggested_insert_start = int(segment.get("startFrame") or 0) + suggested_insert_offset_frames
+    suggested_insert_start = max(0, suggested_insert_start)
+    trim_start_frames = startup_trim_frames
     source_duration_frames = int(segment.get("durationFrames") or max(1, int(segment.get("endFrameExclusive") or 0) - suggested_insert_start))
     generated_duration_frames = max(1, int(generated_probe.get("frame_count") or 0))
     effective_generated_frames = max(1, generated_duration_frames - trim_start_frames)
-    suggested_playback_rate = round(effective_generated_frames / max(1, source_duration_frames), 6)
-    residual_drift_values = [value - trim_start_frames for value in drift_values]
+
+    stable_start_index, _stable_end_index = _window_bounds(len(drift_rows), 0.2, 1.0)
+    stable_rows = drift_rows[stable_start_index:] if len(drift_rows) >= 4 else drift_rows
+    stable_positions = [float(item.get("sourceFrameIndex") or 0.0) for item in stable_rows]
+    stable_drifts = [float(item.get("frameDeltaDrift") or 0.0) for item in stable_rows]
+    drift_slope_frames_per_source_frame = 0.0
+    fitted_residuals: list[float] = []
+    predicted_late_drift = float(late_median)
+    if len(stable_positions) >= 3:
+        x_mean = sum(stable_positions) / len(stable_positions)
+        y_mean = sum(stable_drifts) / len(stable_drifts)
+        denominator = sum((x - x_mean) ** 2 for x in stable_positions)
+        if denominator > 1e-9:
+            drift_slope_frames_per_source_frame = sum((x - x_mean) * (y - y_mean) for x, y in zip(stable_positions, stable_drifts)) / denominator
+        intercept = y_mean - (drift_slope_frames_per_source_frame * x_mean)
+        fitted_residuals = [y - (intercept + (drift_slope_frames_per_source_frame * x)) for x, y in zip(stable_positions, stable_drifts)]
+        late_position = float(late_window[-1].get("sourceFrameIndex") or stable_positions[-1]) if late_window else stable_positions[-1]
+        predicted_late_drift = intercept + (drift_slope_frames_per_source_frame * late_position)
+    stable_rate_delta = drift_slope_frames_per_source_frame
+    suggested_playback_rate = round(max(0.05, min(20.0, 1.0 + stable_rate_delta)), 6)
+    residual_end_frames = int(round(float(late_median) - predicted_late_drift))
+    trim_end_frames = max(0, residual_end_frames)
+    residual_drift_values = fitted_residuals if fitted_residuals else [float(value - stable_baseline_drift) for value in drift_values]
     residual_mean_abs_drift = (
         round(sum(abs(value) for value in residual_drift_values) / max(1, len(residual_drift_values)), 4)
         if residual_drift_values
         else 0.0
     )
-    sample_indices = list(range(len(residual_drift_values)))
     linear_fit_mae = 0.0
-    if len(sample_indices) >= 3:
-        x_mean = sum(sample_indices) / len(sample_indices)
-        y_mean = sum(residual_drift_values) / len(residual_drift_values)
-        denominator = sum((x - x_mean) ** 2 for x in sample_indices)
-        slope = (sum((x - x_mean) * (y - y_mean) for x, y in zip(sample_indices, residual_drift_values)) / denominator) if denominator > 1e-9 else 0.0
-        intercept = y_mean - (slope * x_mean)
-        fitted = [intercept + (slope * x) for x in sample_indices]
-        linear_fit_mae = round(sum(abs(y - fit) for y, fit in zip(residual_drift_values, fitted)) / len(residual_drift_values), 4)
-    monotonic_late_bias = (
-        len(drift_values) >= 3 and all(value >= 0 for value in drift_values[: min(3, len(drift_values))]) and late_median >= early_median
-    )
+    if residual_drift_values:
+        linear_fit_mae = round(sum(abs(value) for value in residual_drift_values) / len(residual_drift_values), 4)
+    stable_span_drift = late_median - quarter_median if drift_values else 0
 
     recommendation = "trim_only"
     notes: list[str] = []
@@ -6604,25 +7118,25 @@ def compute_merge_alignment_suggestion(
         notes.append("Alignment and drift were measured against preserved pixels outside the edited region, not the changed subject area.")
     else:
         notes.append("No usable edit mask was available for alignment, so timing was analysed across the full frame.")
+    if suggested_insert_offset_frames != 0:
+        direction = "later" if suggested_insert_offset_frames > 0 else "earlier"
+        notes.append(f"Persistent drift suggests moving the source insert start {direction} by about {abs(suggested_insert_offset_frames)} frame(s).")
     if trim_start_frames > 0:
-        notes.append(f"Generated motion appears to start about {trim_start_frames} frame(s) late; trim opening first.")
-    if trim_end_frames > 0:
-        notes.append(f"Generated tail still overruns by about {trim_end_frames} frame(s); trim tail to land closer to source end.")
-    if residual_end_frames > 1 and monotonic_late_bias:
+        notes.append(f"Opening frames differ from the settled timing by about {trim_start_frames} frame(s); trim generation start first.")
+    if abs(suggested_playback_rate - 1.0) > 0.005 and abs(stable_span_drift) >= 2:
         recommendation = "retime_recommended"
-        notes.append(f"Drift continues to build after opening trim. Estimated retime is about {suggested_playback_rate:.4f}x.")
-    elif residual_end_frames < -1:
-        recommendation = "rerender_recommended"
-        notes.append("Generated motion appears to run ahead of source timing; simple trim controls are unlikely to fix this cleanly.")
-    elif residual_mean_abs_drift > 2.0 and linear_fit_mae <= 1.25:
+        notes.append(f"Drift changes through the clip. Estimated retime is about {suggested_playback_rate:.4f}x.")
+    if trim_end_frames > 0:
+        notes.append(f"Generated end still overruns the fitted timing by about {trim_end_frames} frame(s); trim generation end if needed.")
+    if residual_mean_abs_drift > 2.0 and linear_fit_mae <= 1.25:
         recommendation = "piecewise_reconcile_recommended"
-        notes.append("Residual drift changes across the clip but still looks structurally matchable. A piecewise time map is more appropriate than one uniform retime.")
+        notes.append("Drift is not constant across the clip but still looks structurally matchable. A piecewise time map is more appropriate than one uniform retime.")
     elif residual_mean_abs_drift > 2.0:
         recommendation = "rerender_recommended"
-        notes.append("Residual drift varies through the clip, suggesting non-linear timing differences.")
+        notes.append("Residual drift still varies after alignment and retime analysis, suggesting non-linear timing differences.")
     elif trim_end_frames > 0:
         recommendation = "trim_start_and_end"
-    elif trim_start_frames <= 1 and residual_mean_abs_drift <= 1.0:
+    elif trim_start_frames <= 1 and abs(suggested_insert_offset_frames) <= 1 and abs(suggested_playback_rate - 1.0) <= 0.005 and residual_mean_abs_drift <= 1.0:
         recommendation = "merge_ready"
 
     confidence = round(
@@ -6646,11 +7160,18 @@ def compute_merge_alignment_suggestion(
             "anchorAlignment": video_alignment,
             "sampleCount": paired_count,
             "earlyMedianDriftFrames": early_median,
+            "quarterMedianDriftFrames": quarter_median,
+            "middleMedianDriftFrames": middle_median,
+            "threeQuarterMedianDriftFrames": three_quarter_median,
             "lateMedianDriftFrames": late_median,
+            "stableBaselineDriftFrames": stable_baseline_drift,
+            "suggestedInsertOffsetFrames": int(suggested_insert_offset_frames),
+            "startupTrimFrames": int(trim_start_frames),
             "residualEndFrames": residual_end_frames,
             "meanAbsDriftFrames": mean_abs_drift,
             "residualMeanAbsDriftFrames": residual_mean_abs_drift,
             "linearFitMaeFrames": linear_fit_mae,
+            "driftSlopeFramesPerSourceFrame": round(drift_slope_frames_per_source_frame, 6),
             "alignmentMaskMode": alignment_mask_mode,
             "suggestedPlaybackRate": suggested_playback_rate,
             "recommendation": recommendation,
@@ -7618,6 +8139,17 @@ def _handle_qc_report_build(
                         paths=paths,
                         report_id=report_id,
                         gen_id=str(asset_ref.get("genId") or ""),
+                        tests=tests,
+                        settings=settings,
+                    )
+                elif asset_type == "export":
+                    row = _build_export_video_report_row(
+                        task=task,
+                        asset_store=asset_store,
+                        store=store,
+                        paths=paths,
+                        report_id=report_id,
+                        export_id=str(asset_ref.get("exportId") or ""),
                         tests=tests,
                         settings=settings,
                     )

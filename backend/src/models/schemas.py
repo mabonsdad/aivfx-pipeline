@@ -421,6 +421,40 @@ class ManualFrameUploadCompleteRequest(BaseModel):
     filename: str = Field(min_length=1, max_length=255)
 
 
+class ManualSegmentGenerationUploadInitRequest(BaseModel):
+    filename: str = Field(min_length=1, max_length=255)
+    contentType: str = Field(min_length=1, max_length=120)
+
+
+class ManualSegmentGenerationUploadCompleteRequest(BaseModel):
+    uploadKey: str = Field(min_length=1)
+    filename: str = Field(min_length=1, max_length=255)
+    model: Literal[
+        "ray-2",
+        "ray-flash-2",
+        "runway-gen4.5",
+        "sora-2-image-to-video",
+        "happy-horse-video-edit",
+        "happy-horse-image-to-video",
+        "runway-gen4-aleph",
+        "kling-2.6",
+        "kling-o1",
+        "kling-v3-omni-video",
+        "seedance-2.0-reference-to-video",
+        "veo-3.1",
+        "veo-3.1-fast",
+        "wan2.2-a14b",
+        "wan2.2-animate",
+        "wan2.7-videoedit",
+        "wan2.7-i2v",
+    ]
+    mode: str = Field(min_length=1, max_length=120)
+    prompt: str | None = None
+    negativePrompt: str | None = None
+    firstFrameVariantId: str | None = None
+    lastFrameVariantId: str | None = None
+
+
 class VariantSelectRequest(BaseModel):
     ok: bool = True
 
@@ -434,10 +468,11 @@ class AssetDeleteRequest(BaseModel):
 
 
 class CustomReportOutputRef(BaseModel):
-    assetType: Literal["frame_variant", "segment_generation", "external_frame_pair"]
+    assetType: Literal["frame_variant", "segment_generation", "export", "external_frame_pair"]
     frameId: str | None = None
     variantId: str | None = None
     genId: str | None = None
+    exportId: str | None = None
     pairId: str | None = None
 
 

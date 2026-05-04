@@ -1,14 +1,9 @@
 import { useMemo, useState, type ComponentType } from "react";
 
 import { HelpInfoButton, PendingButtonLabel, StatusNotice } from "../../components/layout/UiFeedback";
+import { useVideoFrameStrip, type VideoFrameStripItem } from "../../hooks/useVideoFrameStrip";
 import { getGenerationModeConfig, type GenerateInputMode } from "../../lib/generationModeRegistry";
 import type { ExportRecord, SegmentGeneration, SegmentRecord } from "../../types/api";
-
-type VideoFrameStripItem = {
-  frameIndex: number;
-  imageUrl: string | null;
-  sourceFrameIndex?: number;
-};
 
 export type MergeTabCtx = {
   onNext: () => void;
@@ -46,29 +41,40 @@ export type MergeTabCtx = {
   mergeEffectiveEndFrameInclusive: number;
   mergeEndOffsetFrames: number;
   mergeGeneratedStartAnchor: number;
+  mergeGeneratedMaxFrameIndex: number;
   mergeFeatherClamped: number;
+  mergeTrimStartFramesEffective: number;
+  mergeOriginalVideoForPreview: string | null;
+  mergeGeneratedVideoForPreview: string | null;
+  mergeOriginalSourceCacheKey: string;
+  mergeGeneratedSourceCacheKey: string;
   startBoundaryOriginalThumbs: VideoFrameStripItem[];
   startBoundaryGeneratedThumbs: VideoFrameStripItem[];
   MergeBoundaryPreview: ComponentType<{
     title: string;
-    subtitle: string;
+    actionLabel: string;
+    onAction: () => void;
     firstTrack: {
       title: string;
       items: VideoFrameStripItem[];
       anchorFrame: number;
       anchorEdge?: "start" | "end";
+      anchorSlotIndex?: number;
       overlapStart?: number;
       overlapEnd?: number;
       prefix: string;
+      frameLabelPosition?: "top" | "bottom";
     };
     secondTrack: {
       title: string;
       items: VideoFrameStripItem[];
       anchorFrame: number;
       anchorEdge?: "start" | "end";
+      anchorSlotIndex?: number;
       overlapStart?: number;
       overlapEnd?: number;
       prefix: string;
+      frameLabelPosition?: "top" | "bottom";
     };
   }>;
   mergeGeneratedEndAnchor: number;
@@ -95,10 +101,18 @@ export type MergeTabCtx = {
       sourceFrameOffset: number;
       sourceOffsetSec: number;
       earlyMedianDriftFrames: number;
+      quarterMedianDriftFrames?: number;
+      middleMedianDriftFrames?: number;
+      threeQuarterMedianDriftFrames?: number;
       lateMedianDriftFrames: number;
+      stableBaselineDriftFrames?: number;
+      suggestedInsertOffsetFrames?: number;
+      startupTrimFrames?: number;
       residualEndFrames: number;
       meanAbsDriftFrames: number;
       residualMeanAbsDriftFrames: number;
+      linearFitMaeFrames?: number;
+      driftSlopeFramesPerSourceFrame?: number;
       suggestedPlaybackRate: number;
       recommendation: string;
       confidence: number;
@@ -136,14 +150,59 @@ type BoundaryZoomPair = {
 };
 
 type BoundaryZoomModalState = {
+  kind: "start" | "end";
   title: string;
-  subtitle: string;
-  pairs: BoundaryZoomPair[];
   crop: SegmentRecord["crop"] | null;
+  frameOffset: number;
 };
 
-function clampInt(value: number, min: number, max: number) {
-  return Math.min(max, Math.max(min, Math.round(value)));
+function clampInteger(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, Math.round(value)));
+}
+
+function frameWindow(centerFrame: number, before: number, after: number, minFrame: number, maxFrame: number): number[] {
+  if (maxFrame < minFrame) return [];
+  const values: number[] = [];
+  for (let frame = centerFrame - before; frame <= centerFrame + after; frame += 1) {
+    if (frame < minFrame || frame > maxFrame) continue;
+    values.push(frame);
+  }
+  return values;
+}
+
+function generatedOutputFrameToSourceFrame(
+  outputFrameIndex: number,
+  trimStartFrames: number,
+  visibleSourceFrames: number,
+  effectiveOutputFrames: number,
+): number {
+  const safeVisibleSourceFrames = Math.max(1, visibleSourceFrames);
+  const safeEffectiveOutputFrames = Math.max(1, effectiveOutputFrames);
+  if (safeVisibleSourceFrames <= 1 || safeEffectiveOutputFrames <= 1) {
+    return trimStartFrames;
+  }
+  const clampedOutputFrameIndex = clampInteger(outputFrameIndex, 0, safeEffectiveOutputFrames - 1);
+  const sourceOffset =
+    safeEffectiveOutputFrames === safeVisibleSourceFrames
+      ? clampedOutputFrameIndex
+      : Math.round((clampedOutputFrameIndex * (safeVisibleSourceFrames - 1)) / (safeEffectiveOutputFrames - 1));
+  return trimStartFrames + clampInteger(sourceOffset, 0, safeVisibleSourceFrames - 1);
+}
+
+function remapGeneratedStripItems(
+  displayFrameIndices: number[],
+  sourceFrameIndices: number[],
+  sourceItems: VideoFrameStripItem[],
+): VideoFrameStripItem[] {
+  const imageBySourceFrame = new Map(sourceItems.map((item) => [item.frameIndex, item.imageUrl ?? null]));
+  return displayFrameIndices.map((displayFrameIndex, idx) => {
+    const sourceFrameIndex = sourceFrameIndices[idx] ?? sourceFrameIndices[sourceFrameIndices.length - 1] ?? 0;
+    return {
+      frameIndex: displayFrameIndex,
+      sourceFrameIndex,
+      imageUrl: imageBySourceFrame.get(sourceFrameIndex) ?? null,
+    };
+  });
 }
 
 function findStripItem(items: VideoFrameStripItem[], frameIndex: number) {
@@ -170,18 +229,6 @@ function buildBoundaryZoomPairs(
       generatedImageUrl: generatedItem.imageUrl,
     };
   });
-}
-
-function NudgeButton({ label, onClick }: { label: string; onClick: () => void }) {
-  return (
-    <button
-      type="button"
-      className="rounded border border-ink/15 bg-white px-2 py-1 text-[11px] text-ink/80 transition hover:border-teal-500 hover:text-teal-700"
-      onClick={onClick}
-    >
-      {label}
-    </button>
-  );
 }
 
 function NumberAdjustField({
@@ -214,12 +261,6 @@ function NumberAdjustField({
           onChange={(e) => onChange(Number(e.target.value))}
           className="w-24 rounded-md border border-ink/20 px-2 py-2 text-sm"
         />
-      </div>
-      <div className="mt-3 flex flex-wrap gap-1.5">
-        <NudgeButton label="-5" onClick={() => onChange(clampInt(value - 5, min, max))} />
-        <NudgeButton label="-1" onClick={() => onChange(clampInt(value - 1, min, max))} />
-        <NudgeButton label="+1" onClick={() => onChange(clampInt(value + 1, min, max))} />
-        <NudgeButton label="+5" onClick={() => onChange(clampInt(value + 5, min, max))} />
       </div>
     </div>
   );
@@ -300,7 +341,13 @@ export default function MergeTab({ ctx }: MergeTabProps) {
     mergeEffectiveEndFrameInclusive,
     mergeEndOffsetFrames,
     mergeGeneratedStartAnchor,
+    mergeGeneratedMaxFrameIndex,
     mergeFeatherClamped,
+    mergeTrimStartFramesEffective,
+    mergeOriginalVideoForPreview,
+    mergeGeneratedVideoForPreview,
+    mergeOriginalSourceCacheKey,
+    mergeGeneratedSourceCacheKey,
     startBoundaryOriginalThumbs,
     startBoundaryGeneratedThumbs,
     MergeBoundaryPreview,
@@ -378,6 +425,20 @@ export default function MergeTab({ ctx }: MergeTabProps) {
     showTrackedCleanupTool && mergeTargetGeneration?.status === "complete" && Boolean(mergeTargetGeneration.downloadUrl)
       ? mergeTargetGeneration
       : null;
+  const currentGenerationFrameDifference = mergeEffectiveDurationFrames - mergeOriginalDurationFrames;
+  const suggestedInsertOffset =
+    mergeAlignmentSuggestion && mergeTargetSegment
+      ? mergeAlignmentSuggestion.suggested.startFrameOverride - (mergeTargetSegment.startFrame ?? 0)
+      : null;
+  const actionableSuggestionNotes = useMemo(() => {
+    if (!mergeAlignmentSuggestion) return [];
+    return mergeAlignmentSuggestion.analysis.notes.filter(
+      (note) =>
+        !note.startsWith("Alignment was analysed against") &&
+        !note.startsWith("Alignment and drift were measured against") &&
+        !note.startsWith("No usable edit mask was available"),
+    );
+  }, [mergeAlignmentSuggestion]);
 
   function resetExtendModalForGeneration(generation: SegmentGeneration | null) {
     const segment = generation ? getSegmentForGeneration(generation) : null;
@@ -414,30 +475,112 @@ export default function MergeTab({ ctx }: MergeTabProps) {
 
   function openStartBoundaryZoom() {
     setBoundaryZoomModal({
+      kind: "start",
       title: "Start merge zoom",
-      subtitle: `source f${mergeInsertStartFrameEffective} aligned to generated output g${mergeGeneratedStartAnchor}`,
-      pairs: buildBoundaryZoomPairs(
-        startBoundaryGeneratedThumbs,
-        mergeGeneratedStartAnchor,
-        startBoundaryOriginalThumbs,
-        mergeInsertStartFrameEffective,
-      ),
       crop: mergeTargetSegment?.crop ?? null,
+      frameOffset: 0,
     });
   }
 
   function openEndBoundaryZoom() {
     setBoundaryZoomModal({
+      kind: "end",
       title: "End merge zoom",
-      subtitle: `generated output g${mergeGeneratedEndAnchor} resolving through source f${mergeEffectiveEndFrameInclusive} before cut to f${mergeEffectiveEndFrameExclusive}`,
-      pairs: buildBoundaryZoomPairs(
-        endBoundaryGeneratedThumbs,
-        mergeGeneratedEndAnchor,
-        endBoundaryOriginalThumbs,
-        mergeEffectiveEndFrameInclusive,
-      ),
       crop: mergeTargetSegment?.crop ?? null,
+      frameOffset: 0,
     });
+  }
+
+  const boundaryZoomDisplayAnchor = useMemo(() => {
+    if (!boundaryZoomModal) return null;
+    const anchorBase = boundaryZoomModal.kind === "start" ? mergeGeneratedStartAnchor : mergeGeneratedEndAnchor;
+    return clampInteger(anchorBase + boundaryZoomModal.frameOffset, 0, mergeGeneratedMaxFrameIndex);
+  }, [boundaryZoomModal, mergeGeneratedEndAnchor, mergeGeneratedMaxFrameIndex, mergeGeneratedStartAnchor]);
+  const boundaryZoomSourceAnchor = useMemo(() => {
+    if (!boundaryZoomModal) return null;
+    const anchorBase = boundaryZoomModal.kind === "start" ? mergeInsertStartFrameEffective : mergeEffectiveEndFrameInclusive;
+    return clampInteger(anchorBase + boundaryZoomModal.frameOffset, 0, Math.max(0, sourceFrameCount - 1));
+  }, [boundaryZoomModal, mergeEffectiveEndFrameInclusive, mergeInsertStartFrameEffective, sourceFrameCount]);
+  const boundaryZoomDisplayFrames = useMemo(
+    () =>
+      boundaryZoomDisplayAnchor == null ? [] : frameWindow(boundaryZoomDisplayAnchor, 1, 1, 0, mergeGeneratedMaxFrameIndex),
+    [boundaryZoomDisplayAnchor, mergeGeneratedMaxFrameIndex],
+  );
+  const boundaryZoomGeneratedSourceFrames = useMemo(
+    () =>
+      boundaryZoomDisplayFrames.map((frameIndex) =>
+        generatedOutputFrameToSourceFrame(
+          frameIndex,
+          mergeTrimStartFramesEffective,
+          mergeVisibleDurationFramesBeforeRetime,
+          mergeEffectiveDurationFrames,
+        ),
+      ),
+    [boundaryZoomDisplayFrames, mergeEffectiveDurationFrames, mergeTrimStartFramesEffective, mergeVisibleDurationFramesBeforeRetime],
+  );
+  const boundaryZoomSourceFrames = useMemo(
+    () => (boundaryZoomSourceAnchor == null ? [] : frameWindow(boundaryZoomSourceAnchor, 1, 1, 0, Math.max(0, sourceFrameCount - 1))),
+    [boundaryZoomSourceAnchor, sourceFrameCount],
+  );
+  const boundaryZoomGeneratedThumbs = useVideoFrameStrip({
+    videoUrl: boundaryZoomModal ? mergeGeneratedVideoForPreview : null,
+    fps: mergeFps,
+    frameIndices: boundaryZoomGeneratedSourceFrames,
+    cachePrefix: boundaryZoomModal ? `merge:zoom:${boundaryZoomModal.kind}:generated` : "merge:zoom:generated",
+    sourceCacheKey: mergeGeneratedSourceCacheKey,
+  });
+  const boundaryZoomGeneratedDisplayThumbs = useMemo(
+    () => remapGeneratedStripItems(boundaryZoomDisplayFrames, boundaryZoomGeneratedSourceFrames, boundaryZoomGeneratedThumbs),
+    [boundaryZoomDisplayFrames, boundaryZoomGeneratedSourceFrames, boundaryZoomGeneratedThumbs],
+  );
+  const boundaryZoomSourceThumbs = useVideoFrameStrip({
+    videoUrl: boundaryZoomModal ? mergeOriginalVideoForPreview : null,
+    fps: mergeFps,
+    frameIndices: boundaryZoomSourceFrames,
+    cachePrefix: boundaryZoomModal ? `merge:zoom:${boundaryZoomModal.kind}:source` : "merge:zoom:source",
+    sourceCacheKey: mergeOriginalSourceCacheKey,
+  });
+  const boundaryZoomPairs = useMemo(
+    () =>
+      boundaryZoomModal && boundaryZoomDisplayAnchor != null && boundaryZoomSourceAnchor != null
+        ? buildBoundaryZoomPairs(
+            boundaryZoomGeneratedDisplayThumbs,
+            boundaryZoomDisplayAnchor,
+            boundaryZoomSourceThumbs,
+            boundaryZoomSourceAnchor,
+          )
+        : [],
+    [
+      boundaryZoomDisplayAnchor,
+      boundaryZoomGeneratedDisplayThumbs,
+      boundaryZoomModal,
+      boundaryZoomSourceAnchor,
+      boundaryZoomSourceThumbs,
+    ],
+  );
+  const boundaryZoomCanStepBackward = useMemo(() => {
+    if (!boundaryZoomModal) return false;
+    const anchorBase = boundaryZoomModal.kind === "start" ? mergeGeneratedStartAnchor : mergeGeneratedEndAnchor;
+    return anchorBase + boundaryZoomModal.frameOffset > 0;
+  }, [boundaryZoomModal, mergeGeneratedEndAnchor, mergeGeneratedStartAnchor]);
+  const boundaryZoomCanStepForward = useMemo(() => {
+    if (!boundaryZoomModal) return false;
+    const anchorBase = boundaryZoomModal.kind === "start" ? mergeGeneratedStartAnchor : mergeGeneratedEndAnchor;
+    return anchorBase + boundaryZoomModal.frameOffset < mergeGeneratedMaxFrameIndex;
+  }, [boundaryZoomModal, mergeGeneratedEndAnchor, mergeGeneratedMaxFrameIndex, mergeGeneratedStartAnchor]);
+
+  function nudgeBoundaryZoomFrameOffset(delta: number) {
+    setBoundaryZoomModal((previous) => {
+      if (!previous) return previous;
+      const anchorBase = previous.kind === "start" ? mergeGeneratedStartAnchor : mergeGeneratedEndAnchor;
+      const nextFrameOffset = previous.frameOffset + delta;
+      const nextAnchor = clampInteger(anchorBase + nextFrameOffset, 0, mergeGeneratedMaxFrameIndex);
+      return { ...previous, frameOffset: nextAnchor - anchorBase };
+    });
+  }
+
+  function nudgeMergeInsertStart(delta: number) {
+    setMergeInsertStartFrame(mergeInsertStartFrame + delta);
   }
 
   return (
@@ -538,26 +681,54 @@ export default function MergeTab({ ctx }: MergeTabProps) {
         {mergeTargetGeneration && mergeTargetSegment ? (
           <>
             <div className="space-y-3 rounded-lg border border-ink/10 p-3">
-              <p className="text-sm font-medium">Advanced merge alignment</p>
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  className="rounded-md border border-ink/20 bg-white px-3 py-2 text-sm text-ink disabled:cursor-not-allowed disabled:opacity-60"
-                  disabled={isSuggestingMergeAlignment}
-                  onClick={suggestMergeAlignment}
-                >
-                  <PendingButtonLabel
-                    isPending={isSuggestingMergeAlignment}
-                    idle="Suggest alignment"
-                    pending="Analysing alignment..."
-                  />
-                </button>
-                {mergeAlignmentSuggestion ? (
-                  <p className="text-xs text-ink/65">
-                    Suggestion: <span className="font-medium text-ink">{mergeAlignmentSuggestion.analysis.recommendation.split("_").join(" ")}</span> ·
-                    confidence {mergeAlignmentSuggestion.analysis.confidence.toFixed(2)}
-                  </p>
-                ) : null}
+              <div className="space-y-2">
+                <p className="text-sm font-medium text-ink">Current Alignment</p>
+                <div className="grid gap-2 rounded-lg border border-ink/10 bg-white p-3 md:grid-cols-3">
+                  <div>
+                    <p className="text-[11px] uppercase tracking-wide text-ink/50">Source frame length</p>
+                    <p className="mt-1 text-lg font-semibold text-ink">{mergeOriginalDurationFrames}f</p>
+                  </div>
+                  <div>
+                    <p className="text-[11px] uppercase tracking-wide text-ink/50">Generation frame length</p>
+                    <p className="mt-1 text-lg font-semibold text-ink">{mergeEffectiveDurationFrames}f</p>
+                  </div>
+                  <div>
+                    <p className="text-[11px] uppercase tracking-wide text-ink/50">Generation frame difference</p>
+                    <p className={`mt-1 text-lg font-semibold ${currentGenerationFrameDifference === 0 ? "text-ink" : currentGenerationFrameDifference > 0 ? "text-orange-700" : "text-teal-700"}`}>
+                      {currentGenerationFrameDifference >= 0 ? "+" : ""}
+                      {currentGenerationFrameDifference}f
+                    </p>
+                  </div>
+                </div>
+              </div>
+              <div className="space-y-3">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="space-y-2">
+                    <p className="text-sm font-medium text-ink">Suggested Merge Alignment</p>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        className="rounded-md border border-ink/20 bg-white px-3 py-2 text-sm text-ink disabled:cursor-not-allowed disabled:opacity-60"
+                        disabled={isSuggestingMergeAlignment}
+                        onClick={suggestMergeAlignment}
+                      >
+                        <PendingButtonLabel
+                          isPending={isSuggestingMergeAlignment}
+                          idle="Suggest alignment"
+                          pending="Analysing alignment..."
+                        />
+                      </button>
+                      {mergeAlignmentSuggestion ? (
+                        <p className="text-xs text-ink/65">
+                          Confidence <span className="font-medium text-ink">{mergeAlignmentSuggestion.analysis.confidence.toFixed(2)}</span>
+                        </p>
+                      ) : null}
+                    </div>
+                  </div>
+                  <div className="max-w-xl rounded-lg border border-ink/10 bg-bg px-3 py-2 text-[11px] leading-5 text-ink/65">
+                    Alignment and drift analysis uses pixel comparisons to match frames, and where feasible focuses on unedited regions outside of the mask and matching any cropping.
+                  </div>
+                </div>
               </div>
               {mergeAlignmentSuggestion ? (
                 <StatusNotice
@@ -570,28 +741,105 @@ export default function MergeTab({ ctx }: MergeTabProps) {
                         : "info"
                   }
                 >
-                  <div className="space-y-1 text-xs">
-                    <p>
-                      Suggested controls: insert offset {mergeAlignmentSuggestion.suggested.startFrameOverride - (mergeTargetSegment?.startFrame ?? 0)}f
-                      (absolute f{mergeAlignmentSuggestion.suggested.startFrameOverride}), trim opening{" "}
-                      {mergeAlignmentSuggestion.suggested.trimStartFrames}f, trim tail {mergeAlignmentSuggestion.suggested.trimEndFrames}f.
-                    </p>
-                    <p>
-                      Start alignment: source offset {mergeAlignmentSuggestion.analysis.sourceFrameOffset}f · early drift{" "}
-                      {mergeAlignmentSuggestion.analysis.earlyMedianDriftFrames >= 0 ? "+" : ""}
-                      {mergeAlignmentSuggestion.analysis.earlyMedianDriftFrames}f
-                    </p>
-                    <p>
-                      End alignment: late drift{" "}
-                      {mergeAlignmentSuggestion.analysis.lateMedianDriftFrames >= 0 ? "+" : ""}
-                      {mergeAlignmentSuggestion.analysis.lateMedianDriftFrames}f · residual end drift{" "}
-                      {mergeAlignmentSuggestion.analysis.residualEndFrames >= 0 ? "+" : ""}
-                      {mergeAlignmentSuggestion.analysis.residualEndFrames}f · estimated retime {mergeAlignmentSuggestion.analysis.suggestedPlaybackRate.toFixed(4)}x
-                    </p>
-                    {mergeAlignmentSuggestion.analysis.notes.map((note) => (
-                      <p key={note}>{note}</p>
-                    ))}
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <div className="space-y-3 rounded-lg border border-ink/10 bg-white p-3">
+                      <p className="text-sm font-medium text-ink">Alignment</p>
+                      <div className="flex items-end justify-between gap-3">
+                        <div>
+                          <p className="text-[11px] text-ink/55">Source insert start</p>
+                          <p className="text-xl font-semibold text-ink">
+                            {suggestedInsertOffset != null && suggestedInsertOffset >= 0 ? "+" : ""}
+                            {suggestedInsertOffset ?? 0}f
+                          </p>
+                        </div>
+                        <p className="text-[11px] text-ink/60">positive values start generation later</p>
+                      </div>
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        <div>
+                          <p className="text-[11px] text-ink/55">Trim generation start</p>
+                          <p className="text-xl font-semibold text-ink">{mergeAlignmentSuggestion.suggested.trimStartFrames}f</p>
+                        </div>
+                        <div>
+                          <p className="text-[11px] text-ink/55">Trim generation end</p>
+                          <p className="text-xl font-semibold text-ink">{mergeAlignmentSuggestion.suggested.trimEndFrames}f</p>
+                        </div>
+                      </div>
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        <div>
+                          <p className="text-[11px] text-ink/55">Source offset</p>
+                          <p className="text-lg font-semibold text-ink">{mergeAlignmentSuggestion.analysis.sourceFrameOffset}f</p>
+                        </div>
+                        <div>
+                          <p className="text-[11px] text-ink/55">Settled baseline drift</p>
+                          <p className="text-lg font-semibold text-ink">
+                            {(mergeAlignmentSuggestion.analysis.stableBaselineDriftFrames ?? 0) >= 0 ? "+" : ""}
+                            {mergeAlignmentSuggestion.analysis.stableBaselineDriftFrames ?? 0}f
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="space-y-3 rounded-lg border border-ink/10 bg-white p-3">
+                      <p className="text-sm font-medium text-ink">Calculated drift</p>
+                      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                        <div>
+                          <p className="text-[11px] text-ink/55">Early drift</p>
+                          <p className="text-xl font-semibold text-ink">
+                            {mergeAlignmentSuggestion.analysis.earlyMedianDriftFrames >= 0 ? "+" : ""}
+                            {mergeAlignmentSuggestion.analysis.earlyMedianDriftFrames}f
+                          </p>
+                        </div>
+                        <div>
+                          <p className="text-[11px] text-ink/55">Quarter drift</p>
+                          <p className="text-xl font-semibold text-ink">
+                            {(mergeAlignmentSuggestion.analysis.quarterMedianDriftFrames ?? 0) >= 0 ? "+" : ""}
+                            {mergeAlignmentSuggestion.analysis.quarterMedianDriftFrames ?? 0}f
+                          </p>
+                        </div>
+                        <div>
+                          <p className="text-[11px] text-ink/55">Middle drift</p>
+                          <p className="text-xl font-semibold text-ink">
+                            {(mergeAlignmentSuggestion.analysis.middleMedianDriftFrames ?? 0) >= 0 ? "+" : ""}
+                            {mergeAlignmentSuggestion.analysis.middleMedianDriftFrames ?? 0}f
+                          </p>
+                        </div>
+                        <div>
+                          <p className="text-[11px] text-ink/55">Late drift</p>
+                          <p className="text-xl font-semibold text-ink">
+                            {mergeAlignmentSuggestion.analysis.lateMedianDriftFrames >= 0 ? "+" : ""}
+                            {mergeAlignmentSuggestion.analysis.lateMedianDriftFrames}f
+                          </p>
+                        </div>
+                        <div>
+                          <p className="text-[11px] text-ink/55">Residual end drift</p>
+                          <p className="text-xl font-semibold text-ink">
+                            {mergeAlignmentSuggestion.analysis.residualEndFrames >= 0 ? "+" : ""}
+                            {mergeAlignmentSuggestion.analysis.residualEndFrames}f
+                          </p>
+                        </div>
+                        <div>
+                          <p className="text-[11px] text-ink/55">Estimated retime</p>
+                          <p className="text-xl font-semibold text-ink">{mergeAlignmentSuggestion.analysis.suggestedPlaybackRate.toFixed(4)}x</p>
+                        </div>
+                      </div>
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        <div>
+                          <p className="text-[11px] text-ink/55">Drift slope</p>
+                          <p className="text-lg font-semibold text-ink">{(mergeAlignmentSuggestion.analysis.driftSlopeFramesPerSourceFrame ?? 0).toFixed(4)}</p>
+                        </div>
+                        <div>
+                          <p className="text-[11px] text-ink/55">Residual fit error</p>
+                          <p className="text-lg font-semibold text-ink">{(mergeAlignmentSuggestion.analysis.linearFitMaeFrames ?? 0).toFixed(2)}f</p>
+                        </div>
+                      </div>
+                    </div>
                   </div>
+                  {actionableSuggestionNotes.length ? (
+                    <div className="mt-3 space-y-1 text-xs text-ink/75">
+                      {actionableSuggestionNotes.slice(0, 2).map((note) => (
+                        <p key={note}>{note}</p>
+                      ))}
+                    </div>
+                  ) : null}
                 </StatusNotice>
               ) : null}
               {mergeAlignmentSuggestionError ? (
@@ -639,15 +887,17 @@ export default function MergeTab({ ctx }: MergeTabProps) {
                     `1.0` keeps original timing. Values above `1.0` speed the generated clip up; below `1.0` slow it down.
                   </p>
                 </div>
-                <div className="mt-3 grid gap-2 text-[11px] text-ink/65 md:grid-cols-2">
-                  <p>
-                    Frames before retime: <span className="font-medium text-ink">{mergeVisibleDurationFramesBeforeRetime}f</span> (
-                    {formatFramesAndSeconds(mergeVisibleDurationFramesBeforeRetime, mergeFps)})
-                  </p>
-                  <p>
-                    Frames after retime: <span className="font-medium text-ink">{mergeEffectiveDurationFrames}f</span> (
-                    {formatFramesAndSeconds(mergeEffectiveDurationFrames, mergeFps)})
-                  </p>
+                <div className="mt-3 grid gap-3 text-[11px] text-ink/65 md:grid-cols-2">
+                  <div className="px-1 py-1">
+                    <p className="text-[11px] text-ink/55">Frames before retime</p>
+                    <p className="mt-1 text-xl font-semibold text-ink">{mergeVisibleDurationFramesBeforeRetime}f</p>
+                    <p>{(mergeVisibleDurationFramesBeforeRetime / Math.max(1, mergeFps)).toFixed(2)}s</p>
+                  </div>
+                  <div className="px-1 py-1">
+                    <p className="text-[11px] text-ink/55">Frames after retime</p>
+                    <p className="mt-1 text-xl font-semibold text-ink">{mergeEffectiveDurationFrames}f</p>
+                    <p>{(mergeEffectiveDurationFrames / Math.max(1, mergeFps)).toFixed(2)}s</p>
+                  </div>
                 </div>
               </div>
               <div className="grid gap-3 xl:grid-cols-2">
@@ -663,8 +913,8 @@ export default function MergeTab({ ctx }: MergeTabProps) {
                       onChange={setMergeInsertStartFrame}
                     />
                     <NumberAdjustField
-                      label="Trim generated opening"
-                      hint="Drop opening generated frames if the model loses sync at the start."
+                      label="Trim generation start"
+                      hint="Hide inconsistent opening generated frames after the insert point is aligned."
                       value={mergeTrimStartFrames}
                       min={0}
                       max={Math.max(0, mergeGeneratedDurationFrames - 1)}
@@ -676,8 +926,8 @@ export default function MergeTab({ ctx }: MergeTabProps) {
                   <p className="text-xs font-semibold uppercase tracking-wide text-ink/55">End alignment and blend</p>
                   <div className="grid gap-3 md:grid-cols-2">
                     <NumberAdjustField
-                      label="Trim generated tail"
-                      hint="Shorten the generated end if it drifts or overruns the source cut."
+                      label="Trim generation end"
+                      hint="Hide inconsistent generated tail frames at the end of the insert."
                       value={mergeTrimEndFrames}
                       min={0}
                       max={Math.max(0, mergeGeneratedDurationFrames - 1)}
@@ -719,32 +969,27 @@ export default function MergeTab({ ctx }: MergeTabProps) {
             </div>
 
             <div className="space-y-2">
-              <div className="flex justify-end">
-                <button
-                  type="button"
-                  className="rounded-md border border-ink/20 bg-white px-3 py-1.5 text-xs text-ink transition hover:border-teal-500 hover:text-teal-700"
-                  onClick={openStartBoundaryZoom}
-                >
-                  Zoom start boundary
-                </button>
-              </div>
               <MergeBoundaryPreview
                 title="Start merge point preview"
-                subtitle={`original f${mergeInsertStartFrameEffective} -> generated output g${mergeGeneratedStartAnchor}`}
+                actionLabel="Zoom start boundary"
+                onAction={openStartBoundaryZoom}
                 firstTrack={{
-                  title: "Original track around start cut",
+                  title: "Source track",
                   items: startBoundaryOriginalThumbs,
                   anchorFrame: mergeInsertStartFrameEffective,
                   anchorEdge: "start",
+                  anchorSlotIndex: 3,
                   overlapStart: mergeFeatherClamped > 0 ? mergeInsertStartFrameEffective : undefined,
                   overlapEnd: mergeFeatherClamped > 0 ? mergeInsertStartFrameEffective + mergeFeatherClamped - 1 : undefined,
                   prefix: "f",
+                  frameLabelPosition: "top",
                 }}
                 secondTrack={{
-                  title: "Generated track around start cut",
+                  title: "Generated track",
                   items: startBoundaryGeneratedThumbs,
                   anchorFrame: mergeGeneratedStartAnchor,
                   anchorEdge: "start",
+                  anchorSlotIndex: 3,
                   overlapStart: mergeFeatherClamped > 0 ? mergeGeneratedStartAnchor : undefined,
                   overlapEnd: mergeFeatherClamped > 0 ? mergeGeneratedStartAnchor + mergeFeatherClamped - 1 : undefined,
                   prefix: "g",
@@ -753,35 +998,30 @@ export default function MergeTab({ ctx }: MergeTabProps) {
             </div>
 
             <div className="space-y-2">
-              <div className="flex justify-end">
-                <button
-                  type="button"
-                  className="rounded-md border border-ink/20 bg-white px-3 py-1.5 text-xs text-ink transition hover:border-teal-500 hover:text-teal-700"
-                  onClick={openEndBoundaryZoom}
-                >
-                  Zoom end boundary
-                </button>
-              </div>
               <MergeBoundaryPreview
                 title="End merge point preview"
-                subtitle={`generated output g${mergeGeneratedEndAnchor} -> cut before original f${mergeEffectiveEndFrameExclusive}`}
+                actionLabel="Zoom end boundary"
+                onAction={openEndBoundaryZoom}
                 firstTrack={{
-                  title: "Generated track around end cut",
+                  title: "Generated track",
                   items: endBoundaryGeneratedThumbs,
                   anchorFrame: mergeGeneratedEndAnchor,
                   anchorEdge: "end",
+                  anchorSlotIndex: 2,
                   overlapStart: mergeFeatherClamped > 0 ? mergeGeneratedEndAnchor - mergeFeatherClamped + 1 : undefined,
                   overlapEnd: mergeFeatherClamped > 0 ? mergeGeneratedEndAnchor : undefined,
                   prefix: "g",
                 }}
                 secondTrack={{
-                  title: "Original track after generated segment",
+                  title: "Source track",
                   items: endBoundaryOriginalThumbs,
                   anchorFrame: mergeEffectiveEndFrameExclusive,
                   anchorEdge: "start",
-                  overlapStart: mergeFeatherClamped > 0 ? mergeEffectiveEndFrameExclusive : undefined,
-                  overlapEnd: mergeFeatherClamped > 0 ? mergeEffectiveEndFrameExclusive + mergeFeatherClamped - 1 : undefined,
+                  anchorSlotIndex: 3,
+                  overlapStart: mergeFeatherClamped > 0 ? mergeEffectiveEndFrameExclusive - mergeFeatherClamped : undefined,
+                  overlapEnd: mergeFeatherClamped > 0 ? mergeEffectiveEndFrameExclusive - 1 : undefined,
                   prefix: "f",
+                  frameLabelPosition: "top",
                 }}
               />
             </div>
@@ -983,7 +1223,6 @@ export default function MergeTab({ ctx }: MergeTabProps) {
             <div className="flex items-start justify-between gap-4">
               <div>
                 <h4 className="text-lg font-semibold">{boundaryZoomModal.title}</h4>
-                <p className="mt-1 text-sm text-ink/60">{boundaryZoomModal.subtitle}</p>
               </div>
               <button
                 type="button"
@@ -994,27 +1233,90 @@ export default function MergeTab({ ctx }: MergeTabProps) {
               </button>
             </div>
             <div className="mt-4 space-y-4">
-              <div className={`grid gap-4 ${boundaryZoomModal.crop?.enabled ? "xl:grid-cols-3" : "lg:grid-cols-3"}`}>
-                {boundaryZoomModal.pairs.map((pair) => (
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-ink/10 bg-bg px-3 py-2">
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    className="rounded border border-ink/20 px-2 py-1 text-sm text-ink disabled:cursor-not-allowed disabled:opacity-50"
+                    disabled={!boundaryZoomCanStepBackward}
+                    onClick={() => nudgeBoundaryZoomFrameOffset(-1)}
+                  >
+                    &#8249;
+                  </button>
+                  <p className="text-xs text-ink/65">Step through boundary frames</p>
+                  <button
+                    type="button"
+                    className="rounded border border-ink/20 px-2 py-1 text-sm text-ink disabled:cursor-not-allowed disabled:opacity-50"
+                    disabled={!boundaryZoomCanStepForward}
+                    onClick={() => nudgeBoundaryZoomFrameOffset(1)}
+                  >
+                    &#8250;
+                  </button>
+                </div>
+                <div className="flex items-center gap-2">
+                  <p className="text-xs text-ink/65">Source insert start</p>
+                  <button
+                    type="button"
+                    className="rounded border border-ink/20 px-2 py-1 text-sm text-ink"
+                    onClick={() => nudgeMergeInsertStart(-1)}
+                  >
+                    -1
+                  </button>
+                  <p className="min-w-12 text-center text-sm font-medium text-ink">
+                    {mergeInsertStartFrame >= 0 ? "+" : ""}
+                    {mergeInsertStartFrame}f
+                  </p>
+                  <button
+                    type="button"
+                    className="rounded border border-ink/20 px-2 py-1 text-sm text-ink"
+                    onClick={() => nudgeMergeInsertStart(1)}
+                  >
+                    +1
+                  </button>
+                </div>
+              </div>
+              <div className="grid gap-4 lg:grid-cols-3">
+                {boundaryZoomPairs.map((pair) => (
                   <div key={`${pair.originalFrameIndex}:${pair.generatedFrameIndex}`} className="space-y-2 rounded-lg border border-ink/10 p-3">
-                    <div className="grid gap-3 md:grid-cols-2">
-                      <div>
-                        <p className="mb-1 text-xs font-medium text-ink/80">Source f{pair.originalFrameIndex}</p>
-                        {pair.originalImageUrl ? (
-                          <img src={pair.originalImageUrl} alt={`Source frame ${pair.originalFrameIndex}`} className="h-44 w-full rounded-lg border border-ink/10 object-contain bg-bg" />
-                        ) : (
-                          <div className="flex h-44 items-center justify-center rounded-lg border border-ink/10 bg-bg text-xs text-ink/55">Source unavailable</div>
-                        )}
+                    {boundaryZoomModal.crop?.enabled ? (
+                      <div className="grid gap-3 md:grid-cols-2">
+                        <div>
+                          <p className="mb-1 text-xs font-medium text-ink/80">Source f{pair.originalFrameIndex}</p>
+                          {pair.originalImageUrl ? (
+                            <img src={pair.originalImageUrl} alt={`Source frame ${pair.originalFrameIndex}`} className="h-44 w-full rounded-lg border border-ink/10 object-contain bg-bg" />
+                          ) : (
+                            <div className="flex h-44 items-center justify-center rounded-lg border border-ink/10 bg-bg text-xs text-ink/55">Source unavailable</div>
+                          )}
+                        </div>
+                        <div>
+                          <p className="mb-1 text-xs font-medium text-ink/80">Generated g{pair.generatedFrameIndex}</p>
+                          {pair.generatedImageUrl ? (
+                            <img src={pair.generatedImageUrl} alt={`Generated frame ${pair.generatedFrameIndex}`} className="h-44 w-full rounded-lg border border-ink/10 object-contain bg-bg" />
+                          ) : (
+                            <div className="flex h-44 items-center justify-center rounded-lg border border-ink/10 bg-bg text-xs text-ink/55">Generated unavailable</div>
+                          )}
+                        </div>
                       </div>
-                      <div>
-                        <p className="mb-1 text-xs font-medium text-ink/80">Generated g{pair.generatedFrameIndex}</p>
-                        {pair.generatedImageUrl ? (
-                          <img src={pair.generatedImageUrl} alt={`Generated frame ${pair.generatedFrameIndex}`} className="h-44 w-full rounded-lg border border-ink/10 object-contain bg-bg" />
-                        ) : (
-                          <div className="flex h-44 items-center justify-center rounded-lg border border-ink/10 bg-bg text-xs text-ink/55">Generated unavailable</div>
-                        )}
+                    ) : (
+                      <div className="space-y-3">
+                        <div>
+                          <p className="mb-1 text-xs font-medium text-ink/80">Source f{pair.originalFrameIndex}</p>
+                          {pair.originalImageUrl ? (
+                            <img src={pair.originalImageUrl} alt={`Source frame ${pair.originalFrameIndex}`} className="h-56 w-full rounded-lg border border-ink/10 object-contain bg-bg" />
+                          ) : (
+                            <div className="flex h-56 items-center justify-center rounded-lg border border-ink/10 bg-bg text-xs text-ink/55">Source unavailable</div>
+                          )}
+                        </div>
+                        <div>
+                          <p className="mb-1 text-xs font-medium text-ink/80">Generated g{pair.generatedFrameIndex}</p>
+                          {pair.generatedImageUrl ? (
+                            <img src={pair.generatedImageUrl} alt={`Generated frame ${pair.generatedFrameIndex}`} className="h-56 w-full rounded-lg border border-ink/10 object-contain bg-bg" />
+                          ) : (
+                            <div className="flex h-56 items-center justify-center rounded-lg border border-ink/10 bg-bg text-xs text-ink/55">Generated unavailable</div>
+                          )}
+                        </div>
                       </div>
-                    </div>
+                    )}
                     {boundaryZoomModal.crop?.enabled ? (
                       <div>
                         <p className="mb-1 text-xs font-medium text-ink/80">Crop merged back into source frame</p>
@@ -1030,9 +1332,6 @@ export default function MergeTab({ ctx }: MergeTabProps) {
                   </div>
                 ))}
               </div>
-              <p className="text-xs text-ink/60">
-                Use trim generated opening if the AI output starts late. Use source insert start to move the whole generated clip on the source timeline, then trim tail if the end overruns.
-              </p>
             </div>
           </div>
         </div>

@@ -386,6 +386,33 @@ export const apiClient = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
+  initManualSegmentGenerationUpload: (
+    taskId: string,
+    segmentId: string,
+    payload: { filename: string; contentType: string },
+  ) =>
+    api<{ uploadKey: string; uploadUrl: string }>(`/tasks/${taskId}/segments/${segmentId}/manual-generation/upload/init`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  completeManualSegmentGenerationUpload: (
+    taskId: string,
+    segmentId: string,
+    payload: {
+      uploadKey: string;
+      filename: string;
+      model: string;
+      mode: string;
+      prompt?: string | null;
+      negativePrompt?: string | null;
+      firstFrameVariantId?: string | null;
+      lastFrameVariantId?: string | null;
+    },
+  ) =>
+    api<{ generation: { genId: string } }>(`/tasks/${taskId}/segments/${segmentId}/manual-generation/upload/complete`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
   segmentQualityMatchSam: (
     taskId: string,
     frameId: string,

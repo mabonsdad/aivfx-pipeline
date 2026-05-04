@@ -1,7 +1,7 @@
 import { useEffect, useMemo } from "react";
 import type { NavigateFunction } from "react-router-dom";
 
-export type TabId = "timeline" | "frames" | "refine" | "generate" | "outputs" | "merge" | "assets" | "report" | "custom_qc" | "api_logs";
+export type TabId = "timeline" | "frames" | "refine" | "generate" | "outputs" | "merge" | "assets" | "asset_library" | "report" | "custom_qc" | "api_logs";
 export type ReportView = "frames" | "videos" | "reports";
 
 export type WorkflowRouteState = {
@@ -17,6 +17,7 @@ export const TAB_ROUTE_SEGMENT: Record<TabId, string> = {
   outputs: "outputs",
   merge: "merge-video",
   assets: "download-assets",
+  asset_library: "asset-library",
   report: "reports",
   custom_qc: "custom-qc",
   api_logs: "api-logs",
@@ -30,6 +31,7 @@ export const ROUTE_SEGMENT_TO_TAB: Record<string, TabId> = {
   outputs: "outputs",
   "merge-video": "merge",
   "download-assets": "assets",
+  "asset-library": "asset_library",
   reports: "report",
   "custom-qc": "custom_qc",
   "api-logs": "api_logs",
@@ -67,7 +69,7 @@ export function useReportRouteState(search: string): {
         ? "frames"
         : reportViewParam === "qc_video"
           ? "videos"
-          : "frames";
+          : "reports";
   const activeCustomReportId = routeSearch.get("reportId");
   return { routeSearch, reportView, activeCustomReportId };
 }

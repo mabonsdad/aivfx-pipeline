@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ChangeEvent } from "react";
 
 import { CompareIcon, DeleteIcon, DownloadIcon, IconActionButton, PreviewIcon } from "../../components/layout/MediaActionButtons";
 import { PendingButtonLabel, StatusNotice } from "../../components/layout/UiFeedback";
@@ -86,6 +86,7 @@ export type GenerateTabCtx = {
   frameVariantImageUrl: (frameId: string | null | undefined, variantId: string | null | undefined) => string | null;
   segmentWindow: { startSec: number; endSec: number; startLabel: string; endLabel: string } | null;
   originalSegmentPreviewUrl: string | null;
+  uploadManualGeneratedVideo: (file: File) => Promise<string>;
   selectedPreviewGeneration: SegmentGeneration | null;
   task: TaskDetail | undefined;
   originalPreviewIsSegmentClip: boolean;
@@ -184,6 +185,7 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
     frameVariantImageUrl,
     segmentWindow,
     originalSegmentPreviewUrl,
+    uploadManualGeneratedVideo,
     selectedPreviewGeneration,
     task,
     originalPreviewIsSegmentClip,
@@ -207,14 +209,17 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
   const latestChunkedRun = selectedSegmentChunkedGenerationRuns[0] ?? null;
   const [isChunkSessionOpen, setIsChunkSessionOpen] = useState(false);
   const [chunkPromptDrafts, setChunkPromptDrafts] = useState<Record<number, string>>({});
+  const [manualUploadPending, setManualUploadPending] = useState(false);
+  const [manualUploadError, setManualUploadError] = useState<string | null>(null);
   const lastSavedRunRef = useRef<string | null>(null);
   const promptDraftRunIdRef = useRef<string | null>(null);
+  const uploadInputRef = useRef<HTMLInputElement | null>(null);
   const isPreparingChunkPlan = Boolean(generateChunkedSegmentMutation.isPending);
   const canStartChunkedGeneration =
     Boolean(selectedSegmentId) &&
     !generationPromptError &&
     generationInputMode === "start_video" &&
-    ["ray-2", "ray-flash-2", "kling-o1", "kling-v3-omni-video", "seedance-2.0-reference-to-video", "wan2.2-animate", "wan2.7-videoedit"].includes(lumaModel);
+    ["ray-2", "ray-flash-2", "kling-o1", "kling-v3-omni-video", "seedance-2.0-reference-to-video", "wan2.7-videoedit"].includes(lumaModel);
   const canStartSinglePassGeneration =
     Boolean(selectedSegmentId) &&
     !selectedSegmentOverLimit &&
@@ -251,11 +256,58 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
     setIsChunkSessionOpen(false);
   }, [latestChunkedRun?.runId, latestChunkedRun?.saveStatus, latestChunkedRun?.savedGenerationId, selectSegmentGeneration]);
 
+  function triggerDirectDownload(url: string, filename?: string) {
+    const link = document.createElement("a");
+    link.href = url;
+    if (filename) link.download = filename;
+    link.rel = "noreferrer";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  }
+
+  async function handleManualGeneratedVideoUpload(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setManualUploadPending(true);
+    setManualUploadError(null);
+    try {
+      await uploadManualGeneratedVideo(file);
+    } catch (error) {
+      setManualUploadError(error instanceof Error ? error.message : "Failed to upload generated video");
+    } finally {
+      setManualUploadPending(false);
+    }
+  }
+
   return (
     <div className="space-y-4">
+      <input ref={uploadInputRef} type="file" accept="video/*" className="hidden" onChange={(event) => void handleManualGeneratedVideoUpload(event)} />
       <div className="rounded-xl border border-ink/15 bg-white">
         <div className="grid gap-3 p-3 lg:grid-cols-[1.65fr_1fr]">
           <div className="space-y-3">
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              <button
+                type="button"
+                className="rounded-md border border-ink/20 bg-white px-4 py-2 text-sm font-medium text-ink disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={!originalSegmentPreviewUrl}
+                onClick={() => {
+                  if (!originalSegmentPreviewUrl) return;
+                  triggerDirectDownload(originalSegmentPreviewUrl);
+                }}
+              >
+                Download Source Video
+              </button>
+              <button
+                type="button"
+                className="rounded-md border border-ink/20 bg-white px-4 py-2 text-sm font-medium text-ink disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={!selectedSegmentId || manualUploadPending}
+                onClick={() => uploadInputRef.current?.click()}
+              >
+                <PendingButtonLabel isPending={manualUploadPending} idle="Upload Generated Video" pending="Uploading video..." />
+              </button>
+            </div>
             <div className="grid gap-3 md:grid-cols-2">
               <select
                 value={lumaModel}
@@ -341,22 +393,6 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
                 </div>
               )}
             </div>
-            {generationInputMode === "start_video" ? (
-              <label className="flex items-start gap-3 rounded-md border border-ink/20 bg-bg px-3 py-2 text-sm text-ink/80">
-                <input
-                  type="checkbox"
-                  className="mt-0.5"
-                  checked={preserveFrames}
-                  onChange={(e) => setPreserveFrames(e.target.checked)}
-                />
-                <span>
-                  <span className="block font-medium text-ink">Preserve source frames</span>
-                  <span className="block text-xs text-ink/65">
-                    Change source fps to match AI model, to avoid dropping or resampling frames, then revert fps after generation.
-                  </span>
-                </span>
-              </label>
-            ) : null}
             {lumaModel === "wan2.2-animate" ? (
               <div className="rounded-md border border-ink/20 bg-bg px-3 py-2 text-xs text-ink/60">
                 Text prompt is unavailable for Wan2.2 Animate in this flow. Generation uses the selected start frame plus motion from the current working range.
@@ -406,6 +442,11 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
                 <p className="text-xs">{missingRouteInputsMessage}</p>
               </StatusNotice>
             ) : null}
+            {manualUploadError ? (
+              <StatusNotice variant="error">
+                <p className="text-xs">{manualUploadError}</p>
+              </StatusNotice>
+            ) : null}
           </div>
           <div className="rounded-lg border border-ink/15 bg-bg p-3">
             <p className="text-sm font-semibold">{generationHelp.title}</p>
@@ -414,6 +455,22 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
                 <p key={line}>{line}</p>
               ))}
             </div>
+            {generationInputMode === "start_video" ? (
+              <label className="mt-3 flex items-start gap-3 rounded-md border border-ink/20 bg-white px-3 py-2 text-sm text-ink/80">
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  checked={preserveFrames}
+                  onChange={(e) => setPreserveFrames(e.target.checked)}
+                />
+                <span>
+                  <span className="block font-medium text-ink">Preserve source frames</span>
+                  <span className="block text-xs text-ink/65">
+                    Change source fps to match AI model, to avoid dropping or resampling frames, then revert fps after generation.
+                  </span>
+                </span>
+              </label>
+            ) : null}
           </div>
         </div>
       </div>
@@ -422,7 +479,7 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
         <StatusNotice variant="warning">
           <div className="flex items-start gap-2">
             <p className="text-xs">{selectedSegmentLimitMessage}</p>
-            {generationInputMode === "start_video" ? <FrameLimitInfoButton label="Frame limits for video generation" /> : null}
+            {generationInputMode === "start_video" ? <FrameLimitInfoButton label="Frame limits for video generation" mode={generationInputMode} /> : null}
           </div>
         </StatusNotice>
       ) : null}
@@ -473,7 +530,7 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
               <p className="text-xs">Switch to `start frame + video` for the long-video chunked flow.</p>
             </StatusNotice>
           ) : null}
-          {!["ray-2", "ray-flash-2", "kling-o1", "kling-v3-omni-video", "seedance-2.0-reference-to-video", "wan2.2-animate", "wan2.7-videoedit"].includes(lumaModel) ? (
+          {!["ray-2", "ray-flash-2", "kling-o1", "kling-v3-omni-video", "seedance-2.0-reference-to-video", "wan2.7-videoedit"].includes(lumaModel) ? (
             <StatusNotice variant="warning">
               <p className="text-xs">This model is not in the first chunked-release set. Use one of the first-frame + source-video models for whole-video generation.</p>
             </StatusNotice>
@@ -774,11 +831,6 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
               Select the output to carry forward. Use the compare action on any thumbnail to open source vs output review.
             </p>
           </div>
-          {selectedPreviewGeneration ? (
-            <div className="rounded-md border border-teal-500 bg-teal-50 px-3 py-2 text-xs text-ink/75">
-              Chosen: {selectedPreviewGeneration.luma.model} / {selectedPreviewGeneration.luma.mode}
-            </div>
-          ) : null}
         </div>
         <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
           {selectedSegmentGenerations.slice(0, generationCardsVisible).map((gen, index) => {
@@ -823,6 +875,7 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
                 )}
               </button>
               <p className="mt-2 text-xs font-medium text-ink/80">{gen.luma.model} / {gen.luma.mode}</p>
+              {gen.manualUpload ? <p className="text-[11px] text-teal-700">Manual upload</p> : null}
               <p className="text-[11px] text-ink/60">{formatCompactTimestamp(gen.finishedAt ?? gen.createdAt)}</p>
               {gen.status === "failed" && gen.error ? (
                 <p className="mt-1 line-clamp-3 text-[11px] text-red-700" title={gen.error}>

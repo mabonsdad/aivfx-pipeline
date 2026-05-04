@@ -405,6 +405,10 @@ export type SegmentGeneration = {
   sourceLastFrameResolvedKey?: string | null;
   requestedDurationSec?: number;
   providerDurationSec?: number | null;
+  manualUpload?: {
+    filename?: string;
+    uploadedAt?: string;
+  } | null;
   sourceFrameOffset?: number;
   alignment?: {
     sourceFrameOffset?: number;
@@ -434,10 +438,18 @@ export type SegmentGeneration = {
         sourceFrameOffset: number;
         sourceOffsetSec: number;
         earlyMedianDriftFrames: number;
+        quarterMedianDriftFrames?: number;
+        middleMedianDriftFrames?: number;
+        threeQuarterMedianDriftFrames?: number;
         lateMedianDriftFrames: number;
+        stableBaselineDriftFrames?: number;
+        suggestedInsertOffsetFrames?: number;
+        startupTrimFrames?: number;
         residualEndFrames: number;
         meanAbsDriftFrames: number;
         residualMeanAbsDriftFrames: number;
+        linearFitMaeFrames?: number;
+        driftSlopeFramesPerSourceFrame?: number;
         suggestedPlaybackRate: number;
         recommendation: string;
         confidence: number;
@@ -636,6 +648,7 @@ export type ExportRecord = {
 export type CustomReportOutputRef =
   | { assetType: "frame_variant"; frameId: string; variantId: string }
   | { assetType: "segment_generation"; genId: string }
+  | { assetType: "export"; exportId: string }
   | { assetType: "external_frame_pair"; pairId: string };
 
 export type CustomReportRecord = {

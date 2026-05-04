@@ -17,41 +17,45 @@ The underlying storage is still task-based, but the UI now presents each task as
 1. **Select**
    - Upload and ingest a source video.
    - The backend probes media with `ffprobe`, creates or records a constant-frame-rate edit source, generates a lightweight preview proxy, and creates timeline thumbnails.
+   - Users choose the creation route here:
+     - source motion (`first frame + video`)
+     - animate between two frames (`start + end`)
+     - animate from start frame only
    - The app creates a default full-video working range automatically. Users can also define and save shorter custom working ranges.
    - Optional crop is configured here and is later merged back in Post Process.
 
 2. **Edit**
-   - Users choose a creation route up front:
-     - source motion (`first frame + video`)
-     - animate between two frames (`start + end`)
-     - animate from start frame only
    - The Edit area then exposes only the inputs required for that route.
    - `Edit frames` remains the main still-edit surface.
    - `Refine Frames` is now a contextual workspace opened from edited outputs rather than a primary peer step.
+   - Source frames can be downloaded and manually edited frames can be uploaded back into the current frame grid.
 
 3. **Generate**
-   - Generated attempts are reviewed here for the current working range.
+   - Video generation controls and generated attempts are reviewed here for the current working range.
    - The chosen output is compared against the source and handed forward into Post Process.
+   - Users can also download the current working-range source clip and manually upload a generated video, which is attached to the current working reference as a normal output.
    - Multiple overlapping generation jobs are supported. Jobs are tracked independently and completed results are added without overwriting earlier outputs.
    - For long-video source-motion runs, chunked/continuation drafts stay inside their session UI until a stitched draft is saved back to Generate.
 
 4. **Post Process**
-   - Acts on the currently chosen output from Outputs.
+   - Acts on the currently chosen output from Generate.
    - Supports:
      - extend/continuation for long videos
-     - merge alignment and export
+     - reconcile timing, merge alignment, and export
      - crop merge-back
-     - tracked keep-mask video cleanup / refine on eligible source-motion outputs
-   - Video cleanup is conceptually post-processing, but can be used before final merge while the user is still working on a selected working range.
+     - tracked keep-mask cleanup on eligible source-motion outputs
+   - Merge previews, zoom tools, alignment suggestion, and optional retime are all part of this stage.
 
-5. **Reports**
+5. **Assets**
+   - Shows merged videos, generated videos, and edited frames for the current source video.
+   - Report creation now starts here from selected asset grids.
+   - A separate Asset Library page outside the main step flow shows the latest assets across all source videos for the current user.
+
+6. **Reports / API Logs**
+   - Reports primarily list existing reports for the current source video, without orphaning older saved reports.
    - Quality reports compare original, edited, refined, generated, and merged assets.
-   - Reports are now scoped by working range by default.
    - Custom QC supports two uploaded images or two uploaded videos; video uploads are sampled from the first frame and then every two seconds.
    - Video comparison reports compare selected generations from the same working range/start frame with aligned frame grids, diff grids, zoomed crops, model settings, input/output resolution, fps, duration, and frame counts.
-
-6. **Assets / API Logs**
-   - The asset library shows uploads, frame outputs, generated video outputs, and merged exports.
    - The standalone API playground is served at `/experiments/aivfx/api-test.html`.
    - A nav link opens the API logs page, showing external API jobs with input/output asset previews and errors.
 

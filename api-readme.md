@@ -10,6 +10,7 @@ The application UI is now organized around:
 - `Edit`
 - `Generate`
 - `Post Process`
+- `Assets`
 - `Reports`
 
 The external API is intentionally more operation-oriented than wizard-oriented, but it shares the same model capability registry, media preparation, provider routing, and output normalization.

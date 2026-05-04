@@ -674,7 +674,7 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
                 {rangeWarning ? (
                   <div className="mt-3 flex items-start gap-2 text-xs text-amber-700">
                     <p>{rangeWarning}</p>
-                    <FrameLimitInfoButton label="Frame limits for working ranges" />
+                    <FrameLimitInfoButton label="Frame limits for working ranges" mode={generationInputMode} />
                   </div>
                 ) : null}
               </button>

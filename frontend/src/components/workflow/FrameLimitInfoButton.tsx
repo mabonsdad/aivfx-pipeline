@@ -7,6 +7,8 @@ type FrameLimitRow = {
   maxFrameCount: number;
 };
 
+type GenerateInputMode = "start_video" | "start_end" | "start_only";
+
 const START_VIDEO_ROWS: FrameLimitRow[] = [
   { model: "Luma Ray 2 Flash", maxSeconds: 10, modelFps: 24, maxFrameCount: 240 },
   { model: "Luma Ray 2", maxSeconds: 10, modelFps: 24, maxFrameCount: 240 },
@@ -39,50 +41,58 @@ const START_ONLY_ROWS: FrameLimitRow[] = [
   { model: "Sora 2.0", maxSeconds: 15, modelFps: 24, maxFrameCount: 360 },
 ];
 
-function FrameLimitTable(props: { title: string; rows: FrameLimitRow[] }) {
+function FrameLimitTable(props: { rows: FrameLimitRow[] }) {
   return (
-    <section className="space-y-2">
-      <h4 className="text-sm font-semibold text-ink">{props.title}</h4>
-      <div className="overflow-x-auto rounded-lg border border-ink/10">
-        <table className="min-w-full text-left text-xs text-ink/80">
+    <div className="overflow-x-auto rounded-lg border border-ink/10">
+      <table className="min-w-full text-left text-[11px] leading-5 text-ink/80">
           <thead className="bg-bg/80 text-ink/70">
             <tr>
-              <th className="px-3 py-2 font-medium">Model</th>
-              <th className="px-3 py-2 text-right font-medium">Max seconds</th>
-              <th className="px-3 py-2 text-right font-medium">Model FPS</th>
-              <th className="px-3 py-2 text-right font-medium">Max frame count</th>
+              <th className="px-2 py-1.5 font-medium">Model</th>
+              <th className="px-2 py-1.5 text-right font-medium">Secs</th>
+              <th className="px-2 py-1.5 text-right font-medium">FPS</th>
+              <th className="px-2 py-1.5 text-right font-medium">Frames</th>
             </tr>
           </thead>
           <tbody>
             {props.rows.map((row) => (
-              <tr key={`${props.title}:${row.model}`} className="border-t border-ink/10">
-                <td className="px-3 py-2">{row.model}</td>
-                <td className="px-3 py-2 text-right">{row.maxSeconds}</td>
-                <td className="px-3 py-2 text-right">{row.modelFps}</td>
-                <td className="px-3 py-2 text-right">{row.maxFrameCount}</td>
+              <tr key={row.model} className="border-t border-ink/10">
+                <td className="px-2 py-1.5">{row.model}</td>
+                <td className="px-2 py-1.5 text-right">{row.maxSeconds}</td>
+                <td className="px-2 py-1.5 text-right">{row.modelFps}</td>
+                <td className="px-2 py-1.5 text-right">{row.maxFrameCount}</td>
               </tr>
             ))}
           </tbody>
-        </table>
-      </div>
-    </section>
+      </table>
+    </div>
   );
 }
 
-export default function FrameLimitInfoButton(props: { label?: string }) {
+function modeTitle(mode: GenerateInputMode): string {
+  if (mode === "start_video") return "First frame + video input to video";
+  if (mode === "start_end") return "First frame + last frame to video";
+  return "First frame to video";
+}
+
+function rowsForMode(mode: GenerateInputMode): FrameLimitRow[] {
+  if (mode === "start_video") return START_VIDEO_ROWS;
+  if (mode === "start_end") return START_END_ROWS;
+  return START_ONLY_ROWS;
+}
+
+export default function FrameLimitInfoButton(props: { label?: string; mode: GenerateInputMode }) {
+  const rows = rowsForMode(props.mode);
   return (
-    <InfoDialogButton title="Frame limits" label={props.label ?? "Frame limits"} maxWidthClassName="max-w-5xl">
-      <div className="space-y-5 text-sm leading-6 text-ink/80">
+    <InfoDialogButton title="Frame limits" label={props.label ?? "Frame limits"} maxWidthClassName="max-w-3xl">
+      <div className="space-y-4 text-sm leading-6 text-ink/80">
         <p>
-          If you are using a video input above the frame limits below you will need to extend it in Post Processing.
+          If you are above these limits, generate in parts and extend later in Post Process.
         </p>
-        <FrameLimitTable title="First frame + video input → video" rows={START_VIDEO_ROWS} />
-        <FrameLimitTable title="First frame + last frame → video" rows={START_END_ROWS} />
-        <FrameLimitTable title="First frame → video" rows={START_ONLY_ROWS} />
-        <p>
-          Most models lose a few frames from the start of the generation and some the last frame, so it may be best to
-          generate a slightly longer clip than what you need.
-        </p>
+        <section className="space-y-2">
+          <h4 className="text-sm font-semibold text-ink">{modeTitle(props.mode)}</h4>
+          <FrameLimitTable rows={rows} />
+        </section>
+        <p>Most models lose a few frames at the start, and sometimes at the end, so it can help to generate slightly long.</p>
       </div>
     </InfoDialogButton>
   );
