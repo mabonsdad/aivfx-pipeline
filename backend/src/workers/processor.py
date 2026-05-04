@@ -29,6 +29,7 @@ from src.core.ffmpeg import (
     generate_thumbnail_strip,
     merge_with_segment_replacement,
     stitch_video_segments,
+    trim_video_to_duration,
     trim_and_retime_video_uniform,
     transcode_for_preview,
     transcode_for_provider,
@@ -50,6 +51,9 @@ from src.integrations.gemini import generate_image_edit as generate_gemini_image
 from src.integrations.fal import (
     get_queue_result as get_fal_queue_result,
     get_queue_status as get_fal_queue_status,
+    submit_happy_horse_image_to_video,
+    submit_happy_horse_video_edit,
+    submit_sora_2_image_to_video_pro,
     submit_seedance_reference_to_video,
 )
 from src.jobs.queue import JobQueue
@@ -198,6 +202,27 @@ def _nearest_runware_wan22_resolution(width: int, height: int) -> tuple[int, int
 
 def _nearest_supported_kling_duration(duration_sec: float) -> int:
     return min(KLING_SUPPORTED_DURATIONS, key=lambda value: abs(duration_sec - float(value)))
+
+
+def _sora_supported_duration(duration_sec: float) -> int:
+    requested = max(4.0, min(10.0, float(duration_sec)))
+    if requested <= 4.0:
+        return 4
+    if requested <= 8.0:
+        return 8
+    return 12
+
+
+def _target_preserving_aspect_long_edge(width: int, height: int, *, long_edge: int) -> tuple[int, int]:
+    source_w = max(1, int(width or long_edge))
+    source_h = max(1, int(height or long_edge))
+    current_long_edge = max(source_w, source_h)
+    if current_long_edge <= 0:
+        return long_edge, long_edge
+    scale = long_edge / float(current_long_edge)
+    target_w = max(1, int(round(source_w * scale)))
+    target_h = max(1, int(round(source_h * scale)))
+    return target_w, target_h
 
 
 def _nearest_allowed_aspect_ratio(width: int, height: int, *, allowed: tuple[str, ...]) -> str:
@@ -1610,6 +1635,65 @@ def _run_wan27_prediction(
     raise RuntimeError("Wan 2.7 generation did not produce a result")
 
 
+def _run_wan27_i2v_prediction(
+    *,
+    api_key: str,
+    prompt: str,
+    first_frame: str,
+    last_frame: str | None,
+    negative_prompt: str | None,
+    resolution: str,
+    duration_seconds: int,
+    job: dict[str, Any],
+    store: S3JsonStore,
+) -> tuple[str, dict[str, Any]]:
+    input_payload: dict[str, Any] = {
+        "first_frame": first_frame,
+        "prompt": prompt,
+        "resolution": resolution,
+        "duration": int(duration_seconds),
+        "enable_prompt_expansion": True,
+    }
+    if last_frame:
+        input_payload["last_frame"] = last_frame
+    if negative_prompt:
+        input_payload["negative_prompt"] = negative_prompt
+    last_exc: BaseException | None = None
+    for retry_index in range(3):
+        _job_progress(job, store, 35, "running", "Creating Replicate Wan 2.7 image-to-video generation")
+        created = create_replicate_official_model_prediction(
+            api_key=api_key,
+            owner="wan-video",
+            name="wan-2.7-i2v",
+            input=input_payload,
+        )
+        generation_id = created.get("id")
+        if not isinstance(generation_id, str):
+            raise RuntimeError(f"Unexpected Replicate Wan 2.7 I2V create response: {created}")
+        _job_progress(job, store, 55, "running", "Polling Replicate Wan 2.7 image-to-video generation")
+        try:
+            result = _wait_replicate_complete(api_key, prediction_id=generation_id)
+            return generation_id, result
+        except RuntimeError as exc:
+            last_exc = exc
+            message = str(exc)
+            if ("(E004)" in message or "temporarily unavailable" in message.lower()) and retry_index < 2:
+                wait_sec = 15 * (retry_index + 1)
+                _job_progress(
+                    job,
+                    store,
+                    55,
+                    "running",
+                    f"Wan 2.7 provider is temporarily unavailable, retrying in {wait_sec}s",
+                )
+                time.sleep(wait_sec)
+                continue
+            raise
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("Wan 2.7 image-to-video generation did not produce a result")
+
+
 def _alpha_mask_for_rect(size: tuple[int, int], rect: dict[str, int], feather_px: int, bleed_px: int) -> Image.Image:
     mask = Image.new("L", size, 0)
     x = max(0, rect["x"] - bleed_px)
@@ -2350,30 +2434,57 @@ def _handle_api_video_generate_reference(
     capability = get_video_model_capability(model_name)
     requested_mode = str(payload["mode"])
     luma_mode = requested_mode if requested_mode in LUMA_API_ALLOWED_MODES else "flex_1"
-    uses_end_keyframe = requested_mode in {"kling_start_end", "veo_start_end"}
+    uses_end_keyframe = requested_mode in {"kling_start_end", "veo_start_end", "wan27_i2v_start_end"}
     replicate_kling_mode = str(payload.get("replicateKlingMode") or "pro")
     replicate_kling_v3_mode = str(payload.get("replicateKlingV3Mode") or "pro")
     wan27_resolution = str(payload.get("wan27Resolution") or "720p")
+    happy_horse_resolution = str(payload.get("happyHorseResolution") or "1080p")
+    wan27_negative_prompt = str(payload.get("negativePrompt") or "").strip() or None
     preserve_frames = bool(payload.get("preserveFrames", True))
     provider_name = capability.provider
 
     _api_request_progress(job=job, store=store, request_record=request_record, progress=10, status="running", logs="Loading video generation assets")
     with tempfile.TemporaryDirectory() as td:
         td_path = Path(td)
-        source_video_path = td_path / "source_video.mp4"
-        _download_s3(boto3.client("s3"), settings.assets_bucket, str(payload["videoAssetKey"]), source_video_path)
         first_frame_bytes = asset_store.read_bytes(str(payload["firstFrameAssetKey"]))
         last_frame_bytes = asset_store.read_bytes(str(payload["lastFrameAssetKey"])) if payload.get("lastFrameAssetKey") else None
+        with Image.open(BytesIO(first_frame_bytes)) as first_image_probe:
+            first_source_width, first_source_height = first_image_probe.size
 
-        source_probe = ffprobe_video(str(source_video_path))
-        segment_duration_sec = float(source_probe.get("duration_sec") or 0.0)
-        fps = Fraction(int(source_probe.get("fps_num") or 30), int(source_probe.get("fps_den") or 1))
-        if fps.numerator <= 0 or fps.denominator <= 0:
-            fps = Fraction(30, 1)
-        src_width = int(source_probe.get("width") or 1920)
-        src_height = int(source_probe.get("height") or 1080)
-        provider_media_has_audio = bool(source_probe.get("has_audio"))
-        source_size = source_video_path.stat().st_size
+        source_video_key = payload.get("videoAssetKey")
+        source_video_path: Path | None = None
+        source_probe: dict[str, Any] | None = None
+        if source_video_key:
+            source_video_path = td_path / "source_video.mp4"
+            _download_s3(boto3.client("s3"), settings.assets_bucket, str(source_video_key), source_video_path)
+            source_probe = ffprobe_video(str(source_video_path))
+            segment_duration_sec = float(source_probe.get("duration_sec") or 0.0)
+            fps = Fraction(int(source_probe.get("fps_num") or 30), int(source_probe.get("fps_den") or 1))
+            if fps.numerator <= 0 or fps.denominator <= 0:
+                fps = Fraction(30, 1)
+            src_width = int(source_probe.get("width") or first_source_width or 1920)
+            src_height = int(source_probe.get("height") or first_source_height or 1080)
+            provider_media_has_audio = bool(source_probe.get("has_audio"))
+            source_size = source_video_path.stat().st_size
+        else:
+            requested_duration_sec = float(payload.get("durationSeconds") or capability.min_seconds or capability.max_seconds or 4)
+            segment_duration_sec = max(float(capability.min_seconds or 1), min(float(capability.max_seconds or 10), requested_duration_sec))
+            fps_value = capability.frame_budget_fps or 24
+            fps = Fraction(fps_value, 1)
+            src_width = first_source_width or 1920
+            src_height = first_source_height or 1080
+            provider_media_has_audio = False
+            source_size = 0
+            source_probe = {
+                "width": src_width,
+                "height": src_height,
+                "fps_num": fps.numerator,
+                "fps_den": fps.denominator,
+                "duration_sec": segment_duration_sec,
+                "frame_count": max(1, int(round(segment_duration_sec * float(fps)))),
+                "is_vfr_input": False,
+                "has_audio": False,
+            }
 
         duration_frames = max(1, int(round(segment_duration_sec * float(fps))))
         limit_error = resolve_video_model_limit_error(
@@ -2381,8 +2492,8 @@ def _handle_api_video_generate_reference(
             duration_seconds=segment_duration_sec,
             duration_frames=duration_frames,
             source_fps=fps,
-            source_label="source video",
-            selected_label="Input video",
+            source_label="source video" if source_video_key else "requested duration",
+            selected_label="Input video" if source_video_key else "Requested duration",
         )
         if limit_error:
             raise RuntimeError(limit_error)
@@ -2401,6 +2512,9 @@ def _handle_api_video_generate_reference(
         wan27_video_transport: str | None = None
         wan27_reference_transport: str | None = None
         wan27_video_data_url: str | None = None
+        sora2_resolution = str(payload.get("sora2Resolution") or "auto")
+        sora2_requested_duration_sec: float | None = None
+        sora2_provider_duration_sec: float | None = None
         replicate_aspect_ratio: str | None = None
         seedance_aspect_ratio: str | None = None
         seedance_requested_duration_sec: float | None = None
@@ -2517,16 +2631,30 @@ def _handle_api_video_generate_reference(
             media_key_for_provider = paths.request_artifact(request_id, "prepared", "provider_video", ".mp4")
             asset_store.put_bytes(media_key_for_provider, local_provider_segment.read_bytes(), content_type="video/mp4")
         else:
-            media_key_for_provider = str(payload["videoAssetKey"])
-            provider_media_width = src_width
-            provider_media_height = src_height
-            provider_media_fps = fps
-            provider_input_duration_sec = round(segment_duration_sec, 3)
+            if source_video_key:
+                media_key_for_provider = str(source_video_key)
+                provider_media_width = src_width
+                provider_media_height = src_height
+                provider_media_fps = fps
+                provider_input_duration_sec = round(segment_duration_sec, 3)
 
-        with Image.open(BytesIO(first_frame_bytes)) as first_image_probe:
-            first_source_width, first_source_height = first_image_probe.size
         if capability.first_frame_profile == "runware_wan22":
             first_target_w, first_target_h = _nearest_runware_wan22_resolution(first_source_width, first_source_height)
+        elif capability.first_frame_profile == "sora_i2v":
+            sora_edge = 1920 if sora2_resolution == "1080p" else 1280
+            first_target_w, first_target_h = _target_by_orientation(
+                first_source_width,
+                first_source_height,
+                landscape=(sora_edge, int(round(sora_edge * 9 / 16))),
+                portrait=(int(round(sora_edge * 9 / 16)), sora_edge),
+            )
+        elif capability.first_frame_profile == "happy_horse_reference":
+            happy_horse_long_edge = 1920 if happy_horse_resolution == "1080p" else 1280
+            first_target_w, first_target_h = _target_preserving_aspect_long_edge(
+                first_source_width,
+                first_source_height,
+                long_edge=happy_horse_long_edge,
+            )
         elif capability.first_frame_profile == "kling_edit":
             if not replicate_aspect_ratio:
                 replicate_aspect_ratio = _nearest_allowed_aspect_ratio(
@@ -2721,6 +2849,116 @@ def _handle_api_video_generate_reference(
             result = _wait_runware_video_complete(runware_key, task_uuid=generation_id)
             out_url = _parse_runware_video_output_url(result)
             used_provider_model = RUNWARE_WAN22_A14B_MODEL
+        elif model_name == "sora-2-image-to-video":
+            fal_api_key = secrets.get("FAL_API_KEY")
+            if not fal_api_key:
+                raise RuntimeError("Sora 2 Image to Video requires FAL_API_KEY")
+            sora2_requested_duration_sec = float(max(4, min(10, int(math.ceil(segment_duration_sec or 4.0)))))
+            sora2_provider_duration_sec = float(_sora_supported_duration(sora2_requested_duration_sec))
+            provider_duration_sec = sora2_requested_duration_sec
+            _api_request_progress(job=job, store=store, request_record=request_record, progress=40, status="running", logs="Creating Sora 2 image-to-video generation")
+            created = submit_sora_2_image_to_video_pro(
+                api_key=fal_api_key,
+                input={
+                    "prompt": payload.get("prompt"),
+                    "image_url": first_frame_url,
+                    "resolution": sora2_resolution if sora2_resolution in {"auto", "720p", "1080p"} else "auto",
+                    "aspect_ratio": "auto",
+                    "duration": int(sora2_provider_duration_sec),
+                    "delete_video": True,
+                    "detect_and_block_ip": False,
+                },
+            )
+            generation_id = created.get("request_id")
+            if not isinstance(generation_id, str):
+                raise RuntimeError(f"Unexpected fal.ai Sora 2 create response: {created}")
+            _api_request_progress(job=job, store=store, request_record=request_record, progress=55, status="running", logs="Polling Sora 2 image-to-video generation")
+            result = _wait_fal_queue_complete(fal_api_key, created=created)
+            out_url = _parse_fal_video_output_url(result)
+            used_provider_model = "fal-ai/sora-2/image-to-video/pro"
+        elif model_name == "happy-horse-video-edit":
+            fal_api_key = secrets.get("FAL_API_KEY")
+            if not fal_api_key:
+                raise RuntimeError("Happy Horse 1.0 Video Edit requires FAL_API_KEY")
+            if not media_url:
+                raise RuntimeError("Happy Horse 1.0 Video Edit requires a source video")
+            provider_duration_sec = min(15.0, round(segment_duration_sec, 3))
+            _api_request_progress(job=job, store=store, request_record=request_record, progress=40, status="running", logs="Creating Happy Horse video edit generation")
+            created = submit_happy_horse_video_edit(
+                api_key=fal_api_key,
+                input={
+                    "video_url": media_url,
+                    "prompt": payload.get("prompt"),
+                    "reference_image_urls": [first_frame_url],
+                    "resolution": happy_horse_resolution if happy_horse_resolution in {"720p", "1080p"} else "1080p",
+                    "audio_setting": "origin" if provider_media_has_audio else "auto",
+                    "enable_safety_checker": True,
+                },
+            )
+            generation_id = created.get("request_id")
+            if not isinstance(generation_id, str):
+                raise RuntimeError(f"Unexpected Happy Horse video edit create response: {created}")
+            _api_request_progress(job=job, store=store, request_record=request_record, progress=55, status="running", logs="Polling Happy Horse video edit generation")
+            result = _wait_fal_queue_complete(fal_api_key, created=created)
+            out_url = _parse_fal_video_output_url(result)
+            used_provider_model = "alibaba/happy-horse/video-edit"
+        elif model_name == "happy-horse-image-to-video":
+            fal_api_key = secrets.get("FAL_API_KEY")
+            if not fal_api_key:
+                raise RuntimeError("Happy Horse 1.0 Image to Video requires FAL_API_KEY")
+            provider_duration_sec = float(max(3, min(15, int(math.ceil(segment_duration_sec or 5.0)))))
+            _api_request_progress(job=job, store=store, request_record=request_record, progress=40, status="running", logs="Creating Happy Horse image-to-video generation")
+            created = submit_happy_horse_image_to_video(
+                api_key=fal_api_key,
+                input={
+                    "image_url": first_frame_url,
+                    "prompt": payload.get("prompt"),
+                    "resolution": happy_horse_resolution if happy_horse_resolution in {"720p", "1080p"} else "1080p",
+                    "duration": int(provider_duration_sec),
+                    "enable_safety_checker": True,
+                },
+            )
+            generation_id = created.get("request_id")
+            if not isinstance(generation_id, str):
+                raise RuntimeError(f"Unexpected Happy Horse image-to-video create response: {created}")
+            _api_request_progress(job=job, store=store, request_record=request_record, progress=55, status="running", logs="Polling Happy Horse image-to-video generation")
+            result = _wait_fal_queue_complete(fal_api_key, created=created)
+            out_url = _parse_fal_video_output_url(result)
+            used_provider_model = "alibaba/happy-horse/image-to-video"
+        elif model_name == "wan2.7-i2v":
+            replicate_key = secrets.get("REPLICATE_API_KEY")
+            if not replicate_key:
+                raise RuntimeError("Wan 2.7 Image to Video requires REPLICATE_API_KEY")
+            provider_duration_sec = float(max(2, min(10, int(math.ceil(segment_duration_sec or 2.0)))))
+            wan27_first_frame_data_url = _prepare_replicate_image_data_url(
+                first_frame_bytes,
+                target_width=first_target_w,
+                target_height=first_target_h,
+            )
+            wan27_reference_transport = "data_url"
+            wan27_last_frame_data_url = (
+                _prepare_replicate_image_data_url(
+                    last_frame_bytes or first_frame_bytes,
+                    target_width=first_target_w,
+                    target_height=first_target_h,
+                )
+                if uses_end_keyframe
+                else None
+            )
+            _api_request_progress(job=job, store=store, request_record=request_record, progress=40, status="running", logs="Creating Wan 2.7 image-to-video generation")
+            generation_id, result = _run_wan27_i2v_prediction(
+                api_key=replicate_key,
+                prompt=str(payload.get("prompt") or ""),
+                first_frame=wan27_first_frame_data_url,
+                last_frame=wan27_last_frame_data_url,
+                negative_prompt=wan27_negative_prompt,
+                resolution=wan27_resolution if wan27_resolution in {"720p", "1080p"} else "720p",
+                duration_seconds=int(provider_duration_sec),
+                job=job,
+                store=store,
+            )
+            out_url = _parse_replicate_output_url(result)
+            used_provider_model = "wan-video/wan-2.7-i2v"
         elif model_name == "wan2.2-animate":
             runware_key = secrets.get("RUNWARE_API_KEY")
             if not runware_key:
@@ -2881,6 +3119,23 @@ def _handle_api_video_generate_reference(
         _api_request_progress(job=job, store=store, request_record=request_record, progress=75, status="running", logs="Downloading provider output")
         downloaded_path = td_path / "provider_output_raw.mp4"
         _download_url_to_path(out_url, downloaded_path)
+        if (
+            model_name == "sora-2-image-to-video"
+            and sora2_requested_duration_sec
+            and sora2_provider_duration_sec
+            and sora2_provider_duration_sec - sora2_requested_duration_sec > 1e-3
+        ):
+            _api_request_progress(job=job, store=store, request_record=request_record, progress=79, status="running", logs="Trimming Sora output to requested duration")
+            trimmed_path = td_path / "provider_output_trimmed.mp4"
+            trim_video_to_duration(
+                str(downloaded_path),
+                str(trimmed_path),
+                duration_sec=sora2_requested_duration_sec,
+                crf=16,
+                preset="medium",
+                audio_bitrate="192k",
+            )
+            downloaded_path = trimmed_path
         raw_output_probe = ffprobe_video(str(downloaded_path))
         if model_name == "seedance-2.0-reference-to-video":
             seedance_raw_output_width = int(raw_output_probe.get("width") or 0) or None
@@ -2978,6 +3233,10 @@ def _handle_api_video_generate_reference(
         "storedOutput": _video_timing_payload(output_probe),
         "timelineConform": timeline_conform,
         "aspectRatio": replicate_aspect_ratio or seedance_aspect_ratio or ("auto" if model_name == "wan2.7-videoedit" else None),
+        "sora2Resolution": sora2_resolution if model_name == "sora-2-image-to-video" else None,
+        "happyHorseResolution": happy_horse_resolution if model_name in {"happy-horse-video-edit", "happy-horse-image-to-video"} else None,
+        "sora2RequestedDurationSec": sora2_requested_duration_sec if model_name == "sora-2-image-to-video" else None,
+        "sora2ProviderDurationSec": sora2_provider_duration_sec if model_name == "sora-2-image-to-video" else None,
         "seedanceRequestedDurationSec": seedance_requested_duration_sec,
         "seedanceRawOutputResolution": (
             {"width": seedance_raw_output_width, "height": seedance_raw_output_height}
@@ -2989,9 +3248,10 @@ def _handle_api_video_generate_reference(
             if seedance_output_width and seedance_output_height
             else None
         ),
-        "wan27Resolution": wan27_resolution if model_name == "wan2.7-videoedit" else None,
+        "wan27Resolution": wan27_resolution if model_name in {"wan2.7-videoedit", "wan2.7-i2v"} else None,
         "wan27VideoTransport": wan27_video_transport,
         "wan27ReferenceTransport": wan27_reference_transport,
+        "wan27NegativePrompt": wan27_negative_prompt if model_name == "wan2.7-i2v" else None,
         "mediaHasAudio": provider_media_has_audio,
         "providerModel": used_provider_model or model_name,
     }
@@ -3165,10 +3425,12 @@ def _handle_segment_generate(
     capability = get_video_model_capability(model_name)
     requested_mode = payload["mode"]
     luma_mode = requested_mode if requested_mode in LUMA_API_ALLOWED_MODES else "flex_1"
-    uses_end_keyframe = requested_mode in {"kling_start_end", "veo_start_end"}
+    uses_end_keyframe = requested_mode in {"kling_start_end", "veo_start_end", "wan27_i2v_start_end"}
     replicate_kling_mode = str(payload.get("replicateKlingMode") or "pro")
     replicate_kling_v3_mode = str(payload.get("replicateKlingV3Mode") or "pro")
     wan27_resolution = str(payload.get("wan27Resolution") or "720p")
+    happy_horse_resolution = str(payload.get("happyHorseResolution") or "1080p")
+    wan27_negative_prompt = str(payload.get("negativePrompt") or "").strip() or None
     preserve_frames = bool(payload.get("preserveFrames", True))
     segment_key: str | None = None
     if capability.uses_source_video:
@@ -3202,7 +3464,7 @@ def _handle_segment_generate(
         if end_variant:
             last_frame_key = end_variant["outputKey"]
             source_last_variant_id = end_variant_id
-    if model_name in {"kling-2.6", "veo-3.1", "veo-3.1-fast"} and not uses_end_keyframe:
+    if model_name in {"kling-2.6", "veo-3.1", "veo-3.1-fast", "wan2.7-i2v"} and not uses_end_keyframe:
         last_frame_key = first_frame_key
         source_last_variant_id = None
 
@@ -3228,6 +3490,9 @@ def _handle_segment_generate(
     wan27_reference_transport: str | None = None
     wan27_video_transport: str | None = None
     wan27_video_data_url: str | None = None
+    sora2_resolution = str(payload.get("sora2Resolution") or "auto")
+    sora2_requested_duration_sec: float | None = None
+    sora2_provider_duration_sec: float | None = None
     replicate_aspect_ratio: str | None = None
     seedance_aspect_ratio: str | None = None
     seedance_requested_duration_sec: float | None = None
@@ -3371,6 +3636,21 @@ def _handle_segment_generate(
             first_source_width, first_source_height = first_image_probe.size
         if capability.first_frame_profile == "runware_wan22":
             first_target_w, first_target_h = _nearest_runware_wan22_resolution(first_source_width, first_source_height)
+        elif capability.first_frame_profile == "sora_i2v":
+            sora_edge = 1920 if sora2_resolution == "1080p" else 1280
+            first_target_w, first_target_h = _target_by_orientation(
+                first_source_width,
+                first_source_height,
+                landscape=(sora_edge, int(round(sora_edge * 9 / 16))),
+                portrait=(int(round(sora_edge * 9 / 16)), sora_edge),
+            )
+        elif capability.first_frame_profile == "happy_horse_reference":
+            happy_horse_long_edge = 1920 if happy_horse_resolution == "1080p" else 1280
+            first_target_w, first_target_h = _target_preserving_aspect_long_edge(
+                first_source_width,
+                first_source_height,
+                long_edge=happy_horse_long_edge,
+            )
         elif capability.first_frame_profile == "kling_edit":
             if not replicate_aspect_ratio:
                 replicate_aspect_ratio = _nearest_allowed_aspect_ratio(
@@ -3440,7 +3720,7 @@ def _handle_segment_generate(
         )
         _upload_s3(s3, settings.assets_bucket, first_frame_input_key, local_first_frame, first_frame_content_type)
 
-        if model_name in {"kling-2.6", "veo-3.1", "veo-3.1-fast"} and uses_end_keyframe:
+        if model_name in {"kling-2.6", "veo-3.1", "veo-3.1-fast", "wan2.7-i2v"} and uses_end_keyframe:
             last_frame_bytes = asset_store.read_bytes(last_frame_key)
             prepared_last_frame, last_frame_content_type, last_frame_ext = _prepare_first_frame_image_payload(
                 last_frame_bytes,
@@ -3453,7 +3733,7 @@ def _handle_segment_generate(
             last_frame_input_key = paths.segment_provider_last_frame(
                 segment_id,
                 gen_id,
-                "kling" if model_name == "kling-2.6" else "runware",
+                "kling" if model_name == "kling-2.6" else ("replicate" if model_name == "wan2.7-i2v" else "runware"),
                 ext=last_frame_ext,
             )
             _upload_s3(s3, settings.assets_bucket, last_frame_input_key, local_last_frame, last_frame_content_type)
@@ -3598,6 +3878,122 @@ def _handle_segment_generate(
         out_url = _parse_runware_video_output_url(result)
         provider_name = "runware"
         used_provider_model = RUNWARE_WAN22_A14B_MODEL
+    elif model_name == "sora-2-image-to-video":
+        fal_api_key = secrets.get("FAL_API_KEY")
+        if not fal_api_key:
+            raise RuntimeError("Sora 2 Image to Video requires FAL_API_KEY")
+        if not first_frame_url:
+            raise RuntimeError("Sora 2 Image to Video requires a prepared reference image URL")
+        sora2_requested_duration_sec = float(max(4, min(10, int(math.ceil(segment_duration_sec or 4.0)))))
+        sora2_provider_duration_sec = float(_sora_supported_duration(sora2_requested_duration_sec))
+        provider_duration_sec = sora2_requested_duration_sec
+        _job_progress(job, store, 35, "running", "Creating fal.ai Sora 2 image-to-video generation")
+        created = submit_sora_2_image_to_video_pro(
+            api_key=fal_api_key,
+            input={
+                "prompt": payload.get("prompt"),
+                "image_url": first_frame_url,
+                "resolution": sora2_resolution if sora2_resolution in {"auto", "720p", "1080p"} else "auto",
+                "aspect_ratio": "auto",
+                "duration": int(sora2_provider_duration_sec),
+                "delete_video": True,
+                "detect_and_block_ip": False,
+            },
+        )
+        generation_id = created.get("request_id")
+        if not isinstance(generation_id, str):
+            raise RuntimeError(f"Unexpected fal.ai Sora 2 create response: {created}")
+        _job_progress(job, store, 55, "running", "Polling fal.ai Sora 2 image-to-video generation")
+        result = _wait_fal_queue_complete(fal_api_key, created=created)
+        out_url = _parse_fal_video_output_url(result)
+        provider_name = "fal"
+        used_provider_model = "fal-ai/sora-2/image-to-video/pro"
+    elif model_name == "happy-horse-video-edit":
+        fal_api_key = secrets.get("FAL_API_KEY")
+        if not fal_api_key:
+            raise RuntimeError("Happy Horse 1.0 Video Edit requires FAL_API_KEY")
+        if not media_url:
+            raise RuntimeError("Happy Horse 1.0 Video Edit requires a prepared segment media URL")
+        provider_duration_sec = min(15.0, round(segment_duration_sec, 3))
+        _job_progress(job, store, 35, "running", "Creating fal.ai Happy Horse video edit generation")
+        created = submit_happy_horse_video_edit(
+            api_key=fal_api_key,
+            input={
+                "video_url": media_url,
+                "prompt": payload.get("prompt"),
+                "reference_image_urls": [first_frame_url],
+                "resolution": happy_horse_resolution if happy_horse_resolution in {"720p", "1080p"} else "1080p",
+                "audio_setting": "origin" if provider_media_has_audio else "auto",
+                "enable_safety_checker": True,
+            },
+        )
+        generation_id = created.get("request_id")
+        if not isinstance(generation_id, str):
+            raise RuntimeError(f"Unexpected Happy Horse video edit create response: {created}")
+        _job_progress(job, store, 55, "running", "Polling fal.ai Happy Horse video edit generation")
+        result = _wait_fal_queue_complete(fal_api_key, created=created)
+        out_url = _parse_fal_video_output_url(result)
+        provider_name = "fal"
+        used_provider_model = "alibaba/happy-horse/video-edit"
+    elif model_name == "happy-horse-image-to-video":
+        fal_api_key = secrets.get("FAL_API_KEY")
+        if not fal_api_key:
+            raise RuntimeError("Happy Horse 1.0 Image to Video requires FAL_API_KEY")
+        if not first_frame_url:
+            raise RuntimeError("Happy Horse 1.0 Image to Video requires a prepared reference image URL")
+        provider_duration_sec = float(max(3, min(15, int(math.ceil(segment_duration_sec or 5.0)))))
+        _job_progress(job, store, 35, "running", "Creating fal.ai Happy Horse image-to-video generation")
+        created = submit_happy_horse_image_to_video(
+            api_key=fal_api_key,
+            input={
+                "image_url": first_frame_url,
+                "prompt": payload.get("prompt"),
+                "resolution": happy_horse_resolution if happy_horse_resolution in {"720p", "1080p"} else "1080p",
+                "duration": int(provider_duration_sec),
+                "enable_safety_checker": True,
+            },
+        )
+        generation_id = created.get("request_id")
+        if not isinstance(generation_id, str):
+            raise RuntimeError(f"Unexpected Happy Horse image-to-video create response: {created}")
+        _job_progress(job, store, 55, "running", "Polling fal.ai Happy Horse image-to-video generation")
+        result = _wait_fal_queue_complete(fal_api_key, created=created)
+        out_url = _parse_fal_video_output_url(result)
+        provider_name = "fal"
+        used_provider_model = "alibaba/happy-horse/image-to-video"
+    elif model_name == "wan2.7-i2v":
+        replicate_key = secrets.get("REPLICATE_API_KEY")
+        if not replicate_key:
+            raise RuntimeError("Wan 2.7 Image to Video requires REPLICATE_API_KEY")
+        provider_duration_sec = float(max(2, min(10, int(math.ceil(segment_duration_sec or 2.0)))))
+        wan27_first_frame_data_url = _prepare_replicate_image_data_url(
+            frame_bytes,
+            target_width=first_target_w,
+            target_height=first_target_h,
+        )
+        wan27_reference_transport = "data_url"
+        wan27_last_frame_data_url: str | None = None
+        if uses_end_keyframe:
+            last_frame_bytes = asset_store.read_bytes(last_frame_key)
+            wan27_last_frame_data_url = _prepare_replicate_image_data_url(
+                last_frame_bytes,
+                target_width=first_target_w,
+                target_height=first_target_h,
+            )
+        generation_id, result = _run_wan27_i2v_prediction(
+            api_key=replicate_key,
+            prompt=str(payload.get("prompt") or ""),
+            first_frame=wan27_first_frame_data_url,
+            last_frame=wan27_last_frame_data_url,
+            negative_prompt=wan27_negative_prompt,
+            resolution=wan27_resolution if wan27_resolution in {"720p", "1080p"} else "720p",
+            duration_seconds=int(provider_duration_sec),
+            job=job,
+            store=store,
+        )
+        out_url = _parse_replicate_output_url(result)
+        provider_name = "replicate"
+        used_provider_model = "wan-video/wan-2.7-i2v"
     elif model_name == "wan2.2-animate":
         runware_key = secrets.get("RUNWARE_API_KEY")
         if not runware_key:
@@ -3781,6 +4177,23 @@ def _handle_segment_generate(
         td_path = Path(td)
         downloaded_path = td_path / "provider_output_raw.mp4"
         _download_url_to_path(out_url, downloaded_path)
+        if (
+            model_name == "sora-2-image-to-video"
+            and sora2_requested_duration_sec
+            and sora2_provider_duration_sec
+            and sora2_provider_duration_sec - sora2_requested_duration_sec > 1e-3
+        ):
+            _job_progress(job, store, 79, "running", "Trimming Sora output to requested duration")
+            trimmed_path = td_path / "provider_output_trimmed.mp4"
+            trim_video_to_duration(
+                str(downloaded_path),
+                str(trimmed_path),
+                duration_sec=sora2_requested_duration_sec,
+                crf=16,
+                preset="medium",
+                audio_bitrate="192k",
+            )
+            downloaded_path = trimmed_path
         raw_output_probe = ffprobe_video(str(downloaded_path))
         if model_name == "seedance-2.0-reference-to-video":
             seedance_raw_output_width = int(raw_output_probe.get("width") or 0) or None
@@ -3866,6 +4279,7 @@ def _handle_segment_generate(
                 "model": model_name,
                 "mode": requested_mode,
                 "prompt": payload.get("prompt"),
+                "negativePrompt": payload.get("negativePrompt"),
                 "lumaGenerationId": generation_id,
             },
             "status": "complete",
@@ -3922,9 +4336,14 @@ def _handle_segment_generate(
                     if model_name == "seedance-2.0-reference-to-video" and seedance_output_width and seedance_output_height
                     else None
                 ),
-                "wan27Resolution": wan27_resolution if model_name == "wan2.7-videoedit" else None,
+                "wan27Resolution": wan27_resolution if model_name in {"wan2.7-videoedit", "wan2.7-i2v"} else None,
                 "wan27VideoTransport": wan27_video_transport if model_name == "wan2.7-videoedit" else None,
-                "wan27ReferenceTransport": wan27_reference_transport if model_name == "wan2.7-videoedit" else None,
+                "wan27ReferenceTransport": wan27_reference_transport if model_name in {"wan2.7-videoedit", "wan2.7-i2v"} else None,
+                "wan27NegativePrompt": wan27_negative_prompt if model_name == "wan2.7-i2v" else None,
+                "sora2Resolution": sora2_resolution if model_name == "sora-2-image-to-video" else None,
+                "happyHorseResolution": happy_horse_resolution if model_name in {"happy-horse-video-edit", "happy-horse-image-to-video"} else None,
+                "sora2RequestedDurationSec": sora2_requested_duration_sec if model_name == "sora-2-image-to-video" else None,
+                "sora2ProviderDurationSec": sora2_provider_duration_sec if model_name == "sora-2-image-to-video" else None,
                 "preserveFrames": preserve_frames,
                 "providerInputTimingPolicy": provider_input_timing_policy,
                 "mediaHasAudio": provider_media_has_audio,
@@ -4111,7 +4530,7 @@ def _handle_merge(
                 start_frame_override = default_start_frame_override
                 if total_frames > 0:
                     start_frame_override = min(start_frame_override, total_frames - 1)
-            merge_start_frame = segment["startFrame"] if start_frame_override is None else start_frame_override
+            merge_start_frame = int(start_frame_override)
             effective_trim_start = trim_start_frames
             effective_trim_end = trim_end_frames
             merge_segment_path = seg_path
@@ -4123,7 +4542,7 @@ def _handle_merge(
                     str(retimed_path),
                     fps=Fraction(task["video"]["editSource"]["fps"]["num"], task["video"]["editSource"]["fps"]["den"]),
                     playback_rate=playback_rate,
-                    trim_start_frames=trim_start_frames,
+                    trim_start_frames=effective_trim_start,
                     trim_end_frames=trim_end_frames,
                     target_width=int(task["video"]["editSource"]["width"]),
                     target_height=int(task["video"]["editSource"]["height"]),
@@ -4145,7 +4564,7 @@ def _handle_merge(
                 composed_path = td_path / f"segment_composed_{idx}.mp4"
                 crop_compose_cmd = compose_cropped_generated_segment(
                     str(current_path),
-                    str(seg_path),
+                    str(merge_segment_path),
                     str(composed_path),
                     start_frame=merge_start_frame,
                     fps_num=task["video"]["editSource"]["fps"]["num"],
@@ -4157,8 +4576,8 @@ def _handle_merge(
                     crop_width=int(crop_settings.get("width", 0)),
                     crop_height=int(crop_settings.get("height", 0)),
                     crop_feather_px=int(crop_settings.get("featherPx", 0)),
-                    generated_trim_start_frames=trim_start_frames,
-                    generated_trim_end_frames=trim_end_frames,
+                    generated_trim_start_frames=effective_trim_start,
+                    generated_trim_end_frames=effective_trim_end,
                 )
                 merge_segment_path = composed_path
                 effective_trim_start = 0
@@ -4185,8 +4604,11 @@ def _handle_merge(
                     "generationId": gen_id,
                     "sourceFrameOffset": source_frame_offset,
                     "startFrameOverride": start_frame_override,
+                    "effectiveInsertStartFrame": merge_start_frame,
                     "trimStartFrames": trim_start_frames,
                     "trimEndFrames": trim_end_frames,
+                    "effectiveTrimStartFrames": effective_trim_start,
+                    "effectiveTrimEndFrames": effective_trim_end,
                     "playbackRate": playback_rate,
                     "autoTimingApplied": {
                         "startFrameOverride": raw_adjustment.get("startFrameOverride") is None,
@@ -4250,6 +4672,20 @@ def _load_optional_mask(mask_bytes: bytes | None, size: tuple[int, int]) -> Imag
     if mask.size != size:
         mask = mask.resize(size, Image.Resampling.BILINEAR)
     return mask.point(lambda value: 255 if value >= 127 else 0)
+
+
+def _alignment_region_mask_from_edit_mask(mask_bytes: bytes | None, size: tuple[int, int], *, expand_px: int = 6) -> Image.Image | None:
+    edit_mask = _load_optional_mask(mask_bytes, size)
+    if edit_mask is None:
+        return None
+    if expand_px > 0:
+        edit_mask = _grow_or_shrink_mask(edit_mask, expand_px).point(lambda value: 255 if value >= 127 else 0)
+    preserve_mask = ImageChops.invert(edit_mask.convert("L")).point(lambda value: 255 if value >= 127 else 0)
+    selected_pixels = _count_binary_pixels(preserve_mask)
+    total_pixels = max(1, preserve_mask.width * preserve_mask.height)
+    if selected_pixels < max(128, int(total_pixels * 0.12)):
+        return None
+    return preserve_mask
 
 
 def _analyze_image_pair(
@@ -5748,12 +6184,35 @@ def _pearson_score(first: list[float], second: list[float]) -> float:
     return max(-1.0, min(1.0, numerator / (first_den * second_den)))
 
 
-def _video_compare_vectors(image: Image.Image, *, size: tuple[int, int] = (96, 54)) -> tuple[list[float], list[float], list[float]]:
+def _video_compare_vectors(
+    image: Image.Image,
+    *,
+    size: tuple[int, int] = (96, 54),
+    region_mask: Image.Image | None = None,
+) -> tuple[list[float], list[float], list[float]]:
     gray = ImageOps.autocontrast(image.convert("L").resize(size, Image.Resampling.BILINEAR))
     edge = ImageOps.autocontrast(gray.filter(ImageFilter.FIND_EDGES))
-    gray_values = [float(value) for value in gray.getdata()]
-    edge_values = [float(value) for value in edge.getdata()]
-    histogram = gray.histogram()
+    gray_values_all = [float(value) for value in gray.getdata()]
+    edge_values_all = [float(value) for value in edge.getdata()]
+    mask_flags: list[bool] | None = None
+    if region_mask is not None:
+        aligned_mask = region_mask.convert("L")
+        if aligned_mask.size != size:
+            aligned_mask = aligned_mask.resize(size, Image.Resampling.NEAREST)
+        mask_flags = [value >= 127 for value in aligned_mask.getdata()]
+        if sum(1 for value in mask_flags if value) < 64:
+            mask_flags = None
+    if mask_flags is None:
+        gray_values = gray_values_all
+        edge_values = edge_values_all
+        histogram = gray.histogram()
+    else:
+        gray_values = [value for value, keep in zip(gray_values_all, mask_flags) if keep]
+        edge_values = [value for value, keep in zip(edge_values_all, mask_flags) if keep]
+        histogram = [0] * 256
+        for value, keep in zip(gray.getdata(), mask_flags):
+            if keep:
+                histogram[int(value)] += 1
     bucket_count = 16
     bucket_width = max(1, len(histogram) // bucket_count)
     buckets = [
@@ -5768,24 +6227,29 @@ def _histogram_intersection(first: list[float], second: list[float]) -> float:
     return max(0.0, min(1.0, sum(min(a, b) for a, b in zip(first, second))))
 
 
-def _video_compare_similarity(source_image: Image.Image, generated_image: Image.Image) -> float:
+def _video_compare_similarity(source_image: Image.Image, generated_image: Image.Image, *, region_mask: Image.Image | None = None) -> float:
     source = source_image.convert("RGB")
     generated = generated_image.convert("RGB")
     if generated.size != source.size:
         generated = generated.resize(source.size, Image.Resampling.LANCZOS)
-    source_gray, source_edge, source_hist = _video_compare_vectors(source)
-    generated_gray, generated_edge, generated_hist = _video_compare_vectors(generated)
+    source_gray, source_edge, source_hist = _video_compare_vectors(source, region_mask=region_mask)
+    generated_gray, generated_edge, generated_hist = _video_compare_vectors(generated, region_mask=region_mask)
     edge_score = (_pearson_score(source_edge, generated_edge) + 1.0) / 2.0
     gray_score = (_pearson_score(source_gray, generated_gray) + 1.0) / 2.0
     histogram_score = _histogram_intersection(source_hist, generated_hist)
     return max(0.0, min(1.0, (0.58 * edge_score) + (0.27 * gray_score) + (0.15 * histogram_score)))
 
 
-def _estimate_video_compare_alignment_from_frame_zero(source_frames: list[Image.Image], generated_first_frame: Image.Image) -> dict[str, Any]:
+def _estimate_video_compare_alignment_from_frame_zero(
+    source_frames: list[Image.Image],
+    generated_first_frame: Image.Image,
+    *,
+    region_mask: Image.Image | None = None,
+) -> dict[str, Any]:
     if not source_frames:
         return {"sourceFrameOffset": 0, "confidence": 0.0, "score": 0.0, "runnerUpScore": 0.0, "method": "frame_zero_fallback"}
     scored = [
-        (index, _video_compare_similarity(source_frame, generated_first_frame))
+        (index, _video_compare_similarity(source_frame, generated_first_frame, region_mask=region_mask))
         for index, source_frame in enumerate(source_frames)
     ]
     scored.sort(key=lambda item: item[1], reverse=True)
@@ -5808,6 +6272,7 @@ def _estimate_video_compare_alignment_from_anchors(
     generated_anchors: list[tuple[int, Image.Image]],
     source_fps: Fraction,
     generated_fps: Fraction,
+    region_mask: Image.Image | None = None,
 ) -> dict[str, Any]:
     if not source_frames or not generated_anchors:
         return {"sourceFrameOffset": 0, "confidence": 0.0, "score": 0.0, "runnerUpScore": 0.0, "method": "anchor_sequence"}
@@ -5826,7 +6291,7 @@ def _estimate_video_compare_alignment_from_anchors(
             source_index = candidate_offset + source_step
             if source_index >= len(source_frames):
                 continue
-            scores.append(_video_compare_similarity(source_frames[source_index], generated_image))
+            scores.append(_video_compare_similarity(source_frames[source_index], generated_image, region_mask=region_mask))
         if not scores:
             continue
         candidate_scores.append((candidate_offset, sum(scores) / len(scores), len(scores)))
@@ -5869,6 +6334,7 @@ def _estimate_generated_source_offset(
     source_fps: Fraction,
     work_dir: Path,
     prefix: str,
+    region_mask: Image.Image | None = None,
 ) -> dict[str, Any]:
     frame_count = int(generated_probe.get("frame_count") or 0)
     alignment: dict[str, Any] = {
@@ -5894,12 +6360,13 @@ def _estimate_generated_source_offset(
             generated_anchors=generated_anchors,
             source_fps=source_fps,
             generated_fps=generated_fps,
+            region_mask=region_mask,
         )
     else:
         first_generated_path = work_dir / f"{prefix}_align_generated_0000.png"
         extract_frame_png(str(generated_path), 0, str(first_generated_path))
         first_generated_image = Image.open(first_generated_path).convert("RGB")
-        alignment = _estimate_video_compare_alignment_from_frame_zero(source_frames, first_generated_image)
+        alignment = _estimate_video_compare_alignment_from_frame_zero(source_frames, first_generated_image, region_mask=region_mask)
     alignment["scanFrameCount"] = len(source_frames)
     return alignment
 
@@ -5913,6 +6380,7 @@ def _best_aligned_generated_frame_index(
     work_dir: Path,
     prefix: str,
     search_radius: int = 2,
+    region_mask: Image.Image | None = None,
 ) -> tuple[int, Image.Image, float]:
     candidates = sorted(
         {
@@ -5927,7 +6395,7 @@ def _best_aligned_generated_frame_index(
         candidate_path = work_dir / f"{prefix}_candidate_{candidate_index:04d}.png"
         extract_frame_png(str(generated_path), candidate_index, str(candidate_path))
         candidate_image = Image.open(candidate_path).convert("RGB")
-        score = _video_compare_similarity(source_image, candidate_image)
+        score = _video_compare_similarity(source_image, candidate_image, region_mask=region_mask)
         if score > best_score:
             best_index = candidate_index
             best_image = candidate_image
@@ -5957,13 +6425,25 @@ def compute_merge_alignment_suggestion(
     analysis_width, analysis_height = _target_by_orientation(
         source_width,
         source_height,
-        landscape=(640, 360),
-        portrait=(360, 640),
+        landscape=(960, 540),
+        portrait=(540, 960),
     )
 
     s3 = boto3.client("s3")
     with tempfile.TemporaryDirectory() as td:
         td_path = Path(td)
+        frames = task.get("frames", {}) if isinstance(task.get("frames"), dict) else {}
+        start_frame = frames.get(segment.get("startFrameId")) if isinstance(segment.get("startFrameId"), str) else None
+        source_first_variant: dict[str, Any] | None = None
+        source_first_variant_id = generation.get("sourceFirstFrameVariantId")
+        if isinstance(start_frame, dict):
+            variants = start_frame.get("variants", [])
+            if isinstance(source_first_variant_id, str) and source_first_variant_id:
+                source_first_variant = next((item for item in variants if item.get("variantId") == source_first_variant_id), None)
+            if not isinstance(source_first_variant, dict):
+                selected_variant_id = start_frame.get("selectedVariantId")
+                if isinstance(selected_variant_id, str) and selected_variant_id:
+                    source_first_variant = next((item for item in variants if item.get("variantId") == selected_variant_id), None)
         original_segment_key = _ensure_segment_clip(
             s3=s3,
             asset_store=asset_store,
@@ -5985,8 +6465,8 @@ def compute_merge_alignment_suggestion(
             target_fps,
             target_width=analysis_width,
             target_height=analysis_height,
-            crf=24,
-            preset="ultrafast",
+            crf=20,
+            preset="veryfast",
             audio_bitrate="96k",
         )
         transcode_to_cfr(
@@ -5995,16 +6475,30 @@ def compute_merge_alignment_suggestion(
             target_fps,
             target_width=analysis_width,
             target_height=analysis_height,
-            crf=24,
-            preset="ultrafast",
+            crf=20,
+            preset="veryfast",
             audio_bitrate="96k",
         )
         original_probe = ffprobe_video(str(original_standard_path))
         generated_probe = ffprobe_video(str(generated_standard_path))
+        alignment_region_mask: Image.Image | None = None
+        alignment_mask_mode = "full_frame"
+        edit_mask_key = None
+        if isinstance(source_first_variant, dict):
+            if isinstance(source_first_variant.get("patchMeta"), dict):
+                edit_mask_key = source_first_variant.get("patchMeta", {}).get("maskKey")
+            if not edit_mask_key and isinstance(source_first_variant.get("qualityMatch"), dict):
+                edit_mask_key = source_first_variant.get("qualityMatch", {}).get("finalMaskKey")
+        edit_mask_bytes = asset_store.read_bytes(edit_mask_key) if isinstance(edit_mask_key, str) and edit_mask_key else None
+        if edit_mask_bytes:
+            candidate_mask = _alignment_region_mask_from_edit_mask(edit_mask_bytes, (analysis_width, analysis_height), expand_px=6)
+            if candidate_mask is not None:
+                alignment_region_mask = candidate_mask
+                alignment_mask_mode = "outside_edit_mask"
         alignment_source_frames = _load_video_alignment_source_frames(
             original_standard_path,
             td_path / "merge_alignment",
-            max_frames=MERGE_ALIGNMENT_SCAN_FRAMES,
+            max_frames=VIDEO_COMPARE_ALIGNMENT_SCAN_FRAMES,
         )
         video_alignment = _estimate_generated_source_offset(
             source_frames=alignment_source_frames,
@@ -6013,6 +6507,7 @@ def compute_merge_alignment_suggestion(
             source_fps=target_fps,
             work_dir=td_path / "merge_alignment",
             prefix="merge",
+            region_mask=alignment_region_mask,
         )
         anchor_offset_frames = max(0, int(video_alignment.get("sourceFrameOffset") or 0))
         source_offset_sec = anchor_offset_frames / float(target_fps)
@@ -6023,29 +6518,19 @@ def compute_merge_alignment_suggestion(
                 float(generated_probe.get("duration_sec") or 0.0),
             ),
         )
-        drift_source_dir = td_path / "merge_orig_frames"
-        drift_source_dir.mkdir(parents=True, exist_ok=True)
+        original_frames = _extract_sampled_frames(
+            original_standard_path,
+            td_path / "merge_orig_frames",
+            sample_fps=QC_SAMPLE_FPS,
+            duration_sec=common_duration_sec,
+            start_sec=source_offset_sec,
+        )
         generated_frame_count = int(generated_probe.get("frame_count") or 0)
         drift_rows: list[dict[str, Any]] = []
-        sample_count = max(2, MERGE_ALIGNMENT_SAMPLE_POINTS)
-        if common_duration_sec <= 0.12:
-            sample_time_offsets = [0.0]
-        else:
-            max_offset = max(0.0, common_duration_sec - 0.05)
-            sample_time_offsets = [round((max_offset * idx) / max(1, sample_count - 1), 4) for idx in range(sample_count)]
-        paired_count = len(sample_time_offsets)
-        original_frame_count = max(1, int(original_probe.get("frame_count") or 1))
-        for frame_idx, sample_time_sec in enumerate(sample_time_offsets):
-            source_frame_index = max(
-                0,
-                min(
-                    original_frame_count - 1,
-                    int(round((source_offset_sec + sample_time_sec) * float(target_fps))),
-                ),
-            )
-            original_frame_path = drift_source_dir / f"source_{frame_idx:04d}.png"
-            extract_frame_png(str(original_standard_path), source_frame_index, str(original_frame_path))
+        paired_count = len(original_frames)
+        for frame_idx, original_frame_path in enumerate(original_frames):
             source_image = Image.open(original_frame_path).convert("RGB")
+            sample_time_sec = frame_idx / float(QC_SAMPLE_FPS)
             expected_generated_frame_index = max(0, min(generated_frame_count - 1, int(round(sample_time_sec * float(target_fps)))))
             matched_generated_frame_index, _matched_generated_image, match_similarity = _best_aligned_generated_frame_index(
                 generated_path=generated_standard_path,
@@ -6054,14 +6539,15 @@ def compute_merge_alignment_suggestion(
                 frame_count=generated_frame_count,
                 work_dir=td_path / "merge_drift",
                 prefix=f"merge_{generation.get('genId', 'gen')}_{frame_idx:04d}",
-                search_radius=MERGE_ALIGNMENT_SEARCH_RADIUS,
+                search_radius=3,
+                region_mask=alignment_region_mask,
             )
             drift_delta_frames = int(matched_generated_frame_index - expected_generated_frame_index)
             drift_rows.append(
                 {
                     "index": frame_idx,
                     "timeSec": round(source_offset_sec + sample_time_sec, 4),
-                    "sourceFrameIndex": source_frame_index,
+                    "sourceFrameIndex": int(round((source_offset_sec + sample_time_sec) * float(target_fps))),
                     "expectedGeneratedFrameIndex": expected_generated_frame_index,
                     "matchedGeneratedFrameIndex": matched_generated_frame_index,
                     "frameDeltaDrift": drift_delta_frames,
@@ -6096,6 +6582,16 @@ def compute_merge_alignment_suggestion(
         if residual_drift_values
         else 0.0
     )
+    sample_indices = list(range(len(residual_drift_values)))
+    linear_fit_mae = 0.0
+    if len(sample_indices) >= 3:
+        x_mean = sum(sample_indices) / len(sample_indices)
+        y_mean = sum(residual_drift_values) / len(residual_drift_values)
+        denominator = sum((x - x_mean) ** 2 for x in sample_indices)
+        slope = (sum((x - x_mean) * (y - y_mean) for x, y in zip(sample_indices, residual_drift_values)) / denominator) if denominator > 1e-9 else 0.0
+        intercept = y_mean - (slope * x_mean)
+        fitted = [intercept + (slope * x) for x in sample_indices]
+        linear_fit_mae = round(sum(abs(y - fit) for y, fit in zip(residual_drift_values, fitted)) / len(residual_drift_values), 4)
     monotonic_late_bias = (
         len(drift_values) >= 3 and all(value >= 0 for value in drift_values[: min(3, len(drift_values))]) and late_median >= early_median
     )
@@ -6104,6 +6600,10 @@ def compute_merge_alignment_suggestion(
     notes: list[str] = []
     if crop_settings:
         notes.append("Alignment was analysed against the same cropped source region, not the full original frame.")
+    if alignment_mask_mode == "outside_edit_mask":
+        notes.append("Alignment and drift were measured against preserved pixels outside the edited region, not the changed subject area.")
+    else:
+        notes.append("No usable edit mask was available for alignment, so timing was analysed across the full frame.")
     if trim_start_frames > 0:
         notes.append(f"Generated motion appears to start about {trim_start_frames} frame(s) late; trim opening first.")
     if trim_end_frames > 0:
@@ -6114,6 +6614,9 @@ def compute_merge_alignment_suggestion(
     elif residual_end_frames < -1:
         recommendation = "rerender_recommended"
         notes.append("Generated motion appears to run ahead of source timing; simple trim controls are unlikely to fix this cleanly.")
+    elif residual_mean_abs_drift > 2.0 and linear_fit_mae <= 1.25:
+        recommendation = "piecewise_reconcile_recommended"
+        notes.append("Residual drift changes across the clip but still looks structurally matchable. A piecewise time map is more appropriate than one uniform retime.")
     elif residual_mean_abs_drift > 2.0:
         recommendation = "rerender_recommended"
         notes.append("Residual drift varies through the clip, suggesting non-linear timing differences.")
@@ -6147,6 +6650,8 @@ def compute_merge_alignment_suggestion(
             "residualEndFrames": residual_end_frames,
             "meanAbsDriftFrames": mean_abs_drift,
             "residualMeanAbsDriftFrames": residual_mean_abs_drift,
+            "linearFitMaeFrames": linear_fit_mae,
+            "alignmentMaskMode": alignment_mask_mode,
             "suggestedPlaybackRate": suggested_playback_rate,
             "recommendation": recommendation,
             "confidence": confidence,
@@ -6154,6 +6659,71 @@ def compute_merge_alignment_suggestion(
             "driftSamples": drift_rows,
         },
     }
+
+
+def _handle_merge_alignment_suggestion(
+    *,
+    job: dict[str, Any],
+    store: S3JsonStore,
+    asset_store: AssetStore,
+    task: dict[str, Any],
+    settings: Any,
+) -> dict[str, Any]:
+    payload = job.get("payload") or {}
+    gen_id = str(payload.get("genId") or "")
+    if not gen_id:
+        raise RuntimeError("Missing generation id for merge alignment suggestion")
+    generation = task.get("segmentGenerations", {}).get(gen_id)
+    if not isinstance(generation, dict):
+        raise RuntimeError("Generation not found for merge alignment suggestion")
+    if generation.get("status") != "complete" or not generation.get("outputKey"):
+        raise RuntimeError("Generation must be complete before alignment can be analysed")
+    segment_id = str(generation.get("segmentId") or "")
+    segment = next(
+        (item for item in task.get("segments", []) if isinstance(item, dict) and str(item.get("segmentId") or "") == segment_id),
+        None,
+    )
+    if not isinstance(segment, dict):
+        raise RuntimeError("Segment not found for generation")
+
+    suggestion_state = generation.get("mergeAlignmentSuggestion") if isinstance(generation.get("mergeAlignmentSuggestion"), dict) else {}
+    suggestion_state.update(
+        {
+            "status": "running",
+            "jobId": job.get("jobId"),
+            "updatedAt": now_iso(),
+        }
+    )
+    generation["mergeAlignmentSuggestion"] = suggestion_state
+    store.save_task(task, merge_on_conflict=True)
+    _job_progress(job, store, 10, "running", "Preparing alignment analysis")
+
+    suggestion = compute_merge_alignment_suggestion(
+        task=task,
+        segment=segment,
+        generation=generation,
+        asset_store=asset_store,
+        paths=_asset_paths(task),
+        settings=settings,
+    )
+
+    latest_task = store.load_task(task["userId"], task["taskId"]) or task
+    latest_generation = latest_task.get("segmentGenerations", {}).get(gen_id) if isinstance(latest_task, dict) else None
+    if not isinstance(latest_generation, dict):
+        raise RuntimeError("Generation disappeared before alignment suggestion could be saved")
+
+    latest_generation["mergeAlignmentSuggestion"] = {
+        "status": "complete",
+        "jobId": job.get("jobId"),
+        "updatedAt": now_iso(),
+        "analyzedAt": now_iso(),
+        "suggestion": suggestion,
+    }
+    store.save_task(latest_task, merge_on_conflict=True)
+    _job_progress(job, store, 100, "complete", "Alignment suggestion ready")
+    job["resultRefs"] = {"genId": gen_id, "suggestion": suggestion}
+    store.save_job(job)
+    return job
 
 
 def _build_video_comparison_report(
@@ -6258,7 +6828,7 @@ def _build_video_comparison_report(
                 prefix=f"gen_{index:03d}",
             )
             subsetting_parts = [mode]
-            for setting_key in ("replicateKlingMode", "replicateKlingV3Mode", "wan27Resolution", "seedanceResolution"):
+            for setting_key in ("replicateKlingMode", "replicateKlingV3Mode", "wan27Resolution", "happyHorseResolution", "seedanceResolution"):
                 value = generation_settings.get(setting_key)
                 if value:
                     subsetting_parts.append(f"{setting_key}={value}")
@@ -8027,6 +8597,191 @@ def _handle_video_cleanup_apply(
     return job
 
 
+def _handle_generation_reconcile_timing(
+    *,
+    job: dict[str, Any],
+    store: S3JsonStore,
+    asset_store: AssetStore,
+    task: dict[str, Any],
+    settings: Any,
+) -> dict[str, Any]:
+    payload = job["payload"]
+    source_gen_id = str(payload.get("sourceGenId") or "")
+    gen_id = str(payload.get("genId") or "")
+    trim_start_frames = max(0, int(payload.get("trimStartFrames") or 0))
+    trim_end_frames = max(0, int(payload.get("trimEndFrames") or 0))
+    playback_rate_raw = payload.get("playbackRate")
+    playback_rate = None if playback_rate_raw in (None, "", 1, 1.0) else max(0.05, min(20.0, float(playback_rate_raw)))
+
+    source_generation = task.setdefault("segmentGenerations", {}).get(source_gen_id)
+    queued_generation = task.setdefault("segmentGenerations", {}).get(gen_id)
+    if not isinstance(source_generation, dict):
+        raise RuntimeError("Source generation not found")
+    if not isinstance(queued_generation, dict):
+        raise RuntimeError("Queued reconciled generation not found")
+    if source_generation.get("status") != "complete" or not source_generation.get("outputKey"):
+        raise RuntimeError("Source generation must be complete before timing can be reconciled")
+
+    segment_id = str(source_generation.get("segmentId") or "")
+    segment = next((item for item in task.get("segments", []) if isinstance(item, dict) and item.get("segmentId") == segment_id), None)
+    if not isinstance(segment, dict):
+        raise RuntimeError("Source segment not found")
+
+    queued_generation.update(
+        {
+            "status": "running",
+            "jobId": job.get("jobId"),
+            "error": None,
+            "startedAt": now_iso(),
+            "updatedAt": now_iso(),
+        }
+    )
+    source_generation["timingReconcile"] = {
+        "status": "running",
+        "jobId": job.get("jobId"),
+        "resultGenId": gen_id,
+        "updatedAt": now_iso(),
+        "adjustments": {
+            "trimStartFrames": trim_start_frames,
+            "trimEndFrames": trim_end_frames,
+            "playbackRate": playback_rate,
+        },
+    }
+    store.save_task(task, merge_on_conflict=True)
+    _job_progress(job, store, 15, "running", "Preparing timing reconcile output")
+
+    paths = _asset_paths(task)
+    output_key = paths.segment_generated(segment_id, gen_id)
+    with tempfile.TemporaryDirectory() as td:
+        td_path = Path(td)
+        s3 = boto3.client("s3")
+        input_path = td_path / "source_generation.mp4"
+        output_path = td_path / "reconciled_generation.mp4"
+        _download_s3(s3, settings.assets_bucket, str(source_generation["outputKey"]), input_path)
+        input_probe = ffprobe_video(str(input_path))
+        fps_num = int(
+            (source_generation.get("generationSettings") or {}).get("storedOutput", {}).get("fps", {}).get("num")
+            or task.get("video", {}).get("editSource", {}).get("fps", {}).get("num")
+            or input_probe.get("fps_num")
+            or 30
+        )
+        fps_den = int(
+            (source_generation.get("generationSettings") or {}).get("storedOutput", {}).get("fps", {}).get("den")
+            or task.get("video", {}).get("editSource", {}).get("fps", {}).get("den")
+            or input_probe.get("fps_den")
+            or 1
+        )
+        target_width = int(
+            (source_generation.get("generationSettings") or {}).get("storedOutput", {}).get("width")
+            or input_probe.get("width")
+            or 0
+        )
+        target_height = int(
+            (source_generation.get("generationSettings") or {}).get("storedOutput", {}).get("height")
+            or input_probe.get("height")
+            or 0
+        )
+
+        trim_and_retime_video_uniform(
+            str(input_path),
+            str(output_path),
+            fps=Fraction(max(1, fps_num), max(1, fps_den)),
+            playback_rate=playback_rate or 1.0,
+            trim_start_frames=trim_start_frames,
+            trim_end_frames=trim_end_frames,
+            target_width=target_width if target_width > 0 else None,
+            target_height=target_height if target_height > 0 else None,
+            crf=16,
+            preset="slow",
+            audio_bitrate="192k",
+        )
+        output_probe = ffprobe_video(str(output_path))
+        _upload_s3(s3, settings.assets_bucket, output_key, output_path, "video/mp4")
+
+    finished_at = now_iso()
+    processing_duration_sec = _processing_duration_seconds(queued_generation.get("startedAt"), finished_at)
+    generation_settings = {
+        **(source_generation.get("generationSettings") if isinstance(source_generation.get("generationSettings"), dict) else {}),
+        "workflow": "timing_reconcile",
+        "derivedFromGenerationId": source_gen_id,
+        "reconcileTiming": {
+            "sourceGenerationId": source_gen_id,
+            "trimStartFrames": trim_start_frames,
+            "trimEndFrames": trim_end_frames,
+            "playbackRate": playback_rate,
+        },
+        "storedOutput": {
+            "width": int(output_probe.get("width") or 0),
+            "height": int(output_probe.get("height") or 0),
+            "fps": {
+                "num": int(output_probe.get("fps_num") or 0),
+                "den": int(output_probe.get("fps_den") or 1),
+            },
+            "durationSec": float(output_probe.get("duration_sec") or 0.0),
+            "frameCount": int(output_probe.get("frame_count") or 0),
+            "isVfr": bool(output_probe.get("is_vfr_input")),
+        },
+        "timelineAlignment": None,
+        "timelineConform": {
+            "policy": "timing_reconcile_variant",
+            "applied": True,
+            "durationDeltaSec": round(float(output_probe.get("duration_sec") or 0.0) - float(input_probe.get("duration_sec") or 0.0), 6),
+            "frameDelta": int(output_probe.get("frame_count") or 0) - int(input_probe.get("frame_count") or 0),
+            "fpsConformed": True,
+            "resolutionConformed": True,
+        },
+    }
+    queued_generation.update(
+        {
+            "status": "complete",
+            "outputKey": output_key,
+            "error": None,
+            "updatedAt": finished_at,
+            "finishedAt": finished_at,
+            "processingDurationSec": processing_duration_sec,
+            "sourceFrameOffset": None,
+            "alignment": None,
+            "mergeAlignmentSuggestion": None,
+            "derivedFromGenerationId": source_gen_id,
+            "cleanupTrackId": None,
+            "generationSettings": generation_settings,
+        }
+    )
+    source_generation["timingReconcile"] = {
+        "status": "complete",
+        "jobId": job.get("jobId"),
+        "resultGenId": gen_id,
+        "updatedAt": finished_at,
+        "adjustments": {
+            "trimStartFrames": trim_start_frames,
+            "trimEndFrames": trim_end_frames,
+            "playbackRate": playback_rate,
+        },
+    }
+    segment["selectedGenerationId"] = gen_id
+    _append_task_history_event(
+        task,
+        {
+            "at": finished_at,
+            "event": "segment_generation.timing_reconciled",
+            "jobId": job.get("jobId"),
+            "genId": gen_id,
+            "sourceGenId": source_gen_id,
+        },
+    )
+    store.save_task(task, merge_on_conflict=True)
+    _job_progress(job, store, 100, "complete", "Timing reconcile output ready")
+    job["resultRefs"] = {
+        "genId": gen_id,
+        "sourceGenId": source_gen_id,
+        "outputKey": output_key,
+        "finishedAt": finished_at,
+        "processingDurationSec": processing_duration_sec,
+    }
+    store.save_job(job)
+    return job
+
+
 def process_job_record(record: dict[str, Any], *, settings: Any) -> None:
     body = json.loads(record["body"])
     user_id = body["userId"]
@@ -8074,6 +8829,10 @@ def process_job_record(record: dict[str, Any], *, settings: Any) -> None:
             _handle_segment_generate(job=job, store=store, asset_store=asset_store, task=task, settings=settings)
         elif job_type == "chunked_generation_finalize":
             _handle_chunked_generation_finalize(job=job, store=store, asset_store=asset_store, task=task, settings=settings)
+        elif job_type == "merge_alignment_suggestion":
+            _handle_merge_alignment_suggestion(job=job, store=store, asset_store=asset_store, task=task, settings=settings)
+        elif job_type == "generation_reconcile_timing":
+            _handle_generation_reconcile_timing(job=job, store=store, asset_store=asset_store, task=task, settings=settings)
         elif job_type == "merge_export":
             _handle_merge(job=job, store=store, asset_store=asset_store, task=task, settings=settings)
         elif job_type == "qc_report_build":
@@ -8172,6 +8931,39 @@ def process_job_record(record: dict[str, Any], *, settings: Any) -> None:
                 run["saveError"] = str(exc)
                 run["updatedAt"] = now_iso()
                 store.save_task(latest_task, merge_on_conflict=True)
+            return
+        elif job_type == "merge_alignment_suggestion":
+            gen_id = str((job.get("payload") or {}).get("genId") or "")
+            generation = latest_task.setdefault("segmentGenerations", {}).get(gen_id)
+            if isinstance(generation, dict):
+                generation["mergeAlignmentSuggestion"] = {
+                    "status": "failed",
+                    "jobId": job_id,
+                    "updatedAt": now_iso(),
+                    "error": str(exc),
+                }
+                store.save_task(latest_task, merge_on_conflict=True)
+            return
+        elif job_type == "generation_reconcile_timing":
+            payload = job.get("payload") or {}
+            gen_id = str(payload.get("genId") or "")
+            source_gen_id = str(payload.get("sourceGenId") or "")
+            generation = latest_task.setdefault("segmentGenerations", {}).get(gen_id)
+            if isinstance(generation, dict):
+                generation["status"] = "failed"
+                generation["error"] = str(exc)
+                generation["updatedAt"] = now_iso()
+                generation["finishedAt"] = now_iso()
+            source_generation = latest_task.setdefault("segmentGenerations", {}).get(source_gen_id)
+            if isinstance(source_generation, dict):
+                source_generation["timingReconcile"] = {
+                    "status": "failed",
+                    "jobId": job_id,
+                    "resultGenId": gen_id,
+                    "updatedAt": now_iso(),
+                    "error": str(exc),
+                }
+            store.save_task(latest_task, merge_on_conflict=True)
             return
         latest_task["status"] = "error"
         latest_task.setdefault("history", []).append({"at": now_iso(), "event": "job.failed", "jobId": job_id})

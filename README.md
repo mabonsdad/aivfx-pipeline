@@ -149,6 +149,35 @@ The registry is the canonical source for model-specific constraints and behavior
 
 The current UI still uses the existing flows, but validation and media-prep decisions are now driven from that registry rather than scattered constants.
 
+When adding or changing a video model, update the backend capability registry first and then wire any provider-specific execution details behind it. Do not add new model limits, prompt requirements, or input-mode support as ad hoc conditionals in page components.
+
+## Generation Mode Registry
+
+UI route behavior is now centralized in a frontend generation-mode registry:
+
+- `frontend/src/lib/generationModeRegistry.ts`
+
+The mode registry is the canonical source for route-level UI behavior, including:
+
+- route label and description
+- whether the route requires an end frame
+- which Post Process tools are visible for that route
+
+Current mode/tool behavior is:
+
+- `start_video`
+  - `Extend`
+  - `Reconcile timing`
+  - `Tracked keep-mask cleanup`
+  - `Merge into source`
+- `start_end`
+  - `Extend`
+  - `Merge into source`
+- `start_only`
+  - `Extend`
+
+When adding a new creation mode or changing which tools apply to a mode, update this registry and consume it from the UI rather than scattering new `mode === ...` checks across `App.tsx`, `MergeTab.tsx`, or other workflow pages.
+
 ## Async Job Types
 
 Current worker job types include:

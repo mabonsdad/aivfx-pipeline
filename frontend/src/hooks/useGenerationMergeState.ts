@@ -117,26 +117,10 @@ export function useGenerationMergeState({ task, selectedSegmentId, segmentsById 
   useEffect(() => {
     const selectedId = selectedPreviewGeneration?.genId;
     if (!selectedId) {
-      setSelectedGenIds((previous) =>
-        previous.filter((genId) => {
-          const generation = task?.segmentGenerations?.[genId];
-          return Boolean(generation && generation.status === "complete" && generation.outputKey);
-        }),
-      );
+      setSelectedGenIds([]);
       return;
     }
-    setSelectedGenIds((previous) => {
-      const selectedGeneration = task?.segmentGenerations?.[selectedId];
-      if (!selectedGeneration || selectedGeneration.status !== "complete" || !selectedGeneration.outputKey) {
-        return previous;
-      }
-      const filtered = previous.filter((genId) => {
-        if (genId === selectedId) return false;
-        const generation = task?.segmentGenerations?.[genId];
-        return Boolean(generation && generation.status === "complete" && generation.outputKey && generation.segmentId !== selectedGeneration.segmentId);
-      });
-      return [selectedId, ...filtered];
-    });
+    setSelectedGenIds((previous) => (previous.length === 1 && previous[0] === selectedId ? previous : [selectedId]));
   }, [selectedPreviewGeneration?.genId, task?.segmentGenerations]);
 
   useEffect(() => {
@@ -148,14 +132,13 @@ export function useGenerationMergeState({ task, selectedSegmentId, segmentsById 
     if (generationId === mergeConfiguredGenId) return;
     setMergeConfiguredGenId(generationId);
     const sourceFrameOffset = generationSourceFrameOffset(mergeTargetGeneration);
-    const targetStartFrame = Math.max(0, (mergeTargetSegment?.startFrame ?? 0) + sourceFrameOffset);
     const segmentDurationFrames = Math.max(
       1,
       Number(mergeTargetSegment?.durationFrames ?? Math.max(1, (mergeTargetSegment?.endFrameExclusive ?? 1) - (mergeTargetSegment?.startFrame ?? 0))) || 1,
     );
     const storedOutputFrameCount = generationStoredOutputFrameCount(mergeTargetGeneration);
     const defaultTrimEndFrames = storedOutputFrameCount > 0 ? Math.max(0, storedOutputFrameCount - Math.max(1, segmentDurationFrames - sourceFrameOffset)) : 0;
-    setMergeInsertStartFrame(targetStartFrame);
+    setMergeInsertStartFrame(sourceFrameOffset);
     setMergeTrimStartFrames(0);
     setMergeTrimEndFrames(defaultTrimEndFrames);
   }, [mergeConfiguredGenId, mergeTargetGeneration, mergeTargetGeneration?.genId, mergeTargetSegment]);

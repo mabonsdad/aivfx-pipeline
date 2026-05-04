@@ -1,18 +1,20 @@
 import { useMemo, useState, type ComponentType } from "react";
 
 import { HelpInfoButton, PendingButtonLabel, StatusNotice } from "../../components/layout/UiFeedback";
+import { getGenerationModeConfig, type GenerateInputMode } from "../../lib/generationModeRegistry";
 import type { ExportRecord, SegmentGeneration, SegmentRecord } from "../../types/api";
 
 type VideoFrameStripItem = {
   frameIndex: number;
   imageUrl: string | null;
+  sourceFrameIndex?: number;
 };
 
 export type MergeTabCtx = {
   onNext: () => void;
   nextDisabled: boolean;
   nextWarning: string | null;
-  generationInputMode: "start_video" | "start_end" | "start_only";
+  generationInputMode: GenerateInputMode;
   mergeTargetGeneration: SegmentGeneration | null;
   mergeTargetSegment: SegmentRecord | null;
   completeGenerations: SegmentGeneration[];
@@ -35,9 +37,13 @@ export type MergeTabCtx = {
   mergeOriginalDurationFrames: number;
   formatFramesAndSeconds: (frames: number, fps: number) => string;
   mergeFps: number;
+  mergeVisibleDurationFramesBeforeRetime: number;
   mergeEffectiveDurationFrames: number;
-  mergeInsertStartFrameClamped: number;
+  mergeInsertStartFrameLowerBound: number;
+  mergeInsertStartFrameUpperBound: number;
+  mergeInsertStartFrameEffective: number;
   mergeEffectiveEndFrameExclusive: number;
+  mergeEffectiveEndFrameInclusive: number;
   mergeEndOffsetFrames: number;
   mergeGeneratedStartAnchor: number;
   mergeFeatherClamped: number;
@@ -50,6 +56,7 @@ export type MergeTabCtx = {
       title: string;
       items: VideoFrameStripItem[];
       anchorFrame: number;
+      anchorEdge?: "start" | "end";
       overlapStart?: number;
       overlapEnd?: number;
       prefix: string;
@@ -58,6 +65,7 @@ export type MergeTabCtx = {
       title: string;
       items: VideoFrameStripItem[];
       anchorFrame: number;
+      anchorEdge?: "start" | "end";
       overlapStart?: number;
       overlapEnd?: number;
       prefix: string;
@@ -75,6 +83,8 @@ export type MergeTabCtx = {
   setMergePlaybackRate: (value: number) => void;
   suggestMergeAlignment: () => void;
   isSuggestingMergeAlignment: boolean;
+  reconcileTiming: () => void;
+  isReconcilingTiming: boolean;
   mergeAlignmentSuggestion: {
     suggested: {
       startFrameOverride: number;
@@ -96,6 +106,7 @@ export type MergeTabCtx = {
     };
   } | null;
   mergeAlignmentSuggestionError: string | null;
+  reconcileTimingError: string | null;
   extendGeneration: (payload: {
     generationId: string;
     alignmentFrameIndex: number;
@@ -280,9 +291,13 @@ export default function MergeTab({ ctx }: MergeTabProps) {
     mergeOriginalDurationFrames,
     formatFramesAndSeconds,
     mergeFps,
+    mergeVisibleDurationFramesBeforeRetime,
     mergeEffectiveDurationFrames,
-    mergeInsertStartFrameClamped,
+    mergeInsertStartFrameLowerBound,
+    mergeInsertStartFrameUpperBound,
+    mergeInsertStartFrameEffective,
     mergeEffectiveEndFrameExclusive,
+    mergeEffectiveEndFrameInclusive,
     mergeEndOffsetFrames,
     mergeGeneratedStartAnchor,
     mergeFeatherClamped,
@@ -301,8 +316,11 @@ export default function MergeTab({ ctx }: MergeTabProps) {
     setMergePlaybackRate,
     suggestMergeAlignment,
     isSuggestingMergeAlignment,
+    reconcileTiming,
+    isReconcilingTiming,
     mergeAlignmentSuggestion,
     mergeAlignmentSuggestionError,
+    reconcileTimingError,
     extendGeneration,
     isExtendingGeneration,
     extendGenerationError,
@@ -337,12 +355,27 @@ export default function MergeTab({ ctx }: MergeTabProps) {
     parsedAnchorFramesFromEnd >= 1 &&
     parsedAnchorFramesFromEnd <= 60 &&
     (parsedDurationSeconds === undefined || (Number.isInteger(parsedDurationSeconds) && parsedDurationSeconds >= 1 && parsedDurationSeconds <= 15));
+  const generationModeConfig = useMemo(() => getGenerationModeConfig(generationInputMode), [generationInputMode]);
+  const showExtendTool = generationModeConfig.postProcessTools.extend;
+  const showReconcileTimingTool = generationModeConfig.postProcessTools.reconcileTiming;
+  const showTrackedCleanupTool = generationModeConfig.postProcessTools.trackedCleanup;
+  const showMergeIntoSourceTool = generationModeConfig.postProcessTools.mergeIntoSource;
+  const visibleToolCount = [
+    showExtendTool,
+    showReconcileTimingTool,
+    showTrackedCleanupTool,
+    showMergeIntoSourceTool,
+  ].filter(Boolean).length;
+  const toolGridClass =
+    visibleToolCount <= 1
+      ? "grid gap-3"
+      : visibleToolCount === 2
+        ? "grid gap-3 lg:grid-cols-2"
+        : visibleToolCount === 3
+          ? "grid gap-3 lg:grid-cols-3"
+          : "grid gap-3 lg:grid-cols-4";
   const cleanupEligibleGeneration =
-    generationInputMode === "start_video" &&
-    mergeTargetGeneration?.status === "complete" &&
-    Boolean(mergeTargetGeneration.downloadUrl) &&
-    mergeTargetGeneration.luma.provider === "luma" &&
-    !mergeTargetGeneration.derivedFromGenerationId
+    showTrackedCleanupTool && mergeTargetGeneration?.status === "complete" && Boolean(mergeTargetGeneration.downloadUrl)
       ? mergeTargetGeneration
       : null;
 
@@ -382,12 +415,12 @@ export default function MergeTab({ ctx }: MergeTabProps) {
   function openStartBoundaryZoom() {
     setBoundaryZoomModal({
       title: "Start merge zoom",
-      subtitle: `source f${mergeInsertStartFrameClamped} aligned to generated g${mergeGeneratedStartAnchor}`,
+      subtitle: `source f${mergeInsertStartFrameEffective} aligned to generated output g${mergeGeneratedStartAnchor}`,
       pairs: buildBoundaryZoomPairs(
         startBoundaryGeneratedThumbs,
         mergeGeneratedStartAnchor,
         startBoundaryOriginalThumbs,
-        mergeInsertStartFrameClamped,
+        mergeInsertStartFrameEffective,
       ),
       crop: mergeTargetSegment?.crop ?? null,
     });
@@ -396,12 +429,12 @@ export default function MergeTab({ ctx }: MergeTabProps) {
   function openEndBoundaryZoom() {
     setBoundaryZoomModal({
       title: "End merge zoom",
-      subtitle: `generated g${mergeGeneratedEndAnchor} resolving back to source f${mergeEffectiveEndFrameExclusive}`,
+      subtitle: `generated output g${mergeGeneratedEndAnchor} resolving through source f${mergeEffectiveEndFrameInclusive} before cut to f${mergeEffectiveEndFrameExclusive}`,
       pairs: buildBoundaryZoomPairs(
         endBoundaryGeneratedThumbs,
         mergeGeneratedEndAnchor,
         endBoundaryOriginalThumbs,
-        mergeEffectiveEndFrameExclusive,
+        mergeEffectiveEndFrameInclusive,
       ),
       crop: mergeTargetSegment?.crop ?? null,
     });
@@ -410,26 +443,49 @@ export default function MergeTab({ ctx }: MergeTabProps) {
   return (
     <div className="space-y-4">
       <div className="rounded-lg border border-ink/15 bg-bg p-3">
-        <div className="grid gap-3 lg:grid-cols-3">
-          <div className="rounded-lg border border-ink/10 bg-white p-3">
-            <p className="text-sm font-medium text-ink">Extend long outputs</p>
-            <p className="mt-1 text-xs text-ink/65">
-              Continue from an existing output by selecting an anchor near its end and creating the next working-range continuation.
-            </p>
-            <button
-              type="button"
-              className="mt-3 rounded-md border border-ink/20 bg-white px-3 py-2 text-sm text-ink disabled:cursor-not-allowed disabled:opacity-60"
-              disabled={!completeGenerations.length || isExtendingGeneration}
-              onClick={openExtendModal}
-            >
-              <PendingButtonLabel isPending={isExtendingGeneration} idle="Extend output" pending="Queueing extension..." />
-            </button>
-          </div>
-          {generationInputMode === "start_video" ? (
+        <div className={toolGridClass}>
+          {showExtendTool ? (
             <div className="rounded-lg border border-ink/10 bg-white p-3">
-              <p className="text-sm font-medium text-ink">Refine generated video</p>
+              <p className="text-sm font-medium text-ink">Extend long outputs</p>
               <p className="mt-1 text-xs text-ink/65">
-                Use tracked keep-mask cleanup on a generated working-range output before final merge. This is currently available for successful Luma generations.
+                Continue from an existing output by selecting an anchor near its end and creating the next working-range continuation.
+              </p>
+              <button
+                type="button"
+                className="mt-3 rounded-md border border-ink/20 bg-white px-3 py-2 text-sm text-ink disabled:cursor-not-allowed disabled:opacity-60"
+                disabled={!completeGenerations.length || isExtendingGeneration}
+                onClick={openExtendModal}
+              >
+                <PendingButtonLabel isPending={isExtendingGeneration} idle="Extend output" pending="Queueing extension..." />
+              </button>
+            </div>
+          ) : null}
+          {showReconcileTimingTool ? (
+            <div className="rounded-lg border border-ink/10 bg-white p-3">
+              <p className="text-sm font-medium text-ink">Reconcile timing</p>
+              <p className="mt-1 text-xs text-ink/65">
+                Create a new derived output using the current opening trim, tail trim, and optional uniform retime settings below.
+              </p>
+              <button
+                type="button"
+                className="mt-3 rounded-md border border-ink/20 bg-white px-3 py-2 text-sm text-ink disabled:cursor-not-allowed disabled:opacity-60"
+                disabled={!cleanupEligibleGeneration || isReconcilingTiming}
+                onClick={reconcileTiming}
+              >
+                <PendingButtonLabel isPending={isReconcilingTiming} idle="Create reconciled output" pending="Reconciling timing..." />
+              </button>
+              {!cleanupEligibleGeneration ? (
+                <p className="mt-2 text-[11px] text-ink/55">Select a successful first frame + video output in Generate before reconciling timing.</p>
+              ) : (
+                <p className="mt-2 text-[11px] text-ink/55">This creates a new working-range output for cleanup or merge. It does not merge into source yet.</p>
+              )}
+            </div>
+          ) : null}
+          {showTrackedCleanupTool ? (
+            <div className="rounded-lg border border-ink/10 bg-white p-3">
+              <p className="text-sm font-medium text-ink">Tracked keep-mask cleanup</p>
+              <p className="mt-1 text-xs text-ink/65">
+                Best used after extension or stitch review, once timing is close enough, and before the final merge into source.
               </p>
               <button
                 type="button"
@@ -440,31 +496,28 @@ export default function MergeTab({ ctx }: MergeTabProps) {
                   openVideoCleanupModal(cleanupEligibleGeneration);
                 }}
               >
-                Refine chosen output
+                Open cleanup
               </button>
               {!cleanupEligibleGeneration ? (
-                <p className="mt-2 text-[11px] text-ink/55">Select a successful Luma output in Outputs to refine it here.</p>
+                <p className="mt-2 text-[11px] text-ink/55">Select a successful first frame + video output in Generate before opening cleanup.</p>
               ) : null}
             </div>
-          ) : (
-            <div className="rounded-lg border border-ink/10 bg-white p-3">
-              <p className="text-sm font-medium text-ink">Refine generated video</p>
-              <p className="mt-1 text-xs text-ink/65">
-                Hidden by default on this route. Keep-mask video refine is primarily used for first frame + video source-motion generations.
+          ) : null}
+          {showMergeIntoSourceTool ? (
+            <div className="rounded-lg border border-teal-500 bg-teal-50 p-3">
+              <p className="text-sm font-medium text-ink">Merge into source</p>
+              <p className="mt-1 text-xs text-ink/70">
+                Align the chosen working-range output against the original timeline, trim if needed, then create a merged export below.
+              </p>
+              <p className="mt-3 text-xs font-semibold text-teal-700">
+                {mergeTargetGeneration ? "Current output ready for merge review below." : "Choose an output in Outputs first."}
               </p>
             </div>
-          )}
-          <div className="rounded-lg border border-teal-500 bg-teal-50 p-3">
-            <p className="text-sm font-medium text-ink">Merge into source</p>
-            <p className="mt-1 text-xs text-ink/70">
-              Align the chosen working-range output against the original timeline, trim if needed, then create a merged export below.
-            </p>
-            <p className="mt-3 text-xs font-semibold text-teal-700">
-              {mergeTargetGeneration ? "Current output ready for merge review below." : "Choose an output in Outputs first."}
-            </p>
-          </div>
+          ) : null}
         </div>
       </div>
+      {showMergeIntoSourceTool ? (
+      <>
       <div className="rounded-lg border border-ink/15 bg-bg p-3">
         <div className="flex items-center gap-2">
           <p className="text-sm font-semibold">Merge into source</p>
@@ -482,19 +535,6 @@ export default function MergeTab({ ctx }: MergeTabProps) {
         </div>
       </div>
       <div className="space-y-3">
-        <div className="space-y-2 rounded-lg border border-ink/10 p-3">
-          <p className="text-sm font-medium">Chosen output in use</p>
-          {!mergeTargetGeneration ? (
-            <p className="text-sm text-ink/60">No output selected in Outputs yet.</p>
-          ) : (
-            <div className="rounded border border-teal-500 bg-teal-50 p-2">
-              <p className="text-sm font-semibold">{describeGeneration(mergeTargetGeneration)}</p>
-              <p className="text-xs text-ink/50">{mergeTargetGeneration.genId}</p>
-            </div>
-          )}
-          {mergeTargetSegment ? <p className="text-xs text-ink/60">Current working range: {describeSegment(mergeTargetSegment)}</p> : null}
-        </div>
-
         {mergeTargetGeneration && mergeTargetSegment ? (
           <>
             <div className="space-y-3 rounded-lg border border-ink/10 p-3">
@@ -524,18 +564,27 @@ export default function MergeTab({ ctx }: MergeTabProps) {
                   variant={
                     mergeAlignmentSuggestion.analysis.recommendation === "rerender_recommended"
                       ? "error"
-                      : mergeAlignmentSuggestion.analysis.recommendation === "retime_recommended"
+                      : mergeAlignmentSuggestion.analysis.recommendation === "retime_recommended" ||
+                          mergeAlignmentSuggestion.analysis.recommendation === "piecewise_reconcile_recommended"
                         ? "warning"
                         : "info"
                   }
                 >
                   <div className="space-y-1 text-xs">
                     <p>
-                      Suggested controls: insert at f{mergeAlignmentSuggestion.suggested.startFrameOverride}, trim opening{" "}
+                      Suggested controls: insert offset {mergeAlignmentSuggestion.suggested.startFrameOverride - (mergeTargetSegment?.startFrame ?? 0)}f
+                      (absolute f{mergeAlignmentSuggestion.suggested.startFrameOverride}), trim opening{" "}
                       {mergeAlignmentSuggestion.suggested.trimStartFrames}f, trim tail {mergeAlignmentSuggestion.suggested.trimEndFrames}f.
                     </p>
                     <p>
-                      Start offset {mergeAlignmentSuggestion.analysis.sourceFrameOffset}f · residual end drift{" "}
+                      Start alignment: source offset {mergeAlignmentSuggestion.analysis.sourceFrameOffset}f · early drift{" "}
+                      {mergeAlignmentSuggestion.analysis.earlyMedianDriftFrames >= 0 ? "+" : ""}
+                      {mergeAlignmentSuggestion.analysis.earlyMedianDriftFrames}f
+                    </p>
+                    <p>
+                      End alignment: late drift{" "}
+                      {mergeAlignmentSuggestion.analysis.lateMedianDriftFrames >= 0 ? "+" : ""}
+                      {mergeAlignmentSuggestion.analysis.lateMedianDriftFrames}f · residual end drift{" "}
                       {mergeAlignmentSuggestion.analysis.residualEndFrames >= 0 ? "+" : ""}
                       {mergeAlignmentSuggestion.analysis.residualEndFrames}f · estimated retime {mergeAlignmentSuggestion.analysis.suggestedPlaybackRate.toFixed(4)}x
                     </p>
@@ -548,6 +597,11 @@ export default function MergeTab({ ctx }: MergeTabProps) {
               {mergeAlignmentSuggestionError ? (
                 <StatusNotice variant="error">
                   <p className="text-xs">{mergeAlignmentSuggestionError}</p>
+                </StatusNotice>
+              ) : null}
+              {reconcileTimingError ? (
+                <StatusNotice variant="error">
+                  <p className="text-xs">{reconcileTimingError}</p>
                 </StatusNotice>
               ) : null}
               <div className="rounded-lg border border-ink/10 bg-white p-3">
@@ -585,6 +639,16 @@ export default function MergeTab({ ctx }: MergeTabProps) {
                     `1.0` keeps original timing. Values above `1.0` speed the generated clip up; below `1.0` slow it down.
                   </p>
                 </div>
+                <div className="mt-3 grid gap-2 text-[11px] text-ink/65 md:grid-cols-2">
+                  <p>
+                    Frames before retime: <span className="font-medium text-ink">{mergeVisibleDurationFramesBeforeRetime}f</span> (
+                    {formatFramesAndSeconds(mergeVisibleDurationFramesBeforeRetime, mergeFps)})
+                  </p>
+                  <p>
+                    Frames after retime: <span className="font-medium text-ink">{mergeEffectiveDurationFrames}f</span> (
+                    {formatFramesAndSeconds(mergeEffectiveDurationFrames, mergeFps)})
+                  </p>
+                </div>
               </div>
               <div className="grid gap-3 xl:grid-cols-2">
                 <div className="space-y-3 rounded-lg border border-ink/10 bg-bg p-3">
@@ -592,10 +656,10 @@ export default function MergeTab({ ctx }: MergeTabProps) {
                   <div className="grid gap-3 md:grid-cols-2">
                     <NumberAdjustField
                       label="Source insert start"
-                      hint="Move where the generated clip begins on the source timeline."
+                      hint="Offset the generated insert relative to the original working-range start. Negative values move it earlier when source frames exist before the cut."
                       value={mergeInsertStartFrame}
-                      min={0}
-                      max={mergeMaxFrameIndex}
+                      min={mergeInsertStartFrameLowerBound}
+                      max={mergeInsertStartFrameUpperBound}
                       onChange={setMergeInsertStartFrame}
                     />
                     <NumberAdjustField
@@ -641,8 +705,11 @@ export default function MergeTab({ ctx }: MergeTabProps) {
                   (from source {formatFramesAndSeconds(mergeGeneratedDurationFrames, mergeFps)})
                 </p>
                 <p>
-                  Insert window now: <span className="font-medium text-ink">f{mergeInsertStartFrameClamped}</span> to{" "}
-                  <span className="font-medium text-ink">f{Math.max(mergeInsertStartFrameClamped, mergeEffectiveEndFrameExclusive - 1)}</span>
+                  Insert offset: <span className="font-medium text-ink">{mergeInsertStartFrame >= 0 ? "+" : ""}{mergeInsertStartFrame}f</span>
+                </p>
+                <p>
+                  Insert window now: <span className="font-medium text-ink">f{mergeInsertStartFrameEffective}</span> to{" "}
+                  <span className="font-medium text-ink">f{Math.max(mergeInsertStartFrameEffective, mergeEffectiveEndFrameExclusive - 1)}</span>
                 </p>
                 <p className={mergeEndOffsetFrames !== 0 ? "font-semibold text-orange-700" : ""}>
                   End shift from original cut: {mergeEndOffsetFrames >= 0 ? "+" : ""}
@@ -663,19 +730,21 @@ export default function MergeTab({ ctx }: MergeTabProps) {
               </div>
               <MergeBoundaryPreview
                 title="Start merge point preview"
-                subtitle={`original f${mergeInsertStartFrameClamped} -> generated g${mergeGeneratedStartAnchor}`}
+                subtitle={`original f${mergeInsertStartFrameEffective} -> generated output g${mergeGeneratedStartAnchor}`}
                 firstTrack={{
                   title: "Original track around start cut",
                   items: startBoundaryOriginalThumbs,
-                  anchorFrame: mergeInsertStartFrameClamped,
-                  overlapStart: mergeFeatherClamped > 0 ? mergeInsertStartFrameClamped : undefined,
-                  overlapEnd: mergeFeatherClamped > 0 ? mergeInsertStartFrameClamped + mergeFeatherClamped - 1 : undefined,
+                  anchorFrame: mergeInsertStartFrameEffective,
+                  anchorEdge: "start",
+                  overlapStart: mergeFeatherClamped > 0 ? mergeInsertStartFrameEffective : undefined,
+                  overlapEnd: mergeFeatherClamped > 0 ? mergeInsertStartFrameEffective + mergeFeatherClamped - 1 : undefined,
                   prefix: "f",
                 }}
                 secondTrack={{
                   title: "Generated track around start cut",
                   items: startBoundaryGeneratedThumbs,
                   anchorFrame: mergeGeneratedStartAnchor,
+                  anchorEdge: "start",
                   overlapStart: mergeFeatherClamped > 0 ? mergeGeneratedStartAnchor : undefined,
                   overlapEnd: mergeFeatherClamped > 0 ? mergeGeneratedStartAnchor + mergeFeatherClamped - 1 : undefined,
                   prefix: "g",
@@ -695,11 +764,12 @@ export default function MergeTab({ ctx }: MergeTabProps) {
               </div>
               <MergeBoundaryPreview
                 title="End merge point preview"
-                subtitle={`generated g${mergeGeneratedEndAnchor} -> original f${mergeEffectiveEndFrameExclusive}`}
+                subtitle={`generated output g${mergeGeneratedEndAnchor} -> cut before original f${mergeEffectiveEndFrameExclusive}`}
                 firstTrack={{
                   title: "Generated track around end cut",
                   items: endBoundaryGeneratedThumbs,
                   anchorFrame: mergeGeneratedEndAnchor,
+                  anchorEdge: "end",
                   overlapStart: mergeFeatherClamped > 0 ? mergeGeneratedEndAnchor - mergeFeatherClamped + 1 : undefined,
                   overlapEnd: mergeFeatherClamped > 0 ? mergeGeneratedEndAnchor : undefined,
                   prefix: "g",
@@ -708,6 +778,7 @@ export default function MergeTab({ ctx }: MergeTabProps) {
                   title: "Original track after generated segment",
                   items: endBoundaryOriginalThumbs,
                   anchorFrame: mergeEffectiveEndFrameExclusive,
+                  anchorEdge: "start",
                   overlapStart: mergeFeatherClamped > 0 ? mergeEffectiveEndFrameExclusive : undefined,
                   overlapEnd: mergeFeatherClamped > 0 ? mergeEffectiveEndFrameExclusive + mergeFeatherClamped - 1 : undefined,
                   prefix: "f",
@@ -740,6 +811,9 @@ export default function MergeTab({ ctx }: MergeTabProps) {
           </StatusNotice>
         ) : null}
       </div>
+      </>
+      ) : null}
+      {showMergeIntoSourceTool ? (
       <div className="space-y-2">
         <p className="text-sm font-medium text-ink/80">Merged exports</p>
         {!sortedExports.length ? <p className="text-sm text-ink/60">No merged exports yet.</p> : null}
@@ -764,7 +838,12 @@ export default function MergeTab({ ctx }: MergeTabProps) {
             ) : null}
             <div className="mt-2 flex flex-wrap items-center gap-2">
               {exp.downloadUrl ? (
-                <a className="rounded border border-ink/20 bg-white px-3 py-1.5 text-sm text-ink" href={exp.downloadUrl}>
+                <a
+                  className="rounded border border-ink/20 bg-white px-3 py-1.5 text-sm text-ink"
+                  href={exp.downloadUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                >
                   Download merged video
                 </a>
               ) : null}
@@ -779,6 +858,7 @@ export default function MergeTab({ ctx }: MergeTabProps) {
           </div>
         ))}
       </div>
+      ) : null}
       {nextWarning ? (
         <StatusNotice variant="warning">
           <p className="text-xs">{nextWarning}</p>

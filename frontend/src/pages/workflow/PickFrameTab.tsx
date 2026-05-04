@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType, type PointerEvent, type RefObject } from "react";
 
 import { HelpInfoButton, PendingButtonLabel, StatusNotice } from "../../components/layout/UiFeedback";
+import FrameLimitInfoButton from "../../components/workflow/FrameLimitInfoButton";
 import type { SegmentRecord, TaskDetail } from "../../types/api";
 
 type CropAspect = "16:9" | "9:16";
@@ -287,14 +288,25 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
     );
   }, [defaultVideoSegment, selectedSegment, uncroppedSegments]);
   const orderedSegments = useMemo(() => {
-    if (!uncroppedSegments.length) return uncroppedSegments;
+    if (!visibleSegments.length) return visibleSegments;
+    const grouped = new Map<string, SegmentRecord[]>();
+    for (const segment of visibleSegments) {
+      const key = `${segment.startFrame}:${segment.endFrameExclusive}`;
+      const bucket = grouped.get(key) ?? [];
+      bucket.push(segment);
+      grouped.set(key, bucket);
+    }
+    const representatives = Array.from(grouped.values()).map((segments) => {
+      const uncropped = segments.find((segment) => !segment.crop?.enabled);
+      return uncropped ?? segments[0];
+    });
     const defaultId = defaultVideoSegment?.segmentId ?? null;
-    return [...uncroppedSegments].sort((a, b) => {
+    return representatives.sort((a, b) => {
       if (a.segmentId === defaultId) return -1;
       if (b.segmentId === defaultId) return 1;
       return a.startFrame - b.startFrame || a.endFrameExclusive - b.endFrameExclusive;
     });
-  }, [defaultVideoSegment?.segmentId, uncroppedSegments]);
+  }, [defaultVideoSegment?.segmentId, visibleSegments]);
   const cropOptions = useMemo(() => {
     if (!selectedBaseSegment) return [];
     const matching = visibleSegments.filter(
@@ -302,12 +314,10 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
         segment.startFrame === selectedBaseSegment.startFrame &&
         segment.endFrameExclusive === selectedBaseSegment.endFrameExclusive,
     );
-    return matching.sort((a, b) => {
+    return [...matching].sort((a, b) => {
       const aCrop = Boolean(a.crop?.enabled);
       const bCrop = Boolean(b.crop?.enabled);
       if (aCrop !== bCrop) return aCrop ? 1 : -1;
-      if (a.segmentId === selectedBaseSegment.segmentId) return -1;
-      if (b.segmentId === selectedBaseSegment.segmentId) return 1;
       return a.segmentId.localeCompare(b.segmentId);
     });
   }, [selectedBaseSegment, visibleSegments]);
@@ -661,7 +671,12 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
                     )}
                   </div>
                 </div>
-                {rangeWarning ? <p className="mt-3 text-xs text-amber-700">{rangeWarning}</p> : null}
+                {rangeWarning ? (
+                  <div className="mt-3 flex items-start gap-2 text-xs text-amber-700">
+                    <p>{rangeWarning}</p>
+                    <FrameLimitInfoButton label="Frame limits for working ranges" />
+                  </div>
+                ) : null}
               </button>
             );
           })}

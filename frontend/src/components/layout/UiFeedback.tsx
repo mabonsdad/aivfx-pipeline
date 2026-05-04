@@ -43,7 +43,12 @@ export function StatusNotice(props: {
   );
 }
 
-export function HelpInfoButton(props: { title: string; lines: string[]; label?: string }) {
+export function InfoDialogButton(props: {
+  title: string;
+  label?: string;
+  children: ReactNode;
+  maxWidthClassName?: string;
+}) {
   const [isOpen, setIsOpen] = useState(false);
   return (
     <>
@@ -58,7 +63,7 @@ export function HelpInfoButton(props: { title: string; lines: string[]; label?: 
       </button>
       {isOpen ? (
         <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/40 p-4">
-          <div className="w-full max-w-3xl rounded-2xl border border-ink/10 bg-card p-6 shadow-xl">
+          <div className={`w-full rounded-2xl border border-ink/10 bg-card p-6 shadow-xl ${props.maxWidthClassName ?? "max-w-3xl"}`}>
             <div className="flex items-start justify-between gap-4">
               <div>
                 <h3 className="text-xl font-semibold">{props.title}</h3>
@@ -67,14 +72,22 @@ export function HelpInfoButton(props: { title: string; lines: string[]; label?: 
                 Close
               </button>
             </div>
-            <div className="mt-4 space-y-3 text-sm leading-6 text-ink/80">
-              {props.lines.map((line) => (
-                <p key={line}>{line}</p>
-              ))}
-            </div>
+            <div className="mt-4">{props.children}</div>
           </div>
         </div>
       ) : null}
     </>
+  );
+}
+
+export function HelpInfoButton(props: { title: string; lines: string[]; label?: string }) {
+  return (
+    <InfoDialogButton title={props.title} label={props.label}>
+      <div className="space-y-3 text-sm leading-6 text-ink/80">
+        {props.lines.map((line) => (
+          <p key={line}>{line}</p>
+        ))}
+      </div>
+    </InfoDialogButton>
   );
 }

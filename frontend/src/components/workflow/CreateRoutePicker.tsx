@@ -1,31 +1,15 @@
-type GenerateInputMode = "start_video" | "start_end" | "start_only";
+import { GENERATION_MODE_CONFIGS, type GenerateInputMode } from "../../lib/generationModeRegistry";
 
 type CreateRoutePickerProps = {
   activeMode: GenerateInputMode;
   onSelect: (mode: GenerateInputMode) => void;
 };
 
-const ROUTES: Array<{
-  id: GenerateInputMode;
-  title: string;
-  body: string;
-}> = [
-  {
-    id: "start_video",
-    title: "Use source motion",
-    body: "Edit a start frame, then generate motion from the working range video.",
-  },
-  {
-    id: "start_end",
-    title: "Animate between two frames",
-    body: "Edit both the start and end frames, then generate a transition between them.",
-  },
-  {
-    id: "start_only",
-    title: "Animate from start frame",
-    body: "Generate a new clip from the edited start frame without using source motion.",
-  },
-];
+const ROUTES = Object.values(GENERATION_MODE_CONFIGS).map((config) => ({
+  id: config.id,
+  title: config.title,
+  body: config.description,
+}));
 
 export default function CreateRoutePicker({ activeMode, onSelect }: CreateRoutePickerProps) {
   return (

@@ -347,6 +347,9 @@ export type SegmentGeneration = {
       | "ray-2"
       | "ray-flash-2"
       | "runway-gen4.5"
+      | "sora-2-image-to-video"
+      | "happy-horse-video-edit"
+      | "happy-horse-image-to-video"
       | "runway-gen4-aleph"
       | "kling-2.6"
       | "kling-o1"
@@ -356,9 +359,11 @@ export type SegmentGeneration = {
       | "veo-3.1-fast"
       | "wan2.2-a14b"
       | "wan2.2-animate"
-      | "wan2.7-videoedit";
+      | "wan2.7-videoedit"
+      | "wan2.7-i2v";
     mode: string;
     prompt?: string;
+    negativePrompt?: string;
     lumaGenerationId?: string | null;
   };
   status: "queued" | "running" | "complete" | "failed";
@@ -411,6 +416,46 @@ export type SegmentGeneration = {
     anchorCount?: number;
     sourceFrameSteps?: number[];
     scanFrameCount?: number;
+  } | null;
+  mergeAlignmentSuggestion?: {
+    status?: "queued" | "running" | "complete" | "failed";
+    jobId?: string | null;
+    updatedAt?: string;
+    analyzedAt?: string;
+    error?: string | null;
+    suggestion?: {
+      suggested: {
+        startFrameOverride: number;
+        trimStartFrames: number;
+        trimEndFrames: number;
+      };
+      analysis: {
+        cropApplied?: boolean;
+        sourceFrameOffset: number;
+        sourceOffsetSec: number;
+        earlyMedianDriftFrames: number;
+        lateMedianDriftFrames: number;
+        residualEndFrames: number;
+        meanAbsDriftFrames: number;
+        residualMeanAbsDriftFrames: number;
+        suggestedPlaybackRate: number;
+        recommendation: string;
+        confidence: number;
+        notes: string[];
+      };
+    } | null;
+  } | null;
+  timingReconcile?: {
+    status?: "queued" | "running" | "complete" | "failed";
+    jobId?: string | null;
+    resultGenId?: string | null;
+    updatedAt?: string;
+    error?: string | null;
+    adjustments?: {
+      trimStartFrames?: number;
+      trimEndFrames?: number;
+      playbackRate?: number | null;
+    };
   } | null;
   cleanupTrackId?: string;
   derivedFromGenerationId?: string;

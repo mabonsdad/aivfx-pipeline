@@ -290,6 +290,42 @@ def trim_and_retime_video_uniform(
     return cmd
 
 
+def trim_video_to_duration(
+    input_path: str,
+    output_path: str,
+    *,
+    duration_sec: float,
+    crf: int = 16,
+    preset: str = "medium",
+    audio_bitrate: str = "192k",
+) -> list[str]:
+    probe = ffprobe_video(input_path)
+    effective_duration = max(0.1, float(duration_sec))
+    cmd = [
+        FFMPEG_BIN,
+        "-y",
+        "-i",
+        input_path,
+        "-t",
+        _format_seconds(effective_duration),
+        "-c:v",
+        "libx264",
+        "-preset",
+        preset,
+        "-crf",
+        str(crf),
+        "-pix_fmt",
+        "yuv420p",
+    ]
+    if bool(probe.get("has_audio")):
+        cmd.extend(["-c:a", "aac", "-b:a", audio_bitrate])
+    else:
+        cmd.append("-an")
+    cmd.append(output_path)
+    _run(cmd)
+    return cmd
+
+
 def extract_frame_png(
     input_path: str,
     frame_index: int,

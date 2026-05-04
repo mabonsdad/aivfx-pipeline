@@ -23,6 +23,7 @@ import {
 } from "./hooks/useWorkflowRouting";
 import { useTaskLifecycle } from "./hooks/useTaskLifecycle";
 import { useGenerationMergeState } from "./hooks/useGenerationMergeState";
+import { getGenerationModeConfig, type GenerateInputMode } from "./lib/generationModeRegistry";
 import { currentUser, login, logout } from "./lib/auth";
 import type { AssetsTabCtx } from "./pages/workflow/AssetsTab";
 import type { EditFrameTabCtx } from "./pages/workflow/EditFrameTab";
@@ -37,16 +38,19 @@ import type {
   CustomReportRecord,
   ExportRecord,
   FrameVariant,
+  JobStatus,
   SegmentGeneration,
   SegmentRecord,
   TaskDetail,
 } from "./types/api";
 
-type GenerateInputMode = "start_video" | "start_end" | "start_only";
 type VideoModel =
   | "ray-2"
   | "ray-flash-2"
   | "runway-gen4.5"
+  | "sora-2-image-to-video"
+  | "happy-horse-video-edit"
+  | "happy-horse-image-to-video"
   | "runway-gen4-aleph"
   | "kling-2.6"
   | "kling-o1"
@@ -56,7 +60,8 @@ type VideoModel =
   | "veo-3.1-fast"
   | "wan2.2-a14b"
   | "wan2.2-animate"
-  | "wan2.7-videoedit";
+  | "wan2.7-videoedit"
+  | "wan2.7-i2v";
 
 type AutomationVideoOption = {
   id: string;
@@ -192,6 +197,7 @@ type PrimaryWorkflowSection = "source" | "create" | "outputs" | "post" | "report
 type VideoFrameStripItem = {
   frameIndex: number;
   imageUrl: string | null;
+  sourceFrameIndex?: number;
 };
 
 function clampInteger(value: number, min: number, max: number): number {
@@ -217,6 +223,41 @@ function sleep(ms: number): Promise<void> {
 function formatFramesAndSeconds(frames: number, fps: number): string {
   const safeFps = fps > 0 ? fps : 30;
   return `${frames}f / ${(frames / safeFps).toFixed(2)}s`;
+}
+
+function generatedOutputFrameToSourceFrame(
+  outputFrameIndex: number,
+  trimStartFrames: number,
+  visibleSourceFrames: number,
+  effectiveOutputFrames: number,
+): number {
+  const safeVisibleSourceFrames = Math.max(1, visibleSourceFrames);
+  const safeEffectiveOutputFrames = Math.max(1, effectiveOutputFrames);
+  if (safeVisibleSourceFrames <= 1 || safeEffectiveOutputFrames <= 1) {
+    return trimStartFrames;
+  }
+  const clampedOutputFrameIndex = clampInteger(outputFrameIndex, 0, safeEffectiveOutputFrames - 1);
+  const sourceOffset =
+    safeEffectiveOutputFrames === safeVisibleSourceFrames
+      ? clampedOutputFrameIndex
+      : Math.round((clampedOutputFrameIndex * (safeVisibleSourceFrames - 1)) / (safeEffectiveOutputFrames - 1));
+  return trimStartFrames + clampInteger(sourceOffset, 0, safeVisibleSourceFrames - 1);
+}
+
+function remapGeneratedStripItems(
+  displayFrameIndices: number[],
+  sourceFrameIndices: number[],
+  sourceItems: VideoFrameStripItem[],
+): VideoFrameStripItem[] {
+  const imageBySourceFrame = new Map(sourceItems.map((item) => [item.frameIndex, item.imageUrl ?? null]));
+  return displayFrameIndices.map((displayFrameIndex, idx) => {
+    const sourceFrameIndex = sourceFrameIndices[idx] ?? sourceFrameIndices[sourceFrameIndices.length - 1] ?? 0;
+    return {
+      frameIndex: displayFrameIndex,
+      sourceFrameIndex,
+      imageUrl: imageBySourceFrame.get(sourceFrameIndex) ?? null,
+    };
+  });
 }
 
 function isValidHttpUrl(value: string | null | undefined): value is string {
@@ -396,6 +437,9 @@ function videoModelLabel(model: VideoModel): string {
   if (model === "ray-2") return "Luma Ray 2";
   if (model === "ray-flash-2") return "Luma Ray Flash 2";
   if (model === "runway-gen4.5") return "Runway Gen-4.5";
+  if (model === "sora-2-image-to-video") return "Sora 2 Image to Video";
+  if (model === "happy-horse-video-edit") return "Happy Horse 1.0 Video Edit";
+  if (model === "happy-horse-image-to-video") return "Happy Horse 1.0 Image to Video";
   if (model === "runway-gen4-aleph") return "Runway Gen-4 Aleph";
   if (model === "kling-2.6") return "Kling 2.6";
   if (model === "kling-o1") return "Kling O1 Edit";
@@ -406,23 +450,8 @@ function videoModelLabel(model: VideoModel): string {
   if (model === "wan2.2-a14b") return "Wan 2.2 A14B";
   if (model === "wan2.2-animate") return "Wan 2.2 Animate";
   if (model === "wan2.7-videoedit") return "Wan 2.7 VideoEdit";
+  if (model === "wan2.7-i2v") return "Wan 2.7 Image to Video";
   return model;
-}
-
-function generationRouteLabel(mode: GenerateInputMode): string {
-  if (mode === "start_end") return "Animate between two frames";
-  if (mode === "start_only") return "Animate from start frame";
-  return "Use source motion";
-}
-
-function generationRouteDescription(mode: GenerateInputMode): string {
-  if (mode === "start_end") {
-    return "This route uses edited start and end frames to generate a transition between them.";
-  }
-  if (mode === "start_only") {
-    return "This route generates a new clip from the edited start frame without using source-motion video guidance.";
-  }
-  return "This route uses the source video motion from the working range together with the edited start frame.";
 }
 
 function formatFps(value: number): string {
@@ -438,6 +467,8 @@ function videoModelDurationConstraints(model: VideoModel): {
   if (model === "ray-2") return { maxSeconds: 10 };
   if (model === "ray-flash-2") return { maxSeconds: 15 };
   if (model === "runway-gen4.5") return { maxSeconds: 10 };
+  if (model === "sora-2-image-to-video") return { minSeconds: 4, maxSeconds: 10 };
+  if (model === "happy-horse-video-edit" || model === "happy-horse-image-to-video") return { minSeconds: 3, maxSeconds: 15 };
   if (model === "runway-gen4-aleph") return { maxSeconds: 10 };
   if (model === "kling-2.6") return { maxSeconds: 10 };
   if (model === "kling-o1") return { minSeconds: 3, maxSeconds: 10 };
@@ -447,6 +478,7 @@ function videoModelDurationConstraints(model: VideoModel): {
   if (model === "wan2.2-a14b") return { maxSeconds: 5 };
   if (model === "wan2.2-animate") return { maxSeconds: 10 };
   if (model === "wan2.7-videoedit") return { minSeconds: 2, maxSeconds: 10 };
+  if (model === "wan2.7-i2v") return { minSeconds: 2, maxSeconds: 10 };
   return { maxSeconds: 60 };
 }
 
@@ -505,6 +537,7 @@ const GENERATION_MODELS_BY_INPUT: Record<GenerateInputMode, Array<{ value: Video
   start_video: [
     { value: "ray-flash-2", label: "Luma Ray Flash 2" },
     { value: "ray-2", label: "Luma Ray 2" },
+    { value: "happy-horse-video-edit", label: "Happy Horse 1.0 Video Edit" },
     { value: "runway-gen4-aleph", label: "Runway Gen-4 Aleph" },
     { value: "kling-o1", label: "Kling O1 Edit" },
     { value: "kling-v3-omni-video", label: "Kling v3 Omni Video" },
@@ -514,12 +547,16 @@ const GENERATION_MODELS_BY_INPUT: Record<GenerateInputMode, Array<{ value: Video
   ],
   start_end: [
     { value: "kling-2.6", label: "Kling 2.6" },
+    { value: "wan2.7-i2v", label: "Wan 2.7 Image to Video" },
     { value: "veo-3.1", label: "Veo 3.1" },
     { value: "veo-3.1-fast", label: "Veo 3.1 Fast" },
   ],
   start_only: [
     { value: "wan2.2-a14b", label: "Wan 2.2 A14B" },
+    { value: "happy-horse-image-to-video", label: "Happy Horse 1.0 Image to Video" },
+    { value: "wan2.7-i2v", label: "Wan 2.7 Image to Video" },
     { value: "runway-gen4.5", label: "Runway Gen-4.5" },
+    { value: "sora-2-image-to-video", label: "Sora 2 Image to Video" },
     { value: "veo-3.1", label: "Veo 3.1" },
     { value: "veo-3.1-fast", label: "Veo 3.1 Fast" },
     { value: "kling-2.6", label: "Kling 2.6" },
@@ -529,6 +566,7 @@ const GENERATION_MODELS_BY_INPUT: Record<GenerateInputMode, Array<{ value: Video
 const AUTOMATION_VIDEO_OPTIONS: AutomationVideoOption[] = [
   { id: "ray-flash-2:start_video:flex_1", label: "Luma Ray Flash 2 (Start frame + video)", inputMode: "start_video", lumaModel: "ray-flash-2", mode: "flex_1" },
   { id: "ray-2:start_video:flex_1", label: "Luma Ray 2 (Start frame + video)", inputMode: "start_video", lumaModel: "ray-2", mode: "flex_1" },
+  { id: "happy-horse-video-edit:start_video:happy_horse_video_edit", label: "Happy Horse 1.0 Video Edit (Start frame + video)", inputMode: "start_video", lumaModel: "happy-horse-video-edit", mode: "happy_horse_video_edit" },
   { id: "runway-gen4-aleph:start_video:runway_aleph_v2v", label: "Runway Gen-4 Aleph (Start frame + video)", inputMode: "start_video", lumaModel: "runway-gen4-aleph", mode: "runway_aleph_v2v" },
   { id: "kling-v3-omni-video:start_video:kling_v3_omni_video_edit", label: "Kling v3 Omni Video (Start frame + video)", inputMode: "start_video", lumaModel: "kling-v3-omni-video", mode: "kling_v3_omni_video_edit" },
   { id: "seedance-2.0-reference-to-video:start_video:seedance_reference_to_video", label: "Seedance 2.0 Reference to Video (Start frame + video)", inputMode: "start_video", lumaModel: "seedance-2.0-reference-to-video", mode: "seedance_reference_to_video" },
@@ -540,6 +578,8 @@ const AUTOMATION_VIDEO_OPTIONS: AutomationVideoOption[] = [
   { id: "veo-3.1-fast:start_end:veo_start_end", label: "Veo 3.1 Fast (Start/End frame)", inputMode: "start_end", lumaModel: "veo-3.1-fast", mode: "veo_start_end" },
   { id: "veo-3.1-fast:start_only:veo_start_only", label: "Veo 3.1 Fast (Start frame only)", inputMode: "start_only", lumaModel: "veo-3.1-fast", mode: "veo_start_only" },
   { id: "runway-gen4.5:start_only:runway_i2v", label: "Runway Gen-4.5 (Start frame only)", inputMode: "start_only", lumaModel: "runway-gen4.5", mode: "runway_i2v" },
+  { id: "sora-2-image-to-video:start_only:sora_i2v", label: "Sora 2 Image to Video (Start frame only)", inputMode: "start_only", lumaModel: "sora-2-image-to-video", mode: "sora_i2v" },
+  { id: "happy-horse-image-to-video:start_only:happy_horse_i2v", label: "Happy Horse 1.0 Image to Video (Start frame only)", inputMode: "start_only", lumaModel: "happy-horse-image-to-video", mode: "happy_horse_i2v" },
   { id: "wan2.2-a14b:start_only:wan_a14b_i2v", label: "Wan 2.2 A14B (Start frame only)", inputMode: "start_only", lumaModel: "wan2.2-a14b", mode: "wan_a14b_i2v" },
 ];
 
@@ -739,6 +779,7 @@ function MergeTrackStrip({
   title,
   items,
   anchorFrame,
+  anchorEdge = "start",
   overlapStart,
   overlapEnd,
   prefix,
@@ -746,6 +787,7 @@ function MergeTrackStrip({
   title: string;
   items: VideoFrameStripItem[];
   anchorFrame: number;
+  anchorEdge?: "start" | "end";
   overlapStart?: number;
   overlapEnd?: number;
   prefix: string;
@@ -793,7 +835,7 @@ function MergeTrackStrip({
           {anchorIndex >= 0 ? (
             <div
               className="pointer-events-none absolute bottom-0 top-0 w-[2px] bg-teal-600"
-              style={{ left: `${anchorIndex * itemWidthPx}px` }}
+              style={{ left: `${(anchorIndex + (anchorEdge === "end" ? 1 : 0)) * itemWidthPx}px` }}
               title="Merge cut"
             />
           ) : null}
@@ -829,6 +871,7 @@ function MergeBoundaryPreview({
     title: string;
     items: VideoFrameStripItem[];
     anchorFrame: number;
+    anchorEdge?: "start" | "end";
     overlapStart?: number;
     overlapEnd?: number;
     prefix: string;
@@ -837,6 +880,7 @@ function MergeBoundaryPreview({
     title: string;
     items: VideoFrameStripItem[];
     anchorFrame: number;
+    anchorEdge?: "start" | "end";
     overlapStart?: number;
     overlapEnd?: number;
     prefix: string;
@@ -918,6 +962,9 @@ export default function App() {
   const [replicateKlingMode, setReplicateKlingMode] = useState<"std" | "pro">("pro");
   const [replicateKlingV3Mode, setReplicateKlingV3Mode] = useState<"standard" | "pro">("pro");
   const [wan27Resolution, setWan27Resolution] = useState<"720p" | "1080p">("720p");
+  const [happyHorseResolution, setHappyHorseResolution] = useState<"720p" | "1080p">("1080p");
+  const [wan27NegativePrompt, setWan27NegativePrompt] = useState("");
+  const [sora2Resolution, setSora2Resolution] = useState<"auto" | "720p" | "1080p">("auto");
   const [editSourceVariantIds, setEditSourceVariantIds] = useState<{ first: string | null; last: string | null }>({
     first: null,
     last: null,
@@ -988,6 +1035,10 @@ export default function App() {
       notes: string[];
     };
   } | null>(null);
+  const [mergeAlignmentSuggestionJobId, setMergeAlignmentSuggestionJobId] = useState<string | null>(null);
+  const [mergeAlignmentSuggestionError, setMergeAlignmentSuggestionError] = useState<string | null>(null);
+  const [reconcileTimingJobId, setReconcileTimingJobId] = useState<string | null>(null);
+  const [reconcileTimingError, setReconcileTimingError] = useState<string | null>(null);
   const [automationRunState, setAutomationRunState] = useState<AutomationRunState>({
     isOpen: false,
     taskId: null,
@@ -1963,6 +2014,12 @@ export default function App() {
       const selectedMode =
         lumaModel === "runway-gen4.5"
           ? "runway_i2v"
+          : lumaModel === "sora-2-image-to-video"
+            ? "sora_i2v"
+          : lumaModel === "happy-horse-video-edit"
+            ? "happy_horse_video_edit"
+          : lumaModel === "happy-horse-image-to-video"
+            ? "happy_horse_i2v"
           : lumaModel === "runway-gen4-aleph"
             ? "runway_aleph_v2v"
           : lumaModel === "kling-2.6"
@@ -1983,6 +2040,10 @@ export default function App() {
                 ? "wan_a14b_i2v"
                 : lumaModel === "wan2.2-animate"
                   ? "wan_animate_replace"
+                  : lumaModel === "wan2.7-i2v"
+                    ? generationInputMode === "start_end"
+                      ? "wan27_i2v_start_end"
+                      : "wan27_i2v_start_only"
                   : lumaModel === "wan2.7-videoedit"
                     ? "wan27_video_edit"
                   : advancedMode;
@@ -1990,11 +2051,14 @@ export default function App() {
         lumaModel,
         mode: selectedMode,
         prompt: lumaModel === "wan2.2-animate" ? undefined : trimmedPrompt || undefined,
+        negativePrompt: lumaModel === "wan2.7-i2v" ? wan27NegativePrompt.trim() || undefined : undefined,
         firstFrameVariantId: refineSourceVariantIds.first || compareVariantIds.first || undefined,
         lastFrameVariantId: generationInputMode === "start_end" ? refineSourceVariantIds.last || compareVariantIds.last || undefined : undefined,
         replicateKlingMode: lumaModel === "kling-o1" ? replicateKlingMode : undefined,
         replicateKlingV3Mode: lumaModel === "kling-v3-omni-video" ? replicateKlingV3Mode : undefined,
-        wan27Resolution: lumaModel === "wan2.7-videoedit" ? wan27Resolution : undefined,
+        wan27Resolution: lumaModel === "wan2.7-videoedit" || lumaModel === "wan2.7-i2v" ? wan27Resolution : undefined,
+        sora2Resolution: lumaModel === "sora-2-image-to-video" ? sora2Resolution : undefined,
+        happyHorseResolution: lumaModel === "happy-horse-video-edit" || lumaModel === "happy-horse-image-to-video" ? happyHorseResolution : undefined,
         preserveFrames,
       });
     },
@@ -2159,15 +2223,15 @@ export default function App() {
       if (!selectedTaskId) throw new Error("Select a task");
       const generationAdjustments =
         mergeTargetGeneration && selectedGenIds.includes(mergeTargetGeneration.genId)
-          ? {
-              [mergeTargetGeneration.genId]: {
-                startFrameOverride: mergeInsertStartFrameClamped,
-                trimStartFrames: mergeTrimStartClamped,
-                trimEndFrames: mergeTrimEndClamped,
-                playbackRate: mergeApplyRetime ? mergePlaybackRate : undefined,
-              },
-            }
-          : undefined;
+                ? {
+                    [mergeTargetGeneration.genId]: {
+                      startFrameOverride: mergeInsertStartFrameEffective,
+                      trimStartFrames: mergeTrimStartUserClamped,
+                      trimEndFrames: mergeTrimEndClamped,
+                      playbackRate: mergeApplyRetime ? mergePlaybackRate : undefined,
+                    },
+                  }
+                : undefined;
       return apiClient.merge(selectedTaskId, {
         selectedSegmentGenerationIds: selectedGenIds,
         temporalFeatherFrames: mergeFeatherClamped,
@@ -2185,13 +2249,33 @@ export default function App() {
       if (!selectedTaskId || !mergeTargetGeneration?.genId) throw new Error("Choose a completed output first");
       return apiClient.suggestMergeAlignment(selectedTaskId, mergeTargetGeneration.genId);
     },
-    onSuccess: (result) => {
-      setMergeInsertStartFrame(result.suggested.startFrameOverride);
-      setMergeTrimStartFrames(result.suggested.trimStartFrames);
-      setMergeTrimEndFrames(result.suggested.trimEndFrames);
-      setMergePlaybackRate(result.analysis.suggestedPlaybackRate || 1);
-      setMergeApplyRetime(result.analysis.recommendation === "retime_recommended");
-      setMergeAlignmentSuggestion(result);
+    onSuccess: async (result) => {
+      setJobIds((prev) => appendTrackedJobId(prev, result.jobId));
+      setMergeAlignmentSuggestion(null);
+      setMergeAlignmentSuggestionError(null);
+      setMergeAlignmentSuggestionJobId(result.jobId);
+      if (selectedTaskId) {
+        await queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
+      }
+    },
+  });
+
+  const reconcileTimingMutation = useMutation({
+    mutationFn: async () => {
+      if (!selectedTaskId || !mergeTargetGeneration?.genId) throw new Error("Choose a completed output first");
+      return apiClient.reconcileSegmentGenerationTiming(selectedTaskId, mergeTargetGeneration.genId, {
+        trimStartFrames: mergeTrimStartUserClamped,
+        trimEndFrames: mergeTrimEndClamped,
+        playbackRate: mergeApplyRetime ? mergePlaybackRate : undefined,
+      });
+    },
+    onSuccess: async (result) => {
+      setJobIds((prev) => appendTrackedJobId(prev, result.jobId));
+      setReconcileTimingJobId(result.jobId);
+      setReconcileTimingError(null);
+      if (selectedTaskId) {
+        await queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
+      }
     },
   });
 
@@ -2243,6 +2327,10 @@ export default function App() {
     const ids: string[] = [];
     for (const generation of Object.values(task?.segmentGenerations ?? {})) {
       if (generation.jobId) ids.push(generation.jobId);
+      const mergeSuggestionJobId = generation.mergeAlignmentSuggestion?.jobId;
+      if (mergeSuggestionJobId) ids.push(mergeSuggestionJobId);
+      const reconcileJobId = generation.timingReconcile?.jobId;
+      if (reconcileJobId) ids.push(reconcileJobId);
     }
     for (const run of task?.chunkedGenerationRuns ?? []) {
       for (const chunk of run.chunks ?? []) {
@@ -2278,6 +2366,47 @@ export default function App() {
       refetchOnReconnect: false as const,
     })),
   });
+
+  const mergeAlignmentSuggestionJob = useMemo(() => {
+    if (!mergeAlignmentSuggestionJobId) return null;
+    for (const jq of jobQueries) {
+      const data = jq.data;
+      if (data?.jobId === mergeAlignmentSuggestionJobId) return data;
+    }
+    return null;
+  }, [jobQueries, mergeAlignmentSuggestionJobId]);
+
+  const reconcileTimingJob = useMemo(() => {
+    if (!reconcileTimingJobId) return null;
+    for (const jq of jobQueries) {
+      const data = jq.data;
+      if (data?.jobId === reconcileTimingJobId) return data;
+    }
+    return null;
+  }, [jobQueries, reconcileTimingJobId]);
+
+  const jobStatusById = useMemo(() => {
+    const statuses = new Map<string, JobStatus["status"]>();
+    for (const jq of jobQueries) {
+      const data = jq.data;
+      if (data?.jobId && data.status) statuses.set(data.jobId, data.status);
+    }
+    return statuses;
+  }, [jobQueries]);
+
+  const isSuggestingMergeAlignment = useMemo(() => {
+    if (suggestMergeAlignmentMutation.isPending) return true;
+    if (!mergeAlignmentSuggestionJobId) return false;
+    const status = mergeAlignmentSuggestionJob?.status ?? jobStatusById.get(mergeAlignmentSuggestionJobId);
+    return status !== "complete" && status !== "failed";
+  }, [jobStatusById, mergeAlignmentSuggestionJob?.status, mergeAlignmentSuggestionJobId, suggestMergeAlignmentMutation.isPending]);
+
+  const isReconcilingTiming = useMemo(() => {
+    if (reconcileTimingMutation.isPending) return true;
+    if (!reconcileTimingJobId) return false;
+    const status = reconcileTimingJob?.status ?? jobStatusById.get(reconcileTimingJobId);
+    return status !== "complete" && status !== "failed";
+  }, [jobStatusById, reconcileTimingJob?.status, reconcileTimingJobId, reconcileTimingMutation.isPending]);
 
   const seenDoneRef = useRef<Set<string>>(new Set());
   useEffect(() => {
@@ -2342,20 +2471,41 @@ export default function App() {
     asNumber(mergeTargetGeneration?.generationSettings?.providerDurationSec) ??
     mergeTargetSegment?.durationSec ??
     mergeOriginalDurationFrames / (mergeFps || 30);
-  const mergeGeneratedDurationFrames = Math.max(1, Math.round(Math.max(1 / Math.max(1, mergeFps), mergeProviderDurationSec) * mergeFps));
+  const mergeStoredOutputFrameCount = Math.max(
+    0,
+    asNumber(mergeTargetGeneration?.generationSettings?.storedOutput?.frameCount) ?? 0,
+  );
+  const mergeGeneratedDurationFrames = Math.max(
+    1,
+    mergeStoredOutputFrameCount > 0
+      ? Math.round(mergeStoredOutputFrameCount)
+      : Math.round(Math.max(1 / Math.max(1, mergeFps), mergeProviderDurationSec) * mergeFps),
+  );
   const mergeMaxFrameIndex = Math.max(0, frameCount(task) - 1);
-  const mergeInsertStartFrameClamped = clampInteger(mergeInsertStartFrame, 0, mergeMaxFrameIndex);
-  const mergeTrimStartClamped = clampInteger(mergeTrimStartFrames, 0, Math.max(0, mergeGeneratedDurationFrames - 1));
+  const mergeInsertStartFrameLowerBound = -(mergeTargetSegment?.startFrame ?? 0);
+  const mergeInsertStartFrameUpperBound = mergeMaxFrameIndex - (mergeTargetSegment?.startFrame ?? 0);
+  const mergeInsertStartFrameClamped = clampInteger(mergeInsertStartFrame, mergeInsertStartFrameLowerBound, mergeInsertStartFrameUpperBound);
+  const mergeInsertStartFrameEffective = clampInteger(
+    (mergeTargetSegment?.startFrame ?? 0) + mergeInsertStartFrameClamped,
+    0,
+    mergeMaxFrameIndex,
+  );
+  const mergeTrimStartUserClamped = clampInteger(mergeTrimStartFrames, 0, Math.max(0, mergeGeneratedDurationFrames - 1));
+  const mergeTrimStartClamped = mergeTrimStartUserClamped;
   const mergeTrimEndClamped = clampInteger(
     mergeTrimEndFrames,
     0,
     Math.max(0, mergeGeneratedDurationFrames - 1 - mergeTrimStartClamped),
   );
-  const mergeEffectiveDurationFrames = Math.max(1, mergeGeneratedDurationFrames - mergeTrimStartClamped - mergeTrimEndClamped);
-  const mergeEffectiveEndFrameExclusive = mergeInsertStartFrameClamped + mergeEffectiveDurationFrames;
+  const mergeVisibleDurationFramesBeforeRetime = Math.max(1, mergeGeneratedDurationFrames - mergeTrimStartClamped - mergeTrimEndClamped);
+  const mergeEffectiveDurationFrames = mergeApplyRetime
+    ? Math.max(1, Math.round(mergeVisibleDurationFramesBeforeRetime / Math.max(0.05, mergePlaybackRate || 1)))
+    : mergeVisibleDurationFramesBeforeRetime;
+  const mergeEffectiveEndFrameExclusive = mergeInsertStartFrameEffective + mergeEffectiveDurationFrames;
+  const mergeEffectiveEndFrameInclusive = Math.max(mergeInsertStartFrameEffective, mergeEffectiveEndFrameExclusive - 1);
   const mergeEndOffsetFrames = mergeEffectiveEndFrameExclusive - mergeOriginalEndFrameExclusive;
-  const mergeGeneratedStartAnchor = mergeTrimStartClamped;
-  const mergeGeneratedEndAnchor = mergeTrimStartClamped + mergeEffectiveDurationFrames - 1;
+  const mergeGeneratedStartAnchor = 0;
+  const mergeGeneratedEndAnchor = Math.max(0, mergeEffectiveDurationFrames - 1);
   const mergeFeatherClamped = clampInteger(temporalFeatherFrames, 0, 30);
   const mergeOriginalVideoForPreview = task?.video?.previewSource?.downloadUrl ?? task?.video?.editSource?.downloadUrl ?? null;
   const mergeGeneratedVideoForPreview = mergeTargetGeneration?.downloadUrl ?? null;
@@ -2365,14 +2515,14 @@ export default function App() {
   const mergeGeneratedSourceCacheKey = mergeTargetGeneration?.outputKey ?? mergeTargetGeneration?.genId ?? "merge:generated";
   const mergeFrameStripEnabled = tab === "merge" && Boolean(mergeTargetGeneration && mergeTargetSegment);
   const startBoundaryOriginalFrames = useMemo(
-    () => frameWindow(mergeInsertStartFrameClamped, 3, 3, 0, mergeMaxFrameIndex),
-    [mergeInsertStartFrameClamped, mergeMaxFrameIndex],
+    () => frameWindow(mergeInsertStartFrameEffective, 3, 3, 0, mergeMaxFrameIndex),
+    [mergeInsertStartFrameEffective, mergeMaxFrameIndex],
   );
   const endBoundaryOriginalFrames = useMemo(
     () => frameWindow(mergeEffectiveEndFrameExclusive, 3, 3, 0, mergeMaxFrameIndex),
     [mergeEffectiveEndFrameExclusive, mergeMaxFrameIndex],
   );
-  const generatedMaxFrameIndex = Math.max(0, mergeGeneratedDurationFrames - 1);
+  const generatedMaxFrameIndex = Math.max(0, mergeEffectiveDurationFrames - 1);
   const startBoundaryGeneratedFrames = useMemo(
     () => frameWindow(mergeGeneratedStartAnchor, 3, 3, 0, generatedMaxFrameIndex),
     [generatedMaxFrameIndex, mergeGeneratedStartAnchor],
@@ -2380,6 +2530,40 @@ export default function App() {
   const endBoundaryGeneratedFrames = useMemo(
     () => frameWindow(mergeGeneratedEndAnchor, 3, 3, 0, generatedMaxFrameIndex),
     [generatedMaxFrameIndex, mergeGeneratedEndAnchor],
+  );
+  const startBoundaryGeneratedSourceFrames = useMemo(
+    () =>
+      startBoundaryGeneratedFrames.map((frameIndex) =>
+        generatedOutputFrameToSourceFrame(
+          frameIndex,
+          mergeTrimStartClamped,
+          mergeVisibleDurationFramesBeforeRetime,
+          mergeEffectiveDurationFrames,
+        ),
+      ),
+    [
+      startBoundaryGeneratedFrames,
+      mergeTrimStartClamped,
+      mergeVisibleDurationFramesBeforeRetime,
+      mergeEffectiveDurationFrames,
+    ],
+  );
+  const endBoundaryGeneratedSourceFrames = useMemo(
+    () =>
+      endBoundaryGeneratedFrames.map((frameIndex) =>
+        generatedOutputFrameToSourceFrame(
+          frameIndex,
+          mergeTrimStartClamped,
+          mergeVisibleDurationFramesBeforeRetime,
+          mergeEffectiveDurationFrames,
+        ),
+      ),
+    [
+      endBoundaryGeneratedFrames,
+      mergeTrimStartClamped,
+      mergeVisibleDurationFramesBeforeRetime,
+      mergeEffectiveDurationFrames,
+    ],
   );
   const startBoundaryOriginalThumbs = useVideoFrameStrip({
     videoUrl: mergeFrameStripEnabled ? mergeOriginalVideoForPreview : null,
@@ -2391,17 +2575,25 @@ export default function App() {
   const startBoundaryGeneratedThumbs = useVideoFrameStrip({
     videoUrl: mergeFrameStripEnabled ? mergeGeneratedVideoForPreview : null,
     fps: mergeFps,
-    frameIndices: startBoundaryGeneratedFrames,
+    frameIndices: startBoundaryGeneratedSourceFrames,
     cachePrefix: "merge:start:generated",
     sourceCacheKey: mergeGeneratedSourceCacheKey,
   });
   const endBoundaryGeneratedThumbs = useVideoFrameStrip({
     videoUrl: mergeFrameStripEnabled ? mergeGeneratedVideoForPreview : null,
     fps: mergeFps,
-    frameIndices: endBoundaryGeneratedFrames,
+    frameIndices: endBoundaryGeneratedSourceFrames,
     cachePrefix: "merge:end:generated",
     sourceCacheKey: mergeGeneratedSourceCacheKey,
   });
+  const startBoundaryGeneratedDisplayThumbs = useMemo(
+    () => remapGeneratedStripItems(startBoundaryGeneratedFrames, startBoundaryGeneratedSourceFrames, startBoundaryGeneratedThumbs),
+    [startBoundaryGeneratedFrames, startBoundaryGeneratedSourceFrames, startBoundaryGeneratedThumbs],
+  );
+  const endBoundaryGeneratedDisplayThumbs = useMemo(
+    () => remapGeneratedStripItems(endBoundaryGeneratedFrames, endBoundaryGeneratedSourceFrames, endBoundaryGeneratedThumbs),
+    [endBoundaryGeneratedFrames, endBoundaryGeneratedSourceFrames, endBoundaryGeneratedThumbs],
+  );
   const endBoundaryOriginalThumbs = useVideoFrameStrip({
     videoUrl: mergeFrameStripEnabled ? mergeOriginalVideoForPreview : null,
     fps: mergeFps,
@@ -2472,7 +2664,8 @@ export default function App() {
     () => generationModelHelp(lumaModel, advancedMode, generationInputMode),
     [advancedMode, generationInputMode, lumaModel],
   );
-  const requiresEndFrameForRoute = generationInputMode === "start_end";
+  const generationModeConfig = useMemo(() => getGenerationModeConfig(generationInputMode), [generationInputMode]);
+  const requiresEndFrameForRoute = generationModeConfig.requiresEndFrame;
   const hasCompleteOutputForSelectedRange = completeGenerations.length > 0;
   const missingRouteInputsMessage = useMemo(() => {
     if (!editFirstFrame && requiresEndFrameForRoute && !editLastFrame) {
@@ -2499,8 +2692,22 @@ export default function App() {
     if (lumaModel === "wan2.7-videoedit") {
       return "Uses the selected working-range video plus the selected edited start frame as reference_image. Prompt should describe only the intended edit.";
     }
+    if (lumaModel === "happy-horse-video-edit") {
+      return "Uses the selected working-range video plus the selected edited start frame as @Image1. Prompt must reference @Image1.";
+    }
+    if (lumaModel === "happy-horse-image-to-video") {
+      return "Uses only the selected edited start frame. No source working-range video is sent.";
+    }
+    if (lumaModel === "wan2.7-i2v") {
+      return generationInputMode === "start_end"
+        ? "Uses the selected edited start and end frames only. No source working-range video is sent."
+        : "Uses only the selected edited start frame. No source working-range video is sent.";
+    }
     if (lumaModel === "runway-gen4-aleph") {
       return "Uses the selected working-range video plus the selected edited start frame as an image reference. Prompt should describe the intended transformation while preserving motion and camera continuity. Runway may center-crop to the chosen output ratio.";
+    }
+    if (lumaModel === "sora-2-image-to-video") {
+      return "Uses only the selected edited start frame. No source working-range video is sent.";
     }
     if (lumaModel === "wan2.2-a14b" || lumaModel === "runway-gen4.5") {
       return "Start frame variant is taken automatically from your Edit frames selection.";
@@ -2523,11 +2730,25 @@ export default function App() {
     if (lumaModel === "wan2.7-videoedit") {
       return "Change the horse into the white unicorn, keep the background and motion the same.";
     }
+    if (lumaModel === "happy-horse-video-edit") {
+      return "change the horse into the white unicorn in @Image1 and keep the background and motion exactly the same";
+    }
+    if (lumaModel === "happy-horse-image-to-video") {
+      return "Animate from this first frame with clear subject motion, stable background continuity and coherent camera movement.";
+    }
+    if (lumaModel === "wan2.7-i2v") {
+      return generationInputMode === "start_end"
+        ? "Animate from the first frame to the final frame with coherent camera motion and stable subject detail."
+        : "Animate from this first frame with clear subject motion, camera motion and scene continuity.";
+    }
     if (lumaModel === "runway-gen4-aleph") {
       return "Transform the horse into the white unicorn from the reference image while preserving camera movement, timing and background continuity.";
     }
+    if (lumaModel === "sora-2-image-to-video") {
+      return "Animate from this first frame with clear subject motion, camera motion and scene continuity.";
+    }
     return "Optional generation prompt";
-  }, [lumaModel]);
+  }, [generationInputMode, lumaModel]);
   const generationPromptError = useMemo(() => {
     const promptValue = lumaPrompt.trim();
     if (lumaModel === "wan2.2-animate") return null;
@@ -2550,11 +2771,27 @@ export default function App() {
     if (lumaModel === "wan2.7-videoedit" && !promptValue) {
       return "Wan 2.7 VideoEdit requires a prompt describing the change you want to make.";
     }
+    if (lumaModel === "happy-horse-video-edit") {
+      if (!promptValue) return "Happy Horse 1.0 Video Edit requires a prompt that references @Image1.";
+      if (!promptValue.includes("@Image1")) return "Happy Horse 1.0 Video Edit prompt must include @Image1.";
+      return null;
+    }
+    if (lumaModel === "happy-horse-image-to-video" && !promptValue) {
+      return "Happy Horse 1.0 Image to Video requires a prompt describing the intended motion from the first frame.";
+    }
+    if (lumaModel === "wan2.7-i2v" && !promptValue) {
+      return generationInputMode === "start_end"
+        ? "Wan 2.7 Image to Video requires a prompt describing the motion and the transition between the start and end frames."
+        : "Wan 2.7 Image to Video requires a prompt describing the intended motion from the first frame.";
+    }
     if (lumaModel === "runway-gen4-aleph" && !promptValue) {
       return "Runway Gen-4 Aleph requires a prompt describing the intended transformation.";
     }
+    if (lumaModel === "sora-2-image-to-video" && !promptValue) {
+      return "Sora 2 Image to Video requires a prompt describing the intended motion from the first frame.";
+    }
     return null;
-  }, [lumaModel, lumaPrompt]);
+  }, [generationInputMode, lumaModel, lumaPrompt]);
 
   const uploadAssets = useMemo<LibraryAsset[]>(() => {
     const assets: LibraryAsset[] = [];
@@ -2698,8 +2935,8 @@ export default function App() {
     if (mergeInsertStartFrame !== mergeInsertStartFrameClamped) {
       setMergeInsertStartFrame(mergeInsertStartFrameClamped);
     }
-    if (mergeTrimStartFrames !== mergeTrimStartClamped) {
-      setMergeTrimStartFrames(mergeTrimStartClamped);
+    if (mergeTrimStartFrames !== mergeTrimStartUserClamped) {
+      setMergeTrimStartFrames(mergeTrimStartUserClamped);
     }
     if (mergeTrimEndFrames !== mergeTrimEndClamped) {
       setMergeTrimEndFrames(mergeTrimEndClamped);
@@ -2707,17 +2944,140 @@ export default function App() {
   }, [
     mergeInsertStartFrame,
     mergeInsertStartFrameClamped,
+    mergeInsertStartFrameLowerBound,
+    mergeInsertStartFrameUpperBound,
     mergeTrimEndClamped,
     mergeTrimEndFrames,
     mergeTrimStartClamped,
+    mergeTrimStartUserClamped,
     mergeTrimStartFrames,
   ]);
 
   useEffect(() => {
     setMergeAlignmentSuggestion(null);
+    setMergeAlignmentSuggestionJobId(null);
+    setMergeAlignmentSuggestionError(null);
+    setReconcileTimingJobId(null);
+    setReconcileTimingError(null);
     setMergeApplyRetime(false);
     setMergePlaybackRate(1);
   }, [mergeTargetGeneration?.genId]);
+
+  useEffect(() => {
+    const state = mergeTargetGeneration?.mergeAlignmentSuggestion;
+    if (!state || typeof state !== "object") return;
+    const stateJobStatus = state.jobId ? jobStatusById.get(state.jobId) : undefined;
+    if (
+      (state.status === "queued" || state.status === "running") &&
+      state.jobId &&
+      stateJobStatus !== "complete" &&
+      stateJobStatus !== "failed" &&
+      (!mergeAlignmentSuggestionJobId || state.jobId === mergeAlignmentSuggestionJobId)
+    ) {
+      setMergeAlignmentSuggestionJobId(state.jobId);
+      setMergeAlignmentSuggestionError(null);
+      return;
+    }
+    if (
+      state.status === "complete" &&
+      state.suggestion &&
+      (mergeAlignmentSuggestionJobId ? state.jobId === mergeAlignmentSuggestionJobId : !mergeAlignmentSuggestion)
+    ) {
+      const segmentStartFrame = mergeTargetSegment?.startFrame ?? 0;
+      setMergeInsertStartFrame(state.suggestion.suggested.startFrameOverride - segmentStartFrame);
+      setMergeTrimStartFrames(state.suggestion.suggested.trimStartFrames);
+      setMergeTrimEndFrames(state.suggestion.suggested.trimEndFrames);
+      setMergePlaybackRate(state.suggestion.analysis.suggestedPlaybackRate || 1);
+      setMergeApplyRetime(state.suggestion.analysis.recommendation === "retime_recommended");
+      setMergeAlignmentSuggestion(state.suggestion);
+      setMergeAlignmentSuggestionJobId(null);
+      setMergeAlignmentSuggestionError(null);
+      return;
+    }
+    if (state.status === "failed" && (!mergeAlignmentSuggestionJobId || state.jobId === mergeAlignmentSuggestionJobId)) {
+      setMergeAlignmentSuggestionJobId(null);
+      setMergeAlignmentSuggestionError(state.error || "Alignment suggestion failed");
+    }
+  }, [
+    jobStatusById,
+    mergeAlignmentSuggestion,
+    mergeAlignmentSuggestionJobId,
+    mergeTargetSegment?.startFrame,
+    mergeTargetGeneration?.mergeAlignmentSuggestion,
+    setMergeInsertStartFrame,
+    setMergeTrimEndFrames,
+    setMergeTrimStartFrames,
+  ]);
+
+  useEffect(() => {
+    if (!mergeAlignmentSuggestionJobId || !mergeAlignmentSuggestionJob) return;
+    if (mergeAlignmentSuggestionJob.status === "failed") {
+      setMergeAlignmentSuggestionJobId(null);
+      setMergeAlignmentSuggestionError(mergeAlignmentSuggestionJob.error || "Alignment suggestion failed");
+      return;
+    }
+    if (mergeAlignmentSuggestionJob.status !== "complete") return;
+    const result = mergeAlignmentSuggestionJob.resultRefs?.suggestion;
+    if (!result || typeof result !== "object") {
+      setMergeAlignmentSuggestionJobId(null);
+      setMergeAlignmentSuggestionError("Alignment suggestion completed without a result payload");
+      return;
+    }
+    const suggestion = result as NonNullable<typeof mergeAlignmentSuggestion>;
+    const segmentStartFrame = mergeTargetSegment?.startFrame ?? 0;
+    setMergeInsertStartFrame(suggestion.suggested.startFrameOverride - segmentStartFrame);
+    setMergeTrimStartFrames(suggestion.suggested.trimStartFrames);
+    setMergeTrimEndFrames(suggestion.suggested.trimEndFrames);
+    setMergePlaybackRate(suggestion.analysis.suggestedPlaybackRate || 1);
+    setMergeApplyRetime(suggestion.analysis.recommendation === "retime_recommended");
+    setMergeAlignmentSuggestion(suggestion);
+    setMergeAlignmentSuggestionJobId(null);
+    setMergeAlignmentSuggestionError(null);
+  }, [
+    mergeAlignmentSuggestionJob,
+    mergeAlignmentSuggestionJobId,
+    mergeTargetSegment?.startFrame,
+    setMergeInsertStartFrame,
+    setMergeTrimEndFrames,
+    setMergeTrimStartFrames,
+  ]);
+
+  useEffect(() => {
+    const state = mergeTargetGeneration?.timingReconcile;
+    if (!state || typeof state !== "object") return;
+    const stateJobStatus = state.jobId ? jobStatusById.get(state.jobId) : undefined;
+    if (
+      (state.status === "queued" || state.status === "running") &&
+      state.jobId &&
+      stateJobStatus !== "complete" &&
+      stateJobStatus !== "failed" &&
+      (!reconcileTimingJobId || state.jobId === reconcileTimingJobId)
+    ) {
+      setReconcileTimingJobId(state.jobId);
+      setReconcileTimingError(null);
+      return;
+    }
+    if (state.status === "failed" && (!reconcileTimingJobId || state.jobId === reconcileTimingJobId)) {
+      setReconcileTimingJobId(null);
+      setReconcileTimingError(state.error || "Timing reconcile failed");
+    }
+  }, [jobStatusById, mergeTargetGeneration?.timingReconcile, reconcileTimingJobId]);
+
+  useEffect(() => {
+    if (!reconcileTimingJobId || !reconcileTimingJob) return;
+    if (reconcileTimingJob.status === "failed") {
+      setReconcileTimingJobId(null);
+      setReconcileTimingError(reconcileTimingJob.error || "Timing reconcile failed");
+      return;
+    }
+    if (reconcileTimingJob.status !== "complete") return;
+    const reconciledGenId = typeof reconcileTimingJob.resultRefs?.genId === "string" ? reconcileTimingJob.resultRefs.genId : null;
+    if (reconciledGenId) {
+      selectSegmentGeneration(reconciledGenId);
+    }
+    setReconcileTimingJobId(null);
+    setReconcileTimingError(null);
+  }, [reconcileTimingJob, reconcileTimingJobId, selectSegmentGeneration]);
 
   function mapPointerToMaskCoordinates(event: PointerEvent<HTMLCanvasElement>, canvas: HTMLCanvasElement) {
     const maskCanvas = patchMaskCanvasRef.current;
@@ -2994,6 +3354,40 @@ export default function App() {
         ],
       };
     }
+    if (modelName === "happy-horse-video-edit") {
+      return {
+        title: "Happy Horse 1.0 Video Edit",
+        lines: [
+          "Uses the selected working-range video for motion and the selected edited start frame as @Image1.",
+          "Prompt must reference @Image1 so the model uses the supplied edited frame as the visual target.",
+          "Example prompt: change the horse into the white unicorn in @Image1 and keep the background and motion exactly the same",
+        ],
+      };
+    }
+    if (modelName === "happy-horse-image-to-video") {
+      return {
+        title: "Happy Horse 1.0 Image to Video",
+        lines: [
+          "Uses only the selected start frame and prompt. No source working-range video is sent.",
+          "Resolution can be set to 720p or 1080p.",
+          "Happy Horse supports clips from 3 to 15 seconds in this flow.",
+        ],
+      };
+    }
+    if (modelName === "wan2.7-i2v") {
+      return {
+        title: inputMode === "start_end" ? "Wan 2.7 Image to Video (Start/End)" : "Wan 2.7 Image to Video",
+        lines: [
+          inputMode === "start_end"
+            ? "Uses the selected start and end frames only. No source working-range video is sent."
+            : "Uses the selected start frame only. No source working-range video is sent.",
+          "Supports an optional negative prompt plus 720p or 1080p output. This app caps the path at 10 seconds.",
+          inputMode === "start_end"
+            ? "Best prompt style: describe how motion develops from the start frame into the supplied end frame while keeping camera motion coherent."
+            : "Best prompt style: describe the subject motion, camera movement and scene continuity clearly from the first frame.",
+        ],
+      };
+    }
     if (modelName === "kling-2.6") {
       return {
         title: inputMode === "start_only" ? "Kling 2.6 (Start Frame)" : "Kling 2.6 Start/End",
@@ -3015,6 +3409,16 @@ export default function App() {
           "Uses only the selected start frame as the initial frame. It does not use source working-range motion.",
           "Best prompt style: describe the motion and evolution from frame one while preserving composition.",
           "Avoid conflicting scene changes in one prompt; short and specific prompts usually hold frame identity better.",
+        ],
+      };
+    }
+    if (modelName === "sora-2-image-to-video") {
+      return {
+        title: "Sora 2 Image to Video",
+        lines: [
+          "Uses only the selected start frame. No source working-range video is sent.",
+          "Resolution can be auto, 720p or 1080p. This app exposes up to 10 seconds in the UI and trims longer provider outputs back to the requested duration when needed.",
+          "Best prompt style: describe the motion, camera movement and continuity from the first frame clearly and concretely.",
         ],
       };
     }
@@ -4206,7 +4610,7 @@ export default function App() {
   const editFrameTabCtx = useMemo<EditFrameTabCtx>(
     () => ({
       setEditFrameTab,
-      allowEndFrameTab: generationInputMode === "start_end",
+      allowEndFrameTab: generationModeConfig.requiresEndFrame,
       openRefineModalForVariant: (variantId) => {
         openQualityMatchForVariant(activeEditFrame, variantId);
       },
@@ -4265,7 +4669,7 @@ export default function App() {
       formatCompactTimestamp,
     }),
     [
-      generationInputMode,
+      generationModeConfig.requiresEndFrame,
       activeEditFrame,
       handleTabChange,
       missingRouteInputsMessage,
@@ -4303,7 +4707,7 @@ export default function App() {
     () => ({
       refineFrameTab,
       setRefineFrameTab,
-      allowEndFrameTab: generationInputMode === "start_end",
+      allowEndFrameTab: generationModeConfig.requiresEndFrame,
       activeRefineFrame,
       refineGroups: activeRefineGroups,
       focusedEditedVariantId: activeRefineFocusedEditedVariantId,
@@ -4325,7 +4729,7 @@ export default function App() {
       activeRefineFocusedEditedVariantId,
       activeRefineGroups,
       formatCompactTimestamp,
-      generationInputMode,
+      generationModeConfig.requiresEndFrame,
       handleDeleteAsset,
       queryClient,
       refineFrameTab,
@@ -4369,6 +4773,12 @@ export default function App() {
       setReplicateKlingV3Mode,
       wan27Resolution,
       setWan27Resolution,
+      happyHorseResolution,
+      setHappyHorseResolution,
+      wan27NegativePrompt,
+      setWan27NegativePrompt,
+      sora2Resolution,
+      setSora2Resolution,
       preserveFrames,
       setPreserveFrames,
       lumaPrompt,
@@ -4439,6 +4849,9 @@ export default function App() {
       replicateKlingMode,
       replicateKlingV3Mode,
       wan27Resolution,
+      happyHorseResolution,
+      wan27NegativePrompt,
+      sora2Resolution,
       preserveFrames,
       lumaPrompt,
       lumaContinuationPrompt,
@@ -4517,17 +4930,21 @@ export default function App() {
       mergeOriginalDurationFrames,
       formatFramesAndSeconds,
       mergeFps,
+      mergeVisibleDurationFramesBeforeRetime,
       mergeEffectiveDurationFrames,
-      mergeInsertStartFrameClamped,
+      mergeInsertStartFrameLowerBound,
+      mergeInsertStartFrameEffective,
+      mergeInsertStartFrameUpperBound,
       mergeEffectiveEndFrameExclusive,
+      mergeEffectiveEndFrameInclusive,
       mergeEndOffsetFrames,
       mergeGeneratedStartAnchor,
       mergeFeatherClamped,
       startBoundaryOriginalThumbs,
-      startBoundaryGeneratedThumbs,
+      startBoundaryGeneratedThumbs: startBoundaryGeneratedDisplayThumbs,
       MergeBoundaryPreview,
       mergeGeneratedEndAnchor,
-      endBoundaryGeneratedThumbs,
+      endBoundaryGeneratedThumbs: endBoundaryGeneratedDisplayThumbs,
       endBoundaryOriginalThumbs,
       mergeSourceWidth,
       mergeSourceHeight,
@@ -4537,10 +4954,16 @@ export default function App() {
       mergePlaybackRate,
       setMergePlaybackRate,
       suggestMergeAlignment: suggestMergeAlignmentMutation.mutate,
-      isSuggestingMergeAlignment: suggestMergeAlignmentMutation.isPending,
+      isSuggestingMergeAlignment,
+      reconcileTiming: reconcileTimingMutation.mutate,
+      isReconcilingTiming,
       mergeAlignmentSuggestion,
       mergeAlignmentSuggestionError:
-        suggestMergeAlignmentMutation.error instanceof Error ? suggestMergeAlignmentMutation.error.message : null,
+        mergeAlignmentSuggestionError ??
+        (suggestMergeAlignmentMutation.error instanceof Error ? suggestMergeAlignmentMutation.error.message : null),
+      reconcileTimingError:
+        reconcileTimingError ??
+        (reconcileTimingMutation.error instanceof Error ? reconcileTimingMutation.error.message : null),
       extendGeneration: extendSegmentGenerationMutation.mutate,
       isExtendingGeneration: extendSegmentGenerationMutation.isPending,
       extendGenerationError:
@@ -4572,16 +4995,20 @@ export default function App() {
       mergeOriginalEndFrameExclusive,
       mergeOriginalDurationFrames,
       mergeFps,
+      mergeVisibleDurationFramesBeforeRetime,
       mergeEffectiveDurationFrames,
-      mergeInsertStartFrameClamped,
+      mergeInsertStartFrameLowerBound,
+      mergeInsertStartFrameEffective,
+      mergeInsertStartFrameUpperBound,
       mergeEffectiveEndFrameExclusive,
+      mergeEffectiveEndFrameInclusive,
       mergeEndOffsetFrames,
       mergeGeneratedStartAnchor,
       mergeFeatherClamped,
       startBoundaryOriginalThumbs,
-      startBoundaryGeneratedThumbs,
+      startBoundaryGeneratedDisplayThumbs,
       mergeGeneratedEndAnchor,
-      endBoundaryGeneratedThumbs,
+      endBoundaryGeneratedDisplayThumbs,
       endBoundaryOriginalThumbs,
       mergeSourceWidth,
       mergeSourceHeight,
@@ -4589,9 +5016,13 @@ export default function App() {
       mergeApplyRetime,
       mergePlaybackRate,
       suggestMergeAlignmentMutation.mutate,
-      suggestMergeAlignmentMutation.isPending,
+      isSuggestingMergeAlignment,
+      reconcileTimingMutation.mutate,
+      isReconcilingTiming,
       mergeAlignmentSuggestion,
       suggestMergeAlignmentMutation.error,
+      reconcileTimingMutation.error,
+      reconcileTimingError,
       extendSegmentGenerationMutation.mutate,
       extendSegmentGenerationMutation.isPending,
       extendSegmentGenerationMutation.error,

@@ -12,6 +12,9 @@ class FalError(RuntimeError):
 
 FAL_QUEUE_ENDPOINT = "https://queue.fal.run"
 FAL_SEEDANCE_REFERENCE_TO_VIDEO_MODEL = "bytedance/seedance-2.0/reference-to-video"
+FAL_SORA_2_IMAGE_TO_VIDEO_PRO_MODEL = "fal-ai/sora-2/image-to-video/pro"
+FAL_HAPPY_HORSE_VIDEO_EDIT_MODEL = "alibaba/happy-horse/video-edit"
+FAL_HAPPY_HORSE_IMAGE_TO_VIDEO_MODEL = "alibaba/happy-horse/image-to-video"
 CONTENT_POLICY_MESSAGE = (
     "fal.ai rejected the Seedance request because the reference image or video appears to contain "
     "a real-person likeness or other private information. This endpoint does not expose a setting "
@@ -69,6 +72,33 @@ def submit_seedance_reference_to_video(*, api_key: str, input: dict[str, Any]) -
     return _request_json(
         "POST",
         f"{FAL_QUEUE_ENDPOINT}/{FAL_SEEDANCE_REFERENCE_TO_VIDEO_MODEL}",
+        api_key=api_key,
+        payload=input,
+    )
+
+
+def submit_sora_2_image_to_video_pro(*, api_key: str, input: dict[str, Any]) -> dict[str, Any]:
+    return _request_json(
+        "POST",
+        f"{FAL_QUEUE_ENDPOINT}/{FAL_SORA_2_IMAGE_TO_VIDEO_PRO_MODEL}",
+        api_key=api_key,
+        payload=input,
+    )
+
+
+def submit_happy_horse_video_edit(*, api_key: str, input: dict[str, Any]) -> dict[str, Any]:
+    return _request_json(
+        "POST",
+        f"{FAL_QUEUE_ENDPOINT}/{FAL_HAPPY_HORSE_VIDEO_EDIT_MODEL}",
+        api_key=api_key,
+        payload=input,
+    )
+
+
+def submit_happy_horse_image_to_video(*, api_key: str, input: dict[str, Any]) -> dict[str, Any]:
+    return _request_json(
+        "POST",
+        f"{FAL_QUEUE_ENDPOINT}/{FAL_HAPPY_HORSE_IMAGE_TO_VIDEO_MODEL}",
         api_key=api_key,
         payload=input,
     )

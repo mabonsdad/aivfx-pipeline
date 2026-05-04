@@ -212,12 +212,17 @@ export const apiClient = {
     model: string;
     mode: string;
     prompt?: string | null;
-    videoAssetKey: string;
+    negativePrompt?: string | null;
+    videoAssetKey?: string | null;
     firstFrameAssetKey: string;
     lastFrameAssetKey?: string | null;
+    durationSeconds?: number;
     replicateKlingMode?: "std" | "pro";
     replicateKlingV3Mode?: "standard" | "pro";
     wan27Resolution?: "720p" | "1080p";
+    sora2Resolution?: "auto" | "720p" | "1080p";
+    happyHorseResolution?: "720p" | "1080p";
+    preserveFrames?: boolean;
   }) => api<{ requestId: string; jobId: string }>(`/api/v1/video-generations/reference-video`, { method: "POST", body: JSON.stringify(payload) }),
   initQualityMatchMaskUpload: (
     taskId: string,
@@ -505,6 +510,9 @@ export const apiClient = {
         | "ray-2"
         | "ray-flash-2"
         | "runway-gen4.5"
+        | "sora-2-image-to-video"
+        | "happy-horse-video-edit"
+        | "happy-horse-image-to-video"
         | "runway-gen4-aleph"
         | "kling-2.6"
         | "kling-o1"
@@ -514,14 +522,18 @@ export const apiClient = {
         | "veo-3.1-fast"
         | "wan2.2-a14b"
         | "wan2.2-animate"
-        | "wan2.7-videoedit";
+        | "wan2.7-videoedit"
+        | "wan2.7-i2v";
       mode: string;
       prompt?: string;
+      negativePrompt?: string;
       firstFrameVariantId?: string;
       lastFrameVariantId?: string;
       replicateKlingMode?: "std" | "pro";
       replicateKlingV3Mode?: "standard" | "pro";
       wan27Resolution?: "720p" | "1080p";
+      sora2Resolution?: "auto" | "720p" | "1080p";
+      happyHorseResolution?: "720p" | "1080p";
       preserveFrames?: boolean;
     },
   ) => api<{ jobId: string; genId: string }>(`/tasks/${taskId}/segments/${segmentId}/generate`, { method: "POST", body: JSON.stringify(payload) }),
@@ -613,28 +625,22 @@ export const apiClient = {
   ) =>
     api<{ jobId: string }>(`/tasks/${taskId}/merge`, { method: "POST", body: JSON.stringify(payload) }),
   suggestMergeAlignment: (taskId: string, genId: string) =>
-    api<{
-      suggested: {
-        startFrameOverride: number;
-        trimStartFrames: number;
-        trimEndFrames: number;
-      };
-      analysis: {
-        sourceFrameOffset: number;
-        sourceOffsetSec: number;
-        earlyMedianDriftFrames: number;
-        lateMedianDriftFrames: number;
-        residualEndFrames: number;
-        meanAbsDriftFrames: number;
-        residualMeanAbsDriftFrames: number;
-        suggestedPlaybackRate: number;
-        recommendation: string;
-        confidence: number;
-        notes: string[];
-      };
-    }>(`/tasks/${taskId}/segment-generations/${genId}/merge-alignment-suggestion`, {
+    api<{ jobId: string; alreadyRunning?: boolean }>(`/tasks/${taskId}/segment-generations/${genId}/merge-alignment-suggestion`, {
       method: "POST",
       body: "{}",
+    }),
+  reconcileSegmentGenerationTiming: (
+    taskId: string,
+    genId: string,
+    payload: {
+      trimStartFrames: number;
+      trimEndFrames: number;
+      playbackRate?: number;
+    },
+  ) =>
+    api<{ jobId: string; genId: string; alreadyRunning?: boolean }>(`/tasks/${taskId}/segment-generations/${genId}/reconcile-timing`, {
+      method: "POST",
+      body: JSON.stringify(payload),
     }),
   runMotionSyncQc: (taskId: string, exportId: string, payload?: { force?: boolean }) =>
     api<{ jobId: string; alreadyRunning?: boolean }>(`/tasks/${taskId}/exports/${exportId}/motion-qc`, {

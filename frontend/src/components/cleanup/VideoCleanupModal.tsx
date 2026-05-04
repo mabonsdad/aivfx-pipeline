@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 
 import { apiClient } from "../../api/client";
+import { StatusNotice } from "../layout/UiFeedback";
 import { useCleanupTrackStore, type CleanupPreviewMode } from "../../store/cleanupTrackStore";
 import type { SegmentGeneration, TaskDetail, VideoCleanupSettings, VideoCleanupTrack } from "../../types/api";
 
@@ -53,6 +54,12 @@ type RuntimeEstimateInput = {
   trackingDensity: VideoCleanupSettings["trackingDensity"];
 };
 
+type CleanupSyncAssessment = {
+  variant: "info" | "warning" | "error";
+  title: string;
+  lines: string[];
+};
+
 function mergeSettings(track: VideoCleanupTrack | null, pending: Partial<VideoCleanupSettings>): VideoCleanupSettings {
   return {
     ...(track?.settings ?? DEFAULT_SETTINGS),
@@ -80,6 +87,103 @@ function estimateCleanupRuntimeMinutes(input: RuntimeEstimateInput): { minMinute
   const minMinutes = Math.max(2, Math.round((6 * baselineRatio * densityMultiplier) * 10) / 10);
   const maxMinutes = Math.max(minMinutes + 1, Math.round((8 * baselineRatio * densityMultiplier) * 10) / 10);
   return { minMinutes, maxMinutes };
+}
+
+function formatFpsLabel(fps: { num: number; den: number } | null | undefined): string | null {
+  if (!fps?.num || !fps?.den) return null;
+  const value = fps.num / fps.den;
+  if (!Number.isFinite(value) || value <= 0) return null;
+  return `${value.toFixed(value % 1 === 0 ? 0 : 2)}fps`;
+}
+
+function formatFrameAndSeconds(frameCount: number | null | undefined, fps: { num: number; den: number } | null | undefined): string | null {
+  if (frameCount == null || frameCount < 0) return null;
+  if (!fps?.num || !fps?.den) return `${frameCount} frames`;
+  const fpsValue = fps.num / fps.den;
+  if (!Number.isFinite(fpsValue) || fpsValue <= 0) return `${frameCount} frames`;
+  return `${frameCount} frames / ${(frameCount / fpsValue).toFixed(2)}s`;
+}
+
+function assessCleanupSync(generation: SegmentGeneration | null): CleanupSyncAssessment | null {
+  if (!generation) return null;
+  const timing = generation.generationSettings?.sourceSegmentTiming ?? null;
+  const stored = generation.generationSettings?.storedOutput ?? null;
+  const analysis = generation.mergeAlignmentSuggestion?.suggestion?.analysis ?? null;
+  const sourceOffset =
+    generation.generationSettings?.timelineAlignment?.sourceFrameOffset ??
+    generation.alignment?.sourceFrameOffset ??
+    generation.sourceFrameOffset ??
+    analysis?.sourceFrameOffset ??
+    0;
+  const startDrift = analysis?.earlyMedianDriftFrames ?? 0;
+  const endDrift = analysis?.lateMedianDriftFrames ?? 0;
+  const residualEnd = analysis?.residualEndFrames ?? 0;
+  const sourceTiming = formatFrameAndSeconds(timing?.durationFrames, timing?.fps ?? null);
+  const outputTiming = formatFrameAndSeconds(stored?.frameCount, stored?.fps ?? null);
+  const sourceFps = formatFpsLabel(timing?.fps ?? null);
+  const outputFps = formatFpsLabel(stored?.fps ?? null);
+  const timingLineParts = [sourceTiming ? `source ${sourceTiming}` : null, outputTiming ? `output ${outputTiming}` : null].filter(Boolean);
+  const fpsLineParts = [sourceFps ? `source ${sourceFps}` : null, outputFps ? `output ${outputFps}` : null].filter(Boolean);
+
+  if (!analysis) {
+    return {
+      variant: "warning",
+      title: "Timing has not been checked yet",
+      lines: [
+        "Run Suggest alignment in Post Process before cleanup if the model may have dropped opening frames or drifted by the end of the clip.",
+        ...(timingLineParts.length ? [timingLineParts.join(" · ")] : []),
+        ...(fpsLineParts.length ? [fpsLineParts.join(" · ")] : []),
+        "Cleanup restores source pixels outside the tracked keep region. It does not correct timing drift.",
+      ],
+    };
+  }
+
+  const alignmentLine = `Start offset ${sourceOffset >= 0 ? `+${sourceOffset}` : sourceOffset}f · early drift ${startDrift >= 0 ? `+${startDrift}` : startDrift}f · late drift ${endDrift >= 0 ? `+${endDrift}` : endDrift}f`;
+  const residualLine = `End residual ${residualEnd >= 0 ? `+${residualEnd}` : residualEnd}f · suggested playback ${(analysis.suggestedPlaybackRate ?? 1).toFixed(4)}x`;
+
+  if (analysis.recommendation === "rerender_recommended") {
+    return {
+      variant: "error",
+      title: "Timing should be fixed before cleanup",
+      lines: [
+        alignmentLine,
+        residualLine,
+        ...(timingLineParts.length ? [timingLineParts.join(" · ")] : []),
+        "Merge analysis recommends rerendering. Cleanup will not solve drift or unstable timing through the shot.",
+      ],
+    };
+  }
+
+  if (
+    analysis.recommendation === "retime_recommended" ||
+    analysis.recommendation === "piecewise_reconcile_recommended" ||
+    Math.abs(endDrift) > 1 ||
+    Math.abs(residualEnd) > 1
+  ) {
+    return {
+      variant: "warning",
+      title: "Timing is drifting across the clip",
+      lines: [
+        alignmentLine,
+        residualLine,
+        ...(timingLineParts.length ? [timingLineParts.join(" · ")] : []),
+        analysis.recommendation === "piecewise_reconcile_recommended"
+          ? "Uniform retime is unlikely to be enough here. Cleanup should wait until timing is reconciled more locally across the shot."
+          : "Use merge alignment or uniform retime first. Cleanup should come after timing is close enough.",
+      ],
+    };
+  }
+
+  return {
+    variant: "info",
+    title: "Timing looks close enough for cleanup",
+    lines: [
+      alignmentLine,
+      ...(timingLineParts.length ? [timingLineParts.join(" · ")] : []),
+      ...(fpsLineParts.length ? [fpsLineParts.join(" · ")] : []),
+      "Cleanup can now focus on restoring source pixels outside the tracked keep region rather than trying to hide temporal issues.",
+    ],
+  };
 }
 
 function cleanupStageSummary(track: VideoCleanupTrack | null): CleanupStageSummary | null {
@@ -296,6 +400,7 @@ export default function VideoCleanupModal({
     [activeTrack?.settings.trackingDensity, activeTrack?.source.fpsDen, activeTrack?.source.fpsNum, activeTrack?.source.frameCount, effectiveSettings.trackingDensity, segment?.durationFrames, task?.video.editSource?.fps.den, task?.video.editSource?.fps.num],
   );
   const stageSummary = useMemo(() => cleanupStageSummary(activeTrack), [activeTrack]);
+  const syncAssessment = useMemo(() => assessCleanupSync(generation), [generation]);
   const maskEditorBaseImageUrl = useMemo(() => {
     if (!selectedManifestFrame) return null;
     if (maskEditorBaseLayer === "source") {
@@ -692,9 +797,9 @@ export default function VideoCleanupModal({
       <div className="flex h-[92vh] w-[min(1400px,96vw)] flex-col overflow-hidden rounded-2xl border border-ink/15 bg-card text-ink" onClick={(event) => event.stopPropagation()}>
         <div className="flex items-start justify-between border-b border-ink/10 px-5 py-4">
           <div>
-            <p className="text-xs uppercase tracking-[0.22em] text-ink/45">Video Cleanup</p>
-            <h3 className="text-xl font-semibold">Tracked keep-mask refine for {generation.luma.model}</h3>
-            <p className="text-sm text-ink/60">Track the first-frame keep mask through this generated segment, review drift, and restore original pixels outside the keep region.</p>
+            <p className="text-xs uppercase tracking-[0.22em] text-ink/45">Post Process Cleanup</p>
+            <h3 className="text-xl font-semibold">Tracked keep-mask cleanup for {generation.luma.model}</h3>
+            <p className="text-sm text-ink/60">Best used after extension or stitch review, once timing is close enough. This tool restores source pixels outside the tracked keep region; it does not fix motion drift.</p>
           </div>
           <button type="button" className="rounded-full border border-ink/15 px-3 py-1.5 text-sm text-ink/70 hover:bg-bg" onClick={onClose}>
             Close
@@ -723,8 +828,8 @@ export default function VideoCleanupModal({
             </div>
 
             <div className="mt-6 rounded-xl border border-ink/10 bg-white p-3">
-              <p className="text-sm font-semibold">Start a new cleanup track</p>
-              <p className="mt-1 text-xs text-ink/60">Seed from a first-frame Quality Match analysis on the segment start frame.</p>
+              <p className="text-sm font-semibold">Create cleanup track</p>
+              <p className="mt-1 text-xs text-ink/60">Seed from a start-frame Quality Match analysis, then track that keep region through the chosen output.</p>
               <label className="mt-3 block">
                 <span className="mb-1 block text-xs font-medium text-ink/55">Tracking density</span>
                 <select
@@ -772,6 +877,9 @@ export default function VideoCleanupModal({
               <p className="mt-2 text-xs text-ink/55">
                 Estimated runtime for this clip: {runtimeEstimate.minMinutes}-{runtimeEstimate.maxMinutes} minutes with {trackingDensityLabel(effectiveSettings.trackingDensity).toLowerCase()} tracking.
               </p>
+              <p className="mt-2 text-xs text-ink/55">
+                Current implementation seeds from the start frame only. If the clip has opening-frame drop or accumulating drift, resolve timing first rather than forcing cleanup to absorb it.
+              </p>
             </div>
 
             {uiError ? <p className="mt-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{uiError}</p> : null}
@@ -788,12 +896,21 @@ export default function VideoCleanupModal({
               </div>
             ) : (
               <div className="space-y-4">
+                {syncAssessment ? (
+                  <StatusNotice variant={syncAssessment.variant} title={syncAssessment.title}>
+                    <div className="space-y-1.5">
+                      {syncAssessment.lines.map((line) => (
+                        <p key={line}>{line}</p>
+                      ))}
+                    </div>
+                  </StatusNotice>
+                ) : null}
                 {stageSummary ? (
                   <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
                     <p className="font-semibold">{stageSummary.title}</p>
                     <p className="mt-1 text-sm text-amber-800">{stageSummary.detail}</p>
                     <p className="mt-2 text-xs text-amber-700">
-                      For an 8-second 720p Luma clip, standard tracking usually takes about 6-8 minutes. This {trackingDensityLabel(activeTrack.settings.trackingDensity).toLowerCase()} track is estimated at roughly {runtimeEstimate.minMinutes}-{runtimeEstimate.maxMinutes} minutes.
+                      Standard tracking on a short clip usually takes a few minutes. This {trackingDensityLabel(activeTrack.settings.trackingDensity).toLowerCase()} track is estimated at roughly {runtimeEstimate.minMinutes}-{runtimeEstimate.maxMinutes} minutes.
                     </p>
                   </div>
                 ) : null}
@@ -982,7 +1099,7 @@ export default function VideoCleanupModal({
 
               <div className="rounded-xl border border-ink/10 bg-white p-3">
                 <p className="text-sm font-semibold">Apply cleanup</p>
-                <p className="mt-1 text-xs text-ink/60">Render a cleaned segment and attach it back to the task as a merge-ready generation variant.</p>
+                <p className="mt-1 text-xs text-ink/60">Render a cleaned segment and attach it back to the task as a post-cleanup generation variant for final merge review.</p>
                 {activeTrack?.apply.outputSegmentUrl ? (
                   <a href={activeTrack.apply.outputSegmentUrl} target="_blank" rel="noreferrer" className="mt-3 inline-block text-sm text-accent underline">
                     Download current cleaned output

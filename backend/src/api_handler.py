@@ -66,6 +66,7 @@ from src.models.schemas import (
     QualityMatchMaskUploadRequest,
     QualityMatchPreviewRequest,
     QualityMatchSamRequest,
+    ReconcileTimingRequest,
     PatchInitRequest,
     PatchSubmitRequest,
     ReferenceUploadRequest,
@@ -88,8 +89,6 @@ from src.video_cleanup.schemas import (
     VideoCleanupSamAssistRequest,
 )
 from src.video_cleanup.service import add_or_replace_keyframe, get_cleanup_track, resolve_first_mask_key_from_analysis
-from src.workers.processor import compute_merge_alignment_suggestion
-
 logger = Logger()
 settings = load_settings()
 CHUNKED_CONSERVATIVE_DURATION_SECONDS = 6
@@ -1166,11 +1165,13 @@ def _queue_segment_generation_record(
     model: str,
     mode: str,
     prompt: str | None,
+    negative_prompt: str | None = None,
     first_frame_variant_id: str | None = None,
     last_frame_variant_id: str | None = None,
     replicate_kling_mode: str | None = None,
     replicate_kling_v3_mode: str | None = None,
     wan27_resolution: str | None = None,
+    happy_horse_resolution: str | None = None,
     preserve_frames: bool = True,
     parent_generation_id: str | None = None,
     extension_metadata: dict[str, Any] | None = None,
@@ -1188,11 +1189,13 @@ def _queue_segment_generation_record(
             "lumaModel": model,
             "mode": mode,
             "prompt": prompt,
+            "negativePrompt": negative_prompt,
             "firstFrameVariantId": first_frame_variant_id,
             "lastFrameVariantId": last_frame_variant_id,
             "replicateKlingMode": replicate_kling_mode,
             "replicateKlingV3Mode": replicate_kling_v3_mode,
             "wan27Resolution": wan27_resolution,
+            "happyHorseResolution": happy_horse_resolution,
             "preserveFrames": bool(preserve_frames),
             "parentGenerationId": parent_generation_id,
             "extensionMetadata": extension_metadata,
@@ -1207,6 +1210,7 @@ def _queue_segment_generation_record(
             "model": model,
             "mode": mode,
             "prompt": prompt,
+            "negativePrompt": negative_prompt,
             "lumaGenerationId": None,
         },
         "generationSettings": {"preserveFrames": bool(preserve_frames)},
@@ -1253,10 +1257,12 @@ def _queue_chunk_generation_for_run(
     model: str,
     mode: str,
     prompt: str | None,
+    negative_prompt: str | None,
     first_frame_variant_id: str | None,
     replicate_kling_mode: str | None,
     replicate_kling_v3_mode: str | None,
     wan27_resolution: str | None,
+    happy_horse_resolution: str | None,
     preserve_frames: bool,
     parent_generation_id: str | None = None,
     extension_metadata: dict[str, Any] | None = None,
@@ -1271,11 +1277,13 @@ def _queue_chunk_generation_for_run(
         model=model,
         mode=mode,
         prompt=prompt,
+        negative_prompt=negative_prompt,
         first_frame_variant_id=first_frame_variant_id,
         last_frame_variant_id=None,
         replicate_kling_mode=replicate_kling_mode,
         replicate_kling_v3_mode=replicate_kling_v3_mode,
         wan27_resolution=wan27_resolution,
+        happy_horse_resolution=happy_horse_resolution,
         preserve_frames=preserve_frames,
         parent_generation_id=parent_generation_id,
         extension_metadata=extension_metadata,
@@ -1635,14 +1643,22 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
         req = _json_model(ApiReferenceVideoGenerateRequest, event)
         try:
             prompt = _sanitize_prompt(req.prompt) if req.prompt else None
+            negative_prompt = _sanitize_prompt(req.negativePrompt) if req.negativePrompt else None
             _validate_api_video_mode(req.model, req.mode)
             validate_video_model_prompt(req.model, prompt)
-            video_asset = _validate_api_asset_key(
-                asset_store=asset_store,
-                user_id=user_id,
-                asset_key=req.videoAssetKey,
-                expected_type="video",
+            capability = get_video_model_capability(req.model)
+            video_asset = (
+                _validate_api_asset_key(
+                    asset_store=asset_store,
+                    user_id=user_id,
+                    asset_key=req.videoAssetKey,
+                    expected_type="video",
+                )
+                if capability.uses_source_video
+                else None
             )
+            if capability.uses_source_video and not req.videoAssetKey:
+                raise ValueError(f"{capability.label} requires videoAssetKey")
             first_frame_asset = _validate_api_asset_key(
                 asset_store=asset_store,
                 user_id=user_id,
@@ -1673,12 +1689,16 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 "model": req.model,
                 "mode": req.mode,
                 "prompt": prompt,
+                "negativePrompt": negative_prompt,
                 "videoAssetKey": req.videoAssetKey,
                 "firstFrameAssetKey": req.firstFrameAssetKey,
                 "lastFrameAssetKey": req.lastFrameAssetKey,
+                "durationSeconds": req.durationSeconds,
                 "replicateKlingMode": req.replicateKlingMode,
                 "replicateKlingV3Mode": req.replicateKlingV3Mode,
                 "wan27Resolution": req.wan27Resolution,
+                "happyHorseResolution": req.happyHorseResolution,
+                "sora2Resolution": req.sora2Resolution,
                 "preserveFrames": bool(req.preserveFrames),
             },
             enqueue=False,
@@ -1696,9 +1716,13 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             "request": {
                 "mode": req.mode,
                 "prompt": prompt,
+                "negativePrompt": negative_prompt,
+                "durationSeconds": req.durationSeconds,
                 "replicateKlingMode": req.replicateKlingMode,
                 "replicateKlingV3Mode": req.replicateKlingV3Mode,
                 "wan27Resolution": req.wan27Resolution,
+                "happyHorseResolution": req.happyHorseResolution,
+                "sora2Resolution": req.sora2Resolution,
                 "preserveFrames": bool(req.preserveFrames),
             },
             "inputAssets": {
@@ -2213,9 +2237,6 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 return error_response(400, "Generation does not belong to this segment", origin=origin)
             if generation.get("status") != "complete":
                 return error_response(400, "Cleanup tracks require a completed generation", origin=origin)
-            provider = generation.get("luma", {}).get("provider") if isinstance(generation.get("luma"), dict) else None
-            if provider != "luma":
-                return error_response(400, "Cleanup tracks are only supported for Luma generations", origin=origin)
             req = _json_model(VideoCleanupCreateRequest, event)
             analysis = (task.get("qualityMatchAnalyses") or {}).get(req.firstMaskSource.analysisId)
             if not isinstance(analysis, dict):
@@ -3304,6 +3325,8 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 return error_response(400, limit_error, origin=origin)
             try:
                 prompt = _sanitize_prompt(req.prompt) if req.prompt else None
+                negative_prompt = _sanitize_prompt(req.negativePrompt) if req.negativePrompt else None
+                validate_video_model_mode(req.lumaModel, req.mode)
             except ValueError as exc:
                 return error_response(400, str(exc), origin=origin)
             try:
@@ -3328,11 +3351,13 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                     "lumaModel": req.lumaModel,
                     "mode": req.mode,
                     "prompt": prompt,
+                    "negativePrompt": negative_prompt,
                     "firstFrameVariantId": req.firstFrameVariantId,
                     "lastFrameVariantId": req.lastFrameVariantId,
                     "replicateKlingMode": req.replicateKlingMode,
                     "replicateKlingV3Mode": req.replicateKlingV3Mode,
                     "wan27Resolution": req.wan27Resolution,
+                    "happyHorseResolution": req.happyHorseResolution,
                     "preserveFrames": bool(req.preserveFrames),
                 },
             )
@@ -3345,6 +3370,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                     "model": req.lumaModel,
                     "mode": req.mode,
                     "prompt": prompt,
+                    "negativePrompt": negative_prompt,
                     "lumaGenerationId": None,
                 },
                 "generationSettings": {"preserveFrames": bool(req.preserveFrames)},
@@ -3441,10 +3467,11 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 "openingPrompt": opening_prompt,
                 "continuationPrompt": effective_continuation_prompt,
                 "firstFrameVariantId": first_variant_id,
-                "replicateKlingMode": req.replicateKlingMode,
-                "replicateKlingV3Mode": req.replicateKlingV3Mode,
-                "wan27Resolution": req.wan27Resolution,
-                "preserveFrames": bool(req.preserveFrames),
+                    "replicateKlingMode": req.replicateKlingMode,
+                    "replicateKlingV3Mode": req.replicateKlingV3Mode,
+                    "wan27Resolution": req.wan27Resolution,
+                    "happyHorseResolution": req.happyHorseResolution,
+                    "preserveFrames": bool(req.preserveFrames),
                 "chunkDurationSec": CHUNKED_CONSERVATIVE_DURATION_SECONDS,
                 "minimumOverlapFrames": overlap_frames,
                 "createdAt": now,
@@ -3495,10 +3522,12 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 model=req.lumaModel,
                 mode=req.mode,
                 prompt=first_chunk.get("prompt"),
+                negative_prompt=None,
                 first_frame_variant_id=first_variant_id,
                 replicate_kling_mode=req.replicateKlingMode,
                 replicate_kling_v3_mode=req.replicateKlingV3Mode,
                 wan27_resolution=req.wan27Resolution,
+                happy_horse_resolution=req.happyHorseResolution,
                 preserve_frames=bool(req.preserveFrames),
                 extension_metadata={
                     "chunkedRunId": run_id,
@@ -3616,11 +3645,13 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 model=model,
                 mode=str(previous_generation.get("luma", {}).get("mode") or ""),
                 prompt=str(prompt) if prompt else None,
+                negative_prompt=str(previous_generation.get("luma", {}).get("negativePrompt") or "") or None,
                 first_frame_variant_id=str(anchor_variant.get("variantId")),
                 last_frame_variant_id=None,
                 replicate_kling_mode=settings_payload.get("replicateKlingMode"),
                 replicate_kling_v3_mode=settings_payload.get("replicateKlingV3Mode"),
                 wan27_resolution=settings_payload.get("wan27Resolution"),
+                happy_horse_resolution=settings_payload.get("happyHorseResolution"),
                 parent_generation_id=previous_gen_id,
                 extension_metadata=extension_metadata,
             )
@@ -3693,10 +3724,12 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                     model=str(run.get("model") or ""),
                     mode=str(run.get("mode") or ""),
                     prompt=str(prompt) if prompt else None,
+                    negative_prompt=None,
                     first_frame_variant_id=first_frame_variant_id or None,
                     replicate_kling_mode=run.get("replicateKlingMode"),
                     replicate_kling_v3_mode=run.get("replicateKlingV3Mode"),
                     wan27_resolution=run.get("wan27Resolution"),
+                    happy_horse_resolution=run.get("happyHorseResolution"),
                     preserve_frames=bool(run.get("preserveFrames", True)),
                     parent_generation_id=parent_generation_id or None,
                     extension_metadata={
@@ -3780,10 +3813,12 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 model=str(run.get("model") or ""),
                 mode=str(run.get("mode") or ""),
                 prompt=str(prompt) if prompt else None,
+                negative_prompt=None,
                 first_frame_variant_id=first_frame_variant_id or None,
                 replicate_kling_mode=run.get("replicateKlingMode"),
                 replicate_kling_v3_mode=run.get("replicateKlingV3Mode"),
                 wan27_resolution=run.get("wan27Resolution"),
+                happy_horse_resolution=run.get("happyHorseResolution"),
                 preserve_frames=bool(run.get("preserveFrames", True)),
                 parent_generation_id=parent_generation_id or None,
                 extension_metadata={
@@ -3897,22 +3932,120 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 return error_response(404, "Generation not found", origin=origin)
             if generation.get("status") != "complete" or not generation.get("outputKey"):
                 return error_response(409, "Generation must be complete before alignment can be analysed", origin=origin)
+            suggestion_state = generation.get("mergeAlignmentSuggestion") if isinstance(generation.get("mergeAlignmentSuggestion"), dict) else {}
+            existing_job_id = suggestion_state.get("jobId")
+            if (
+                isinstance(existing_job_id, str)
+                and existing_job_id
+                and suggestion_state.get("status") in {"queued", "running"}
+            ):
+                existing_job = store.load_job(user_id, existing_job_id)
+                if isinstance(existing_job, dict) and existing_job.get("status") in {"queued", "running"}:
+                    return response(202, {"jobId": existing_job_id, "alreadyRunning": True}, origin=origin)
+            job_id = _queue_job(
+                store=store,
+                queue=queue,
+                user_id=user_id,
+                task_id=task_id,
+                job_type="merge_alignment_suggestion",
+                payload={"genId": parts[3]},
+            )
+            generation["mergeAlignmentSuggestion"] = {
+                "status": "queued",
+                "jobId": job_id,
+                "updatedAt": now_iso(),
+            }
+            store.save_task(task)
+            return response(202, {"jobId": job_id}, origin=origin)
+
+        if method == "POST" and len(parts) == 5 and parts[2] == "segment-generations" and parts[4] == "reconcile-timing":
+            source_generation_id = parts[3]
+            generation = task.get("segmentGenerations", {}).get(source_generation_id)
+            if not isinstance(generation, dict):
+                return error_response(404, "Generation not found", origin=origin)
+            if generation.get("status") != "complete" or not generation.get("outputKey"):
+                return error_response(409, "Generation must be complete before timing can be reconciled", origin=origin)
+            req = _json_model(ReconcileTimingRequest, event)
+            reconcile_state = generation.get("timingReconcile") if isinstance(generation.get("timingReconcile"), dict) else {}
+            existing_job_id = reconcile_state.get("jobId")
+            if (
+                isinstance(existing_job_id, str)
+                and existing_job_id
+                and reconcile_state.get("status") in {"queued", "running"}
+            ):
+                existing_job = store.load_job(user_id, existing_job_id)
+                if isinstance(existing_job, dict) and existing_job.get("status") in {"queued", "running"}:
+                    return response(
+                        202,
+                        {"jobId": existing_job_id, "genId": reconcile_state.get("resultGenId"), "alreadyRunning": True},
+                        origin=origin,
+                    )
+
+            reconciled_gen_id = new_id("gen")
+            job_id = _queue_job(
+                store=store,
+                queue=queue,
+                user_id=user_id,
+                task_id=task_id,
+                job_type="generation_reconcile_timing",
+                payload={
+                    "sourceGenId": source_generation_id,
+                    "genId": reconciled_gen_id,
+                    "trimStartFrames": int(req.trimStartFrames),
+                    "trimEndFrames": int(req.trimEndFrames),
+                    "playbackRate": req.playbackRate,
+                },
+            )
+            now = now_iso()
             segment_id = str(generation.get("segmentId") or "")
-            segment = next(
-                (item for item in task.get("segments", []) if isinstance(item, dict) and str(item.get("segmentId") or "") == segment_id),
-                None,
-            )
-            if not isinstance(segment, dict):
-                return error_response(404, "Segment not found for generation", origin=origin)
-            suggestion = compute_merge_alignment_suggestion(
-                task=task,
-                segment=segment,
-                generation=generation,
-                asset_store=asset_store,
-                paths=_asset_paths_for_task(task),
-                settings=settings,
-            )
-            return response(200, suggestion, origin=origin)
+            queued_generation = {
+                **generation,
+                "genId": reconciled_gen_id,
+                "segmentId": segment_id,
+                "status": "queued",
+                "outputKey": None,
+                "jobId": job_id,
+                "error": None,
+                "queuedAt": now,
+                "createdAt": now,
+                "updatedAt": now,
+                "startedAt": None,
+                "finishedAt": None,
+                "processingDurationSec": None,
+                "downloadUrl": None,
+                "inputMediaUrl": None,
+                "mergeAlignmentSuggestion": None,
+                "timingReconcile": None,
+                "alignment": None,
+                "sourceFrameOffset": None,
+                "cleanupTrackId": None,
+                "derivedFromGenerationId": source_generation_id,
+                "generationSettings": {
+                    **(generation.get("generationSettings") if isinstance(generation.get("generationSettings"), dict) else {}),
+                    "workflow": "timing_reconcile",
+                    "derivedFromGenerationId": source_generation_id,
+                    "reconcileTiming": {
+                        "sourceGenerationId": source_generation_id,
+                        "trimStartFrames": int(req.trimStartFrames),
+                        "trimEndFrames": int(req.trimEndFrames),
+                        "playbackRate": req.playbackRate,
+                    },
+                },
+            }
+            task.setdefault("segmentGenerations", {})[reconciled_gen_id] = queued_generation
+            generation["timingReconcile"] = {
+                "status": "queued",
+                "jobId": job_id,
+                "resultGenId": reconciled_gen_id,
+                "updatedAt": now,
+                "adjustments": {
+                    "trimStartFrames": int(req.trimStartFrames),
+                    "trimEndFrames": int(req.trimEndFrames),
+                    "playbackRate": req.playbackRate,
+                },
+            }
+            store.save_task(task)
+            return response(202, {"jobId": job_id, "genId": reconciled_gen_id}, origin=origin)
 
     if method == "GET" and path.startswith("/jobs/"):
         job_id = path.split("/")[2]

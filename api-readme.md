@@ -14,6 +14,13 @@ The application UI is now organized around:
 
 The external API is intentionally more operation-oriented than wizard-oriented, but it shares the same model capability registry, media preparation, provider routing, and output normalization.
 
+One important implementation rule for future work:
+
+- add or change model availability through the backend capability registry in `backend/src/generation/capabilities.py`
+- add or change UI route/mode behavior through the frontend generation-mode registry in `frontend/src/lib/generationModeRegistry.ts`
+
+Do not reintroduce scattered per-model or per-mode conditionals as the primary control path.
+
 ## Quick Start
 
 1. Sign in with Cognito and obtain an ID token.
@@ -98,6 +105,10 @@ The core implementation lives in:
 - `backend/src/generation/capabilities.py`
 - `backend/src/api_handler.py`
 - `backend/src/workers/processor.py`
+
+The app-specific route visibility layer lives in:
+
+- `frontend/src/lib/generationModeRegistry.ts`
 
 ## Endpoint Summary
 
@@ -241,12 +252,12 @@ Request:
 
 ```json
 {
-  "model": "kling-o1",
-  "mode": "kling_o1_video_edit",
-  "prompt": "Transform the horse in <<<video_1>>> into the unicorn in <<<image_1>>>. Keep motions, camera movement and background the same.",
-  "videoAssetKey": "users/.../api_uploads/video/incoming.mp4",
+  "model": "sora-2-image-to-video",
+  "mode": "sora_i2v",
+  "prompt": "Animate from the first frame with a slow cinematic push-in and subtle motion in the subject and background.",
   "firstFrameAssetKey": "users/.../api_uploads/first/incoming.png",
-  "replicateKlingMode": "pro"
+  "durationSeconds": 8,
+  "sora2Resolution": "1080p"
 }
 ```
 
@@ -255,6 +266,7 @@ Supported models:
 - `ray-2`
 - `ray-flash-2`
 - `runway-gen4.5`
+- `sora-2-image-to-video`
 - `runway-gen4-aleph`
 - `kling-2.6`
 - `kling-o1`
@@ -272,6 +284,7 @@ Mode compatibility:
 | --- | --- |
 | `ray-2`, `ray-flash-2` | Luma modes such as `adhere_*`, `flex_*`, `reimagine_*` |
 | `runway-gen4.5` | `runway_i2v` |
+| `sora-2-image-to-video` | `sora_i2v` |
 | `runway-gen4-aleph` | `runway_aleph_v2v` |
 | `kling-2.6` | `kling_start_only`, `kling_start_end` |
 | `veo-3.1`, `veo-3.1-fast` | `veo_start_only`, `veo_start_end` |
@@ -284,6 +297,9 @@ Mode compatibility:
 
 Provider-specific validation:
 
+- Models that do not use source video, such as `runway-gen4.5`, `sora-2-image-to-video`, `kling-2.6`, `veo-3.1`, `veo-3.1-fast`, and `wan2.2-a14b`, do not require `videoAssetKey`.
+- `sora-2-image-to-video` supports `sora2Resolution` of `auto`, `720p`, or `1080p`.
+- `sora-2-image-to-video` is exposed here with a maximum requested duration of `10` seconds. The Fal provider uses fixed duration buckets, so the pipeline trims any longer returned clip back to the requested length.
 - Seedance prompts must include `@Video1` and `@Image1`.
 - Seedance content-policy moderation is enforced by the provider and cannot be disabled.
 - Runway Gen-4 Aleph uses the source video plus the uploaded first-frame image as a reference and requires one of Runway's supported output ratios. The app selects the nearest supported ratio and Runway may center-crop inputs to fit it.

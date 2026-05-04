@@ -22,9 +22,12 @@ type PreviewAsset = {
 
 type VideoModelOption = {
   value: string;
+  apiModel?: string;
   label: string;
   mode: string;
   note?: string;
+  usesSourceVideo?: boolean;
+  requiresLastFrame?: boolean;
 };
 
 const IMAGE_FULL_MODELS = [
@@ -45,6 +48,9 @@ const VIDEO_MODELS: readonly VideoModelOption[] = [
   { value: "ray-flash-2", label: "Luma Ray 2 Flash", mode: "flex_1" },
   { value: "ray-2", label: "Luma Ray 2", mode: "adhere_1" },
   { value: "runway-gen4.5", label: "Runway Gen-4.5", mode: "runway_i2v" },
+  { value: "sora-2-image-to-video", label: "Sora 2 Image to Video", mode: "sora_i2v", note: "Image-to-video only. Uses the first frame image and prompt. Resolution can be auto, 720p or 1080p." },
+  { value: "happy-horse-video-edit", label: "Happy Horse 1.0 Video Edit", mode: "happy_horse_video_edit", note: "Uses source video plus the first frame image as @Image1. Prompt must reference @Image1. Resolution can be 720p or 1080p." },
+  { value: "happy-horse-image-to-video", label: "Happy Horse 1.0 Image to Video", mode: "happy_horse_i2v", note: "Image-to-video only. Uses the first frame image and prompt. Resolution can be 720p or 1080p.", usesSourceVideo: false },
   { value: "runway-gen4-aleph", label: "Runway Gen-4 Aleph", mode: "runway_aleph_v2v", note: "Uses source video plus a reference image. Prompt should describe the intended transformation while preserving timing and motion." },
   { value: "kling-2.6", label: "Kling 2.6", mode: "kling_start_only" },
   { value: "kling-o1", label: "Kling O1 Edit", mode: "kling_o1_video_edit", note: "Prompt should reference <<<video_1>>> and <<<image_1>>>." },
@@ -55,6 +61,23 @@ const VIDEO_MODELS: readonly VideoModelOption[] = [
   { value: "wan2.2-a14b", label: "Wan 2.2 A14B", mode: "wan_a14b_i2v" },
   { value: "wan2.2-animate", label: "Wan 2.2 Animate", mode: "wan_animate_replace" },
   { value: "wan2.7-videoedit", label: "Wan 2.7 VideoEdit", mode: "wan27_video_edit" },
+  {
+    value: "wan2.7-i2v:start_only",
+    apiModel: "wan2.7-i2v",
+    label: "Wan 2.7 Image to Video",
+    mode: "wan27_i2v_start_only",
+    note: "Image-to-video only. Uses the first frame image, optional negative prompt, duration up to 10s here, and 720p/1080p output.",
+    usesSourceVideo: false,
+  },
+  {
+    value: "wan2.7-i2v:start_end",
+    apiModel: "wan2.7-i2v",
+    label: "Wan 2.7 Image to Video (Start/End)",
+    mode: "wan27_i2v_start_end",
+    note: "Uses both first and last frame images, plus optional negative prompt, duration up to 10s here, and 720p/1080p output.",
+    usesSourceVideo: false,
+    requiresLastFrame: true,
+  },
 ] as const;
 
 function formatJson(value: unknown): string {
@@ -186,12 +209,18 @@ function App() {
   const [klingMode, setKlingMode] = useState<"std" | "pro">("pro");
   const [klingV3Mode, setKlingV3Mode] = useState<"standard" | "pro">("pro");
   const [wan27Resolution, setWan27Resolution] = useState<"720p" | "1080p">("720p");
+  const [happyHorseResolution, setHappyHorseResolution] = useState<"720p" | "1080p">("1080p");
+  const [wan27NegativePrompt, setWan27NegativePrompt] = useState("");
+  const [sora2Resolution, setSora2Resolution] = useState<"auto" | "720p" | "1080p">("auto");
+  const [durationSeconds, setDurationSeconds] = useState<number>(4);
   const [preserveFrames, setPreserveFrames] = useState(true);
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [videoFile, setVideoFile] = useState<File | null>(null);
+  const [lastFrameFile, setLastFrameFile] = useState<File | null>(null);
   const [maskFile, setMaskFile] = useState<File | null>(null);
   const [imagePreview, setImagePreview] = useState<UploadPreview | null>(null);
   const [videoPreview, setVideoPreview] = useState<UploadPreview | null>(null);
+  const [lastFramePreview, setLastFramePreview] = useState<UploadPreview | null>(null);
   const [maskPreview, setMaskPreview] = useState<UploadPreview | null>(null);
   const [currentUserLabel, setCurrentUserLabel] = useState<string>("Checking sign-in…");
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -206,6 +235,14 @@ function App() {
   const selectedVideoModel = useMemo(
     () => VIDEO_MODELS.find((model) => model.value === videoModel) ?? VIDEO_MODELS[0],
     [videoModel],
+  );
+  const selectedVideoModelUsesSourceVideo = useMemo(
+    () =>
+      selectedVideoModel.usesSourceVideo ??
+      !["runway-gen4.5", "sora-2-image-to-video", "kling-2.6", "veo-3.1", "veo-3.1-fast", "wan2.2-a14b"].includes(
+        selectedVideoModel.apiModel ?? selectedVideoModel.value,
+      ),
+    [selectedVideoModel.apiModel, selectedVideoModel.usesSourceVideo, selectedVideoModel.value],
   );
   const outputAsset = requestDetail?.outputAssets?.output?.url
     ? {
@@ -325,8 +362,16 @@ function App() {
       setError("Select a mask for masked image edit.");
       return;
     }
-    if (workflow === "video_reference" && (!imageFile || !videoFile)) {
-      setError("Select both the edited first frame image and the source video.");
+    if (workflow === "video_reference" && !imageFile) {
+      setError("Select the edited first frame image.");
+      return;
+    }
+    if (workflow === "video_reference" && selectedVideoModelUsesSourceVideo && !videoFile) {
+      setError("Select the source video for this model.");
+      return;
+    }
+    if (workflow === "video_reference" && selectedVideoModel.requiresLastFrame && !lastFrameFile) {
+      setError("Select the edited last frame image for this mode.");
       return;
     }
 
@@ -384,23 +429,29 @@ function App() {
         setSuccessMessage(`Queued masked image edit: ${created.requestId}`);
         setActivity(`Queued masked image edit ${created.requestId}`);
       } else {
-        setActivity("Uploading source video and first frame");
-        const [videoAssetKey, firstFrameAssetKey] = await Promise.all([
-          uploadAsset(videoFile!, "video"),
-          uploadAsset(imageFile!, "image"),
-        ]);
+        setActivity(selectedVideoModelUsesSourceVideo ? "Uploading source video and first frame" : "Uploading first frame");
+        const firstFrameAssetKey = await uploadAsset(imageFile!, "image");
+        const lastFrameAssetKey = selectedVideoModel.requiresLastFrame && lastFrameFile ? await uploadAsset(lastFrameFile, "image") : null;
+        const videoAssetKey = selectedVideoModelUsesSourceVideo && videoFile ? await uploadAsset(videoFile, "video") : null;
         setActivity("Submitting reference video generation request");
         const created = await apiTestRequest<{ requestId: string; jobId: string }>("/api/v1/video-generations/reference-video", {
           method: "POST",
           body: JSON.stringify({
-            model: selectedVideoModel.value,
+            model: selectedVideoModel.apiModel ?? selectedVideoModel.value,
             mode: selectedVideoModel.mode,
             prompt: prompt.trim(),
+            negativePrompt: (selectedVideoModel.apiModel ?? selectedVideoModel.value) === "wan2.7-i2v" ? wan27NegativePrompt.trim() || undefined : undefined,
             videoAssetKey,
             firstFrameAssetKey,
-            replicateKlingMode: selectedVideoModel.value === "kling-o1" ? klingMode : undefined,
-            replicateKlingV3Mode: selectedVideoModel.value === "kling-v3-omni-video" ? klingV3Mode : undefined,
-            wan27Resolution: selectedVideoModel.value === "wan2.7-videoedit" ? wan27Resolution : undefined,
+            lastFrameAssetKey,
+            durationSeconds: ["sora-2-image-to-video", "wan2.7-i2v", "happy-horse-image-to-video"].includes(selectedVideoModel.apiModel ?? selectedVideoModel.value)
+              ? durationSeconds
+              : undefined,
+            replicateKlingMode: (selectedVideoModel.apiModel ?? selectedVideoModel.value) === "kling-o1" ? klingMode : undefined,
+            replicateKlingV3Mode: (selectedVideoModel.apiModel ?? selectedVideoModel.value) === "kling-v3-omni-video" ? klingV3Mode : undefined,
+            wan27Resolution: ["wan2.7-videoedit", "wan2.7-i2v"].includes(selectedVideoModel.apiModel ?? selectedVideoModel.value) ? wan27Resolution : undefined,
+            happyHorseResolution: ["happy-horse-video-edit", "happy-horse-image-to-video"].includes(selectedVideoModel.apiModel ?? selectedVideoModel.value) ? happyHorseResolution : undefined,
+            sora2Resolution: (selectedVideoModel.apiModel ?? selectedVideoModel.value) === "sora-2-image-to-video" ? sora2Resolution : undefined,
             preserveFrames,
           }),
         });
@@ -567,7 +618,7 @@ function App() {
               </div>
             ) : null}
 
-            {workflow === "video_reference" && videoModel === "wan2.7-videoedit" ? (
+            {workflow === "video_reference" && ["wan2.7-videoedit", "wan2.7-i2v:start_only", "wan2.7-i2v:start_end"].includes(videoModel) ? (
               <div className="api-field">
                 <label htmlFor="wan27Resolution">Wan 2.7 resolution</label>
                 <select
@@ -578,6 +629,69 @@ function App() {
                   <option value="720p">720p</option>
                   <option value="1080p">1080p</option>
                 </select>
+              </div>
+            ) : null}
+
+            {workflow === "video_reference" && ["happy-horse-video-edit", "happy-horse-image-to-video"].includes(videoModel) ? (
+              <div className="api-field">
+                <label htmlFor="happyHorseResolution">Happy Horse resolution</label>
+                <select
+                  id="happyHorseResolution"
+                  value={happyHorseResolution}
+                  onChange={(event) => setHappyHorseResolution(event.target.value as "720p" | "1080p")}
+                >
+                  <option value="720p">720p</option>
+                  <option value="1080p">1080p</option>
+                </select>
+              </div>
+            ) : null}
+
+            {workflow === "video_reference" && ["sora-2-image-to-video", "wan2.7-i2v:start_only", "wan2.7-i2v:start_end", "happy-horse-image-to-video"].includes(videoModel) ? (
+              <div className="api-inline-grid">
+                {videoModel === "sora-2-image-to-video" ? (
+                  <div className="api-field">
+                    <label htmlFor="sora2Resolution">Sora 2 resolution</label>
+                    <select
+                      id="sora2Resolution"
+                      value={sora2Resolution}
+                      onChange={(event) => setSora2Resolution(event.target.value as "auto" | "720p" | "1080p")}
+                    >
+                      <option value="auto">auto</option>
+                      <option value="720p">720p</option>
+                      <option value="1080p">1080p</option>
+                    </select>
+                  </div>
+                ) : null}
+                <div className="api-field">
+                  <label htmlFor="durationSeconds">Duration (seconds)</label>
+                  <input
+                    id="durationSeconds"
+                    type="number"
+                    min={videoModel === "happy-horse-image-to-video" ? 3 : 4}
+                    max={videoModel === "happy-horse-image-to-video" ? 15 : 10}
+                    step={1}
+                    value={durationSeconds}
+                    onChange={(event) =>
+                      setDurationSeconds(
+                        videoModel === "happy-horse-image-to-video"
+                          ? Math.max(3, Math.min(15, Number(event.target.value) || 3))
+                          : Math.max(4, Math.min(10, Number(event.target.value) || 4)),
+                      )
+                    }
+                  />
+                </div>
+              </div>
+            ) : null}
+
+            {workflow === "video_reference" && (selectedVideoModel.apiModel ?? selectedVideoModel.value) === "wan2.7-i2v" ? (
+              <div className="api-field">
+                <label htmlFor="wan27NegativePrompt">Wan 2.7 negative prompt</label>
+                <textarea
+                  id="wan27NegativePrompt"
+                  value={wan27NegativePrompt}
+                  onChange={(event) => setWan27NegativePrompt(event.target.value)}
+                  placeholder="Optional. Describe content or artifacts to avoid."
+                />
               </div>
             ) : null}
 
@@ -615,7 +729,19 @@ function App() {
                 />
               </div>
 
-              {workflow === "video_reference" ? (
+              {workflow === "video_reference" && selectedVideoModel.requiresLastFrame ? (
+                <div className="api-field">
+                  <label htmlFor="lastFrameFile">Edited last frame image</label>
+                  <input
+                    id="lastFrameFile"
+                    type="file"
+                    accept="image/*"
+                    onChange={(event) => updatePreview(event.target.files?.[0] ?? null, setLastFrameFile, lastFramePreview, setLastFramePreview)}
+                  />
+                </div>
+              ) : null}
+
+              {workflow === "video_reference" && selectedVideoModelUsesSourceVideo ? (
                 <div className="api-field">
                   <label htmlFor="videoFile">Source video</label>
                   <input
@@ -625,7 +751,7 @@ function App() {
                     onChange={(event) => updatePreview(event.target.files?.[0] ?? null, setVideoFile, videoPreview, setVideoPreview)}
                   />
                 </div>
-              ) : (
+              ) : workflow !== "video_reference" ? (
                 <div className="api-field">
                   <label htmlFor="maskFile">Optional mask</label>
                   <input
@@ -636,7 +762,7 @@ function App() {
                   />
                   <small>{workflow === "image_masked" ? "Required for masked edit." : "Ignored for full image edits."}</small>
                 </div>
-              )}
+              ) : null}
             </div>
 
             <div className="api-button-row">
@@ -675,6 +801,13 @@ function App() {
                 <div className="api-preview-tile">
                   <strong>{videoPreview.name}</strong>
                   <video src={videoPreview.url} controls className="api-preview-media" />
+                </div>
+              ) : null}
+
+              {lastFramePreview ? (
+                <div className="api-preview-tile">
+                  <strong>{lastFramePreview.name}</strong>
+                  <img src={lastFramePreview.url} alt={lastFramePreview.name} className="api-preview-media" />
                 </div>
               ) : null}
 

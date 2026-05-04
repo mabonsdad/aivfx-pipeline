@@ -106,6 +106,9 @@ class SegmentGenerateRequest(BaseModel):
         "ray-2",
         "ray-flash-2",
         "runway-gen4.5",
+        "sora-2-image-to-video",
+        "happy-horse-video-edit",
+        "happy-horse-image-to-video",
         "runway-gen4-aleph",
         "kling-2.6",
         "kling-o1",
@@ -116,6 +119,7 @@ class SegmentGenerateRequest(BaseModel):
         "wan2.2-a14b",
         "wan2.2-animate",
         "wan2.7-videoedit",
+        "wan2.7-i2v",
     ] = "ray-2"
     mode: Literal[
         "adhere_1",
@@ -128,6 +132,9 @@ class SegmentGenerateRequest(BaseModel):
         "reimagine_2",
         "reimagine_3",
         "runway_i2v",
+        "sora_i2v",
+        "happy_horse_video_edit",
+        "happy_horse_i2v",
         "runway_aleph_v2v",
         "kling_start_end",
         "kling_start_only",
@@ -139,13 +146,18 @@ class SegmentGenerateRequest(BaseModel):
         "kling_v3_omni_video_edit",
         "seedance_reference_to_video",
         "wan27_video_edit",
+        "wan27_i2v_start_only",
+        "wan27_i2v_start_end",
     ]
     prompt: str | None = Field(default=None)
+    negativePrompt: str | None = Field(default=None)
     firstFrameVariantId: str | None = None
     lastFrameVariantId: str | None = None
     replicateKlingMode: Literal["std", "pro"] | None = None
     replicateKlingV3Mode: Literal["standard", "pro"] | None = None
     wan27Resolution: Literal["720p", "1080p"] | None = None
+    happyHorseResolution: Literal["720p", "1080p"] | None = None
+    sora2Resolution: Literal["auto", "720p", "1080p"] | None = None
     preserveFrames: bool = True
 
 
@@ -183,6 +195,9 @@ class ApiReferenceVideoGenerateRequest(BaseModel):
         "ray-2",
         "ray-flash-2",
         "runway-gen4.5",
+        "sora-2-image-to-video",
+        "happy-horse-video-edit",
+        "happy-horse-image-to-video",
         "runway-gen4-aleph",
         "kling-2.6",
         "kling-o1",
@@ -193,6 +208,7 @@ class ApiReferenceVideoGenerateRequest(BaseModel):
         "wan2.2-a14b",
         "wan2.2-animate",
         "wan2.7-videoedit",
+        "wan2.7-i2v",
     ]
     mode: Literal[
         "adhere_1",
@@ -205,6 +221,9 @@ class ApiReferenceVideoGenerateRequest(BaseModel):
         "reimagine_2",
         "reimagine_3",
         "runway_i2v",
+        "sora_i2v",
+        "happy_horse_video_edit",
+        "happy_horse_i2v",
         "runway_aleph_v2v",
         "kling_start_end",
         "kling_start_only",
@@ -216,19 +235,31 @@ class ApiReferenceVideoGenerateRequest(BaseModel):
         "kling_v3_omni_video_edit",
         "seedance_reference_to_video",
         "wan27_video_edit",
+        "wan27_i2v_start_only",
+        "wan27_i2v_start_end",
     ]
     prompt: str | None = None
-    videoAssetKey: str = Field(min_length=1)
+    negativePrompt: str | None = None
+    videoAssetKey: str | None = None
     firstFrameAssetKey: str = Field(min_length=1)
     lastFrameAssetKey: str | None = None
+    durationSeconds: int | None = Field(default=None, ge=1, le=10)
     replicateKlingMode: Literal["std", "pro"] | None = None
     replicateKlingV3Mode: Literal["standard", "pro"] | None = None
     wan27Resolution: Literal["720p", "1080p"] | None = None
+    happyHorseResolution: Literal["720p", "1080p"] | None = None
+    sora2Resolution: Literal["auto", "720p", "1080p"] | None = None
     preserveFrames: bool = True
 
 
 class MergeGenerationAdjustment(BaseModel):
     startFrameOverride: int | None = Field(default=None, ge=0)
+    trimStartFrames: int = Field(default=0, ge=0)
+    trimEndFrames: int = Field(default=0, ge=0)
+    playbackRate: float | None = Field(default=None, gt=0.05, le=20.0)
+
+
+class ReconcileTimingRequest(BaseModel):
     trimStartFrames: int = Field(default=0, ge=0)
     trimEndFrames: int = Field(default=0, ge=0)
     playbackRate: float | None = Field(default=None, gt=0.05, le=20.0)
