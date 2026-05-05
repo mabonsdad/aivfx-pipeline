@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from typing import Any, Callable
 
+from src.generation.lifecycle import generation_ready_for_post, get_generation, get_segment
 from src.models.schemas import SegmentGenerationExtendRequest
 
 
@@ -36,17 +37,17 @@ def handle_task_generation_extend_route(
         return None
 
     previous_gen_id = parts[3]
-    previous_generation = task.get("segmentGenerations", {}).get(previous_gen_id)
-    if not previous_generation:
+    previous_generation = get_generation(task, previous_gen_id)
+    if previous_generation is None:
         return error_response_fn(404, "Previous generation not found", origin=origin)
-    if previous_generation.get("status") != "complete" or not previous_generation.get("outputKey"):
+    if not generation_ready_for_post(previous_generation):
         return error_response_fn(400, "Previous generation must be complete before it can be extended", origin=origin)
     req = json_model(SegmentGenerationExtendRequest, event)
     model = str(previous_generation.get("luma", {}).get("model") or "")
     if not supports_generation_extension_fn(model):
         return error_response_fn(400, "Only first-frame + video generation models can be extended in this flow", origin=origin)
 
-    previous_segment = next((item for item in task.get("segments", []) if item.get("segmentId") == previous_generation.get("segmentId")), None)
+    previous_segment = get_segment(task, str(previous_generation.get("segmentId") or ""))
     if not previous_segment:
         return error_response_fn(404, "Previous generation segment not found", origin=origin)
     total_frames = int(task.get("video", {}).get("editSource", {}).get("frameCount") or 0)
