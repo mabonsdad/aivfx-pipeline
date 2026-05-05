@@ -3,27 +3,18 @@ import { useEffect, useRef, useState, type ChangeEvent } from "react";
 import { CompareIcon, DeleteIcon, DownloadIcon, IconActionButton, PreviewIcon } from "../../components/layout/MediaActionButtons";
 import { PendingButtonLabel, StatusNotice } from "../../components/layout/UiFeedback";
 import FrameLimitInfoButton from "../../components/workflow/FrameLimitInfoButton";
+import type {
+  HappyHorseResolutionId,
+  ReplicateKlingModeId,
+  ReplicateKlingV3ModeId,
+  Sora2ResolutionId,
+  VideoModelId,
+  Wan27ResolutionId,
+} from "../../lib/generated/videoContracts";
+import type { GenerateInputMode } from "../../lib/generationModeRegistry";
 import type { ChunkedGenerationRun, CustomReportOutputRef, SegmentGeneration, SegmentRecord, TaskDetail } from "../../types/api";
 
-type GenerateInputMode = "start_video" | "start_end" | "start_only";
-type VideoModel =
-  | "ray-2"
-  | "ray-flash-2"
-  | "runway-gen4.5"
-  | "sora-2-image-to-video"
-  | "happy-horse-video-edit"
-  | "happy-horse-image-to-video"
-  | "runway-gen4-aleph"
-  | "kling-2.6"
-  | "kling-o1"
-  | "kling-v3-omni-video"
-  | "seedance-2.0-reference-to-video"
-  | "veo-3.1"
-  | "veo-3.1-fast"
-  | "wan2.2-a14b"
-  | "wan2.2-animate"
-  | "wan2.7-videoedit"
-  | "wan2.7-i2v";
+type VideoModel = VideoModelId;
 
 export type GenerateTabCtx = {
   viewMode: "create" | "outputs";
@@ -46,18 +37,18 @@ export type GenerateTabCtx = {
   generationModelOptions: Array<{ value: VideoModel; label: string }>;
   advancedMode: string;
   setAdvancedMode: (value: string) => void;
-  replicateKlingMode: "std" | "pro";
-  setReplicateKlingMode: (value: "std" | "pro") => void;
-  replicateKlingV3Mode: "standard" | "pro";
-  setReplicateKlingV3Mode: (value: "standard" | "pro") => void;
-  wan27Resolution: "720p" | "1080p";
-  setWan27Resolution: (value: "720p" | "1080p") => void;
-  happyHorseResolution: "720p" | "1080p";
-  setHappyHorseResolution: (value: "720p" | "1080p") => void;
+  replicateKlingMode: ReplicateKlingModeId;
+  setReplicateKlingMode: (value: ReplicateKlingModeId) => void;
+  replicateKlingV3Mode: ReplicateKlingV3ModeId;
+  setReplicateKlingV3Mode: (value: ReplicateKlingV3ModeId) => void;
+  wan27Resolution: Wan27ResolutionId;
+  setWan27Resolution: (value: Wan27ResolutionId) => void;
+  happyHorseResolution: HappyHorseResolutionId;
+  setHappyHorseResolution: (value: HappyHorseResolutionId) => void;
   wan27NegativePrompt: string;
   setWan27NegativePrompt: (value: string) => void;
-  sora2Resolution: "auto" | "720p" | "1080p";
-  setSora2Resolution: (value: "auto" | "720p" | "1080p") => void;
+  sora2Resolution: Sora2ResolutionId;
+  setSora2Resolution: (value: Sora2ResolutionId) => void;
   preserveFrames: boolean;
   setPreserveFrames: (value: boolean) => void;
   lumaPrompt: string;
@@ -333,7 +324,7 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
               ) : lumaModel === "kling-o1" ? (
                 <select
                   value={replicateKlingMode}
-                  onChange={(e) => setReplicateKlingMode(e.target.value as "std" | "pro")}
+                  onChange={(e) => setReplicateKlingMode(e.target.value as ReplicateKlingModeId)}
                   className="rounded-md border border-ink/20 px-3 py-2"
                 >
                   <option value="std">Kling mode: std</option>
@@ -342,7 +333,7 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
               ) : lumaModel === "kling-v3-omni-video" ? (
                 <select
                   value={replicateKlingV3Mode}
-                  onChange={(e) => setReplicateKlingV3Mode(e.target.value as "standard" | "pro")}
+                  onChange={(e) => setReplicateKlingV3Mode(e.target.value as ReplicateKlingV3ModeId)}
                   className="rounded-md border border-ink/20 px-3 py-2"
                 >
                   <option value="standard">Kling mode: standard</option>
@@ -351,7 +342,7 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
               ) : lumaModel === "wan2.7-videoedit" || lumaModel === "wan2.7-i2v" ? (
                 <select
                   value={wan27Resolution}
-                  onChange={(e) => setWan27Resolution(e.target.value as "720p" | "1080p")}
+                  onChange={(e) => setWan27Resolution(e.target.value as Wan27ResolutionId)}
                   className="rounded-md border border-ink/20 px-3 py-2"
                 >
                   <option value="720p">Resolution: 720p</option>
@@ -360,7 +351,7 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
               ) : lumaModel === "happy-horse-video-edit" || lumaModel === "happy-horse-image-to-video" ? (
                 <select
                   value={happyHorseResolution}
-                  onChange={(e) => setHappyHorseResolution(e.target.value as "720p" | "1080p")}
+                  onChange={(e) => setHappyHorseResolution(e.target.value as HappyHorseResolutionId)}
                   className="rounded-md border border-ink/20 px-3 py-2"
                 >
                   <option value="720p">Resolution: 720p</option>
@@ -369,7 +360,7 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
               ) : lumaModel === "sora-2-image-to-video" ? (
                 <select
                   value={sora2Resolution}
-                  onChange={(e) => setSora2Resolution(e.target.value as "auto" | "720p" | "1080p")}
+                  onChange={(e) => setSora2Resolution(e.target.value as Sora2ResolutionId)}
                   className="rounded-md border border-ink/20 px-3 py-2"
                 >
                   <option value="auto">Resolution: auto</option>

@@ -64,7 +64,38 @@ export const PATCH_EDIT_MODEL_IDS = [
   "runware_ace_pp",
 ] as const;
 
+export const REPLICATE_KLING_MODE_IDS = [
+  "std",
+  "pro",
+] as const;
+
+export const REPLICATE_KLING_V3_MODE_IDS = [
+  "standard",
+  "pro",
+] as const;
+
+export const WAN27_RESOLUTION_IDS = [
+  "720p",
+  "1080p",
+] as const;
+
+export const HAPPY_HORSE_RESOLUTION_IDS = [
+  "720p",
+  "1080p",
+] as const;
+
+export const SORA2_RESOLUTION_IDS = [
+  "auto",
+  "720p",
+  "1080p",
+] as const;
+
 export type VideoModelId = (typeof VIDEO_MODEL_IDS)[number];
 export type VideoModeId = (typeof VIDEO_MODE_IDS)[number];
 export type FullEditModelId = (typeof FULL_EDIT_MODEL_IDS)[number];
 export type PatchEditModelId = (typeof PATCH_EDIT_MODEL_IDS)[number];
+export type ReplicateKlingModeId = (typeof REPLICATE_KLING_MODE_IDS)[number];
+export type ReplicateKlingV3ModeId = (typeof REPLICATE_KLING_V3_MODE_IDS)[number];
+export type Wan27ResolutionId = (typeof WAN27_RESOLUTION_IDS)[number];
+export type HappyHorseResolutionId = (typeof HAPPY_HORSE_RESOLUTION_IDS)[number];
+export type Sora2ResolutionId = (typeof SORA2_RESOLUTION_IDS)[number];

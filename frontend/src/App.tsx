@@ -24,7 +24,16 @@ import {
 import { useVideoFrameStrip, type VideoFrameStripItem } from "./hooks/useVideoFrameStrip";
 import { useTaskLifecycle } from "./hooks/useTaskLifecycle";
 import { useGenerationMergeState } from "./hooks/useGenerationMergeState";
-import type { PatchEditModelId, VideoModeId, VideoModelId } from "./lib/generated/videoContracts";
+import type {
+  HappyHorseResolutionId,
+  PatchEditModelId,
+  ReplicateKlingModeId,
+  ReplicateKlingV3ModeId,
+  Sora2ResolutionId,
+  VideoModeId,
+  VideoModelId,
+  Wan27ResolutionId,
+} from "./lib/generated/videoContracts";
 import { getGenerationModeConfig, type GenerateInputMode } from "./lib/generationModeRegistry";
 import { currentUser, login, logout } from "./lib/auth";
 import type { AssetsTabCtx } from "./pages/workflow/AssetsTab";
@@ -815,12 +824,12 @@ export default function App() {
   const [lumaPrompt, setLumaPrompt] = useState("");
   const [lumaContinuationPrompt, setLumaContinuationPrompt] = useState("");
   const [preserveFrames, setPreserveFrames] = useState(true);
-  const [replicateKlingMode, setReplicateKlingMode] = useState<"std" | "pro">("pro");
-  const [replicateKlingV3Mode, setReplicateKlingV3Mode] = useState<"standard" | "pro">("pro");
-  const [wan27Resolution, setWan27Resolution] = useState<"720p" | "1080p">("720p");
-  const [happyHorseResolution, setHappyHorseResolution] = useState<"720p" | "1080p">("1080p");
+  const [replicateKlingMode, setReplicateKlingMode] = useState<ReplicateKlingModeId>("pro");
+  const [replicateKlingV3Mode, setReplicateKlingV3Mode] = useState<ReplicateKlingV3ModeId>("pro");
+  const [wan27Resolution, setWan27Resolution] = useState<Wan27ResolutionId>("720p");
+  const [happyHorseResolution, setHappyHorseResolution] = useState<HappyHorseResolutionId>("1080p");
   const [wan27NegativePrompt, setWan27NegativePrompt] = useState("");
-  const [sora2Resolution, setSora2Resolution] = useState<"auto" | "720p" | "1080p">("auto");
+  const [sora2Resolution, setSora2Resolution] = useState<Sora2ResolutionId>("auto");
   const [editSourceVariantIds, setEditSourceVariantIds] = useState<{ first: string | null; last: string | null }>({
     first: null,
     last: null,
@@ -1954,16 +1963,7 @@ export default function App() {
                   ? "wan27_video_edit"
                   : advancedMode;
       return apiClient.generateSegmentChunked(selectedTaskId, selectedSegmentId, {
-        lumaModel:
-          lumaModel as
-            | "ray-2"
-            | "ray-flash-2"
-            | "runway-gen4-aleph"
-            | "kling-o1"
-            | "kling-v3-omni-video"
-            | "seedance-2.0-reference-to-video"
-            | "wan2.2-animate"
-            | "wan2.7-videoedit",
+        lumaModel,
         mode: selectedMode as VideoModeId,
         openingPrompt: lumaModel === "wan2.2-animate" ? undefined : trimmedPrompt || undefined,
         continuationPrompt:

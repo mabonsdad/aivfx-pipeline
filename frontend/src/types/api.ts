@@ -1,7 +1,12 @@
+import type { CustomReportTypeId, JobStatusId, SegmentCropAspectId, TaskStatusId } from "../lib/generated/apiContracts";
+import type { FullEditModelId, PatchEditModelId, VideoModelId } from "../lib/generated/videoContracts";
+
+type FrameVariantModelId = FullEditModelId | PatchEditModelId | "generated_extension_anchor" | "manual_upload";
+
 export type TaskSummary = {
   taskId: string;
   name: string;
-  status: "created" | "ingesting" | "ready" | "error";
+  status: TaskStatusId;
   createdAt: string;
   updatedAt: string;
   video?: Record<string, unknown>;
@@ -13,15 +18,7 @@ export type FrameVariant = {
   variantKind?: "edited" | "refined";
   sourceVariantId?: string | null;
   refinedVariantIds?: string[];
-  model:
-    | "nano_banana"
-    | "nano_banana_pro"
-    | "chatgpt"
-    | "chatgpt_latest"
-    | "runware_flux_fill"
-    | "runware_ace_pp"
-    | "generated_extension_anchor"
-    | "manual_upload";
+  model: FrameVariantModelId;
   promptHash: string;
   createdAt: string;
   jobId?: string | null;
@@ -327,7 +324,7 @@ export type SegmentRecord = {
   internalOnly?: boolean;
   crop?: {
     enabled: boolean;
-    aspect: "16:9" | "9:16";
+    aspect: SegmentCropAspectId;
     x: number;
     y: number;
     width: number;
@@ -343,30 +340,13 @@ export type SegmentGeneration = {
   segmentId: string;
   luma: {
     provider?: "luma" | "runway" | "kling" | "runware" | "replicate" | "fal";
-    model:
-      | "ray-2"
-      | "ray-flash-2"
-      | "runway-gen4.5"
-      | "sora-2-image-to-video"
-      | "happy-horse-video-edit"
-      | "happy-horse-image-to-video"
-      | "runway-gen4-aleph"
-      | "kling-2.6"
-      | "kling-o1"
-      | "kling-v3-omni-video"
-      | "seedance-2.0-reference-to-video"
-      | "veo-3.1"
-      | "veo-3.1-fast"
-      | "wan2.2-a14b"
-      | "wan2.2-animate"
-      | "wan2.7-videoedit"
-      | "wan2.7-i2v";
+    model: VideoModelId;
     mode: string;
     prompt?: string;
     negativePrompt?: string;
     lumaGenerationId?: string | null;
   };
-  status: "queued" | "running" | "complete" | "failed";
+  status: JobStatusId;
   isChunkInternal?: boolean;
   chunkedRunId?: string | null;
   chunkRole?: "internal_chunk" | "draft_stitched" | string | null;
@@ -653,11 +633,11 @@ export type CustomReportOutputRef =
 
 export type CustomReportRecord = {
   reportId: string;
-  reportType: "qc_frame" | "qc_video" | "video_compare";
+  reportType: CustomReportTypeId;
   name: string;
   assetRefs: CustomReportOutputRef[];
   tests: string[];
-  status: "queued" | "running" | "complete" | "failed";
+  status: JobStatusId;
   jobId?: string;
   resultKey?: string;
   error?: string;
@@ -668,7 +648,7 @@ export type CustomReportRecord = {
 export type QcReportResult = {
   reportId: string;
   taskId: string;
-  reportType: "qc_frame" | "qc_video" | "video_compare";
+  reportType: CustomReportTypeId;
   name: string;
   tests: string[];
   createdAt: string;
@@ -687,7 +667,7 @@ export type TaskDetail = {
   name: string;
   createdAt: string;
   updatedAt: string;
-  status: "created" | "ingesting" | "ready" | "error";
+  status: TaskStatusId;
   video: {
     original?: {
       s3Key: string;
@@ -741,7 +721,7 @@ export type JobStatus = {
   userId: string;
   taskId: string;
   type: string;
-  status: "queued" | "running" | "complete" | "failed";
+  status: JobStatusId;
   progress: number;
   createdAt?: string;
   updatedAt?: string;
@@ -768,7 +748,7 @@ export type ApiRequestRecord = {
   workflow: "image_edit_full" | "image_edit_patch" | "video_generation_reference";
   model: string;
   provider?: string;
-  status: "queued" | "running" | "complete" | "failed";
+  status: JobStatusId;
   jobId?: string;
   createdAt: string;
   updatedAt: string;

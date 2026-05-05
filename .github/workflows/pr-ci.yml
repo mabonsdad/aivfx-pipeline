@@ -30,6 +30,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r backend/requirements.txt
           python -m py_compile $(find backend/src -name '*.py')
+          python -m pytest backend/tests
+
+      - name: Contract drift check
+        run: |
+          npm run sync:contracts
+          git diff --exit-code -- frontend/src/lib/generated
 
       - name: Frontend install + lint + build
         run: |

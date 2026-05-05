@@ -406,6 +406,17 @@ Python syntax check:
 python3 -m py_compile backend/src/api_handler.py backend/src/workers/processor.py
 ```
 
+Contract sync (frontend generated contracts from backend contract sources):
+
+```bash
+npm run sync:contracts
+```
+
+Generated files:
+
+- `frontend/src/lib/generated/videoContracts.ts`
+- `frontend/src/lib/generated/apiContracts.ts`
+
 Deploy is handled through the existing CDK/static-site workflow used for the live application.
 
 ## Baseline Gates

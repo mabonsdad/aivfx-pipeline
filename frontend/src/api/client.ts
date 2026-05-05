@@ -1,9 +1,35 @@
 import { getIdToken } from "../lib/auth";
 import { config } from "../lib/config";
-import type { FullEditModelId, PatchEditModelId, VideoModeId, VideoModelId } from "../lib/generated/videoContracts";
+import type {
+  ApiAssetUploadInitPayload,
+  ApiImageEditFullPayload,
+  ApiImageEditPatchPayload,
+  ApiReferenceVideoGeneratePayload,
+  AssetDeletePayload,
+  ChunkedSegmentGeneratePayload,
+  CustomReportCreatePayload,
+  MergePayload,
+  ManualRefineExportFormatId,
+  QcEdgeBiasId,
+  QcEdgeSuppressionId,
+  QcSamPromptTypeId,
+  ReconcileTimingPayload,
+  SegmentGenerationExtendPayload,
+  SegmentGeneratePayload,
+} from "../lib/generated/apiContracts";
+import type {
+  FullEditModelId,
+  PatchEditModelId,
+  ReplicateKlingModeId,
+  ReplicateKlingV3ModeId,
+  Sora2ResolutionId,
+  VideoModeId,
+  VideoModelId,
+  Wan27ResolutionId,
+  HappyHorseResolutionId,
+} from "../lib/generated/videoContracts";
 import type {
   ApiRequestRecord,
-  CustomReportOutputRef,
   JobStatus,
   SegmentRecord,
   TaskDetail,
@@ -11,6 +37,34 @@ import type {
   VideoCleanupTrack,
   VideoCleanupSettings,
 } from "../types/api";
+
+type ApiFullEditPayload = Omit<ApiImageEditFullPayload, "model"> & { model: FullEditModelId };
+type ApiPatchEditPayload = Omit<ApiImageEditPatchPayload, "model"> & { model: PatchEditModelId };
+type ApiReferenceVideoPayload = Omit<ApiReferenceVideoGeneratePayload, "model" | "mode"> & {
+  model: VideoModelId;
+  mode: VideoModeId;
+  replicateKlingMode?: ReplicateKlingModeId | null;
+  replicateKlingV3Mode?: ReplicateKlingV3ModeId | null;
+  wan27Resolution?: Wan27ResolutionId | null;
+  sora2Resolution?: Sora2ResolutionId | null;
+  happyHorseResolution?: HappyHorseResolutionId | null;
+};
+type SegmentGenerateApiPayload = Omit<SegmentGeneratePayload, "lumaModel" | "mode"> & {
+  lumaModel: VideoModelId;
+  mode: VideoModeId;
+  replicateKlingMode?: ReplicateKlingModeId | null;
+  replicateKlingV3Mode?: ReplicateKlingV3ModeId | null;
+  wan27Resolution?: Wan27ResolutionId | null;
+  sora2Resolution?: Sora2ResolutionId | null;
+  happyHorseResolution?: HappyHorseResolutionId | null;
+};
+type ChunkedSegmentGenerateApiPayload = Omit<ChunkedSegmentGeneratePayload, "lumaModel" | "mode"> & {
+  lumaModel: VideoModelId;
+  mode: VideoModeId;
+  replicateKlingMode?: ReplicateKlingModeId | null;
+  replicateKlingV3Mode?: ReplicateKlingV3ModeId | null;
+  wan27Resolution?: Wan27ResolutionId | null;
+};
 
 function extractApiErrorMessage(payload: unknown, fallback: string): string {
   if (payload && typeof payload === "object") {
@@ -176,7 +230,7 @@ export const apiClient = {
       sourceVariantId?: string;
     },
   ) => api<{ jobId: string }>(`/tasks/${taskId}/frames/${frameId}/edits/patch/submit`, { method: "POST", body: JSON.stringify(payload) }),
-  initApiAssetUpload: (payload: { filename: string; contentType: string; assetType: "image" | "video" }) =>
+  initApiAssetUpload: (payload: ApiAssetUploadInitPayload) =>
     api<{ assetId: string; assetKey: string; uploadUrl: string }>(`/api/v1/assets/uploads/init`, {
       method: "POST",
       body: JSON.stringify(payload),
@@ -191,40 +245,12 @@ export const apiClient = {
     return api<{ requests: ApiRequestRecord[] }>(`/api/v1/requests${query ? `?${query}` : ""}`);
   },
   getApiRequest: (requestId: string) => api<ApiRequestRecord>(`/api/v1/requests/${requestId}`),
-  apiFullEdit: (payload: { model: FullEditModelId; prompt: string; inputAssetKey: string }) =>
+  apiFullEdit: (payload: ApiFullEditPayload) =>
     api<{ requestId: string; jobId: string }>(`/api/v1/image-edits/full`, { method: "POST", body: JSON.stringify(payload) }),
-  apiPatchEdit: (payload: {
-    model: PatchEditModelId;
-    prompt: string;
-    inputAssetKey: string;
-    patchAssetKey: string;
-    patchRect: { x: number; y: number; width: number; height: number };
-    maskAssetKey?: string;
-    referenceAssetKey?: string;
-    featherPx: number;
-    bleedPx: number;
-    runwareRepaintingScale?: number;
-    edgeAwareRefine?: boolean;
-    edgeAwareStrength?: number;
-    edgeAwareRadiusPx?: number;
-    maskGrowPx?: number;
-  }) => api<{ requestId: string; jobId: string }>(`/api/v1/image-edits/patch`, { method: "POST", body: JSON.stringify(payload) }),
-  apiReferenceVideoGenerate: (payload: {
-    model: VideoModelId;
-    mode: VideoModeId;
-    prompt?: string | null;
-    negativePrompt?: string | null;
-    videoAssetKey?: string | null;
-    firstFrameAssetKey: string;
-    lastFrameAssetKey?: string | null;
-    durationSeconds?: number;
-    replicateKlingMode?: "std" | "pro";
-    replicateKlingV3Mode?: "standard" | "pro";
-    wan27Resolution?: "720p" | "1080p";
-    sora2Resolution?: "auto" | "720p" | "1080p";
-    happyHorseResolution?: "720p" | "1080p";
-    preserveFrames?: boolean;
-  }) => api<{ requestId: string; jobId: string }>(`/api/v1/video-generations/reference-video`, { method: "POST", body: JSON.stringify(payload) }),
+  apiPatchEdit: (payload: ApiPatchEditPayload) =>
+    api<{ requestId: string; jobId: string }>(`/api/v1/image-edits/patch`, { method: "POST", body: JSON.stringify(payload) }),
+  apiReferenceVideoGenerate: (payload: ApiReferenceVideoPayload) =>
+    api<{ requestId: string; jobId: string }>(`/api/v1/video-generations/reference-video`, { method: "POST", body: JSON.stringify(payload) }),
   initQualityMatchMaskUpload: (
     taskId: string,
     frameId: string,
@@ -246,7 +272,7 @@ export const apiClient = {
         minRegionAreaPct?: number;
         featherWidthPx?: number;
         boundaryProtectionWidthPx?: number;
-        edgeSuppression?: "off" | "low" | "medium" | "high";
+        edgeSuppression?: QcEdgeSuppressionId;
         useSeamlessCloneFallback?: boolean;
         autoDetectEditRegion?: boolean;
       };
@@ -281,7 +307,7 @@ export const apiClient = {
         minRegionAreaPct: number;
         featherWidthPx: number;
         boundaryProtectionWidthPx: number;
-        edgeSuppression: "off" | "low" | "medium" | "high";
+        edgeSuppression: QcEdgeSuppressionId;
         useSeamlessCloneFallback: boolean;
         autoDetectEditRegion: boolean;
       };
@@ -301,7 +327,7 @@ export const apiClient = {
         minRegionAreaPct?: number;
         featherWidthPx?: number;
         boundaryProtectionWidthPx?: number;
-        edgeSuppression?: "off" | "low" | "medium" | "high";
+        edgeSuppression?: QcEdgeSuppressionId;
         useSeamlessCloneFallback?: boolean;
         autoDetectEditRegion?: boolean;
       };
@@ -325,7 +351,7 @@ export const apiClient = {
         minRegionAreaPct: number;
         featherWidthPx: number;
         boundaryProtectionWidthPx: number;
-        edgeSuppression: "off" | "low" | "medium" | "high";
+        edgeSuppression: QcEdgeSuppressionId;
         useSeamlessCloneFallback: boolean;
         autoDetectEditRegion: boolean;
       };
@@ -336,7 +362,7 @@ export const apiClient = {
   exportManualRefinePsd: (
     taskId: string,
     frameId: string,
-    payload: { sourceVariantId: string; format?: "psd" | "png_zip" },
+    payload: { sourceVariantId: string; format?: ManualRefineExportFormatId },
   ) =>
     api<{
       downloadUrl: string;
@@ -420,13 +446,13 @@ export const apiClient = {
     payload: {
       variantId: string;
       analysisId?: string;
-      promptType: "points" | "box";
+      promptType: QcSamPromptTypeId;
       positivePoints?: Array<{ x: number; y: number }>;
       negativePoints?: Array<{ x: number; y: number }>;
       box?: { x: number; y: number; w: number; h: number };
       restrictToMaskBounds?: boolean;
       existingMaskKey?: string;
-      edgeBias?: "conservative" | "balanced" | "inclusive";
+      edgeBias?: QcEdgeBiasId;
     },
   ) =>
     api<{ jobId: string; analysisId: string }>(`/tasks/${taskId}/frames/${frameId}/quality-match/sam`, {
@@ -444,7 +470,7 @@ export const apiClient = {
         minRegionAreaPct?: number;
         featherWidthPx?: number;
         boundaryProtectionWidthPx?: number;
-        edgeSuppression?: "off" | "low" | "medium" | "high";
+        edgeSuppression?: QcEdgeSuppressionId;
         useSeamlessCloneFallback?: boolean;
         autoDetectEditRegion?: boolean;
       };
@@ -502,7 +528,7 @@ export const apiClient = {
       box?: { x: number; y: number; width: number; height: number };
       existingMaskKey?: string;
       restrictToMaskBounds?: boolean;
-      edgeBias?: "conservative" | "balanced" | "inclusive";
+      edgeBias?: QcEdgeBiasId;
       propagationMode?: "windowed" | "forward" | "backward" | "bidirectional";
     },
   ) =>
@@ -530,39 +556,9 @@ export const apiClient = {
     }),
   selectVariant: (taskId: string, frameId: string, variantId: string) =>
     api<{ ok: true }>(`/tasks/${taskId}/frames/${frameId}/variants/${variantId}/select`, { method: "POST", body: "{}" }),
-  generateSegment: (
-    taskId: string,
-    segmentId: string,
-    payload: {
-      lumaModel: VideoModelId;
-      mode: VideoModeId;
-      prompt?: string;
-      negativePrompt?: string;
-      firstFrameVariantId?: string;
-      lastFrameVariantId?: string;
-      replicateKlingMode?: "std" | "pro";
-      replicateKlingV3Mode?: "standard" | "pro";
-      wan27Resolution?: "720p" | "1080p";
-      sora2Resolution?: "auto" | "720p" | "1080p";
-      happyHorseResolution?: "720p" | "1080p";
-      preserveFrames?: boolean;
-    },
-  ) => api<{ jobId: string; genId: string }>(`/tasks/${taskId}/segments/${segmentId}/generate`, { method: "POST", body: JSON.stringify(payload) }),
-  generateSegmentChunked: (
-    taskId: string,
-    segmentId: string,
-    payload: {
-      lumaModel: VideoModelId;
-      mode: VideoModeId;
-      openingPrompt?: string;
-      continuationPrompt?: string;
-      firstFrameVariantId?: string;
-      replicateKlingMode?: "std" | "pro";
-      replicateKlingV3Mode?: "standard" | "pro";
-      wan27Resolution?: "720p" | "1080p";
-      preserveFrames?: boolean;
-    },
-  ) =>
+  generateSegment: (taskId: string, segmentId: string, payload: SegmentGenerateApiPayload) =>
+    api<{ jobId: string; genId: string }>(`/tasks/${taskId}/segments/${segmentId}/generate`, { method: "POST", body: JSON.stringify(payload) }),
+  generateSegmentChunked: (taskId: string, segmentId: string, payload: ChunkedSegmentGenerateApiPayload) =>
     api<{ runId: string; jobId?: string; genId?: string; chunkCount: number; chunkDurationSec: number; minimumOverlapFrames: number }>(
       `/tasks/${taskId}/segments/${segmentId}/chunked-generate`,
       { method: "POST", body: JSON.stringify(payload) },
@@ -595,12 +591,7 @@ export const apiClient = {
   extendSegmentGeneration: (
     taskId: string,
     genId: string,
-    payload: {
-      alignmentFrameIndex: number;
-      anchorFramesFromEnd?: number;
-      durationSeconds?: number;
-      prompt?: string;
-    },
+    payload: SegmentGenerationExtendPayload,
   ) =>
     api<{
       jobId: string;
@@ -612,19 +603,7 @@ export const apiClient = {
     }>(`/tasks/${taskId}/segment-generations/${genId}/extend`, { method: "POST", body: JSON.stringify(payload) }),
   merge: (
     taskId: string,
-    payload: {
-      selectedSegmentGenerationIds: string[];
-      temporalFeatherFrames: number;
-      generationAdjustments?: Record<
-        string,
-        {
-          startFrameOverride?: number;
-          trimStartFrames?: number;
-          trimEndFrames?: number;
-          playbackRate?: number;
-        }
-      >;
-    },
+    payload: MergePayload,
   ) =>
     api<{ jobId: string }>(`/tasks/${taskId}/merge`, { method: "POST", body: JSON.stringify(payload) }),
   suggestMergeAlignment: (taskId: string, genId: string) =>
@@ -635,11 +614,7 @@ export const apiClient = {
   reconcileSegmentGenerationTiming: (
     taskId: string,
     genId: string,
-    payload: {
-      trimStartFrames: number;
-      trimEndFrames: number;
-      playbackRate?: number;
-    },
+    payload: ReconcileTimingPayload,
   ) =>
     api<{ jobId: string; genId: string; alreadyRunning?: boolean }>(`/tasks/${taskId}/segment-generations/${genId}/reconcile-timing`, {
       method: "POST",
@@ -652,22 +627,11 @@ export const apiClient = {
     }),
   deleteAsset: (
     taskId: string,
-    payload: {
-      assetType: "upload" | "frame_capture" | "frame_variant" | "segment_generation" | "export";
-      frameId?: string;
-      variantId?: string;
-      genId?: string;
-      exportId?: string;
-    },
+    payload: AssetDeletePayload,
   ) => api<{ ok: true }>(`/tasks/${taskId}/assets`, { method: "DELETE", body: JSON.stringify(payload) }),
   createCustomReport: (
     taskId: string,
-    payload: {
-      reportType: "qc_frame" | "qc_video" | "video_compare";
-      tests: string[];
-      outputRefs: CustomReportOutputRef[];
-      name?: string;
-    },
+    payload: CustomReportCreatePayload,
   ) => api<{ reportId: string }>(`/tasks/${taskId}/reports`, { method: "POST", body: JSON.stringify(payload) }),
   getCustomReport: (taskId: string, reportId: string) =>
     api<{ report: import("../types/api").CustomReportRecord; result?: import("../types/api").QcReportResult }>(
