@@ -296,12 +296,20 @@ class MergeGenerationAdjustment(BaseModel):
     trimStartFrames: int = Field(default=0, ge=0)
     trimEndFrames: int = Field(default=0, ge=0)
     playbackRate: float | None = Field(default=None, gt=0.05, le=20.0)
+    cropEdgeFeather: CropEdgeFeatherRequest | None = None
 
 
 class ReconcileTimingRequest(BaseModel):
     trimStartFrames: int = Field(default=0, ge=0)
     trimEndFrames: int = Field(default=0, ge=0)
     playbackRate: float | None = Field(default=None, gt=0.05, le=20.0)
+
+
+class CropEdgeFeatherRequest(BaseModel):
+    top: int = Field(default=0, ge=0, le=200)
+    right: int = Field(default=0, ge=0, le=200)
+    bottom: int = Field(default=0, ge=0, le=200)
+    left: int = Field(default=0, ge=0, le=200)
 
 
 class MergeRequest(BaseModel):

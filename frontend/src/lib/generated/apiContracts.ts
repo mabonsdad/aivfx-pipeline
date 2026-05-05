@@ -127,11 +127,19 @@ export type ReconcileTimingPayload = {
   playbackRate?: number | null;
 };
 
+export type CropEdgeFeatherPayload = {
+  top: number;
+  right: number;
+  bottom: number;
+  left: number;
+};
+
 export type MergeGenerationAdjustmentPayload = {
   trimStartFrames: number;
   trimEndFrames: number;
   startFrameOverride?: number | null;
   playbackRate?: number | null;
+  cropEdgeFeather?: CropEdgeFeatherPayload | null;
 };
 
 export type MergePayload = {

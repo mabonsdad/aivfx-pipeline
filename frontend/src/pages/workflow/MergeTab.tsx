@@ -1,9 +1,10 @@
-import { useMemo, useState, type ComponentType } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType } from "react";
 
 import { HelpInfoButton, PendingButtonLabel, StatusNotice } from "../../components/layout/UiFeedback";
+import VideoCleanupModal from "../../components/cleanup/VideoCleanupModal";
 import { useVideoFrameStrip, type VideoFrameStripItem } from "../../hooks/useVideoFrameStrip";
 import { getGenerationModeConfig, type GenerateInputMode } from "../../lib/generationModeRegistry";
-import type { ExportRecord, SegmentGeneration, SegmentRecord } from "../../types/api";
+import type { ExportRecord, SegmentGeneration, SegmentRecord, TaskDetail } from "../../types/api";
 
 export type MergeTabCtx = {
   onNext: () => void;
@@ -82,7 +83,10 @@ export type MergeTabCtx = {
   endBoundaryOriginalThumbs: VideoFrameStripItem[];
   mergeSourceWidth: number;
   mergeSourceHeight: number;
-  mergeMutation: { isPending: boolean; mutate: () => void };
+  mergeMutation: {
+    isPending: boolean;
+    mutate: (options?: { cropEdgeFeather?: CropEdgeFeather | null }) => void;
+  };
   mergeApplyRetime: boolean;
   setMergeApplyRetime: (value: boolean) => void;
   mergePlaybackRate: number;
@@ -135,7 +139,10 @@ export type MergeTabCtx = {
   keyBasenameFromS3Key: (key: string) => string;
   formatCompactTimestamp: (iso: string | undefined) => string;
   openMotionSyncModal: (exportId: string) => void;
-  openVideoCleanupModal: (generation: SegmentGeneration) => void;
+  task: TaskDetail | undefined;
+  hasMultiChunkOutput: boolean;
+  onTrackJobId: (jobId: string) => void;
+  refreshTask: () => Promise<void>;
 };
 
 type MergeTabProps = {
@@ -154,6 +161,13 @@ type BoundaryZoomModalState = {
   title: string;
   crop: SegmentRecord["crop"] | null;
   frameOffset: number;
+};
+
+type CropEdgeFeather = {
+  top: number;
+  right: number;
+  bottom: number;
+  left: number;
 };
 
 function clampInteger(value: number, min: number, max: number): number {
@@ -304,6 +318,131 @@ function CropOverlayPreview({
   );
 }
 
+function CropEdgeFeatherPreview({
+  originalImageUrl,
+  generatedImageUrl,
+  crop,
+  sourceWidth,
+  sourceHeight,
+  featherTop,
+  featherRight,
+  featherBottom,
+  featherLeft,
+}: {
+  originalImageUrl: string | null;
+  generatedImageUrl: string | null;
+  crop: NonNullable<SegmentRecord["crop"]>;
+  sourceWidth: number;
+  sourceHeight: number;
+  featherTop: number;
+  featherRight: number;
+  featherBottom: number;
+  featherLeft: number;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [renderError, setRenderError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!originalImageUrl || !generatedImageUrl || sourceWidth <= 0 || sourceHeight <= 0) {
+      return;
+    }
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    let cancelled = false;
+    const original = new Image();
+    const generated = new Image();
+    original.crossOrigin = "anonymous";
+    generated.crossOrigin = "anonymous";
+    original.src = originalImageUrl;
+    generated.src = generatedImageUrl;
+
+    const top = Math.max(0, Math.min(crop.height - 1, featherTop));
+    const right = Math.max(0, Math.min(crop.width - 1, featherRight));
+    const bottom = Math.max(0, Math.min(crop.height - 1, featherBottom));
+    const left = Math.max(0, Math.min(crop.width - 1, featherLeft));
+
+    const load = (img: HTMLImageElement) =>
+      new Promise<void>((resolve, reject) => {
+        if (img.complete && img.naturalWidth > 0) {
+          resolve();
+          return;
+        }
+        img.onload = () => resolve();
+        img.onerror = () => reject(new Error("Failed to load preview frame"));
+      });
+
+    void Promise.all([load(original), load(generated)])
+      .then(() => {
+        if (cancelled) return;
+        canvas.width = sourceWidth;
+        canvas.height = sourceHeight;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return;
+        ctx.clearRect(0, 0, sourceWidth, sourceHeight);
+        ctx.drawImage(original, 0, 0, sourceWidth, sourceHeight);
+
+        const layerCanvas = document.createElement("canvas");
+        layerCanvas.width = crop.width;
+        layerCanvas.height = crop.height;
+        const layerCtx = layerCanvas.getContext("2d");
+        if (!layerCtx) return;
+        layerCtx.drawImage(generated, 0, 0, crop.width, crop.height);
+        const imageData = layerCtx.getImageData(0, 0, crop.width, crop.height);
+        const px = imageData.data;
+        for (let y = 0; y < crop.height; y += 1) {
+          for (let x = 0; x < crop.width; x += 1) {
+            const idx = (y * crop.width + x) * 4 + 3;
+            const leftAlpha = left > 0 && x < left ? (x + 1) / (left + 1) : 1;
+            const rightDistance = crop.width - 1 - x;
+            const rightAlpha = right > 0 && rightDistance < right ? (rightDistance + 1) / (right + 1) : 1;
+            const topAlpha = top > 0 && y < top ? (y + 1) / (top + 1) : 1;
+            const bottomDistance = crop.height - 1 - y;
+            const bottomAlpha = bottom > 0 && bottomDistance < bottom ? (bottomDistance + 1) / (bottom + 1) : 1;
+            const edgeAlpha = Math.min(leftAlpha, rightAlpha, topAlpha, bottomAlpha);
+            px[idx] = Math.max(0, Math.min(255, Math.round(px[idx] * edgeAlpha)));
+          }
+        }
+        layerCtx.putImageData(imageData, 0, 0);
+        ctx.drawImage(layerCanvas, crop.x, crop.y, crop.width, crop.height);
+        setRenderError(null);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setRenderError(error instanceof Error ? error.message : "Unable to render feather preview");
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    crop.height,
+    crop.width,
+    crop.x,
+    crop.y,
+    featherBottom,
+    featherLeft,
+    featherRight,
+    featherTop,
+    generatedImageUrl,
+    originalImageUrl,
+    sourceHeight,
+    sourceWidth,
+  ]);
+
+  if (!originalImageUrl || !generatedImageUrl || sourceWidth <= 0 || sourceHeight <= 0) {
+    return <div className="flex h-48 items-center justify-center rounded-lg border border-ink/10 bg-bg text-xs text-ink/55">Preview unavailable</div>;
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="overflow-hidden rounded-lg border border-ink/10 bg-bg" style={{ aspectRatio: `${sourceWidth} / ${sourceHeight}` }}>
+        <canvas ref={canvasRef} className="h-full w-full object-contain" />
+      </div>
+      {renderError ? <p className="text-[11px] text-ink/55">Feather preview fallback: {renderError}</p> : null}
+    </div>
+  );
+}
+
 export default function MergeTab({ ctx }: MergeTabProps) {
   const {
     onNext,
@@ -375,9 +514,12 @@ export default function MergeTab({ ctx }: MergeTabProps) {
     keyBasenameFromS3Key,
     formatCompactTimestamp,
     openMotionSyncModal,
-    openVideoCleanupModal,
+    task,
+    hasMultiChunkOutput,
+    onTrackJobId,
+    refreshTask,
   } = ctx;
-  const [isExtendModalOpen, setIsExtendModalOpen] = useState(false);
+  const [selectedToolId, setSelectedToolId] = useState<"extend" | "align_retime" | "cleanup" | "merge" | null>(null);
   const [extendGenerationId, setExtendGenerationId] = useState("");
   const [extendAlignmentFrame, setExtendAlignmentFrame] = useState("");
   const [extendAnchorFramesFromEnd, setExtendAnchorFramesFromEnd] = useState("5");
@@ -406,24 +548,25 @@ export default function MergeTab({ ctx }: MergeTabProps) {
   const showReconcileTimingTool = generationModeConfig.postProcessTools.reconcileTiming;
   const showTrackedCleanupTool = generationModeConfig.postProcessTools.trackedCleanup;
   const showMergeIntoSourceTool = generationModeConfig.postProcessTools.mergeIntoSource;
-  const visibleToolCount = [
-    showExtendTool,
-    showReconcileTimingTool,
-    showTrackedCleanupTool,
-    showMergeIntoSourceTool,
-  ].filter(Boolean).length;
-  const toolGridClass =
-    visibleToolCount <= 1
-      ? "grid gap-3"
-      : visibleToolCount === 2
-        ? "grid gap-3 lg:grid-cols-2"
-        : visibleToolCount === 3
-          ? "grid gap-3 lg:grid-cols-3"
-          : "grid gap-3 lg:grid-cols-4";
   const cleanupEligibleGeneration =
     showTrackedCleanupTool && mergeTargetGeneration?.status === "complete" && Boolean(mergeTargetGeneration.downloadUrl)
       ? mergeTargetGeneration
       : null;
+  const hasReconciledOutput = Boolean(
+    mergeTargetGeneration?.derivedFromGenerationId ||
+      mergeTargetGeneration?.timingReconcile?.resultGenId ||
+      mergeTargetGeneration?.timingReconcile?.status === "complete",
+  );
+  const generationLengthDiffersFromSource = mergeGeneratedDurationFrames !== mergeOriginalDurationFrames;
+  const cleanupBlockedByTiming = Boolean(generationLengthDiffersFromSource && !hasReconciledOutput);
+  const cleanupToolDisabled = !cleanupEligibleGeneration || cleanupBlockedByTiming;
+  const needsExtension = Boolean(
+    showExtendTool &&
+      mergeTargetGeneration &&
+      mergeGeneratedDurationFrames < mergeOriginalDurationFrames &&
+      !hasMultiChunkOutput,
+  );
+  const shouldShowExtendAlert = needsExtension;
   const currentGenerationFrameDifference = mergeEffectiveDurationFrames - mergeOriginalDurationFrames;
   const suggestedInsertOffset =
     mergeAlignmentSuggestion && mergeTargetSegment
@@ -438,8 +581,83 @@ export default function MergeTab({ ctx }: MergeTabProps) {
         !note.startsWith("No usable edit mask was available"),
     );
   }, [mergeAlignmentSuggestion]);
+  const mergeTargetCrop = useMemo(() => {
+    const crop = mergeTargetSegment?.crop;
+    if (!crop || !crop.enabled) return null;
+    return crop;
+  }, [mergeTargetSegment]);
+  const cropPreviewSourceFrameMin = mergeInsertStartFrameEffective;
+  const cropPreviewSourceFrameMax = Math.max(mergeInsertStartFrameEffective, mergeEffectiveEndFrameInclusive);
+  const [cropPreviewSourceFrame, setCropPreviewSourceFrame] = useState(mergeInsertStartFrameEffective);
+  const [cropEdgeFeather, setCropEdgeFeather] = useState<CropEdgeFeather>({
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+  });
+  const effectiveCropEdgeFeather = useMemo(() => {
+    const maxHorizontal = mergeTargetCrop ? Math.max(0, mergeTargetCrop.width - 1) : 0;
+    const maxVertical = mergeTargetCrop ? Math.max(0, mergeTargetCrop.height - 1) : 0;
+    return {
+      top: clampInteger(cropEdgeFeather.top, 0, maxVertical),
+      right: clampInteger(cropEdgeFeather.right, 0, maxHorizontal),
+      bottom: clampInteger(cropEdgeFeather.bottom, 0, maxVertical),
+      left: clampInteger(cropEdgeFeather.left, 0, maxHorizontal),
+    };
+  }, [cropEdgeFeather.bottom, cropEdgeFeather.left, cropEdgeFeather.right, cropEdgeFeather.top, mergeTargetCrop]);
 
-  function resetExtendModalForGeneration(generation: SegmentGeneration | null) {
+  useEffect(() => {
+    setCropPreviewSourceFrame((previous) =>
+      clampInteger(previous, cropPreviewSourceFrameMin, cropPreviewSourceFrameMax),
+    );
+  }, [cropPreviewSourceFrameMax, cropPreviewSourceFrameMin]);
+
+  useEffect(() => {
+    setCropPreviewSourceFrame(clampInteger(mergeInsertStartFrameEffective, cropPreviewSourceFrameMin, cropPreviewSourceFrameMax));
+  }, [cropPreviewSourceFrameMax, cropPreviewSourceFrameMin, mergeInsertStartFrameEffective, mergeTargetGeneration?.genId]);
+
+  useEffect(() => {
+    const defaultFeather = mergeTargetCrop ? clampInteger(mergeTargetCrop.featherPx ?? 0, 0, 200) : 0;
+    setCropEdgeFeather({
+      top: defaultFeather,
+      right: defaultFeather,
+      bottom: defaultFeather,
+      left: defaultFeather,
+    });
+  }, [mergeTargetCrop]);
+
+  const cropPreviewDisplayFrame = useMemo(
+    () => clampInteger(cropPreviewSourceFrame - mergeInsertStartFrameEffective, 0, Math.max(0, mergeEffectiveDurationFrames - 1)),
+    [cropPreviewSourceFrame, mergeEffectiveDurationFrames, mergeInsertStartFrameEffective],
+  );
+  const cropPreviewGeneratedSourceFrame = useMemo(
+    () =>
+      generatedOutputFrameToSourceFrame(
+        cropPreviewDisplayFrame,
+        mergeTrimStartFramesEffective,
+        mergeVisibleDurationFramesBeforeRetime,
+        mergeEffectiveDurationFrames,
+      ),
+    [cropPreviewDisplayFrame, mergeEffectiveDurationFrames, mergeTrimStartFramesEffective, mergeVisibleDurationFramesBeforeRetime],
+  );
+  const cropPreviewOriginalFrame = useVideoFrameStrip({
+    videoUrl: selectedToolId === "merge" && mergeTargetCrop ? mergeOriginalVideoForPreview : null,
+    fps: mergeFps,
+    frameIndices: selectedToolId === "merge" && mergeTargetCrop ? [cropPreviewSourceFrame] : [],
+    cachePrefix: "merge:crop-feather:source",
+    sourceCacheKey: mergeOriginalSourceCacheKey,
+  });
+  const cropPreviewGeneratedFrame = useVideoFrameStrip({
+    videoUrl: selectedToolId === "merge" && mergeTargetCrop ? mergeGeneratedVideoForPreview : null,
+    fps: mergeFps,
+    frameIndices: selectedToolId === "merge" && mergeTargetCrop ? [cropPreviewGeneratedSourceFrame] : [],
+    cachePrefix: "merge:crop-feather:generated",
+    sourceCacheKey: mergeGeneratedSourceCacheKey,
+  });
+  const cropPreviewOriginalImageUrl = cropPreviewOriginalFrame[0]?.imageUrl ?? null;
+  const cropPreviewGeneratedImageUrl = cropPreviewGeneratedFrame[0]?.imageUrl ?? null;
+
+  const resetExtensionFormForGeneration = useCallback((generation: SegmentGeneration | null) => {
     const segment = generation ? getSegmentForGeneration(generation) : null;
     const defaultAlignment = Math.max(0, (segment?.endFrameExclusive ?? 1) - 6);
     const defaultDuration = Math.max(1, Math.ceil(segment?.durationSec ?? 5));
@@ -448,16 +666,11 @@ export default function MergeTab({ ctx }: MergeTabProps) {
     setExtendAnchorFramesFromEnd("5");
     setExtendDurationSeconds(String(defaultDuration));
     setExtendPrompt(generation?.luma.prompt ?? "");
-  }
-
-  function openExtendModal() {
-    resetExtendModalForGeneration(mergeTargetGeneration ?? completeGenerations[0] ?? null);
-    setIsExtendModalOpen(true);
-  }
+  }, [getSegmentForGeneration]);
 
   function handleExtendGenerationChange(genId: string) {
     const generation = completeGenerations.find((item) => item.genId === genId) ?? null;
-    resetExtendModalForGeneration(generation);
+    resetExtensionFormForGeneration(generation);
   }
 
   function submitExtension() {
@@ -469,8 +682,88 @@ export default function MergeTab({ ctx }: MergeTabProps) {
       durationSeconds: parsedDurationSeconds,
       prompt: extendPrompt.trim() || undefined,
     });
-    setIsExtendModalOpen(false);
   }
+
+  const visibleToolSequence = useMemo(() => {
+    const tools: Array<{
+      id: "extend" | "align_retime" | "cleanup" | "merge";
+      title: string;
+      description: string;
+      disabled?: boolean;
+      alert?: string | null;
+    }> = [];
+    if (showExtendTool) {
+      tools.push({
+        id: "extend",
+        title: "Extend generation",
+        description: "Continue from an existing output",
+        alert: shouldShowExtendAlert ? "Extend the generation to match the current working range" : null,
+      });
+    }
+    if (showReconcileTimingTool) {
+      tools.push({
+        id: "align_retime",
+        title: "Align & Retime",
+        description: "Create frame accurate alignment with the source to allow comping and seamless merge",
+      });
+    }
+    if (showTrackedCleanupTool) {
+      tools.push({
+        id: "cleanup",
+        title: "Comp / clean-up",
+        description: "Create tracked mask to comp the generated regions back onto source to recover original fidelity",
+        disabled: cleanupToolDisabled,
+      });
+    }
+    if (showMergeIntoSourceTool) {
+      tools.push({
+        id: "merge",
+        title: "Merge into source",
+        description: "Blend and place the generation back into the source clip",
+      });
+    }
+    return tools;
+  }, [
+    cleanupToolDisabled,
+    shouldShowExtendAlert,
+    showExtendTool,
+    showMergeIntoSourceTool,
+    showReconcileTimingTool,
+    showTrackedCleanupTool,
+  ]);
+
+  useEffect(() => {
+    const defaultTool = needsExtension
+      ? "extend"
+      : showReconcileTimingTool
+        ? "align_retime"
+        : showMergeIntoSourceTool
+          ? "merge"
+          : showTrackedCleanupTool
+            ? "cleanup"
+            : showExtendTool
+              ? "extend"
+              : null;
+    const selectedStillValid = visibleToolSequence.some((tool) => tool.id === selectedToolId && !tool.disabled);
+    if (!selectedStillValid) {
+      setSelectedToolId(defaultTool);
+    }
+    if (!selectedExtendGeneration && completeGenerations.length) {
+      resetExtensionFormForGeneration(mergeTargetGeneration ?? completeGenerations[0] ?? null);
+    }
+  }, [
+    completeGenerations,
+    mergeTargetGeneration,
+    needsExtension,
+    selectedExtendGeneration,
+    selectedToolId,
+    showExtendTool,
+    showMergeIntoSourceTool,
+    showReconcileTimingTool,
+    showTrackedCleanupTool,
+    visibleToolSequence,
+    resetExtensionFormForGeneration,
+  ]);
 
   function openStartBoundaryZoom() {
     setBoundaryZoomModal({
@@ -585,94 +878,177 @@ export default function MergeTab({ ctx }: MergeTabProps) {
   return (
     <div className="space-y-4">
       <div className="rounded-lg border border-ink/15 bg-bg p-3">
-        <div className={toolGridClass}>
-          {showExtendTool ? (
-            <div className="rounded-lg border border-ink/10 bg-white p-3">
-              <p className="text-sm font-medium text-ink">Extend long outputs</p>
-              <p className="mt-1 text-xs text-ink/65">
-                Continue from an existing output by selecting an anchor near its end and creating the next working-range continuation.
-              </p>
-              <button
-                type="button"
-                className="mt-3 rounded-md border border-ink/20 bg-white px-3 py-2 text-sm text-ink disabled:cursor-not-allowed disabled:opacity-60"
-                disabled={!completeGenerations.length || isExtendingGeneration}
-                onClick={openExtendModal}
-              >
-                <PendingButtonLabel isPending={isExtendingGeneration} idle="Extend output" pending="Queueing extension..." />
-              </button>
-            </div>
-          ) : null}
-          {showReconcileTimingTool ? (
-            <div className="rounded-lg border border-ink/10 bg-white p-3">
-              <p className="text-sm font-medium text-ink">Reconcile timing</p>
-              <p className="mt-1 text-xs text-ink/65">
-                Create a new derived output using the current opening trim, tail trim, and optional uniform retime settings below.
-              </p>
-              <button
-                type="button"
-                className="mt-3 rounded-md border border-ink/20 bg-white px-3 py-2 text-sm text-ink disabled:cursor-not-allowed disabled:opacity-60"
-                disabled={!cleanupEligibleGeneration || isReconcilingTiming}
-                onClick={reconcileTiming}
-              >
-                <PendingButtonLabel isPending={isReconcilingTiming} idle="Create reconciled output" pending="Reconciling timing..." />
-              </button>
-              {!cleanupEligibleGeneration ? (
-                <p className="mt-2 text-[11px] text-ink/55">Select a successful first frame + video output in Generate before reconciling timing.</p>
-              ) : (
-                <p className="mt-2 text-[11px] text-ink/55">This creates a new working-range output for cleanup or merge. It does not merge into source yet.</p>
-              )}
-            </div>
-          ) : null}
-          {showTrackedCleanupTool ? (
-            <div className="rounded-lg border border-ink/10 bg-white p-3">
-              <p className="text-sm font-medium text-ink">Tracked keep-mask cleanup</p>
-              <p className="mt-1 text-xs text-ink/65">
-                Best used after extension or stitch review, once timing is close enough, and before the final merge into source.
-              </p>
-              <button
-                type="button"
-                className="mt-3 rounded-md border border-accent/25 bg-white px-3 py-2 text-sm font-medium text-accent disabled:cursor-not-allowed disabled:opacity-60"
-                disabled={!cleanupEligibleGeneration}
-                onClick={() => {
-                  if (!cleanupEligibleGeneration) return;
-                  openVideoCleanupModal(cleanupEligibleGeneration);
-                }}
-              >
-                Open cleanup
-              </button>
-              {!cleanupEligibleGeneration ? (
-                <p className="mt-2 text-[11px] text-ink/55">Select a successful first frame + video output in Generate before opening cleanup.</p>
-              ) : null}
-            </div>
-          ) : null}
-          {showMergeIntoSourceTool ? (
-            <div className="rounded-lg border border-teal-500 bg-teal-50 p-3">
-              <p className="text-sm font-medium text-ink">Merge into source</p>
-              <p className="mt-1 text-xs text-ink/70">
-                Align the chosen working-range output against the original timeline, trim if needed, then create a merged export below.
-              </p>
-              <p className="mt-3 text-xs font-semibold text-teal-700">
-                {mergeTargetGeneration ? "Current output ready for merge review below." : "Choose an output in Outputs first."}
-              </p>
-            </div>
-          ) : null}
+        <div className="flex items-stretch overflow-x-auto py-1">
+          {visibleToolSequence.map((tool, index) => {
+            const isActive = selectedToolId === tool.id;
+            const isDisabled = Boolean(tool.disabled);
+            return (
+              <div key={tool.id} className="flex min-w-[15.5rem] max-w-[19rem] flex-none items-center">
+                <button
+                  type="button"
+                  disabled={isDisabled}
+                  onClick={() => {
+                    if (isDisabled) return;
+                    setSelectedToolId(tool.id);
+                  }}
+                  className={`w-full rounded-lg border px-3 py-3 text-left transition ${
+                    isDisabled
+                      ? "cursor-not-allowed border-ink/10 bg-ink/5 text-ink/40"
+                      : isActive
+                        ? "border-teal-500 bg-teal-50 text-ink shadow-sm"
+                        : "border-ink/15 bg-white text-ink hover:border-ink/30"
+                  }`}
+                >
+                  <p className="text-sm font-semibold">{tool.title}</p>
+                  <p className="mt-1 text-xs leading-snug opacity-85">{tool.description}</p>
+                  {tool.alert ? (
+                    <p className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-[11px] font-medium text-amber-900">
+                      {tool.alert}
+                    </p>
+                  ) : null}
+                  {tool.id === "cleanup" && cleanupBlockedByTiming ? (
+                    <p className="mt-2 text-[11px] text-ink/55">
+                      Requires an aligned/retimed output when generation and source frame lengths differ.
+                    </p>
+                  ) : null}
+                </button>
+                {index < visibleToolSequence.length - 1 ? (
+                  <div className="-mx-1 z-10 flex h-full items-center">
+                    <div className="rounded-full border border-ink/15 bg-white px-1.5 py-0.5 text-[11px] text-ink/65">&#8594;</div>
+                  </div>
+                ) : null}
+              </div>
+            );
+          })}
         </div>
       </div>
-      {showMergeIntoSourceTool ? (
+      {selectedToolId === "extend" ? (
+        <div className="rounded-lg border border-ink/15 bg-bg p-4">
+          <div className="space-y-3">
+            <div>
+              <h4 className="text-base font-semibold">Extend generation</h4>
+              <p className="mt-1 text-sm text-ink/60">Creates the next working-range continuation from an existing output.</p>
+            </div>
+            <label className="block space-y-1 text-sm">
+              <span className="font-medium">Previous output</span>
+              <select
+                className="w-full rounded-md border border-ink/20 px-2 py-2"
+                value={extendGenerationId}
+                onChange={(event) => handleExtendGenerationChange(event.target.value)}
+              >
+                {completeGenerations.map((generation) => {
+                  const segment = getSegmentForGeneration(generation);
+                  return (
+                    <option key={generation.genId} value={generation.genId}>
+                      {describeGeneration(generation)}
+                      {segment ? ` · ${describeSegment(segment)}` : ""}
+                    </option>
+                  );
+                })}
+              </select>
+            </label>
+            <div className="grid gap-3 md:grid-cols-3">
+              <label className="space-y-1 text-sm">
+                <span className="block font-medium">Alignment source frame</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={Math.max(0, sourceFrameCount - 1)}
+                  className="w-full rounded-md border border-ink/20 px-2 py-2"
+                  value={extendAlignmentFrame}
+                  onChange={(event) => setExtendAlignmentFrame(event.target.value)}
+                />
+              </label>
+              <label className="space-y-1 text-sm">
+                <span className="block font-medium">Anchor offset from end</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={60}
+                  className="w-full rounded-md border border-ink/20 px-2 py-2"
+                  value={extendAnchorFramesFromEnd}
+                  onChange={(event) => setExtendAnchorFramesFromEnd(event.target.value)}
+                />
+              </label>
+              <label className="space-y-1 text-sm">
+                <span className="block font-medium">Next range seconds</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={15}
+                  className="w-full rounded-md border border-ink/20 px-2 py-2"
+                  value={extendDurationSeconds}
+                  onChange={(event) => setExtendDurationSeconds(event.target.value)}
+                />
+              </label>
+            </div>
+            {selectedExtendSegment ? (
+              <p className="rounded-md bg-white p-2 text-xs text-ink/70">
+                Previous working range: {describeSegment(selectedExtendSegment)}. The next continuation will start at source f
+                {Number.isFinite(parsedAlignmentFrame) ? parsedAlignmentFrame : 0}.
+              </p>
+            ) : null}
+            <label className="block space-y-1 text-sm">
+              <span className="font-medium">Prompt for next continuation</span>
+              <textarea
+                rows={4}
+                className="w-full rounded-md border border-ink/20 px-2 py-2"
+                value={extendPrompt}
+                onChange={(event) => setExtendPrompt(event.target.value)}
+              />
+            </label>
+            <div className="flex justify-end">
+              <button
+                type="button"
+                className="rounded bg-accent2 px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-60"
+                disabled={!canSubmitExtension || isExtendingGeneration}
+                onClick={submitExtension}
+              >
+                <PendingButtonLabel isPending={isExtendingGeneration} idle="Queue next continuation" pending="Queueing continuation..." />
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {selectedToolId === "cleanup" ? (
+        cleanupEligibleGeneration ? (
+          <VideoCleanupModal
+            embedded
+            isOpen
+            task={task}
+            generation={cleanupEligibleGeneration}
+            onClose={() => undefined}
+            onTrackJobId={onTrackJobId}
+            refreshTask={refreshTask}
+          />
+        ) : (
+          <StatusNotice variant="warning">
+            <p className="text-xs">Select a completed generation output in Generate before using Comp / clean-up.</p>
+          </StatusNotice>
+        )
+      ) : null}
+      {showMergeIntoSourceTool && (selectedToolId === "align_retime" || selectedToolId === "merge") ? (
       <>
       <div className="rounded-lg border border-ink/15 bg-bg p-3">
         <div className="flex items-center gap-2">
-          <p className="text-sm font-semibold">Merge into source</p>
+          <p className="text-sm font-semibold">{selectedToolId === "align_retime" ? "Align & Retime" : "Merge into source"}</p>
           <HelpInfoButton
-            title="Merge into source video"
-            lines={[
-              "This step takes the chosen output from Outputs and re-inserts it into the original timeline.",
-              "Many models drop or reinterpret the first few generated frames. Use trim start and insert start together to bring the generated clip back into sync.",
-              "Trim end lets you shorten the generated tail before reinserting it. Use feather only after timing looks right.",
-              "Use the zoom buttons on the start and end previews to inspect three generated frames around each merge line.",
-              "Solid teal lines show the cut points. Dashed amber lines show blend boundaries from temporal feathering.",
-              "When a crop is active, zoom preview also shows the generated crop overlaid back onto the original full frame at the stored crop position.",
-            ]}
+            title={selectedToolId === "align_retime" ? "Alignment and retime" : "Merge composition"}
+            lines={
+              selectedToolId === "align_retime"
+                ? [
+                    "Use this step to align generated timing with the source segment before compositing.",
+                    "Suggest alignment analyses source-vs-generation drift and proposes insert/trim offsets.",
+                    "Apply retime when drift builds steadily through the segment.",
+                    "Use the preview timelines to inspect start and end boundary placement.",
+                  ]
+                : [
+                    "Use this step to blend and place the generated segment back into the source clip.",
+                    "Temporal feather controls overlap blending at the merge boundaries.",
+                    "When crop is active, crop-edge feather controls let you soften each edge independently before overlay.",
+                    "Use the preview timelines and crop overlay preview to verify boundary quality.",
+                  ]
+            }
           />
         </div>
       </div>
@@ -700,46 +1076,48 @@ export default function MergeTab({ ctx }: MergeTabProps) {
                   </div>
                 </div>
               </div>
-              <div className="space-y-3">
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div className="space-y-2">
-                    <p className="text-sm font-medium text-ink">Suggested Merge Alignment</p>
-                    <div className="flex flex-wrap items-center gap-2">
-                      <button
-                        type="button"
-                        className="rounded-md border border-ink/20 bg-white px-3 py-2 text-sm text-ink disabled:cursor-not-allowed disabled:opacity-60"
-                        disabled={isSuggestingMergeAlignment}
-                        onClick={suggestMergeAlignment}
-                      >
-                        <PendingButtonLabel
-                          isPending={isSuggestingMergeAlignment}
-                          idle="Suggest alignment"
-                          pending="Analysing alignment..."
-                        />
-                      </button>
-                      {mergeAlignmentSuggestion ? (
-                        <p className="text-xs text-ink/65">
-                          Confidence <span className="font-medium text-ink">{mergeAlignmentSuggestion.analysis.confidence.toFixed(2)}</span>
-                        </p>
-                      ) : null}
+              {selectedToolId === "align_retime" ? (
+                <>
+                  <div className="space-y-3">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div className="space-y-2">
+                        <p className="text-sm font-medium text-ink">Suggested Merge Alignment</p>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <button
+                            type="button"
+                            className="rounded-md border border-ink/20 bg-white px-3 py-2 text-sm text-ink disabled:cursor-not-allowed disabled:opacity-60"
+                            disabled={isSuggestingMergeAlignment}
+                            onClick={suggestMergeAlignment}
+                          >
+                            <PendingButtonLabel
+                              isPending={isSuggestingMergeAlignment}
+                              idle="Suggest alignment"
+                              pending="Analysing alignment..."
+                            />
+                          </button>
+                          {mergeAlignmentSuggestion ? (
+                            <p className="text-xs text-ink/65">
+                              Confidence <span className="font-medium text-ink">{mergeAlignmentSuggestion.analysis.confidence.toFixed(2)}</span>
+                            </p>
+                          ) : null}
+                        </div>
+                      </div>
+                      <div className="max-w-xl rounded-lg border border-ink/10 bg-bg px-3 py-2 text-[11px] leading-5 text-ink/65">
+                        Alignment and drift analysis uses pixel comparisons to match frames, and where feasible focuses on unedited regions outside of the mask and matching any cropping.
+                      </div>
                     </div>
                   </div>
-                  <div className="max-w-xl rounded-lg border border-ink/10 bg-bg px-3 py-2 text-[11px] leading-5 text-ink/65">
-                    Alignment and drift analysis uses pixel comparisons to match frames, and where feasible focuses on unedited regions outside of the mask and matching any cropping.
-                  </div>
-                </div>
-              </div>
-              {mergeAlignmentSuggestion ? (
-                <StatusNotice
-                  variant={
-                    mergeAlignmentSuggestion.analysis.recommendation === "rerender_recommended"
-                      ? "error"
-                      : mergeAlignmentSuggestion.analysis.recommendation === "retime_recommended" ||
-                          mergeAlignmentSuggestion.analysis.recommendation === "piecewise_reconcile_recommended"
-                        ? "warning"
-                        : "info"
-                  }
-                >
+                  {mergeAlignmentSuggestion ? (
+                    <StatusNotice
+                      variant={
+                        mergeAlignmentSuggestion.analysis.recommendation === "rerender_recommended"
+                          ? "error"
+                          : mergeAlignmentSuggestion.analysis.recommendation === "retime_recommended" ||
+                              mergeAlignmentSuggestion.analysis.recommendation === "piecewise_reconcile_recommended"
+                            ? "warning"
+                            : "info"
+                      }
+                    >
                   <div className="grid gap-4 md:grid-cols-2">
                     <div className="space-y-3 rounded-lg border border-ink/10 bg-white p-3">
                       <p className="text-sm font-medium text-ink">Alignment</p>
@@ -839,19 +1217,19 @@ export default function MergeTab({ ctx }: MergeTabProps) {
                       ))}
                     </div>
                   ) : null}
-                </StatusNotice>
-              ) : null}
-              {mergeAlignmentSuggestionError ? (
-                <StatusNotice variant="error">
-                  <p className="text-xs">{mergeAlignmentSuggestionError}</p>
-                </StatusNotice>
-              ) : null}
-              {reconcileTimingError ? (
-                <StatusNotice variant="error">
-                  <p className="text-xs">{reconcileTimingError}</p>
-                </StatusNotice>
-              ) : null}
-              <div className="rounded-lg border border-ink/10 bg-white p-3">
+                    </StatusNotice>
+                  ) : null}
+                  {mergeAlignmentSuggestionError ? (
+                    <StatusNotice variant="error">
+                      <p className="text-xs">{mergeAlignmentSuggestionError}</p>
+                    </StatusNotice>
+                  ) : null}
+                  {reconcileTimingError ? (
+                    <StatusNotice variant="error">
+                      <p className="text-xs">{reconcileTimingError}</p>
+                    </StatusNotice>
+                  ) : null}
+                  <div className="rounded-lg border border-ink/10 bg-white p-3">
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div>
                     <p className="text-xs font-medium text-ink/85">Uniform retime before merge</p>
@@ -898,8 +1276,10 @@ export default function MergeTab({ ctx }: MergeTabProps) {
                     <p>{(mergeEffectiveDurationFrames / Math.max(1, mergeFps)).toFixed(2)}s</p>
                   </div>
                 </div>
-              </div>
-              <div className="grid gap-3 xl:grid-cols-2">
+                  </div>
+                </>
+              ) : null}
+              <div className={`grid gap-3 ${selectedToolId === "align_retime" ? "xl:grid-cols-2" : ""}`}>
                 <div className="space-y-3 rounded-lg border border-ink/10 bg-bg p-3">
                   <p className="text-xs font-semibold uppercase tracking-wide text-ink/55">Start alignment</p>
                   <div className="grid gap-3 md:grid-cols-2">
@@ -922,24 +1302,30 @@ export default function MergeTab({ ctx }: MergeTabProps) {
                   </div>
                 </div>
                 <div className="space-y-3 rounded-lg border border-ink/10 bg-bg p-3">
-                  <p className="text-xs font-semibold uppercase tracking-wide text-ink/55">End alignment and blend</p>
-                  <div className="grid gap-3 md:grid-cols-2">
-                    <NumberAdjustField
-                      label="Trim generation end"
-                      hint="Hide inconsistent generated tail frames at the end of the insert."
-                      value={mergeTrimEndFrames}
-                      min={0}
-                      max={Math.max(0, mergeGeneratedDurationFrames - 1)}
-                      onChange={setMergeTrimEndFrames}
-                    />
-                    <NumberAdjustField
-                      label="Temporal feather"
-                      hint="Blend a small overlap only after the timing looks right."
-                      value={temporalFeatherFrames}
-                      min={0}
-                      max={30}
-                      onChange={setTemporalFeatherFrames}
-                    />
+                  <p className="text-xs font-semibold uppercase tracking-wide text-ink/55">
+                    {selectedToolId === "align_retime" ? "End alignment" : "Merge blend"}
+                  </p>
+                  <div className="grid gap-3">
+                    {selectedToolId === "align_retime" ? (
+                      <NumberAdjustField
+                        label="Trim generation end"
+                        hint="Hide inconsistent generated tail frames at the end of the insert."
+                        value={mergeTrimEndFrames}
+                        min={0}
+                        max={Math.max(0, mergeGeneratedDurationFrames - 1)}
+                        onChange={setMergeTrimEndFrames}
+                      />
+                    ) : null}
+                    {selectedToolId === "merge" ? (
+                      <NumberAdjustField
+                        label="Temporal feather"
+                        hint="Blend a small overlap at the start and end merge boundaries."
+                        value={temporalFeatherFrames}
+                        min={0}
+                        max={30}
+                        onChange={setTemporalFeatherFrames}
+                      />
+                    ) : null}
                   </div>
                 </div>
               </div>
@@ -965,6 +1351,115 @@ export default function MergeTab({ ctx }: MergeTabProps) {
                   {mergeEndOffsetFrames} frames ({(mergeEndOffsetFrames / Math.max(1, mergeFps)).toFixed(2)}s)
                 </p>
               </div>
+              {selectedToolId === "merge" && mergeTargetCrop ? (
+                <div className="space-y-3 rounded-lg border border-ink/10 bg-white p-3">
+                  <div>
+                    <p className="text-sm font-medium text-ink">Crop edge feather</p>
+                    <p className="mt-1 text-[11px] text-ink/60">
+                      Feather is measured inward from each crop edge. Edge alpha uses `edgeOpacity = edgeDistancePx / (featherPx + 1)`.
+                    </p>
+                  </div>
+                  <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                    <label className="space-y-1 text-xs text-ink/70">
+                      <span className="block font-medium text-ink/80">Top (px)</span>
+                      <input
+                        type="number"
+                        min={0}
+                        max={Math.max(0, mergeTargetCrop.height - 1)}
+                        value={effectiveCropEdgeFeather.top}
+                        onChange={(event) =>
+                          setCropEdgeFeather((previous) => ({
+                            ...previous,
+                            top: clampInteger(Number(event.target.value) || 0, 0, Math.max(0, mergeTargetCrop.height - 1)),
+                          }))
+                        }
+                        className="w-full rounded-md border border-ink/20 px-2 py-2 text-sm"
+                      />
+                    </label>
+                    <label className="space-y-1 text-xs text-ink/70">
+                      <span className="block font-medium text-ink/80">Right (px)</span>
+                      <input
+                        type="number"
+                        min={0}
+                        max={Math.max(0, mergeTargetCrop.width - 1)}
+                        value={effectiveCropEdgeFeather.right}
+                        onChange={(event) =>
+                          setCropEdgeFeather((previous) => ({
+                            ...previous,
+                            right: clampInteger(Number(event.target.value) || 0, 0, Math.max(0, mergeTargetCrop.width - 1)),
+                          }))
+                        }
+                        className="w-full rounded-md border border-ink/20 px-2 py-2 text-sm"
+                      />
+                    </label>
+                    <label className="space-y-1 text-xs text-ink/70">
+                      <span className="block font-medium text-ink/80">Bottom (px)</span>
+                      <input
+                        type="number"
+                        min={0}
+                        max={Math.max(0, mergeTargetCrop.height - 1)}
+                        value={effectiveCropEdgeFeather.bottom}
+                        onChange={(event) =>
+                          setCropEdgeFeather((previous) => ({
+                            ...previous,
+                            bottom: clampInteger(Number(event.target.value) || 0, 0, Math.max(0, mergeTargetCrop.height - 1)),
+                          }))
+                        }
+                        className="w-full rounded-md border border-ink/20 px-2 py-2 text-sm"
+                      />
+                    </label>
+                    <label className="space-y-1 text-xs text-ink/70">
+                      <span className="block font-medium text-ink/80">Left (px)</span>
+                      <input
+                        type="number"
+                        min={0}
+                        max={Math.max(0, mergeTargetCrop.width - 1)}
+                        value={effectiveCropEdgeFeather.left}
+                        onChange={(event) =>
+                          setCropEdgeFeather((previous) => ({
+                            ...previous,
+                            left: clampInteger(Number(event.target.value) || 0, 0, Math.max(0, mergeTargetCrop.width - 1)),
+                          }))
+                        }
+                        className="w-full rounded-md border border-ink/20 px-2 py-2 text-sm"
+                      />
+                    </label>
+                  </div>
+                  <div className="grid gap-3 lg:grid-cols-[18rem_minmax(0,1fr)]">
+                    <label className="space-y-1 text-xs text-ink/70">
+                      <span className="block font-medium text-ink/80">Preview source frame</span>
+                      <input
+                        type="number"
+                        min={cropPreviewSourceFrameMin}
+                        max={cropPreviewSourceFrameMax}
+                        value={cropPreviewSourceFrame}
+                        onChange={(event) =>
+                          setCropPreviewSourceFrame(
+                            clampInteger(Number(event.target.value) || cropPreviewSourceFrameMin, cropPreviewSourceFrameMin, cropPreviewSourceFrameMax),
+                          )
+                        }
+                        className="w-full rounded-md border border-ink/20 px-2 py-2 text-sm"
+                      />
+                      <p className="text-[11px] text-ink/60">
+                        Source f{cropPreviewSourceFrame} aligned to generated g{cropPreviewDisplayFrame}.
+                      </p>
+                    </label>
+                    <div>
+                      <CropEdgeFeatherPreview
+                        originalImageUrl={cropPreviewOriginalImageUrl}
+                        generatedImageUrl={cropPreviewGeneratedImageUrl}
+                        crop={mergeTargetCrop}
+                        sourceWidth={mergeSourceWidth}
+                        sourceHeight={mergeSourceHeight}
+                        featherTop={effectiveCropEdgeFeather.top}
+                        featherRight={effectiveCropEdgeFeather.right}
+                        featherBottom={effectiveCropEdgeFeather.bottom}
+                        featherLeft={effectiveCropEdgeFeather.left}
+                      />
+                    </div>
+                  </div>
+                </div>
+              ) : null}
             </div>
 
             <div className="space-y-2">
@@ -978,8 +1473,8 @@ export default function MergeTab({ ctx }: MergeTabProps) {
                   anchorFrame: mergeInsertStartFrameEffective,
                   anchorEdge: "start",
                   anchorSlotIndex: 3,
-                  overlapStart: mergeFeatherClamped > 0 ? mergeInsertStartFrameEffective : undefined,
-                  overlapEnd: mergeFeatherClamped > 0 ? mergeInsertStartFrameEffective + mergeFeatherClamped - 1 : undefined,
+                  overlapStart: selectedToolId === "merge" && mergeFeatherClamped > 0 ? mergeInsertStartFrameEffective : undefined,
+                  overlapEnd: selectedToolId === "merge" && mergeFeatherClamped > 0 ? mergeInsertStartFrameEffective + mergeFeatherClamped - 1 : undefined,
                   prefix: "f",
                   frameLabelPosition: "top",
                 }}
@@ -989,8 +1484,8 @@ export default function MergeTab({ ctx }: MergeTabProps) {
                   anchorFrame: mergeGeneratedStartAnchor,
                   anchorEdge: "start",
                   anchorSlotIndex: 3,
-                  overlapStart: mergeFeatherClamped > 0 ? mergeGeneratedStartAnchor : undefined,
-                  overlapEnd: mergeFeatherClamped > 0 ? mergeGeneratedStartAnchor + mergeFeatherClamped - 1 : undefined,
+                  overlapStart: selectedToolId === "merge" && mergeFeatherClamped > 0 ? mergeGeneratedStartAnchor : undefined,
+                  overlapEnd: selectedToolId === "merge" && mergeFeatherClamped > 0 ? mergeGeneratedStartAnchor + mergeFeatherClamped - 1 : undefined,
                   prefix: "g",
                 }}
               />
@@ -1007,8 +1502,8 @@ export default function MergeTab({ ctx }: MergeTabProps) {
                   anchorFrame: mergeGeneratedEndAnchor,
                   anchorEdge: "end",
                   anchorSlotIndex: 2,
-                  overlapStart: mergeFeatherClamped > 0 ? mergeGeneratedEndAnchor - mergeFeatherClamped + 1 : undefined,
-                  overlapEnd: mergeFeatherClamped > 0 ? mergeGeneratedEndAnchor : undefined,
+                  overlapStart: selectedToolId === "merge" && mergeFeatherClamped > 0 ? mergeGeneratedEndAnchor - mergeFeatherClamped + 1 : undefined,
+                  overlapEnd: selectedToolId === "merge" && mergeFeatherClamped > 0 ? mergeGeneratedEndAnchor : undefined,
                   prefix: "g",
                 }}
                 secondTrack={{
@@ -1017,8 +1512,8 @@ export default function MergeTab({ ctx }: MergeTabProps) {
                   anchorFrame: mergeEffectiveEndFrameExclusive,
                   anchorEdge: "start",
                   anchorSlotIndex: 3,
-                  overlapStart: mergeFeatherClamped > 0 ? mergeEffectiveEndFrameExclusive - mergeFeatherClamped : undefined,
-                  overlapEnd: mergeFeatherClamped > 0 ? mergeEffectiveEndFrameExclusive - 1 : undefined,
+                  overlapStart: selectedToolId === "merge" && mergeFeatherClamped > 0 ? mergeEffectiveEndFrameExclusive - mergeFeatherClamped : undefined,
+                  overlapEnd: selectedToolId === "merge" && mergeFeatherClamped > 0 ? mergeEffectiveEndFrameExclusive - 1 : undefined,
                   prefix: "f",
                   frameLabelPosition: "top",
                 }}
@@ -1028,20 +1523,32 @@ export default function MergeTab({ ctx }: MergeTabProps) {
         ) : null}
 
         <div className="flex flex-wrap gap-2">
+          {selectedToolId === "align_retime" ? (
+            <button
+              type="button"
+              className="rounded-md bg-teal-600 px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={!mergeTargetGeneration || isReconcilingTiming}
+              onClick={reconcileTiming}
+            >
+              <PendingButtonLabel isPending={isReconcilingTiming} idle="Create aligned/retimed output" pending="Reconciling timing..." />
+            </button>
+          ) : null}
           <button
-            className="rounded-md bg-accent2 px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-60"
+            className={`rounded-md px-4 py-2 disabled:cursor-not-allowed disabled:opacity-60 ${
+              selectedToolId === "merge" ? "bg-accent2 text-white" : "border border-ink/20 bg-white text-ink"
+            }`}
             disabled={!mergeTargetGeneration || mergeMutation.isPending}
-            onClick={() => mergeMutation.mutate()}
+            onClick={() =>
+              mergeMutation.mutate(
+                selectedToolId === "merge" && mergeTargetCrop
+                  ? {
+                      cropEdgeFeather: effectiveCropEdgeFeather,
+                    }
+                  : undefined,
+              )
+            }
           >
-            <PendingButtonLabel isPending={mergeMutation.isPending} idle="Merge chosen output" pending="Merging..." />
-          </button>
-          <button
-            type="button"
-            className="rounded-md border border-ink/20 bg-white px-4 py-2 text-ink disabled:cursor-not-allowed disabled:opacity-60"
-            disabled={!completeGenerations.length || isExtendingGeneration}
-            onClick={openExtendModal}
-          >
-            <PendingButtonLabel isPending={isExtendingGeneration} idle="Extend output" pending="Queueing extension..." />
+            <PendingButtonLabel isPending={mergeMutation.isPending} idle="Merge generated output" pending="Merging..." />
           </button>
         </div>
         {extendGenerationError ? (
@@ -1052,7 +1559,7 @@ export default function MergeTab({ ctx }: MergeTabProps) {
       </div>
       </>
       ) : null}
-      {showMergeIntoSourceTool ? (
+      {showMergeIntoSourceTool && selectedToolId === "merge" ? (
       <div className="space-y-2">
         <p className="text-sm font-medium text-ink/80">Merged exports</p>
         {!sortedExports.length ? <p className="text-sm text-ink/60">No merged exports yet.</p> : null}
@@ -1098,7 +1605,7 @@ export default function MergeTab({ ctx }: MergeTabProps) {
         ))}
       </div>
       ) : null}
-      {nextWarning ? (
+      {nextWarning && (selectedToolId === "align_retime" || selectedToolId === "merge") ? (
         <StatusNotice variant="warning">
           <p className="text-xs">{nextWarning}</p>
         </StatusNotice>
@@ -1113,109 +1620,6 @@ export default function MergeTab({ ctx }: MergeTabProps) {
           Next
         </button>
       </div>
-      {isExtendModalOpen ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/40 p-4">
-          <div className="w-full max-w-2xl rounded-xl bg-white p-4 shadow-xl">
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <h4 className="text-lg font-semibold">Extend output</h4>
-                <p className="mt-1 text-sm text-ink/60">
-                  Creates the next working-range continuation and uses an anchor frame from the previous output as the new first-frame edit.
-                </p>
-              </div>
-              <button type="button" className="rounded border border-ink/20 px-2 py-1 text-sm" onClick={() => setIsExtendModalOpen(false)}>
-                Close
-              </button>
-            </div>
-            <div className="mt-4 space-y-3">
-              <label className="block space-y-1 text-sm">
-                <span className="font-medium">Previous output</span>
-                <select
-                  className="w-full rounded-md border border-ink/20 px-2 py-2"
-                  value={extendGenerationId}
-                  onChange={(event) => handleExtendGenerationChange(event.target.value)}
-                >
-                  {completeGenerations.map((generation) => {
-                    const segment = getSegmentForGeneration(generation);
-                    return (
-                      <option key={generation.genId} value={generation.genId}>
-                        {describeGeneration(generation)}
-                        {segment ? ` · ${describeSegment(segment)}` : ""}
-                      </option>
-                    );
-                  })}
-                </select>
-              </label>
-              <div className="grid gap-3 md:grid-cols-3">
-                <label className="space-y-1 text-sm">
-                  <span className="block font-medium">Alignment source frame</span>
-                  <input
-                    type="number"
-                    min={0}
-                    max={Math.max(0, sourceFrameCount - 1)}
-                    className="w-full rounded-md border border-ink/20 px-2 py-2"
-                    value={extendAlignmentFrame}
-                    onChange={(event) => setExtendAlignmentFrame(event.target.value)}
-                  />
-                </label>
-                <label className="space-y-1 text-sm">
-                  <span className="block font-medium">Anchor offset from end</span>
-                  <input
-                    type="number"
-                    min={1}
-                    max={60}
-                    className="w-full rounded-md border border-ink/20 px-2 py-2"
-                    value={extendAnchorFramesFromEnd}
-                    onChange={(event) => setExtendAnchorFramesFromEnd(event.target.value)}
-                  />
-                </label>
-                <label className="space-y-1 text-sm">
-                  <span className="block font-medium">Next range seconds</span>
-                  <input
-                    type="number"
-                    min={1}
-                    max={15}
-                    className="w-full rounded-md border border-ink/20 px-2 py-2"
-                    value={extendDurationSeconds}
-                    onChange={(event) => setExtendDurationSeconds(event.target.value)}
-                  />
-                </label>
-              </div>
-              <p className="text-xs text-ink/60">
-                Default alignment is five frames before the previous range's last source frame. Adjust it to the original frame that visually matches the
-                chosen anchor. The default offset uses frame five before the output ends.
-              </p>
-              {selectedExtendSegment ? (
-                <p className="rounded-md bg-bg p-2 text-xs text-ink/70">
-                  Previous working range: {describeSegment(selectedExtendSegment)}. The next continuation will start at source f{Number.isFinite(parsedAlignmentFrame) ? parsedAlignmentFrame : 0}.
-                </p>
-              ) : null}
-              <label className="block space-y-1 text-sm">
-                <span className="font-medium">Prompt for next continuation</span>
-                <textarea
-                  rows={4}
-                  className="w-full rounded-md border border-ink/20 px-2 py-2"
-                  value={extendPrompt}
-                  onChange={(event) => setExtendPrompt(event.target.value)}
-                />
-              </label>
-              <div className="flex flex-wrap justify-end gap-2">
-                <button type="button" className="rounded border border-ink/20 px-4 py-2" onClick={() => setIsExtendModalOpen(false)}>
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  className="rounded bg-accent2 px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-60"
-                  disabled={!canSubmitExtension || isExtendingGeneration}
-                  onClick={submitExtension}
-                >
-                  <PendingButtonLabel isPending={isExtendingGeneration} idle="Queue next continuation" pending="Queueing continuation..." />
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      ) : null}
       {boundaryZoomModal ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/45 p-4">
           <div className="max-h-[90vh] w-full max-w-6xl overflow-y-auto rounded-xl bg-white p-4 shadow-xl">

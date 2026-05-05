@@ -90,11 +90,19 @@ class ReconcileTimingPayload(TypedDict):
     playbackRate: NotRequired[float | None]
 
 
+class CropEdgeFeatherPayload(TypedDict):
+    top: int
+    right: int
+    bottom: int
+    left: int
+
+
 class MergeGenerationAdjustmentPayload(TypedDict):
     trimStartFrames: int
     trimEndFrames: int
     startFrameOverride: NotRequired[int | None]
     playbackRate: NotRequired[float | None]
+    cropEdgeFeather: NotRequired[CropEdgeFeatherPayload | None]
 
 
 class MergePayload(TypedDict):

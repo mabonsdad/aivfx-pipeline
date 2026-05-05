@@ -110,6 +110,31 @@ def _format_seconds(value: float) -> str:
     return f"{max(0.0, float(value)):.6f}"
 
 
+def _escape_filter_expression(value: str) -> str:
+    return value.replace("\\", "\\\\").replace(",", "\\,").replace(":", "\\:")
+
+
+def _edge_feather_alpha_expression(
+    *,
+    top: int,
+    right: int,
+    bottom: int,
+    left: int,
+) -> str:
+    def _edge_factor(coord: str, size: str, feather: int, from_end: bool) -> str:
+        if feather <= 0:
+            return "1"
+        if from_end:
+            return f"if(gte({coord},{size}-{feather}),({size}-{coord})/({feather}+1),1)"
+        return f"if(lt({coord},{feather}),({coord}+1)/({feather}+1),1)"
+
+    left_factor = _edge_factor("X", "W", left, False)
+    right_factor = _edge_factor("X", "W", right, True)
+    top_factor = _edge_factor("Y", "H", top, False)
+    bottom_factor = _edge_factor("Y", "H", bottom, True)
+    return f"min(min({left_factor},{right_factor}),min({top_factor},{bottom_factor}))"
+
+
 def _atempo_chain(ratio: float) -> str:
     clamped = max(0.05, min(20.0, float(ratio)))
     factors: list[float] = []
@@ -456,6 +481,10 @@ def compose_cropped_generated_segment(
     crop_width: int,
     crop_height: int,
     crop_feather_px: int = 0,
+    crop_feather_top_px: int | None = None,
+    crop_feather_right_px: int | None = None,
+    crop_feather_bottom_px: int | None = None,
+    crop_feather_left_px: int | None = None,
     generated_trim_start_frames: int = 0,
     generated_trim_end_frames: int = 0,
 ) -> list[str]:
@@ -485,24 +514,47 @@ def compose_cropped_generated_segment(
         ),
     ]
 
-    feather_px = max(0, min(int(crop_feather_px), min(crop_width // 2, crop_height // 2, 128)))
-    if feather_px > 0:
-        inner_w = max(1, crop_width - (feather_px * 2))
-        inner_h = max(1, crop_height - (feather_px * 2))
+    max_horizontal_feather = max(0, min(crop_width - 1, 128))
+    max_vertical_feather = max(0, min(crop_height - 1, 128))
+    feather_top = max(0, min(int(crop_feather_top_px or 0), max_vertical_feather))
+    feather_right = max(0, min(int(crop_feather_right_px or 0), max_horizontal_feather))
+    feather_bottom = max(0, min(int(crop_feather_bottom_px or 0), max_vertical_feather))
+    feather_left = max(0, min(int(crop_feather_left_px or 0), max_horizontal_feather))
+    if feather_top > 0 or feather_right > 0 or feather_bottom > 0 or feather_left > 0:
+        alpha_expr = _escape_filter_expression(
+            _edge_feather_alpha_expression(
+                top=feather_top,
+                right=feather_right,
+                bottom=feather_bottom,
+                left=feather_left,
+            )
+        )
         filter_complex.extend(
             [
-                (
-                    f"color=black:s={crop_width}x{crop_height}:r={fps_str}:d={_format_seconds(generated_effective_duration_sec)},"
-                    f"format=gray,drawbox=x={feather_px}:y={feather_px}:w={inner_w}:h={inner_h}:color=white:t=fill,"
-                    f"boxblur={feather_px}:1[vcropmask]"
-                ),
                 "[vgen]format=rgba[vgen_rgba]",
-                "[vgen_rgba][vcropmask]alphamerge[vgen_alpha]",
+                f"[vgen_rgba]geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='a(X,Y)*{alpha_expr}'[vgen_alpha]",
                 f"[vorig][vgen_alpha]overlay={crop_x}:{crop_y}:format=auto:shortest=1[vout]",
             ]
         )
     else:
-        filter_complex.append(f"[vorig][vgen]overlay={crop_x}:{crop_y}:format=auto:shortest=1[vout]")
+        feather_px = max(0, min(int(crop_feather_px), min(crop_width // 2, crop_height // 2, 128)))
+        if feather_px > 0:
+            inner_w = max(1, crop_width - (feather_px * 2))
+            inner_h = max(1, crop_height - (feather_px * 2))
+            filter_complex.extend(
+                [
+                    (
+                        f"color=black:s={crop_width}x{crop_height}:r={fps_str}:d={_format_seconds(generated_effective_duration_sec)},"
+                        f"format=gray,drawbox=x={feather_px}:y={feather_px}:w={inner_w}:h={inner_h}:color=white:t=fill,"
+                        f"boxblur={feather_px}:1[vcropmask]"
+                    ),
+                    "[vgen]format=rgba[vgen_rgba]",
+                    "[vgen_rgba][vcropmask]alphamerge[vgen_alpha]",
+                    f"[vorig][vgen_alpha]overlay={crop_x}:{crop_y}:format=auto:shortest=1[vout]",
+                ]
+            )
+        else:
+            filter_complex.append(f"[vorig][vgen]overlay={crop_x}:{crop_y}:format=auto:shortest=1[vout]")
 
     cmd = [
         FFMPEG_BIN,

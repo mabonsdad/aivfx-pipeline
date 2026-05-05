@@ -13,6 +13,7 @@ type VideoCleanupModalProps = {
   onClose: () => void;
   onTrackJobId: (jobId: string) => void;
   refreshTask: () => Promise<void>;
+  embedded?: boolean;
 };
 
 const DEFAULT_SETTINGS: VideoCleanupSettings = {
@@ -293,6 +294,7 @@ export default function VideoCleanupModal({
   onClose,
   onTrackJobId,
   refreshTask,
+  embedded = false,
 }: VideoCleanupModalProps) {
   const {
     selectedFrameIndexLocal,
@@ -790,23 +792,28 @@ export default function VideoCleanupModal({
     refreshMaskEditorOverlay();
   }
 
-  if (!isOpen || !generation || !task) return null;
+  if ((!isOpen && !embedded) || !generation || !task) return null;
 
-  return (
-    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
-      <div className="flex h-[92vh] w-[min(1400px,96vw)] flex-col overflow-hidden rounded-2xl border border-ink/15 bg-card text-ink" onClick={(event) => event.stopPropagation()}>
+  const cleanupLayoutClass = embedded
+    ? "grid min-h-0 flex-1 gap-0 xl:grid-cols-[260px_minmax(0,1fr)]"
+    : "grid min-h-0 flex-1 gap-0 lg:grid-cols-[300px_minmax(0,1fr)_340px]";
+
+  const content = (
+      <div className={`${embedded ? "flex min-h-[68vh] w-full flex-col overflow-hidden rounded-2xl border border-ink/15 bg-card text-ink" : "flex h-[92vh] w-[min(1400px,96vw)] flex-col overflow-hidden rounded-2xl border border-ink/15 bg-card text-ink"}`} onClick={(event) => event.stopPropagation()}>
         <div className="flex items-start justify-between border-b border-ink/10 px-5 py-4">
           <div>
             <p className="text-xs uppercase tracking-[0.22em] text-ink/45">Post Process Cleanup</p>
             <h3 className="text-xl font-semibold">Tracked keep-mask cleanup for {generation.luma.model}</h3>
             <p className="text-sm text-ink/60">Best used after extension or stitch review, once timing is close enough. This tool restores source pixels outside the tracked keep region; it does not fix motion drift.</p>
           </div>
-          <button type="button" className="rounded-full border border-ink/15 px-3 py-1.5 text-sm text-ink/70 hover:bg-bg" onClick={onClose}>
-            Close
-          </button>
+          {!embedded ? (
+            <button type="button" className="rounded-full border border-ink/15 px-3 py-1.5 text-sm text-ink/70 hover:bg-bg" onClick={onClose}>
+              Close
+            </button>
+          ) : null}
         </div>
 
-        <div className="grid min-h-0 flex-1 gap-0 lg:grid-cols-[300px_minmax(0,1fr)_340px]">
+        <div className={cleanupLayoutClass}>
           <aside className="overflow-y-auto border-r border-ink/10 bg-bg/55 p-4">
             <p className="text-xs font-semibold uppercase tracking-[0.18em] text-ink/45">Tracks</p>
             <div className="mt-3 space-y-2">
@@ -1240,6 +1247,15 @@ export default function VideoCleanupModal({
           </div>
         ) : null}
       </div>
+  );
+
+  if (embedded) {
+    return content;
+  }
+
+  return (
+    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
+      {content}
     </div>
   );
 }

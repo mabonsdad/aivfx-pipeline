@@ -1970,19 +1970,24 @@ export default function App() {
   });
 
   const mergeMutation = useMutation({
-    mutationFn: async () => {
+    mutationFn: async (options?: { cropEdgeFeather?: { top: number; right: number; bottom: number; left: number } | null }) => {
       if (!selectedTaskId) throw new Error("Select a task");
-      const generationAdjustments =
+      const mergeTargetAdjustment =
         mergeTargetGeneration && selectedGenIds.includes(mergeTargetGeneration.genId)
-                ? {
-                    [mergeTargetGeneration.genId]: {
-                      startFrameOverride: mergeInsertStartFrameEffective,
-                      trimStartFrames: mergeTrimStartUserClamped,
-                      trimEndFrames: mergeTrimEndClamped,
-                      playbackRate: mergeApplyRetime ? mergePlaybackRate : undefined,
-                    },
-                  }
-                : undefined;
+          ? {
+              startFrameOverride: mergeInsertStartFrameEffective,
+              trimStartFrames: mergeTrimStartUserClamped,
+              trimEndFrames: mergeTrimEndClamped,
+              playbackRate: mergeApplyRetime ? mergePlaybackRate : undefined,
+              cropEdgeFeather: options?.cropEdgeFeather ?? undefined,
+            }
+          : null;
+      const generationAdjustments =
+        mergeTargetGeneration && mergeTargetAdjustment
+          ? {
+              [mergeTargetGeneration.genId]: mergeTargetAdjustment,
+            }
+          : undefined;
       return apiClient.merge(selectedTaskId, {
         selectedSegmentGenerationIds: selectedGenIds,
         temporalFeatherFrames: mergeFeatherClamped,
@@ -4228,10 +4233,19 @@ export default function App() {
       keyBasenameFromS3Key,
       formatCompactTimestamp,
       openMotionSyncModal,
-      openVideoCleanupModal: openVideoCleanupModalForGeneration,
+      task,
+      hasMultiChunkOutput: selectedSegmentChunkedGenerationRuns.some((run) => run.chunks.length > 1),
+      onTrackJobId: (jobId) => setJobIds((previous) => appendTrackedJobId(previous, jobId)),
+      refreshTask: async () => {
+        if (!selectedTaskId) return;
+        await queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
+        await queryClient.invalidateQueries({ queryKey: ["task", "report", selectedTaskId] });
+        await queryClient.invalidateQueries({ queryKey: ["task", "assets", selectedTaskId] });
+      },
     }),
     [
       selectedTaskId,
+      queryClient,
       setTab,
       mergeTargetGeneration,
       generationInputMode,
@@ -4289,7 +4303,8 @@ export default function App() {
       extendSegmentGenerationMutation.error,
       sortedExports,
       openMotionSyncModal,
-      openVideoCleanupModalForGeneration,
+      task,
+      selectedSegmentChunkedGenerationRuns,
     ],
   );
 

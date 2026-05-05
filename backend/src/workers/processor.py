@@ -4615,6 +4615,17 @@ def _handle_merge(
                 effective_trim_end = 0
             crop_settings = gen.get("segmentCrop") if isinstance(gen.get("segmentCrop"), dict) else segment.get("crop")
             crop_compose_cmd: list[str] | None = None
+            crop_edge_feather: dict[str, int] | None = None
+            raw_crop_edge_feather = raw_adjustment.get("cropEdgeFeather")
+            if isinstance(raw_crop_edge_feather, dict):
+                max_h = max(0, int(crop_settings.get("width", 0)) - 1) if isinstance(crop_settings, dict) else 0
+                max_v = max(0, int(crop_settings.get("height", 0)) - 1) if isinstance(crop_settings, dict) else 0
+                crop_edge_feather = {
+                    "top": max(0, min(int(raw_crop_edge_feather.get("top", 0) or 0), max_v)),
+                    "right": max(0, min(int(raw_crop_edge_feather.get("right", 0) or 0), max_h)),
+                    "bottom": max(0, min(int(raw_crop_edge_feather.get("bottom", 0) or 0), max_v)),
+                    "left": max(0, min(int(raw_crop_edge_feather.get("left", 0) or 0), max_h)),
+                }
             if (
                 isinstance(crop_settings, dict)
                 and crop_settings.get("enabled")
@@ -4636,6 +4647,10 @@ def _handle_merge(
                     crop_width=int(crop_settings.get("width", 0)),
                     crop_height=int(crop_settings.get("height", 0)),
                     crop_feather_px=int(crop_settings.get("featherPx", 0)),
+                    crop_feather_top_px=(crop_edge_feather or {}).get("top"),
+                    crop_feather_right_px=(crop_edge_feather or {}).get("right"),
+                    crop_feather_bottom_px=(crop_edge_feather or {}).get("bottom"),
+                    crop_feather_left_px=(crop_edge_feather or {}).get("left"),
                     generated_trim_start_frames=effective_trim_start,
                     generated_trim_end_frames=effective_trim_end,
                 )
@@ -4674,6 +4689,7 @@ def _handle_merge(
                         "startFrameOverride": raw_adjustment.get("startFrameOverride") is None,
                         "trimEndFrames": raw_adjustment.get("trimEndFrames") is None,
                     },
+                    "cropEdgeFeather": crop_edge_feather,
                     "segmentCrop": crop_settings if isinstance(crop_settings, dict) else None,
                     "retimeFfmpeg": (" ".join(retime_cmd).replace(str(td_path), "/tmp") if retime_cmd else None),
                     "cropComposeFfmpeg": (" ".join(crop_compose_cmd).replace(str(td_path), "/tmp") if crop_compose_cmd else None),
