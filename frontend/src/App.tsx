@@ -24,6 +24,7 @@ import {
 import { useVideoFrameStrip, type VideoFrameStripItem } from "./hooks/useVideoFrameStrip";
 import { useTaskLifecycle } from "./hooks/useTaskLifecycle";
 import { useGenerationMergeState } from "./hooks/useGenerationMergeState";
+import { useReportOutputSelection } from "./hooks/useReportOutputSelection";
 import type {
   HappyHorseResolutionId,
   PatchEditModelId,
@@ -357,19 +358,6 @@ function humanizeFilename(value: string): string {
 function keyBasenameFromS3Key(key: string): string {
   const parts = key.split("/");
   return parts[parts.length - 1] || key;
-}
-
-function reportOutputRefKey(ref: CustomReportOutputRef): string {
-  if (ref.assetType === "segment_generation") {
-    return `segment_generation:${ref.genId}`;
-  }
-  if (ref.assetType === "export") {
-    return `export:${ref.exportId}`;
-  }
-  if (ref.assetType === "external_frame_pair") {
-    return `external_frame_pair:${ref.pairId}`;
-  }
-  return `frame_variant:${ref.frameId}:${ref.variantId}`;
 }
 
 function truncateIdentifier(value: string, maxLength = 12): string {
@@ -787,7 +775,13 @@ export default function App() {
   );
   const routeState = useWorkflowRouteState(location.pathname);
   const { reportView, activeCustomReportId } = useReportRouteState(location.search);
-  const [selectedReportOutputs, setSelectedReportOutputs] = useState<Record<string, { taskId: string; ref: CustomReportOutputRef }>>({});
+  const {
+    selectedReportOutputs,
+    selectedOutputRefsByTask,
+    reportOutputRefKey,
+    toggleCustomReportOutput,
+    clearCustomReportOutputs,
+  } = useReportOutputSelection();
   const [mergedAssetsVisible, setMergedAssetsVisible] = useState(6);
   const [editedFrameAssetsVisible, setEditedFrameAssetsVisible] = useState(6);
   const [generatedAssetsVisible, setGeneratedAssetsVisible] = useState(6);
@@ -1368,16 +1362,6 @@ export default function App() {
   const activeFrameWidth = activeFrameDimensions?.width ?? null;
   const activeFrameHeight = activeFrameDimensions?.height ?? null;
   const activePatchReference = patchReferenceImages[editFrameTab];
-  const selectedOutputRefsByTask = useMemo(() => {
-    const grouped: Record<string, CustomReportOutputRef[]> = {};
-    for (const item of Object.values(selectedReportOutputs)) {
-      if (!grouped[item.taskId]) {
-        grouped[item.taskId] = [];
-      }
-      grouped[item.taskId].push(item.ref);
-    }
-    return grouped;
-  }, [selectedReportOutputs]);
   useEffect(() => {
     setFirstFrameId(null);
     setLastFrameId(null);
@@ -3378,43 +3362,6 @@ export default function App() {
     };
   }
 
-  function toggleCustomReportOutput(taskId: string, ref: CustomReportOutputRef) {
-    const key = `${taskId}:${reportOutputRefKey(ref)}`;
-    setSelectedReportOutputs((previous) => {
-      if (previous[key]) {
-        const next = { ...previous };
-        delete next[key];
-        return next;
-      }
-      return { ...previous, [key]: { taskId, ref } };
-    });
-  }
-
-  function clearCustomReportOutputs(taskId: string, refs?: CustomReportOutputRef[]) {
-    setSelectedReportOutputs((previous) => {
-      if (!Object.keys(previous).length) return previous;
-      if (!refs?.length) {
-        const next = { ...previous };
-        for (const key of Object.keys(next)) {
-          if (next[key]?.taskId === taskId) {
-            delete next[key];
-          }
-        }
-        return next;
-      }
-      const keysToDelete = new Set(refs.map((ref) => `${taskId}:${reportOutputRefKey(ref)}`));
-      const next = { ...previous };
-      let changed = false;
-      for (const key of keysToDelete) {
-        if (next[key]) {
-          delete next[key];
-          changed = true;
-        }
-      }
-      return changed ? next : previous;
-    });
-  }
-
   function openTaskReport(taskId: string) {
     goToReport(taskId, "frames", null);
   }
@@ -4339,13 +4286,7 @@ export default function App() {
     try {
       await deleteAssetMutation.mutateAsync({ taskId: item.taskId, payload: item.deletePayload });
       if (item.customReportRef) {
-        const key = `${item.taskId}:${reportOutputRefKey(item.customReportRef)}`;
-        setSelectedReportOutputs((previous) => {
-          if (!previous[key]) return previous;
-          const next = { ...previous };
-          delete next[key];
-          return next;
-        });
+        clearCustomReportOutputs(item.taskId, [item.customReportRef]);
       }
     } catch (error) {
       setAppUiError(error instanceof Error ? error.message : "Failed to delete asset");
