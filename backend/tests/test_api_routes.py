@@ -525,3 +525,132 @@ def test_chunked_generation_save_draft_route_queues_finalize_job(monkeypatch) ->
     run = saved[-1]["chunkedGenerationRuns"][0]
     assert run["saveStatus"] == "queued"
     assert run["saveJobId"] == "job_finalize"
+
+
+def test_segment_generation_extend_route_missing_generation_returns_404(monkeypatch) -> None:
+    task = {
+        "taskId": "task_1",
+        "userId": "user-1",
+        "name": "Task 1",
+        "segmentGenerations": {},
+        "segments": [],
+        "video": {"editSource": {"frameCount": 120, "fps": {"num": 24, "den": 1}}},
+    }
+
+    class _Store:
+        pass
+
+    class _AssetStore:
+        pass
+
+    monkeypatch.setattr(api_handler, "get_user_id", lambda _event: "user-1")
+    monkeypatch.setattr(api_handler, "get_user_claims", lambda _event: {"email": "u@example.com"})
+    monkeypatch.setattr(api_handler, "S3JsonStore", lambda _bucket: _Store())
+    monkeypatch.setattr(api_handler, "AssetStore", lambda _bucket, _region: _AssetStore())
+    monkeypatch.setattr(api_handler, "JobQueue", lambda _url: object())
+    monkeypatch.setattr(api_handler, "_load_task_or_404", lambda _store, _user_id, _task_id: task)
+
+    result = api_handler._route(
+        _event(
+            "POST",
+            "/tasks/task_1/segment-generations/gen_missing/extend",
+            {"alignmentFrameIndex": 10},
+        )
+    )
+    assert result["statusCode"] == 404
+
+
+def test_generation_merge_alignment_suggestion_route_queues_job(monkeypatch) -> None:
+    task = {
+        "taskId": "task_1",
+        "userId": "user-1",
+        "name": "Task 1",
+        "segmentGenerations": {
+            "gen_1": {
+                "genId": "gen_1",
+                "status": "complete",
+                "outputKey": "users/user-1/tasks/task_1/generated/out.mp4",
+            }
+        },
+    }
+    saved: list[dict] = []
+
+    class _Store:
+        def save_task(self, task_payload: dict):
+            saved.append(json.loads(json.dumps(task_payload)))
+            return task_payload
+
+    class _AssetStore:
+        pass
+
+    monkeypatch.setattr(api_handler, "get_user_id", lambda _event: "user-1")
+    monkeypatch.setattr(api_handler, "get_user_claims", lambda _event: {"email": "u@example.com"})
+    monkeypatch.setattr(api_handler, "S3JsonStore", lambda _bucket: _Store())
+    monkeypatch.setattr(api_handler, "AssetStore", lambda _bucket, _region: _AssetStore())
+    monkeypatch.setattr(api_handler, "JobQueue", lambda _url: object())
+    monkeypatch.setattr(api_handler, "_load_task_or_404", lambda _store, _user_id, _task_id: task)
+    monkeypatch.setattr(api_handler, "_queue_job", lambda **_kwargs: "job_align")
+
+    result = api_handler._route(
+        _event(
+            "POST",
+            "/tasks/task_1/segment-generations/gen_1/merge-alignment-suggestion",
+            {},
+        )
+    )
+    assert result["statusCode"] == 202
+    payload = json.loads(result["body"])
+    assert payload["jobId"] == "job_align"
+    assert saved
+    state = saved[-1]["segmentGenerations"]["gen_1"]["mergeAlignmentSuggestion"]
+    assert state["status"] == "queued"
+    assert state["jobId"] == "job_align"
+
+
+def test_generation_reconcile_timing_route_queues_derived_generation(monkeypatch) -> None:
+    task = {
+        "taskId": "task_1",
+        "userId": "user-1",
+        "name": "Task 1",
+        "segmentGenerations": {
+            "gen_1": {
+                "genId": "gen_1",
+                "segmentId": "seg_1",
+                "status": "complete",
+                "outputKey": "users/user-1/tasks/task_1/generated/out.mp4",
+                "generationSettings": {},
+            }
+        },
+    }
+    saved: list[dict] = []
+
+    class _Store:
+        def save_task(self, task_payload: dict):
+            saved.append(json.loads(json.dumps(task_payload)))
+            return task_payload
+
+    class _AssetStore:
+        pass
+
+    monkeypatch.setattr(api_handler, "get_user_id", lambda _event: "user-1")
+    monkeypatch.setattr(api_handler, "get_user_claims", lambda _event: {"email": "u@example.com"})
+    monkeypatch.setattr(api_handler, "S3JsonStore", lambda _bucket: _Store())
+    monkeypatch.setattr(api_handler, "AssetStore", lambda _bucket, _region: _AssetStore())
+    monkeypatch.setattr(api_handler, "JobQueue", lambda _url: object())
+    monkeypatch.setattr(api_handler, "_load_task_or_404", lambda _store, _user_id, _task_id: task)
+    monkeypatch.setattr(api_handler, "_queue_job", lambda **_kwargs: "job_reconcile")
+    monkeypatch.setattr(api_handler, "new_id", lambda prefix: f"{prefix}_abc")
+
+    result = api_handler._route(
+        _event(
+            "POST",
+            "/tasks/task_1/segment-generations/gen_1/reconcile-timing",
+            {"trimStartFrames": 1, "trimEndFrames": 2},
+        )
+    )
+    assert result["statusCode"] == 202
+    payload = json.loads(result["body"])
+    assert payload["jobId"] == "job_reconcile"
+    assert payload["genId"] == "gen_abc"
+    assert saved
+    assert "gen_abc" in saved[-1]["segmentGenerations"]

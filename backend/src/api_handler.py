@@ -26,6 +26,8 @@ from src.api.routes_task_assets import handle_task_asset_routes
 from src.api.routes_task_chunked_controls import handle_task_chunked_control_routes
 from src.api.routes_task_cleanup import handle_task_cleanup_routes
 from src.api.routes_task_detail import handle_task_detail_route
+from src.api.routes_task_generation_extend import handle_task_generation_extend_route
+from src.api.routes_task_generation_post import handle_task_generation_post_routes
 from src.api.routes_task_reports import handle_task_report_routes
 from src.api.routes_task_segments import handle_task_segment_routes
 from src.api.routes_tasks_root import handle_tasks_root_routes
@@ -67,11 +69,9 @@ from src.models.schemas import (
     QualityMatchMaskUploadRequest,
     QualityMatchPreviewRequest,
     QualityMatchSamRequest,
-    ReconcileTimingRequest,
     PatchInitRequest,
     PatchSubmitRequest,
     ReferenceUploadRequest,
-    SegmentGenerationExtendRequest,
 )
 from src.quality_match.apply_flow import _allocate_refined_variant_storage, create_refined_variant_from_upload
 from src.quality_match.service import QualityMatchSettings, analyse_quality_match, preview_quality_match_from_mask
@@ -2629,109 +2629,33 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 origin=origin,
             )
 
-        if method == "POST" and len(parts) == 5 and parts[2] == "segment-generations" and parts[4] == "extend":
-            previous_gen_id = parts[3]
-            previous_generation = task.get("segmentGenerations", {}).get(previous_gen_id)
-            if not previous_generation:
-                return error_response(404, "Previous generation not found", origin=origin)
-            if previous_generation.get("status") != "complete" or not previous_generation.get("outputKey"):
-                return error_response(400, "Previous generation must be complete before it can be extended", origin=origin)
-            req = _json_model(SegmentGenerationExtendRequest, event)
-            model = str(previous_generation.get("luma", {}).get("model") or "")
-            if not supports_generation_extension(model):
-                return error_response(400, "Only first-frame + video generation models can be extended in this flow", origin=origin)
-
-            previous_segment = next((item for item in task.get("segments", []) if item.get("segmentId") == previous_generation.get("segmentId")), None)
-            if not previous_segment:
-                return error_response(404, "Previous generation segment not found", origin=origin)
-            total_frames = int(task.get("video", {}).get("editSource", {}).get("frameCount") or 0)
-            if req.alignmentFrameIndex >= total_frames:
-                return error_response(400, "Alignment frame is outside the source video", origin=origin)
-            model_capability = get_video_model_capability(model)
-            model_max_seconds = int(model_capability.max_seconds or 10)
-            requested_duration_seconds = req.durationSeconds or int(math.ceil(float(previous_segment.get("durationSec") or model_max_seconds)))
-            requested_duration_seconds = max(1, min(model_max_seconds, int(requested_duration_seconds)))
-            fps = _fps(task)
-            desired_frames = max(1, int(round(float(fps) * requested_duration_seconds)))
-            remaining_frames = max(0, total_frames - req.alignmentFrameIndex)
-            if remaining_frames <= 0:
-                return error_response(400, "No source frames remain after the selected alignment frame", origin=origin)
-            dur_frames = min(desired_frames, remaining_frames)
-            min_seconds = model_capability.min_seconds
-            if min_seconds is not None and (dur_frames / float(fps)) + 1e-6 < float(min_seconds):
-                return error_response(
-                    400,
-                    f"{_video_model_label(model)} requires at least {min_seconds}s. Choose an earlier alignment frame or a shorter prior overlap.",
-                    origin=origin,
-                )
-            start, end_excl, dur_frames = _resolve_segment_frames(
-                task,
-                req.alignmentFrameIndex,
-                end_frame_exclusive=req.alignmentFrameIndex + dur_frames,
-            )
-            segment = _create_segment_record(task=task, start=start, end_excl=end_excl, dur_frames=dur_frames, asset_store=asset_store)
-            limit_error = _segment_model_limit_error(task, segment, model)
-            if limit_error:
-                task["segments"] = [item for item in task.get("segments", []) if item.get("segmentId") != segment.get("segmentId")]
-                return error_response(400, limit_error, origin=origin)
-
-            try:
-                prompt = _sanitize_prompt(req.prompt) if req.prompt else previous_generation.get("luma", {}).get("prompt")
-                anchor_variant = _copy_generated_anchor_to_frame_variant(
-                    task=task,
-                    generation=previous_generation,
-                    target_frame_id=segment["startFrameId"],
-                    target_frame_index=start,
-                    anchor_frames_from_end=req.anchorFramesFromEnd,
-                    asset_store=asset_store,
-                )
-            except ValueError as exc:
-                task["segments"] = [item for item in task.get("segments", []) if item.get("segmentId") != segment.get("segmentId")]
-                return error_response(400, str(exc), origin=origin)
-
-            settings_payload = previous_generation.get("generationSettings") if isinstance(previous_generation.get("generationSettings"), dict) else {}
-            extension_metadata = {
-                "parentGenerationId": previous_gen_id,
-                "alignmentFrameIndex": start,
-                "anchorFramesFromEnd": req.anchorFramesFromEnd,
-                "anchorVariantId": anchor_variant.get("variantId"),
-                "sourceGeneratedFrameIndex": anchor_variant.get("sourceGeneratedFrameIndex"),
-                "previousSegmentId": previous_generation.get("segmentId"),
-                "createdAt": now_iso(),
-            }
-            gen_id, job_id = _queue_segment_generation_record(
-                task=task,
-                store=store,
-                queue=queue,
-                user_id=user_id,
-                task_id=task_id,
-                segment_id=segment["segmentId"],
-                model=model,
-                mode=str(previous_generation.get("luma", {}).get("mode") or ""),
-                prompt=str(prompt) if prompt else None,
-                negative_prompt=str(previous_generation.get("luma", {}).get("negativePrompt") or "") or None,
-                first_frame_variant_id=str(anchor_variant.get("variantId")),
-                last_frame_variant_id=None,
-                replicate_kling_mode=settings_payload.get("replicateKlingMode"),
-                replicate_kling_v3_mode=settings_payload.get("replicateKlingV3Mode"),
-                wan27_resolution=settings_payload.get("wan27Resolution"),
-                happy_horse_resolution=settings_payload.get("happyHorseResolution"),
-                parent_generation_id=previous_gen_id,
-                extension_metadata=extension_metadata,
-            )
-            store.save_task(task, merge_on_conflict=True)
-            return response(
-                202,
-                {
-                    "jobId": job_id,
-                    "genId": gen_id,
-                    "segmentId": segment["segmentId"],
-                    "anchorVariantId": anchor_variant.get("variantId"),
-                    "alignmentFrameIndex": start,
-                    "sourceGeneratedFrameIndex": anchor_variant.get("sourceGeneratedFrameIndex"),
-                },
-                origin=origin,
-            )
+        task_generation_extend_response = handle_task_generation_extend_route(
+            method,
+            task_id=task_id,
+            parts=parts,
+            event=event,
+            origin=origin,
+            user_id=user_id,
+            task=task,
+            store=store,
+            asset_store=asset_store,
+            json_model=_json_model,
+            response_fn=response,
+            error_response_fn=error_response,
+            now_iso_fn=now_iso,
+            supports_generation_extension_fn=supports_generation_extension,
+            get_video_model_capability_fn=get_video_model_capability,
+            fps_fn=_fps,
+            resolve_segment_frames_fn=_resolve_segment_frames,
+            create_segment_record_fn=_create_segment_record,
+            segment_model_limit_error_fn=_segment_model_limit_error,
+            video_model_label_fn=_video_model_label,
+            sanitize_prompt_fn=_sanitize_prompt,
+            copy_generated_anchor_to_frame_variant_fn=_copy_generated_anchor_to_frame_variant,
+            queue_segment_generation_record_fn=lambda **kwargs: _queue_segment_generation_record(queue=queue, **kwargs),
+        )
+        if task_generation_extend_response is not None:
+            return task_generation_extend_response
 
         task_chunked_control_response = handle_task_chunked_control_routes(
             method,
@@ -2783,126 +2707,24 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             )
             return response(202, {"jobId": job_id}, origin=origin)
 
-        if method == "POST" and len(parts) == 5 and parts[2] == "segment-generations" and parts[4] == "merge-alignment-suggestion":
-            generation = task.get("segmentGenerations", {}).get(parts[3])
-            if not isinstance(generation, dict):
-                return error_response(404, "Generation not found", origin=origin)
-            if generation.get("status") != "complete" or not generation.get("outputKey"):
-                return error_response(409, "Generation must be complete before alignment can be analysed", origin=origin)
-            suggestion_state = generation.get("mergeAlignmentSuggestion") if isinstance(generation.get("mergeAlignmentSuggestion"), dict) else {}
-            existing_job_id = suggestion_state.get("jobId")
-            if (
-                isinstance(existing_job_id, str)
-                and existing_job_id
-                and suggestion_state.get("status") in {"queued", "running"}
-            ):
-                existing_job = store.load_job(user_id, existing_job_id)
-                if isinstance(existing_job, dict) and existing_job.get("status") in {"queued", "running"}:
-                    return response(202, {"jobId": existing_job_id, "alreadyRunning": True}, origin=origin)
-            job_id = _queue_job(
-                store=store,
-                queue=queue,
-                user_id=user_id,
-                task_id=task_id,
-                job_type="merge_alignment_suggestion",
-                payload={"genId": parts[3]},
-            )
-            generation["mergeAlignmentSuggestion"] = {
-                "status": "queued",
-                "jobId": job_id,
-                "updatedAt": now_iso(),
-            }
-            store.save_task(task)
-            return response(202, {"jobId": job_id}, origin=origin)
-
-        if method == "POST" and len(parts) == 5 and parts[2] == "segment-generations" and parts[4] == "reconcile-timing":
-            source_generation_id = parts[3]
-            generation = task.get("segmentGenerations", {}).get(source_generation_id)
-            if not isinstance(generation, dict):
-                return error_response(404, "Generation not found", origin=origin)
-            if generation.get("status") != "complete" or not generation.get("outputKey"):
-                return error_response(409, "Generation must be complete before timing can be reconciled", origin=origin)
-            req = _json_model(ReconcileTimingRequest, event)
-            reconcile_state = generation.get("timingReconcile") if isinstance(generation.get("timingReconcile"), dict) else {}
-            existing_job_id = reconcile_state.get("jobId")
-            if (
-                isinstance(existing_job_id, str)
-                and existing_job_id
-                and reconcile_state.get("status") in {"queued", "running"}
-            ):
-                existing_job = store.load_job(user_id, existing_job_id)
-                if isinstance(existing_job, dict) and existing_job.get("status") in {"queued", "running"}:
-                    return response(
-                        202,
-                        {"jobId": existing_job_id, "genId": reconcile_state.get("resultGenId"), "alreadyRunning": True},
-                        origin=origin,
-                    )
-
-            reconciled_gen_id = new_id("gen")
-            job_id = _queue_job(
-                store=store,
-                queue=queue,
-                user_id=user_id,
-                task_id=task_id,
-                job_type="generation_reconcile_timing",
-                payload={
-                    "sourceGenId": source_generation_id,
-                    "genId": reconciled_gen_id,
-                    "trimStartFrames": int(req.trimStartFrames),
-                    "trimEndFrames": int(req.trimEndFrames),
-                    "playbackRate": req.playbackRate,
-                },
-            )
-            now = now_iso()
-            segment_id = str(generation.get("segmentId") or "")
-            queued_generation = {
-                **generation,
-                "genId": reconciled_gen_id,
-                "segmentId": segment_id,
-                "status": "queued",
-                "outputKey": None,
-                "jobId": job_id,
-                "error": None,
-                "queuedAt": now,
-                "createdAt": now,
-                "updatedAt": now,
-                "startedAt": None,
-                "finishedAt": None,
-                "processingDurationSec": None,
-                "downloadUrl": None,
-                "inputMediaUrl": None,
-                "mergeAlignmentSuggestion": None,
-                "timingReconcile": None,
-                "alignment": None,
-                "sourceFrameOffset": None,
-                "cleanupTrackId": None,
-                "derivedFromGenerationId": source_generation_id,
-                "generationSettings": {
-                    **(generation.get("generationSettings") if isinstance(generation.get("generationSettings"), dict) else {}),
-                    "workflow": "timing_reconcile",
-                    "derivedFromGenerationId": source_generation_id,
-                    "reconcileTiming": {
-                        "sourceGenerationId": source_generation_id,
-                        "trimStartFrames": int(req.trimStartFrames),
-                        "trimEndFrames": int(req.trimEndFrames),
-                        "playbackRate": req.playbackRate,
-                    },
-                },
-            }
-            task.setdefault("segmentGenerations", {})[reconciled_gen_id] = queued_generation
-            generation["timingReconcile"] = {
-                "status": "queued",
-                "jobId": job_id,
-                "resultGenId": reconciled_gen_id,
-                "updatedAt": now,
-                "adjustments": {
-                    "trimStartFrames": int(req.trimStartFrames),
-                    "trimEndFrames": int(req.trimEndFrames),
-                    "playbackRate": req.playbackRate,
-                },
-            }
-            store.save_task(task)
-            return response(202, {"jobId": job_id, "genId": reconciled_gen_id}, origin=origin)
+        task_generation_post_response = handle_task_generation_post_routes(
+            method,
+            task_id=task_id,
+            parts=parts,
+            event=event,
+            origin=origin,
+            user_id=user_id,
+            task=task,
+            store=store,
+            json_model=_json_model,
+            response_fn=response,
+            error_response_fn=error_response,
+            new_id_fn=new_id,
+            now_iso_fn=now_iso,
+            queue_job_fn=lambda **kwargs: _queue_job(queue=queue, **kwargs),
+        )
+        if task_generation_post_response is not None:
+            return task_generation_post_response
 
     job_response = handle_job_status(
         method,
