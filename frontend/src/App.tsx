@@ -24,6 +24,7 @@ import {
 import { useVideoFrameStrip, type VideoFrameStripItem } from "./hooks/useVideoFrameStrip";
 import { useTaskLifecycle } from "./hooks/useTaskLifecycle";
 import { useGenerationMergeState } from "./hooks/useGenerationMergeState";
+import type { PatchEditModelId, VideoModeId, VideoModelId } from "./lib/generated/videoContracts";
 import { getGenerationModeConfig, type GenerateInputMode } from "./lib/generationModeRegistry";
 import { currentUser, login, logout } from "./lib/auth";
 import type { AssetsTabCtx } from "./pages/workflow/AssetsTab";
@@ -45,24 +46,7 @@ import type {
   TaskDetail,
 } from "./types/api";
 
-type VideoModel =
-  | "ray-2"
-  | "ray-flash-2"
-  | "runway-gen4.5"
-  | "sora-2-image-to-video"
-  | "happy-horse-video-edit"
-  | "happy-horse-image-to-video"
-  | "runway-gen4-aleph"
-  | "kling-2.6"
-  | "kling-o1"
-  | "kling-v3-omni-video"
-  | "seedance-2.0-reference-to-video"
-  | "veo-3.1"
-  | "veo-3.1-fast"
-  | "wan2.2-a14b"
-  | "wan2.2-animate"
-  | "wan2.7-videoedit"
-  | "wan2.7-i2v";
+type VideoModel = VideoModelId;
 
 type AutomationVideoOption = {
   id: string;
@@ -127,7 +111,7 @@ type LibraryAsset = {
     | { assetType: "export"; exportId: string };
 };
 
-type PatchEngine = "nano_banana_pro" | "chatgpt" | "chatgpt_latest" | "runware_flux_fill" | "runware_ace_pp";
+type PatchEngine = PatchEditModelId;
 type PatchToolMode = "brush_add" | "brush_erase" | "lasso_add" | "lasso_erase";
 
 type MaskPoint = {
@@ -1930,7 +1914,7 @@ export default function App() {
       const selectedMode = resolveSelectedGenerationMode();
       return apiClient.generateSegment(selectedTaskId, selectedSegmentId, {
         lumaModel,
-        mode: selectedMode,
+        mode: selectedMode as VideoModeId,
         prompt: lumaModel === "wan2.2-animate" ? undefined : trimmedPrompt || undefined,
         negativePrompt: lumaModel === "wan2.7-i2v" ? wan27NegativePrompt.trim() || undefined : undefined,
         firstFrameVariantId: refineSourceVariantIds.first || compareVariantIds.first || undefined,
@@ -1981,7 +1965,7 @@ export default function App() {
             | "seedance-2.0-reference-to-video"
             | "wan2.2-animate"
             | "wan2.7-videoedit",
-        mode: selectedMode,
+        mode: selectedMode as VideoModeId,
         openingPrompt: lumaModel === "wan2.2-animate" ? undefined : trimmedPrompt || undefined,
         continuationPrompt:
           lumaModel === "wan2.2-animate"
@@ -3839,7 +3823,7 @@ export default function App() {
           try {
             const created = await apiClient.generateSegment(taskId, segment.segmentId, {
               lumaModel: option.lumaModel,
-              mode: option.mode,
+              mode: option.mode as VideoModeId,
               prompt: videoPrompt || undefined,
               firstFrameVariantId: choice.startVariantId,
               lastFrameVariantId: option.inputMode === "start_end" ? choice.endVariantId ?? undefined : undefined,

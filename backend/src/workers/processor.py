@@ -104,6 +104,7 @@ from src.video_cleanup.service import (
     sort_keyframes,
 )
 from src.video_cleanup.tracking import normalize_mask_bytes, propagate_mask_to_frame, propagate_window, stitch_seeded_masks
+from src.workers.dispatch import dispatch_job
 
 logger = Logger()
 SOURCE_VIDEO_MAX_DURATION_SECONDS = 120
@@ -9341,48 +9342,45 @@ def process_job_record(record: dict[str, Any], *, settings: Any) -> None:
     store.save_job(job)
 
     try:
-        if job_type == "ingest_video":
-            _handle_ingest(job=job, store=store, asset_store=asset_store, task=task, settings=settings)
-        elif job_type == "edit_full":
-            _handle_full_edit(job=job, store=store, asset_store=asset_store, task=task, settings=settings)
-        elif job_type == "edit_patch":
-            _handle_patch_edit(job=job, store=store, asset_store=asset_store, task=task, settings=settings)
-        elif job_type == "api_image_edit_full":
-            _handle_api_image_edit_full(job=job, store=store, asset_store=asset_store, settings=settings)
-        elif job_type == "api_image_edit_patch":
-            _handle_api_image_edit_patch(job=job, store=store, asset_store=asset_store, settings=settings)
-        elif job_type == "api_video_generate_reference":
-            _handle_api_video_generate_reference(job=job, store=store, asset_store=asset_store, settings=settings)
-        elif job_type == "quality_match_apply":
-            _handle_quality_match_apply(job=job, store=store, asset_store=asset_store, task=task, settings=settings)
-        elif job_type == "quality_match_sam":
-            _handle_quality_match_sam(job=job, store=store, asset_store=asset_store, task=task, settings=settings)
-        elif job_type == "segment_generate":
-            _handle_segment_generate(job=job, store=store, asset_store=asset_store, task=task, settings=settings)
-        elif job_type == "chunked_generation_finalize":
-            _handle_chunked_generation_finalize(job=job, store=store, asset_store=asset_store, task=task, settings=settings)
-        elif job_type == "merge_alignment_suggestion":
-            _handle_merge_alignment_suggestion(job=job, store=store, asset_store=asset_store, task=task, settings=settings)
-        elif job_type == "generation_reconcile_timing":
-            _handle_generation_reconcile_timing(job=job, store=store, asset_store=asset_store, task=task, settings=settings)
-        elif job_type == "merge_export":
-            _handle_merge(job=job, store=store, asset_store=asset_store, task=task, settings=settings)
-        elif job_type == "qc_report_build":
-            _handle_qc_report_build(job=job, store=store, asset_store=asset_store, task=task, settings=settings)
-        elif job_type == "motion_sync_qc":
-            _handle_motion_sync_qc(job=job, store=store, asset_store=asset_store, task=task, settings=settings)
-        elif job_type == "video_cleanup_init":
-            _handle_video_cleanup_init(job=job, store=store, asset_store=asset_store, task=task, settings=settings)
-        elif job_type == "video_cleanup_track":
-            _handle_video_cleanup_track(job=job, store=store, asset_store=asset_store, task=task, settings=settings)
-        elif job_type == "video_cleanup_retrack_window":
-            _handle_video_cleanup_retrack_window(job=job, store=store, asset_store=asset_store, task=task, settings=settings)
-        elif job_type == "video_cleanup_preview":
-            _handle_video_cleanup_preview(job=job, store=store, asset_store=asset_store, task=task, settings=settings)
-        elif job_type == "video_cleanup_apply":
-            _handle_video_cleanup_apply(job=job, store=store, asset_store=asset_store, task=task, settings=settings)
-        else:
-            raise RuntimeError(f"Unsupported job type: {job_type}")
+        handlers = {
+            "ingest_video": lambda **kwargs: _handle_ingest(**kwargs),
+            "edit_full": lambda **kwargs: _handle_full_edit(**kwargs),
+            "edit_patch": lambda **kwargs: _handle_patch_edit(**kwargs),
+            "api_image_edit_full": lambda **kwargs: _handle_api_image_edit_full(
+                job=kwargs["job"], store=kwargs["store"], asset_store=kwargs["asset_store"], settings=kwargs["settings"]
+            ),
+            "api_image_edit_patch": lambda **kwargs: _handle_api_image_edit_patch(
+                job=kwargs["job"], store=kwargs["store"], asset_store=kwargs["asset_store"], settings=kwargs["settings"]
+            ),
+            "api_video_generate_reference": lambda **kwargs: _handle_api_video_generate_reference(
+                job=kwargs["job"], store=kwargs["store"], asset_store=kwargs["asset_store"], settings=kwargs["settings"]
+            ),
+            "quality_match_apply": lambda **kwargs: _handle_quality_match_apply(**kwargs),
+            "quality_match_sam": lambda **kwargs: _handle_quality_match_sam(**kwargs),
+            "segment_generate": lambda **kwargs: _handle_segment_generate(**kwargs),
+            "chunked_generation_finalize": lambda **kwargs: _handle_chunked_generation_finalize(**kwargs),
+            "merge_alignment_suggestion": lambda **kwargs: _handle_merge_alignment_suggestion(**kwargs),
+            "generation_reconcile_timing": lambda **kwargs: _handle_generation_reconcile_timing(**kwargs),
+            "merge_export": lambda **kwargs: _handle_merge(**kwargs),
+            "qc_report_build": lambda **kwargs: _handle_qc_report_build(**kwargs),
+            "motion_sync_qc": lambda **kwargs: _handle_motion_sync_qc(**kwargs),
+            "video_cleanup_init": lambda **kwargs: _handle_video_cleanup_init(**kwargs),
+            "video_cleanup_track": lambda **kwargs: _handle_video_cleanup_track(**kwargs),
+            "video_cleanup_retrack_window": lambda **kwargs: _handle_video_cleanup_retrack_window(**kwargs),
+            "video_cleanup_preview": lambda **kwargs: _handle_video_cleanup_preview(**kwargs),
+            "video_cleanup_apply": lambda **kwargs: _handle_video_cleanup_apply(**kwargs),
+        }
+        dispatch_job(
+            job_type=job_type,
+            handlers=handlers,
+            handler_kwargs={
+                "job": job,
+                "store": store,
+                "asset_store": asset_store,
+                "task": task,
+                "settings": settings,
+            },
+        )
     except Exception as exc:
         logger.exception("Job failed", extra={"jobId": job_id, "taskId": task_id, "userId": user_id})
         job["status"] = "failed"

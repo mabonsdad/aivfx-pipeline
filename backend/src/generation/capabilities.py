@@ -3,21 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from fractions import Fraction
 
+from src.contracts.video import LUMA_API_ALLOWED_MODE_IDS, VIDEO_MODEL_IDS
+
 MODEL_FRAME_BUDGET_FPS = 24
 
-LUMA_API_ALLOWED_MODES = frozenset(
-    {
-        "adhere_1",
-        "adhere_2",
-        "adhere_3",
-        "flex_1",
-        "flex_2",
-        "flex_3",
-        "reimagine_1",
-        "reimagine_2",
-        "reimagine_3",
-    }
-)
+LUMA_API_ALLOWED_MODES = frozenset(LUMA_API_ALLOWED_MODE_IDS)
 
 
 @dataclass(frozen=True)
@@ -248,6 +238,11 @@ VIDEO_MODELS: dict[str, VideoModelCapability] = {
         provider_input_namespace="replicate",
     ),
 }
+
+if frozenset(VIDEO_MODELS.keys()) != frozenset(VIDEO_MODEL_IDS):
+    missing = sorted(set(VIDEO_MODEL_IDS) - set(VIDEO_MODELS))
+    extra = sorted(set(VIDEO_MODELS) - set(VIDEO_MODEL_IDS))
+    raise RuntimeError(f"Video contract mismatch in capabilities: missing={missing}, extra={extra}")
 
 
 def get_video_model_capability(model: str) -> VideoModelCapability:

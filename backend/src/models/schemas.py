@@ -5,6 +5,25 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from src.contracts.video import (
+    FULL_EDIT_MODEL_IDS,
+    HAPPY_HORSE_RESOLUTION_IDS,
+    PATCH_EDIT_MODEL_IDS,
+    REPLICATE_KLING_MODE_IDS,
+    REPLICATE_KLING_V3_MODE_IDS,
+    SORA2_RESOLUTION_IDS,
+    VIDEO_MODE_IDS,
+    VIDEO_MODEL_IDS,
+    WAN27_RESOLUTION_IDS,
+)
+
+
+def _validate_choice(value: str, *, field_name: str, allowed: tuple[str, ...]) -> str:
+    if value not in allowed:
+        allowed_values = ", ".join(allowed)
+        raise ValueError(f"{field_name} must be one of: {allowed_values}")
+    return value
+
 
 class TaskCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=15)
@@ -55,9 +74,14 @@ class FrameCaptureRequest(BaseModel):
 
 
 class FullEditRequest(BaseModel):
-    model: Literal["nano_banana", "nano_banana_pro", "chatgpt", "chatgpt_latest"]
+    model: str
     prompt: str = Field(min_length=1)
     sourceVariantId: str | None = None
+
+    @field_validator("model")
+    @classmethod
+    def validate_model(cls, value: str) -> str:
+        return _validate_choice(value, field_name="model", allowed=FULL_EDIT_MODEL_IDS)
 
 
 class PatchRect(BaseModel):
@@ -76,7 +100,7 @@ class PatchInitRequest(BaseModel):
 
 
 class PatchSubmitRequest(BaseModel):
-    model: Literal["nano_banana_pro", "chatgpt", "chatgpt_latest", "runware_flux_fill", "runware_ace_pp"]
+    model: str
     prompt: str = Field(min_length=1)
     patchKey: str
     maskKey: str | None = None
@@ -91,6 +115,11 @@ class PatchSubmitRequest(BaseModel):
     maskGrowPx: int = Field(ge=-64, le=64, default=0)
     sourceVariantId: str | None = None
 
+    @field_validator("model")
+    @classmethod
+    def validate_model(cls, value: str) -> str:
+        return _validate_choice(value, field_name="model", allowed=PATCH_EDIT_MODEL_IDS)
+
 
 class ReferenceUploadItem(BaseModel):
     filename: str = Field(min_length=1, max_length=255)
@@ -102,63 +131,63 @@ class ReferenceUploadRequest(BaseModel):
 
 
 class SegmentGenerateRequest(BaseModel):
-    lumaModel: Literal[
-        "ray-2",
-        "ray-flash-2",
-        "runway-gen4.5",
-        "sora-2-image-to-video",
-        "happy-horse-video-edit",
-        "happy-horse-image-to-video",
-        "runway-gen4-aleph",
-        "kling-2.6",
-        "kling-o1",
-        "kling-v3-omni-video",
-        "seedance-2.0-reference-to-video",
-        "veo-3.1",
-        "veo-3.1-fast",
-        "wan2.2-a14b",
-        "wan2.2-animate",
-        "wan2.7-videoedit",
-        "wan2.7-i2v",
-    ] = "ray-2"
-    mode: Literal[
-        "adhere_1",
-        "adhere_2",
-        "adhere_3",
-        "flex_1",
-        "flex_2",
-        "flex_3",
-        "reimagine_1",
-        "reimagine_2",
-        "reimagine_3",
-        "runway_i2v",
-        "sora_i2v",
-        "happy_horse_video_edit",
-        "happy_horse_i2v",
-        "runway_aleph_v2v",
-        "kling_start_end",
-        "kling_start_only",
-        "veo_start_end",
-        "veo_start_only",
-        "wan_a14b_i2v",
-        "wan_animate_replace",
-        "kling_o1_video_edit",
-        "kling_v3_omni_video_edit",
-        "seedance_reference_to_video",
-        "wan27_video_edit",
-        "wan27_i2v_start_only",
-        "wan27_i2v_start_end",
-    ]
+    lumaModel: str = "ray-2"
+    mode: str
     prompt: str | None = Field(default=None)
     negativePrompt: str | None = Field(default=None)
     firstFrameVariantId: str | None = None
     lastFrameVariantId: str | None = None
-    replicateKlingMode: Literal["std", "pro"] | None = None
-    replicateKlingV3Mode: Literal["standard", "pro"] | None = None
-    wan27Resolution: Literal["720p", "1080p"] | None = None
-    happyHorseResolution: Literal["720p", "1080p"] | None = None
-    sora2Resolution: Literal["auto", "720p", "1080p"] | None = None
+    replicateKlingMode: str | None = None
+    replicateKlingV3Mode: str | None = None
+    wan27Resolution: str | None = None
+    happyHorseResolution: str | None = None
+    sora2Resolution: str | None = None
     preserveFrames: bool = True
+
+    @field_validator("lumaModel")
+    @classmethod
+    def validate_luma_model(cls, value: str) -> str:
+        return _validate_choice(value, field_name="lumaModel", allowed=VIDEO_MODEL_IDS)
+
+    @field_validator("mode")
+    @classmethod
+    def validate_mode(cls, value: str) -> str:
+        return _validate_choice(value, field_name="mode", allowed=VIDEO_MODE_IDS)
+
+    @field_validator("replicateKlingMode")
+    @classmethod
+    def validate_replicate_kling_mode(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        return _validate_choice(value, field_name="replicateKlingMode", allowed=REPLICATE_KLING_MODE_IDS)
+
+    @field_validator("replicateKlingV3Mode")
+    @classmethod
+    def validate_replicate_kling_v3_mode(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        return _validate_choice(value, field_name="replicateKlingV3Mode", allowed=REPLICATE_KLING_V3_MODE_IDS)
+
+    @field_validator("wan27Resolution")
+    @classmethod
+    def validate_wan27_resolution(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        return _validate_choice(value, field_name="wan27Resolution", allowed=WAN27_RESOLUTION_IDS)
+
+    @field_validator("happyHorseResolution")
+    @classmethod
+    def validate_happy_horse_resolution(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        return _validate_choice(value, field_name="happyHorseResolution", allowed=HAPPY_HORSE_RESOLUTION_IDS)
+
+    @field_validator("sora2Resolution")
+    @classmethod
+    def validate_sora2_resolution(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        return _validate_choice(value, field_name="sora2Resolution", allowed=SORA2_RESOLUTION_IDS)
 
 
 class ApiAssetUploadInitRequest(BaseModel):
@@ -168,13 +197,18 @@ class ApiAssetUploadInitRequest(BaseModel):
 
 
 class ApiImageEditFullRequest(BaseModel):
-    model: Literal["nano_banana", "nano_banana_pro", "chatgpt", "chatgpt_latest"]
+    model: str
     prompt: str = Field(min_length=1)
     inputAssetKey: str = Field(min_length=1)
 
+    @field_validator("model")
+    @classmethod
+    def validate_model(cls, value: str) -> str:
+        return _validate_choice(value, field_name="model", allowed=FULL_EDIT_MODEL_IDS)
+
 
 class ApiImageEditPatchRequest(BaseModel):
-    model: Literal["nano_banana_pro", "chatgpt", "chatgpt_latest", "runware_flux_fill", "runware_ace_pp"]
+    model: str
     prompt: str = Field(min_length=1)
     inputAssetKey: str = Field(min_length=1)
     patchAssetKey: str = Field(min_length=1)
@@ -189,67 +223,72 @@ class ApiImageEditPatchRequest(BaseModel):
     edgeAwareRadiusPx: int = Field(ge=0, le=24, default=6)
     maskGrowPx: int = Field(ge=-64, le=64, default=0)
 
+    @field_validator("model")
+    @classmethod
+    def validate_model(cls, value: str) -> str:
+        return _validate_choice(value, field_name="model", allowed=PATCH_EDIT_MODEL_IDS)
+
 
 class ApiReferenceVideoGenerateRequest(BaseModel):
-    model: Literal[
-        "ray-2",
-        "ray-flash-2",
-        "runway-gen4.5",
-        "sora-2-image-to-video",
-        "happy-horse-video-edit",
-        "happy-horse-image-to-video",
-        "runway-gen4-aleph",
-        "kling-2.6",
-        "kling-o1",
-        "kling-v3-omni-video",
-        "seedance-2.0-reference-to-video",
-        "veo-3.1",
-        "veo-3.1-fast",
-        "wan2.2-a14b",
-        "wan2.2-animate",
-        "wan2.7-videoedit",
-        "wan2.7-i2v",
-    ]
-    mode: Literal[
-        "adhere_1",
-        "adhere_2",
-        "adhere_3",
-        "flex_1",
-        "flex_2",
-        "flex_3",
-        "reimagine_1",
-        "reimagine_2",
-        "reimagine_3",
-        "runway_i2v",
-        "sora_i2v",
-        "happy_horse_video_edit",
-        "happy_horse_i2v",
-        "runway_aleph_v2v",
-        "kling_start_end",
-        "kling_start_only",
-        "veo_start_end",
-        "veo_start_only",
-        "wan_a14b_i2v",
-        "wan_animate_replace",
-        "kling_o1_video_edit",
-        "kling_v3_omni_video_edit",
-        "seedance_reference_to_video",
-        "wan27_video_edit",
-        "wan27_i2v_start_only",
-        "wan27_i2v_start_end",
-    ]
+    model: str
+    mode: str
     prompt: str | None = None
     negativePrompt: str | None = None
     videoAssetKey: str | None = None
     firstFrameAssetKey: str = Field(min_length=1)
     lastFrameAssetKey: str | None = None
     durationSeconds: int | None = Field(default=None, ge=1, le=10)
-    replicateKlingMode: Literal["std", "pro"] | None = None
-    replicateKlingV3Mode: Literal["standard", "pro"] | None = None
-    wan27Resolution: Literal["720p", "1080p"] | None = None
-    happyHorseResolution: Literal["720p", "1080p"] | None = None
-    sora2Resolution: Literal["auto", "720p", "1080p"] | None = None
+    replicateKlingMode: str | None = None
+    replicateKlingV3Mode: str | None = None
+    wan27Resolution: str | None = None
+    happyHorseResolution: str | None = None
+    sora2Resolution: str | None = None
     preserveFrames: bool = True
+
+    @field_validator("model")
+    @classmethod
+    def validate_model(cls, value: str) -> str:
+        return _validate_choice(value, field_name="model", allowed=VIDEO_MODEL_IDS)
+
+    @field_validator("mode")
+    @classmethod
+    def validate_mode(cls, value: str) -> str:
+        return _validate_choice(value, field_name="mode", allowed=VIDEO_MODE_IDS)
+
+    @field_validator("replicateKlingMode")
+    @classmethod
+    def validate_replicate_kling_mode(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        return _validate_choice(value, field_name="replicateKlingMode", allowed=REPLICATE_KLING_MODE_IDS)
+
+    @field_validator("replicateKlingV3Mode")
+    @classmethod
+    def validate_replicate_kling_v3_mode(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        return _validate_choice(value, field_name="replicateKlingV3Mode", allowed=REPLICATE_KLING_V3_MODE_IDS)
+
+    @field_validator("wan27Resolution")
+    @classmethod
+    def validate_wan27_resolution(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        return _validate_choice(value, field_name="wan27Resolution", allowed=WAN27_RESOLUTION_IDS)
+
+    @field_validator("happyHorseResolution")
+    @classmethod
+    def validate_happy_horse_resolution(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        return _validate_choice(value, field_name="happyHorseResolution", allowed=HAPPY_HORSE_RESOLUTION_IDS)
+
+    @field_validator("sora2Resolution")
+    @classmethod
+    def validate_sora2_resolution(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        return _validate_choice(value, field_name="sora2Resolution", allowed=SORA2_RESOLUTION_IDS)
 
 
 class MergeGenerationAdjustment(BaseModel):
@@ -279,40 +318,46 @@ class SegmentGenerationExtendRequest(BaseModel):
 
 
 class ChunkedSegmentGenerateRequest(BaseModel):
-    lumaModel: Literal[
-        "ray-2",
-        "ray-flash-2",
-        "runway-gen4-aleph",
-        "kling-o1",
-        "kling-v3-omni-video",
-        "seedance-2.0-reference-to-video",
-        "wan2.2-animate",
-        "wan2.7-videoedit",
-    ] = "ray-2"
-    mode: Literal[
-        "adhere_1",
-        "adhere_2",
-        "adhere_3",
-        "flex_1",
-        "flex_2",
-        "flex_3",
-        "reimagine_1",
-        "reimagine_2",
-        "reimagine_3",
-        "runway_aleph_v2v",
-        "wan_animate_replace",
-        "kling_o1_video_edit",
-        "kling_v3_omni_video_edit",
-        "seedance_reference_to_video",
-        "wan27_video_edit",
-    ]
+    lumaModel: str = "ray-2"
+    mode: str
     openingPrompt: str | None = Field(default=None)
     continuationPrompt: str | None = Field(default=None)
     firstFrameVariantId: str | None = None
-    replicateKlingMode: Literal["std", "pro"] | None = None
-    replicateKlingV3Mode: Literal["standard", "pro"] | None = None
-    wan27Resolution: Literal["720p", "1080p"] | None = None
+    replicateKlingMode: str | None = None
+    replicateKlingV3Mode: str | None = None
+    wan27Resolution: str | None = None
     preserveFrames: bool = True
+
+    @field_validator("lumaModel")
+    @classmethod
+    def validate_luma_model(cls, value: str) -> str:
+        return _validate_choice(value, field_name="lumaModel", allowed=VIDEO_MODEL_IDS)
+
+    @field_validator("mode")
+    @classmethod
+    def validate_mode(cls, value: str) -> str:
+        return _validate_choice(value, field_name="mode", allowed=VIDEO_MODE_IDS)
+
+    @field_validator("replicateKlingMode")
+    @classmethod
+    def validate_replicate_kling_mode(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        return _validate_choice(value, field_name="replicateKlingMode", allowed=REPLICATE_KLING_MODE_IDS)
+
+    @field_validator("replicateKlingV3Mode")
+    @classmethod
+    def validate_replicate_kling_v3_mode(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        return _validate_choice(value, field_name="replicateKlingV3Mode", allowed=REPLICATE_KLING_V3_MODE_IDS)
+
+    @field_validator("wan27Resolution")
+    @classmethod
+    def validate_wan27_resolution(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        return _validate_choice(value, field_name="wan27Resolution", allowed=WAN27_RESOLUTION_IDS)
 
 
 class ChunkedGenerationPauseRequest(BaseModel):
@@ -429,30 +474,17 @@ class ManualSegmentGenerationUploadInitRequest(BaseModel):
 class ManualSegmentGenerationUploadCompleteRequest(BaseModel):
     uploadKey: str = Field(min_length=1)
     filename: str = Field(min_length=1, max_length=255)
-    model: Literal[
-        "ray-2",
-        "ray-flash-2",
-        "runway-gen4.5",
-        "sora-2-image-to-video",
-        "happy-horse-video-edit",
-        "happy-horse-image-to-video",
-        "runway-gen4-aleph",
-        "kling-2.6",
-        "kling-o1",
-        "kling-v3-omni-video",
-        "seedance-2.0-reference-to-video",
-        "veo-3.1",
-        "veo-3.1-fast",
-        "wan2.2-a14b",
-        "wan2.2-animate",
-        "wan2.7-videoedit",
-        "wan2.7-i2v",
-    ]
+    model: str
     mode: str = Field(min_length=1, max_length=120)
     prompt: str | None = None
     negativePrompt: str | None = None
     firstFrameVariantId: str | None = None
     lastFrameVariantId: str | None = None
+
+    @field_validator("model")
+    @classmethod
+    def validate_model(cls, value: str) -> str:
+        return _validate_choice(value, field_name="model", allowed=VIDEO_MODEL_IDS)
 
 
 class VariantSelectRequest(BaseModel):

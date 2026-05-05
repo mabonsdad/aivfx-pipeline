@@ -1,5 +1,6 @@
 import { getIdToken } from "../lib/auth";
 import { config } from "../lib/config";
+import type { FullEditModelId, PatchEditModelId, VideoModeId, VideoModelId } from "../lib/generated/videoContracts";
 import type {
   ApiRequestRecord,
   CustomReportOutputRef,
@@ -131,7 +132,7 @@ export const apiClient = {
   fullEdit: (
     taskId: string,
     frameId: string,
-    payload: { model: "nano_banana" | "nano_banana_pro" | "chatgpt" | "chatgpt_latest"; prompt: string; sourceVariantId?: string },
+    payload: { model: FullEditModelId; prompt: string; sourceVariantId?: string },
   ) =>
     api<{ jobId: string }>(`/tasks/${taskId}/frames/${frameId}/edits/full`, {
       method: "POST",
@@ -159,7 +160,7 @@ export const apiClient = {
     taskId: string,
     frameId: string,
     payload: {
-      model: "nano_banana_pro" | "chatgpt" | "chatgpt_latest" | "runware_flux_fill" | "runware_ace_pp";
+      model: PatchEditModelId;
       prompt: string;
       patchKey: string;
       maskKey?: string;
@@ -190,10 +191,10 @@ export const apiClient = {
     return api<{ requests: ApiRequestRecord[] }>(`/api/v1/requests${query ? `?${query}` : ""}`);
   },
   getApiRequest: (requestId: string) => api<ApiRequestRecord>(`/api/v1/requests/${requestId}`),
-  apiFullEdit: (payload: { model: "nano_banana" | "nano_banana_pro" | "chatgpt" | "chatgpt_latest"; prompt: string; inputAssetKey: string }) =>
+  apiFullEdit: (payload: { model: FullEditModelId; prompt: string; inputAssetKey: string }) =>
     api<{ requestId: string; jobId: string }>(`/api/v1/image-edits/full`, { method: "POST", body: JSON.stringify(payload) }),
   apiPatchEdit: (payload: {
-    model: "nano_banana_pro" | "chatgpt" | "chatgpt_latest" | "runware_flux_fill" | "runware_ace_pp";
+    model: PatchEditModelId;
     prompt: string;
     inputAssetKey: string;
     patchAssetKey: string;
@@ -209,8 +210,8 @@ export const apiClient = {
     maskGrowPx?: number;
   }) => api<{ requestId: string; jobId: string }>(`/api/v1/image-edits/patch`, { method: "POST", body: JSON.stringify(payload) }),
   apiReferenceVideoGenerate: (payload: {
-    model: string;
-    mode: string;
+    model: VideoModelId;
+    mode: VideoModeId;
     prompt?: string | null;
     negativePrompt?: string | null;
     videoAssetKey?: string | null;
@@ -533,25 +534,8 @@ export const apiClient = {
     taskId: string,
     segmentId: string,
     payload: {
-      lumaModel:
-        | "ray-2"
-        | "ray-flash-2"
-        | "runway-gen4.5"
-        | "sora-2-image-to-video"
-        | "happy-horse-video-edit"
-        | "happy-horse-image-to-video"
-        | "runway-gen4-aleph"
-        | "kling-2.6"
-        | "kling-o1"
-        | "kling-v3-omni-video"
-        | "seedance-2.0-reference-to-video"
-        | "veo-3.1"
-        | "veo-3.1-fast"
-        | "wan2.2-a14b"
-        | "wan2.2-animate"
-        | "wan2.7-videoedit"
-        | "wan2.7-i2v";
-      mode: string;
+      lumaModel: VideoModelId;
+      mode: VideoModeId;
       prompt?: string;
       negativePrompt?: string;
       firstFrameVariantId?: string;
@@ -568,16 +552,8 @@ export const apiClient = {
     taskId: string,
     segmentId: string,
     payload: {
-      lumaModel:
-        | "ray-2"
-        | "ray-flash-2"
-        | "runway-gen4-aleph"
-        | "kling-o1"
-        | "kling-v3-omni-video"
-        | "seedance-2.0-reference-to-video"
-        | "wan2.2-animate"
-        | "wan2.7-videoedit";
-      mode: string;
+      lumaModel: VideoModelId;
+      mode: VideoModeId;
       openingPrompt?: string;
       continuationPrompt?: string;
       firstFrameVariantId?: string;

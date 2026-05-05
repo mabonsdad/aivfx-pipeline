@@ -6,7 +6,9 @@
     "dev:frontend": "cd frontend && npm run dev",
     "build:frontend": "cd frontend && npm run build",
     "lint:frontend": "cd frontend && npm run lint",
+    "sync:contracts": "python3 scripts/sync_video_contracts.py",
     "check:backend": "python3 -m py_compile $(find backend/src -name '*.py')",
+    "test:backend": "python3 -m pytest backend/tests",
     "build:infra": "cd infra && npm run build",
     "synth:infra": "cd infra && npm run synth"
   }

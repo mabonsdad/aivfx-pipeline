@@ -18,6 +18,12 @@ from pydantic import ValidationError
 
 from PIL import Image, ImageOps
 
+from src.api.dispatch import parse_method_path, parse_task_path
+from src.api.routes_external_api import handle_external_api_routes
+from src.api.routes_jobs import handle_job_status
+from src.api.routes_public import handle_health, handle_options
+from src.api.routes_tasks_root import handle_tasks_root_routes
+from src.api.routes_user import handle_me
 from src.core.assets import ApiAssetPaths, AssetPaths, AssetStore
 from src.core.auth import UnauthorizedError, get_user_claims, get_user_id
 from src.core.config import load_settings
@@ -40,10 +46,6 @@ from src.generation import (
 )
 from src.jobs.queue import JobQueue
 from src.models.schemas import (
-    ApiAssetUploadInitRequest,
-    ApiImageEditFullRequest,
-    ApiImageEditPatchRequest,
-    ApiReferenceVideoGenerateRequest,
     AssetDeleteRequest,
     ChunkedGenerationCancelRequest,
     ChunkedGenerationPauseRequest,
@@ -76,7 +78,6 @@ from src.models.schemas import (
     SegmentGenerationExtendRequest,
     SegmentGenerateRequest,
     SegmentPatchRequest,
-    TaskCreateRequest,
     UploadVideoRequest,
 )
 from src.quality_match.apply_flow import _allocate_refined_variant_storage, create_refined_variant_from_upload
@@ -359,12 +360,6 @@ def _origin(event: dict[str, Any]) -> str | None:
     if header_origin and header_origin in settings.cors_allowed_origins:
         return header_origin
     return settings.cors_allowed_origins[0] if settings.cors_allowed_origins else None
-
-
-def _method_path(event: dict[str, Any]) -> tuple[str, str]:
-    method = event.get("requestContext", {}).get("http", {}).get("method", "GET")
-    path = event.get("rawPath", "/")
-    return method.upper(), path
 
 
 def _json_model(model_cls, event: dict[str, Any]):
@@ -1511,23 +1506,16 @@ def _normalize_patch_rect_for_image(rect: dict[str, Any], image_width: int, imag
 
 
 def _route(event: dict[str, Any]) -> dict[str, Any]:
-    method, path = _method_path(event)
+    method, path = parse_method_path(event)
     origin = _origin(event)
 
-    if method == "OPTIONS":
-        return {
-            "statusCode": 204,
-            "headers": {
-                "access-control-allow-origin": origin or "*",
-                "access-control-allow-methods": "GET,POST,PATCH,DELETE,OPTIONS",
-                "access-control-allow-headers": "authorization,content-type",
-                "access-control-allow-credentials": "true",
-            },
-            "body": "",
-        }
+    options_response = handle_options(method, origin=origin)
+    if options_response is not None:
+        return options_response
 
-    if method == "GET" and path == "/health":
-        return response(200, {"ok": True, "service": "aivfx-backend"}, origin=origin)
+    health_response = handle_health(method, path, origin=origin, response_fn=response)
+    if health_response is not None:
+        return health_response
 
     try:
         user_id = get_user_id(event)
@@ -1542,387 +1530,64 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
     request_id = event.get("requestContext", {}).get("requestId")
     logger.append_keys(requestId=request_id, userId=user_id)
 
-    if method == "GET" and path == "/me":
-        return response(
-            200,
-            {
-                "userId": user_id,
-                "email": claims.get("email"),
-                "username": claims.get("cognito:username"),
-            },
-            origin=origin,
-        )
+    me_response = handle_me(method, path, user_id=user_id, claims=claims, origin=origin, response_fn=response)
+    if me_response is not None:
+        return me_response
 
-    if method == "POST" and path == "/api/v1/assets/uploads/init":
-        req = _json_model(ApiAssetUploadInitRequest, event)
-        normalized_content_type = req.contentType.lower()
-        if req.assetType == "image" and not normalized_content_type.startswith("image/"):
-            return response(
-                400,
-                {"error": _api_request_error_payload("validation_error", "Image uploads must use an image content type.")},
-                origin=origin,
-            )
-        if req.assetType == "video" and not normalized_content_type.startswith("video/"):
-            return response(
-                400,
-                {"error": _api_request_error_payload("validation_error", "Video uploads must use a video content type.")},
-                origin=origin,
-            )
-        asset_id = new_id("apiasset")
-        asset_key = _api_asset_paths_for_user(user_id).upload_asset(asset_id, req.filename)
-        return response(
-            200,
-            {
-                "assetId": asset_id,
-                "assetKey": asset_key,
-                "uploadUrl": asset_store.presign_put(asset_key, expires=900, content_type=req.contentType),
-            },
-            origin=origin,
-        )
+    external_api_response = handle_external_api_routes(
+        method,
+        path,
+        event=event,
+        origin=origin,
+        user_id=user_id,
+        store=store,
+        asset_store=asset_store,
+        queue=queue,
+        json_model=_json_model,
+        response_fn=response,
+        error_response_fn=error_response,
+        new_id_fn=new_id,
+        now_iso_fn=now_iso,
+        queue_job_fn=_queue_job,
+        sanitize_prompt_fn=_sanitize_prompt,
+        validate_api_asset_key_fn=_validate_api_asset_key,
+        api_request_error_payload_fn=_api_request_error_payload,
+        api_asset_paths_for_user_fn=_api_asset_paths_for_user,
+        extract_query_fn=_extract_query,
+        api_request_response_fn=_api_request_response,
+        validate_api_video_mode_fn=_validate_api_video_mode,
+        validate_video_model_prompt_fn=validate_video_model_prompt,
+        get_video_model_capability_fn=get_video_model_capability,
+        segment_generation_provider_name_fn=_segment_generation_provider_name,
+    )
+    if external_api_response is not None:
+        return external_api_response
 
-    if method == "GET" and path == "/api/v1/requests":
-        requests = store.list_api_requests(user_id)
-        query = _extract_query(event)
-        status_filter = str(query.get("status") or "").strip().lower()
-        workflow_filter = str(query.get("workflow") or "").strip().lower()
-        model_filter = str(query.get("model") or "").strip()
-        limit_raw = str(query.get("limit") or "").strip()
-        limit = max(1, min(200, int(limit_raw))) if limit_raw.isdigit() else 100
-        filtered: list[dict[str, Any]] = []
-        for item in requests:
-            if status_filter and str(item.get("status") or "").lower() != status_filter:
-                continue
-            if workflow_filter and str(item.get("workflow") or "").lower() != workflow_filter:
-                continue
-            if model_filter and str(item.get("model") or "") != model_filter:
-                continue
-            filtered.append(_api_request_response(item, asset_store))
-            if len(filtered) >= limit:
-                break
-        return response(200, {"requests": filtered}, origin=origin)
-
-    if method == "GET" and path.startswith("/api/v1/requests/"):
-        request_id_value = path.split("/")[4]
-        request_record = store.load_api_request(user_id, request_id_value)
-        if not request_record:
-            return error_response(404, "API request not found", origin=origin)
-        job = None
-        job_id = request_record.get("jobId")
-        if isinstance(job_id, str) and job_id:
-            job = store.load_job(user_id, job_id)
-        return response(200, _api_request_response(request_record, asset_store, job=job), origin=origin)
-
-    if method == "POST" and path == "/api/v1/image-edits/full":
-        req = _json_model(ApiImageEditFullRequest, event)
-        try:
-            prompt = _sanitize_prompt(req.prompt)
-            input_asset = _validate_api_asset_key(
-                asset_store=asset_store,
-                user_id=user_id,
-                asset_key=req.inputAssetKey,
-                expected_type="image",
-            )
-        except ValueError as exc:
-            return response(400, {"error": _api_request_error_payload("validation_error", str(exc))}, origin=origin)
-        request_id_value = new_id("apireq")
-        job_id = _queue_job(
-            store=store,
-            queue=queue,
-            user_id=user_id,
-            task_id="__api__",
-            job_type="api_image_edit_full",
-            payload={
-                "requestId": request_id_value,
-                "model": req.model,
-                "prompt": prompt,
-                "inputAssetKey": req.inputAssetKey,
-            },
-            enqueue=False,
-        )
-        request_record = {
-            "requestId": request_id_value,
-            "userId": user_id,
-            "workflow": "image_edit_full",
-            "model": req.model,
-            "provider": "openai" if req.model in {"chatgpt", "chatgpt_latest"} else "gemini",
-            "status": "queued",
-            "jobId": job_id,
-            "createdAt": now_iso(),
-            "updatedAt": now_iso(),
-            "request": {
-                "prompt": prompt,
-            },
-            "inputAssets": {
-                "input": input_asset,
-            },
-            "preparedAssets": {},
-            "outputAssets": {},
-            "warnings": [],
-            "error": None,
-        }
-        store.save_api_request(request_record)
-        queue.enqueue({"jobId": job_id, "taskId": "__api__", "userId": user_id})
-        return response(202, {"requestId": request_id_value, "jobId": job_id}, origin=origin)
-
-    if method == "POST" and path == "/api/v1/image-edits/patch":
-        req = _json_model(ApiImageEditPatchRequest, event)
-        try:
-            prompt = _sanitize_prompt(req.prompt)
-            input_asset = _validate_api_asset_key(
-                asset_store=asset_store,
-                user_id=user_id,
-                asset_key=req.inputAssetKey,
-                expected_type="image",
-            )
-            patch_asset = _validate_api_asset_key(
-                asset_store=asset_store,
-                user_id=user_id,
-                asset_key=req.patchAssetKey,
-                expected_type="image",
-            )
-            mask_asset = (
-                _validate_api_asset_key(
-                    asset_store=asset_store,
-                    user_id=user_id,
-                    asset_key=req.maskAssetKey,
-                    expected_type="image",
-                )
-                if req.maskAssetKey
-                else None
-            )
-            reference_asset = (
-                _validate_api_asset_key(
-                    asset_store=asset_store,
-                    user_id=user_id,
-                    asset_key=req.referenceAssetKey,
-                    expected_type="image",
-                )
-                if req.referenceAssetKey
-                else None
-            )
-            if req.model == "runware_ace_pp" and not reference_asset:
-                raise ValueError("Runware ACE++ requires a reference image")
-        except ValueError as exc:
-            return response(400, {"error": _api_request_error_payload("validation_error", str(exc))}, origin=origin)
-        request_id_value = new_id("apireq")
-        job_id = _queue_job(
-            store=store,
-            queue=queue,
-            user_id=user_id,
-            task_id="__api__",
-            job_type="api_image_edit_patch",
-            payload={
-                "requestId": request_id_value,
-                "model": req.model,
-                "prompt": prompt,
-                "inputAssetKey": req.inputAssetKey,
-                "patchAssetKey": req.patchAssetKey,
-                "maskAssetKey": req.maskAssetKey,
-                "referenceAssetKey": req.referenceAssetKey,
-                "patchRect": req.patchRect.model_dump(),
-                "featherPx": req.featherPx,
-                "bleedPx": req.bleedPx,
-                "runwareRepaintingScale": req.runwareRepaintingScale,
-                "edgeAwareRefine": req.edgeAwareRefine,
-                "edgeAwareStrength": req.edgeAwareStrength,
-                "edgeAwareRadiusPx": req.edgeAwareRadiusPx,
-                "maskGrowPx": req.maskGrowPx,
-            },
-            enqueue=False,
-        )
-        request_record = {
-            "requestId": request_id_value,
-            "userId": user_id,
-            "workflow": "image_edit_patch",
-            "model": req.model,
-            "provider": "runware" if req.model.startswith("runware_") else ("openai" if req.model in {"chatgpt", "chatgpt_latest"} else "gemini"),
-            "status": "queued",
-            "jobId": job_id,
-            "createdAt": now_iso(),
-            "updatedAt": now_iso(),
-            "request": {
-                "prompt": prompt,
-                "patchRect": req.patchRect.model_dump(),
-                "featherPx": req.featherPx,
-                "bleedPx": req.bleedPx,
-                "edgeAwareRefine": req.edgeAwareRefine,
-                "edgeAwareStrength": req.edgeAwareStrength,
-                "edgeAwareRadiusPx": req.edgeAwareRadiusPx,
-                "maskGrowPx": req.maskGrowPx,
-                "runwareRepaintingScale": req.runwareRepaintingScale,
-            },
-            "inputAssets": {
-                "input": input_asset,
-                "patch": patch_asset,
-                "mask": mask_asset,
-                "reference": reference_asset,
-            },
-            "preparedAssets": {},
-            "outputAssets": {},
-            "warnings": [],
-            "error": None,
-        }
-        store.save_api_request(request_record)
-        queue.enqueue({"jobId": job_id, "taskId": "__api__", "userId": user_id})
-        return response(202, {"requestId": request_id_value, "jobId": job_id}, origin=origin)
-
-    if method == "POST" and path == "/api/v1/video-generations/reference-video":
-        req = _json_model(ApiReferenceVideoGenerateRequest, event)
-        try:
-            prompt = _sanitize_prompt(req.prompt) if req.prompt else None
-            negative_prompt = _sanitize_prompt(req.negativePrompt) if req.negativePrompt else None
-            _validate_api_video_mode(req.model, req.mode)
-            validate_video_model_prompt(req.model, prompt)
-            capability = get_video_model_capability(req.model)
-            video_asset = (
-                _validate_api_asset_key(
-                    asset_store=asset_store,
-                    user_id=user_id,
-                    asset_key=req.videoAssetKey,
-                    expected_type="video",
-                )
-                if capability.uses_source_video
-                else None
-            )
-            if capability.uses_source_video and not req.videoAssetKey:
-                raise ValueError(f"{capability.label} requires videoAssetKey")
-            first_frame_asset = _validate_api_asset_key(
-                asset_store=asset_store,
-                user_id=user_id,
-                asset_key=req.firstFrameAssetKey,
-                expected_type="image",
-            )
-            last_frame_asset = (
-                _validate_api_asset_key(
-                    asset_store=asset_store,
-                    user_id=user_id,
-                    asset_key=req.lastFrameAssetKey,
-                    expected_type="image",
-                )
-                if req.lastFrameAssetKey
-                else None
-            )
-        except ValueError as exc:
-            return response(400, {"error": _api_request_error_payload("validation_error", str(exc))}, origin=origin)
-        request_id_value = new_id("apireq")
-        job_id = _queue_job(
-            store=store,
-            queue=queue,
-            user_id=user_id,
-            task_id="__api__",
-            job_type="api_video_generate_reference",
-            payload={
-                "requestId": request_id_value,
-                "model": req.model,
-                "mode": req.mode,
-                "prompt": prompt,
-                "negativePrompt": negative_prompt,
-                "videoAssetKey": req.videoAssetKey,
-                "firstFrameAssetKey": req.firstFrameAssetKey,
-                "lastFrameAssetKey": req.lastFrameAssetKey,
-                "durationSeconds": req.durationSeconds,
-                "replicateKlingMode": req.replicateKlingMode,
-                "replicateKlingV3Mode": req.replicateKlingV3Mode,
-                "wan27Resolution": req.wan27Resolution,
-                "happyHorseResolution": req.happyHorseResolution,
-                "sora2Resolution": req.sora2Resolution,
-                "preserveFrames": bool(req.preserveFrames),
-            },
-            enqueue=False,
-        )
-        request_record = {
-            "requestId": request_id_value,
-            "userId": user_id,
-            "workflow": "video_generation_reference",
-            "model": req.model,
-            "provider": _segment_generation_provider_name(req.model),
-            "status": "queued",
-            "jobId": job_id,
-            "createdAt": now_iso(),
-            "updatedAt": now_iso(),
-            "request": {
-                "mode": req.mode,
-                "prompt": prompt,
-                "negativePrompt": negative_prompt,
-                "durationSeconds": req.durationSeconds,
-                "replicateKlingMode": req.replicateKlingMode,
-                "replicateKlingV3Mode": req.replicateKlingV3Mode,
-                "wan27Resolution": req.wan27Resolution,
-                "happyHorseResolution": req.happyHorseResolution,
-                "sora2Resolution": req.sora2Resolution,
-                "preserveFrames": bool(req.preserveFrames),
-            },
-            "inputAssets": {
-                "video": video_asset,
-                "firstFrame": first_frame_asset,
-                "lastFrame": last_frame_asset,
-            },
-            "preparedAssets": {},
-            "outputAssets": {},
-            "warnings": [],
-            "error": None,
-        }
-        store.save_api_request(request_record)
-        queue.enqueue({"jobId": job_id, "taskId": "__api__", "userId": user_id})
-        return response(202, {"requestId": request_id_value, "jobId": job_id}, origin=origin)
-
-    if method == "POST" and path == "/tasks":
-        req = _json_model(TaskCreateRequest, event)
-        existing_tasks = store.list_tasks(user_id)
-        existing_names = {str(item.get("name", "")).lower() for item in existing_tasks}
-        task_id = new_id("task")
-        normalized_name = _normalize_task_name(req.name)
-        unique_name = _unique_task_name(normalized_name, existing_names)
-        existing_prefixes = {str(item.get("filePrefix", "")) for item in existing_tasks if item.get("filePrefix")}
-        file_prefix = _build_file_prefix(unique_name, task_id, existing_prefixes)
-        now = now_iso()
-        task = {
-            "taskId": task_id,
-            "userId": user_id,
-            "name": unique_name,
-            "filePrefix": file_prefix,
-            "createdAt": now,
-            "updatedAt": now,
-            "status": "created",
-            "video": {},
-            "segments": [],
-            "frames": {},
-            "segmentGenerations": {},
-            "chunkedGenerationRuns": [],
-            "externalQcPairs": [],
-            "qualityMatchAnalyses": {},
-            "videoCleanupTracks": [],
-            "exports": [],
-            "customReports": [],
-            "history": [],
-            "metaVersion": 0,
-        }
-        store.save_task(task)
-        return response(201, {"taskId": task_id}, origin=origin)
-
-    if method == "GET" and path == "/tasks":
-        task_items = store.list_tasks(user_id)
-        for item in task_items:
-            changed = _reconcile_segment_generation_job_states(item, store)
-            changed = _prune_stale_segment_generations(item, store) or changed
-            changed = _backfill_segment_generation_preview_refs(item) or changed
-            changed = _cleanup_legacy_generation_qc(item) or changed
-            changed = _cleanup_custom_reports(item) or changed
-            if changed:
-                store.save_task(item)
-        tasks = [_task_summary(item) for item in task_items]
-        return response(200, {"tasks": tasks}, origin=origin)
-
-    if method == "DELETE" and path.startswith("/tasks/") and path.count("/") == 2:
-        task_id = path.split("/")[2]
-        try:
-            task = _load_task_or_404(store, user_id, task_id)
-        except KeyError:
-            return error_response(404, "Task not found", origin=origin)
-        task["deletedAt"] = now_iso()
-        task["status"] = "error"
-        store.save_task(task)
-        return response(200, {"ok": True}, origin=origin)
+    tasks_root_response = handle_tasks_root_routes(
+        method,
+        path,
+        event=event,
+        origin=origin,
+        user_id=user_id,
+        store=store,
+        json_model=_json_model,
+        response_fn=response,
+        error_response_fn=error_response,
+        new_id_fn=new_id,
+        now_iso_fn=now_iso,
+        normalize_task_name_fn=_normalize_task_name,
+        unique_task_name_fn=_unique_task_name,
+        build_file_prefix_fn=_build_file_prefix,
+        load_task_or_404_fn=_load_task_or_404,
+        reconcile_segment_generation_job_states_fn=_reconcile_segment_generation_job_states,
+        prune_stale_segment_generations_fn=_prune_stale_segment_generations,
+        backfill_segment_generation_preview_refs_fn=_backfill_segment_generation_preview_refs,
+        cleanup_legacy_generation_qc_fn=_cleanup_legacy_generation_qc,
+        cleanup_custom_reports_fn=_cleanup_custom_reports,
+        task_summary_fn=_task_summary,
+    )
+    if tasks_root_response is not None:
+        return tasks_root_response
 
     if method == "GET" and path.startswith("/tasks/") and path.count("/") == 2:
         task_id = path.split("/")[2]
@@ -2012,11 +1677,11 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 _decorate_embedded_s3_keys(motion_qc, asset_store)
         return response(200, decorated, origin=origin)
 
-    if path.startswith("/tasks/"):
-        parts = path.strip("/").split("/")
+    task_path = parse_task_path(path)
+    if task_path is not None:
+        task_id, parts = task_path
         if len(parts) < 2:
             return error_response(404, "Not found", origin=origin)
-        task_id = parts[1]
         try:
             task = _load_task_or_404(store, user_id, task_id)
         except KeyError:
@@ -4275,12 +3940,17 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             store.save_task(task)
             return response(202, {"jobId": job_id, "genId": reconciled_gen_id}, origin=origin)
 
-    if method == "GET" and path.startswith("/jobs/"):
-        job_id = path.split("/")[2]
-        job = store.load_job(user_id, job_id)
-        if not job:
-            return error_response(404, "Job not found", origin=origin)
-        return response(200, job, origin=origin)
+    job_response = handle_job_status(
+        method,
+        path,
+        user_id=user_id,
+        store=store,
+        origin=origin,
+        response_fn=response,
+        error_response_fn=error_response,
+    )
+    if job_response is not None:
+        return job_response
 
     return error_response(404, "Not found", origin=origin)
 
