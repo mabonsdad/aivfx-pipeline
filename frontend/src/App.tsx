@@ -25,6 +25,7 @@ import { useVideoFrameStrip, type VideoFrameStripItem } from "./hooks/useVideoFr
 import { useTaskLifecycle } from "./hooks/useTaskLifecycle";
 import { useAssetLibraryState } from "./hooks/useAssetLibraryState";
 import { useAssetsTabContexts } from "./hooks/useAssetsTabContexts";
+import { useCurrentWorkingReferenceState } from "./hooks/useCurrentWorkingReferenceState";
 import { useGenerationConfigState } from "./hooks/useGenerationConfigState";
 import { useGenerationPromptGuidance } from "./hooks/useGenerationPromptGuidance";
 import { useGenerationMergeState } from "./hooks/useGenerationMergeState";
@@ -37,6 +38,7 @@ import type {
   VideoModelId,
 } from "./lib/generated/videoContracts";
 import { getGenerationModeConfig, type GenerateInputMode } from "./lib/generationModeRegistry";
+import { PRIMARY_WORKFLOW_TABS, type PrimaryWorkflowSection } from "./lib/workflowSections";
 import { currentUser, login, logout } from "./lib/auth";
 import type { EditFrameTabCtx } from "./pages/workflow/EditFrameTab";
 import type { GenerateTabCtx } from "./pages/workflow/GenerateTab";
@@ -165,7 +167,6 @@ const VIDEO_WORK_MODE_STORAGE_KEY = "aivfx:videoWorkModeByTask:v1";
 const WHOLE_VIDEO_SINGLE_PASS_LIMIT_SECONDS = 10;
 
 type VideoWorkMode = "whole_video" | "custom_segment";
-type PrimaryWorkflowSection = "source" | "create" | "outputs" | "post" | "reports" | "assets";
 
 function clampInteger(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, Math.round(value)));
@@ -3752,62 +3753,30 @@ export default function App() {
       setLastFrameId(result.frameId);
     }
   }
-  const primaryTabs: Array<{ id: PrimaryWorkflowSection; label: string }> = [
-    { id: "source", label: "Select" },
-    { id: "create", label: "Edit" },
-    { id: "outputs", label: "Generate" },
-    { id: "post", label: "Post Process" },
-    { id: "assets", label: "Assets" },
-    { id: "reports", label: "Reports" },
-  ];
-  const currentReferenceSegment = selectedSegment ?? defaultVideoSegment ?? null;
-  const currentReferenceStartImageUrl = currentReferenceSegment ? task?.frames?.[currentReferenceSegment.startFrameId]?.imageUrl ?? null : null;
-  const currentReferenceEndImageUrl = currentReferenceSegment ? task?.frames?.[currentReferenceSegment.endFrameId]?.imageUrl ?? null : null;
-  const currentReferenceAssets = useMemo(() => {
-    const assets: Array<{ label: string; imageUrl?: string | null; videoUrl?: string | null; posterUrl?: string | null }> = [];
-    const useGenerationBoundInputs =
-      (activeWorkflowSection === "outputs" || activeWorkflowSection === "post") && Boolean(selectedPreviewGeneration);
-    const firstFrameVariantId = useGenerationBoundInputs
-      ? selectedPreviewGeneration?.sourceFirstFrameVariantId ?? null
-      : refineSourceVariantIds.first || compareVariantIds.first;
-    const lastFrameVariantId = useGenerationBoundInputs
-      ? selectedPreviewGeneration?.sourceLastFrameVariantId ?? null
-      : refineSourceVariantIds.last || compareVariantIds.last;
-    const firstFrameEditUrl = frameVariantImageUrl(editFirstFrame?.frameId, firstFrameVariantId);
-    const lastFrameEditUrl =
-      generationInputMode === "start_end" ? frameVariantImageUrl(editLastFrame?.frameId, lastFrameVariantId) : null;
-
-    if (firstFrameEditUrl) {
-      assets.push({ label: "First frame edit", imageUrl: firstFrameEditUrl });
-    }
-    if (lastFrameEditUrl) {
-      assets.push({ label: "Last frame edit", imageUrl: lastFrameEditUrl });
-    }
-    if (selectedPreviewGeneration?.downloadUrl) {
-      assets.push({
-        label: "Generated video",
-        videoUrl: selectedPreviewGeneration.downloadUrl,
-        posterUrl: generationThumbnailUrl(selectedPreviewGeneration),
-      });
-    }
-    return assets;
-  }, [
-    compareVariantIds.first,
-    compareVariantIds.last,
-    editFirstFrame?.frameId,
-    editLastFrame?.frameId,
-    frameVariantImageUrl,
-    generationInputMode,
-    generationThumbnailUrl,
+  const primaryTabs = PRIMARY_WORKFLOW_TABS;
+  const {
+    currentReferenceSegment,
+    currentReferenceStartImageUrl,
+    currentReferenceEndImageUrl,
+    currentReferenceAssets,
+    currentReferenceWarning,
+  } = useCurrentWorkingReferenceState({
     activeWorkflowSection,
-    refineSourceVariantIds.first,
-    refineSourceVariantIds.last,
+    selectedSegment,
+    defaultVideoSegment,
+    task,
     selectedPreviewGeneration,
-  ]);
-  const currentReferenceWarning =
-    wholeVideoNeedsChunking && currentReferenceSegment?.segmentId === defaultVideoSegment?.segmentId
-      ? "This video is longer than single-pass generation limit and will require chunking."
-      : undefined;
+    refineStartVariantId: refineSourceVariantIds.first,
+    refineEndVariantId: refineSourceVariantIds.last,
+    compareStartVariantId: compareVariantIds.first,
+    compareEndVariantId: compareVariantIds.last,
+    editFirstFrameId: editFirstFrame?.frameId ?? null,
+    editLastFrameId: editLastFrame?.frameId ?? null,
+    generationInputMode,
+    wholeVideoNeedsChunking,
+    frameVariantImageUrl,
+    generationThumbnailUrl,
+  });
 
   const pickFrameTabCtx = useMemo<PickFrameTabCtx>(
     () => ({
