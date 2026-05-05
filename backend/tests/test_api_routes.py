@@ -354,3 +354,93 @@ def test_cleanup_preview_route_returns_job_id(monkeypatch) -> None:
     payload = json.loads(result["body"])
     assert payload["jobId"] == "job_2"
     assert "genId" not in payload
+
+
+def test_segment_generate_route_returns_job_and_gen(monkeypatch) -> None:
+    task = {
+        "taskId": "task_1",
+        "userId": "user-1",
+        "name": "Task 1",
+        "video": {"editSource": {"fps": {"num": 24, "den": 1}}},
+        "segments": [
+            {
+                "segmentId": "seg_1",
+                "startFrame": 0,
+                "endFrameExclusive": 24,
+                "durationFrames": 24,
+                "durationSec": 1.0,
+                "crop": None,
+            }
+        ],
+        "segmentGenerations": {},
+        "history": [],
+    }
+    saved: list[dict] = []
+
+    class _Store:
+        def save_task(self, task_payload: dict, merge_on_conflict: bool = False):
+            saved.append(json.loads(json.dumps(task_payload)))
+            return task_payload
+
+    class _AssetStore:
+        pass
+
+    monkeypatch.setattr(api_handler, "get_user_id", lambda _event: "user-1")
+    monkeypatch.setattr(api_handler, "get_user_claims", lambda _event: {"email": "u@example.com"})
+    monkeypatch.setattr(api_handler, "S3JsonStore", lambda _bucket: _Store())
+    monkeypatch.setattr(api_handler, "AssetStore", lambda _bucket, _region: _AssetStore())
+    monkeypatch.setattr(api_handler, "JobQueue", lambda _url: object())
+    monkeypatch.setattr(api_handler, "_load_task_or_404", lambda _store, _user_id, _task_id: task)
+    monkeypatch.setattr(api_handler, "_queue_job", lambda **_kwargs: "job_seg")
+    monkeypatch.setattr(api_handler, "new_id", lambda prefix: f"{prefix}_abc")
+
+    result = api_handler._route(
+        _event(
+            "POST",
+            "/tasks/task_1/segments/seg_1/generate",
+            {"lumaModel": "ray-2", "mode": "adhere_1", "prompt": "make it cinematic"},
+        )
+    )
+    assert result["statusCode"] == 202
+    payload = json.loads(result["body"])
+    assert payload["jobId"] == "job_seg"
+    assert payload["genId"] == "gen_abc"
+    assert saved
+    assert "gen_abc" in saved[-1]["segmentGenerations"]
+
+
+def test_manual_segment_upload_init_route_returns_upload_details(monkeypatch) -> None:
+    task = {
+        "taskId": "task_1",
+        "userId": "user-1",
+        "name": "Task 1",
+        "filePrefix": "",
+        "segments": [{"segmentId": "seg_1"}],
+    }
+
+    class _Store:
+        pass
+
+    class _AssetStore:
+        def presign_put(self, key: str, expires: int = 0, content_type: str | None = None):
+            return f"https://upload.example/{key}?e={expires}&ct={content_type}"
+
+    monkeypatch.setattr(api_handler, "get_user_id", lambda _event: "user-1")
+    monkeypatch.setattr(api_handler, "get_user_claims", lambda _event: {"email": "u@example.com"})
+    monkeypatch.setattr(api_handler, "S3JsonStore", lambda _bucket: _Store())
+    monkeypatch.setattr(api_handler, "AssetStore", lambda _bucket, _region: _AssetStore())
+    monkeypatch.setattr(api_handler, "JobQueue", lambda _url: object())
+    monkeypatch.setattr(api_handler, "_load_task_or_404", lambda _store, _user_id, _task_id: task)
+    monkeypatch.setattr(api_handler, "new_id", lambda prefix: f"{prefix}_abc")
+
+    result = api_handler._route(
+        _event(
+            "POST",
+            "/tasks/task_1/segments/seg_1/manual-generation/upload/init",
+            {"filename": "clip.mp4", "contentType": "video/mp4"},
+        )
+    )
+    assert result["statusCode"] == 200
+    payload = json.loads(result["body"])
+    assert "/segments/seg_1/manual_uploads/" in payload["uploadKey"]
+    assert payload["uploadUrl"].startswith("https://upload.example/")

@@ -26,6 +26,7 @@ from src.api.routes_task_assets import handle_task_asset_routes
 from src.api.routes_task_cleanup import handle_task_cleanup_routes
 from src.api.routes_task_detail import handle_task_detail_route
 from src.api.routes_task_reports import handle_task_report_routes
+from src.api.routes_task_segments import handle_task_segment_routes
 from src.api.routes_tasks_root import handle_tasks_root_routes
 from src.api.routes_user import handle_me
 from src.core.assets import ApiAssetPaths, AssetPaths, AssetStore
@@ -59,8 +60,6 @@ from src.models.schemas import (
     FullEditRequest,
     ManualFrameUploadCompleteRequest,
     ManualFrameUploadInitRequest,
-    ManualSegmentGenerationUploadCompleteRequest,
-    ManualSegmentGenerationUploadInitRequest,
     ManualRefineExportRequest,
     ManualRefineUploadCompleteRequest,
     ManualRefineUploadInitRequest,
@@ -75,10 +74,7 @@ from src.models.schemas import (
     PatchInitRequest,
     PatchSubmitRequest,
     ReferenceUploadRequest,
-    SegmentCreateRequest,
     SegmentGenerationExtendRequest,
-    SegmentGenerateRequest,
-    SegmentPatchRequest,
 )
 from src.quality_match.apply_flow import _allocate_refined_variant_storage, create_refined_variant_from_upload
 from src.quality_match.service import QualityMatchSettings, analyse_quality_match, preview_quality_match_from_mask
@@ -1662,6 +1658,44 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
         if task_cleanup_response is not None:
             return task_cleanup_response
 
+        task_segment_response = handle_task_segment_routes(
+            method,
+            task_id=task_id,
+            parts=parts,
+            event=event,
+            origin=origin,
+            user_id=user_id,
+            task=task,
+            store=store,
+            asset_store=asset_store,
+            json_model=_json_model,
+            response_fn=response,
+            error_response_fn=error_response,
+            new_id_fn=new_id,
+            now_iso_fn=now_iso,
+            queue_job_fn=lambda **kwargs: _queue_job(queue=queue, **kwargs),
+            append_history_event_fn=_append_history_event,
+            asset_paths_for_task_fn=_asset_paths_for_task,
+            fps_fn=_fps,
+            timecode_fn=_timecode,
+            resolve_segment_frames_fn=_resolve_segment_frames,
+            capture_segment_boundary_frames_fn=_capture_segment_boundary_frames,
+            segment_crop_signature_fn=_segment_crop_signature,
+            normalize_segment_crop_fn=_normalize_segment_crop,
+            segment_model_limit_error_fn=_segment_model_limit_error,
+            sanitize_prompt_fn=_sanitize_prompt,
+            validate_video_model_mode_fn=validate_video_model_mode,
+            validate_video_model_prompt_fn=validate_video_model_prompt,
+            video_model_provider_fn=get_video_model_provider,
+            audit_prompt_fn=_audit_prompt,
+            create_manual_uploaded_segment_generation_fn=_create_manual_uploaded_segment_generation,
+            normalize_uploaded_generated_video_fn=_normalize_uploaded_generated_video,
+            video_probe_payload_fn=_video_probe_payload,
+            logger=logger,
+        )
+        if task_segment_response is not None:
+            return task_segment_response
+
         task_report_response = handle_task_report_routes(
             method,
             task_id=task_id,
@@ -1791,118 +1825,6 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                         }
                     )
             return response(200, {"frames": frames}, origin=origin)
-
-        if method == "POST" and len(parts) == 3 and parts[2] == "segments":
-            req = _json_model(SegmentCreateRequest, event)
-            try:
-                start, end_excl, dur_frames = _resolve_segment_frames(
-                    task,
-                    req.startFrameIndex,
-                    duration_seconds=req.durationSeconds,
-                    end_frame_exclusive=req.endFrameExclusive,
-                )
-            except ValueError as exc:
-                return error_response(400, str(exc), origin=origin)
-
-            segment_id = new_id("seg")
-            fps = _fps(task)
-            segment = {
-                "segmentId": segment_id,
-                "startFrame": start,
-                "endFrameExclusive": end_excl,
-                "durationFrames": dur_frames,
-                "durationSec": round(dur_frames / float(fps), 3),
-                "startTimecode": _timecode(start, fps),
-                "endTimecode": _timecode(end_excl, fps),
-                "startFrameId": "",
-                "endFrameId": "",
-                "selectedGenerationId": None,
-                "crop": None,
-                "segmentClipKey": None,
-                "segmentClipUpdatedAt": None,
-            }
-            start_capture, end_capture = _capture_segment_boundary_frames(task=task, segment=segment, asset_store=asset_store)
-            segment["startFrameId"] = start_capture["frameId"]
-            segment["endFrameId"] = end_capture["frameId"]
-            task.setdefault("segments", []).append(segment)
-            store.save_task(task)
-            return response(
-                201,
-                {
-                    "segmentId": segment_id,
-                    "resolvedStartFrameIndex": start,
-                    "resolvedEndFrameIndex": end_excl,
-                },
-                origin=origin,
-            )
-
-        if method == "PATCH" and len(parts) == 4 and parts[2] == "segments":
-            segment_id = parts[3]
-            req = _json_model(SegmentPatchRequest, event)
-            raw_body = parse_json_body(event) or {}
-            crop_field_present = isinstance(raw_body, dict) and "crop" in raw_body
-            segment = next((s for s in task["segments"] if s["segmentId"] == segment_id), None)
-            if not segment:
-                return error_response(404, "Segment not found", origin=origin)
-
-            start_frame = req.startFrameIndex if req.startFrameIndex is not None else segment["startFrame"]
-            end_exclusive = req.endFrameExclusive if req.endFrameExclusive is not None else segment["endFrameExclusive"]
-            if end_exclusive <= start_frame:
-                return error_response(400, "Invalid in/out range", origin=origin)
-
-            fps = _fps(task)
-            duration_frames = end_exclusive - start_frame
-            duration_seconds = duration_frames / float(fps)
-            previous_crop_signature = _segment_crop_signature(segment.get("crop"))
-            crop_changed = False
-
-            segment["startFrame"] = start_frame
-            segment["endFrameExclusive"] = end_exclusive
-            segment["durationFrames"] = duration_frames
-            segment["durationSec"] = round(duration_seconds, 3)
-            segment["startTimecode"] = _timecode(start_frame, fps)
-            segment["endTimecode"] = _timecode(end_exclusive, fps)
-            if crop_field_present:
-                if raw_body.get("crop") is None:
-                    segment["crop"] = None
-                else:
-                    if req.crop is None:
-                        return error_response(400, "Invalid crop payload", origin=origin)
-                    try:
-                        normalized_crop = _normalize_segment_crop(task, req.crop.model_dump())
-                    except ValueError as exc:
-                        return error_response(400, str(exc), origin=origin)
-                    segment["crop"] = normalized_crop if normalized_crop and normalized_crop.get("enabled") else None
-                segment["cropUpdatedAt"] = now_iso()
-                crop_changed = previous_crop_signature != _segment_crop_signature(segment.get("crop"))
-            elif "crop" not in segment:
-                segment["crop"] = None
-
-            range_changed = (
-                req.startFrameIndex is not None
-                or req.endFrameExclusive is not None
-                or not segment.get("startFrameId")
-                or not segment.get("endFrameId")
-            )
-            if range_changed or crop_changed:
-                start_capture, end_capture = _capture_segment_boundary_frames(task=task, segment=segment, asset_store=asset_store)
-                segment["startFrameId"] = start_capture["frameId"]
-                segment["endFrameId"] = end_capture["frameId"]
-                segment["segmentClipKey"] = None
-                segment["segmentClipUpdatedAt"] = None
-                segment["selectedGenerationId"] = None
-
-            store.save_task(task)
-            return response(200, {"ok": True, "segment": segment}, origin=origin)
-
-        if method == "DELETE" and len(parts) == 4 and parts[2] == "segments":
-            segment_id = parts[3]
-            before = len(task["segments"])
-            task["segments"] = [s for s in task["segments"] if s["segmentId"] != segment_id]
-            if len(task["segments"]) == before:
-                return error_response(404, "Segment not found", origin=origin)
-            store.save_task(task)
-            return response(200, {"ok": True}, origin=origin)
 
         if method == "POST" and len(parts) == 4 and parts[2] == "frames" and parts[3] == "capture":
             req = _json_model(FrameCaptureRequest, event)
@@ -2556,191 +2478,6 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             frame["selectedVariantId"] = variant_id
             store.save_task(task)
             return response(200, {"ok": True}, origin=origin)
-
-        if method == "POST" and len(parts) == 5 and parts[2] == "segments" and parts[4] == "generate":
-            segment_id = parts[3]
-            segment = next((s for s in task.get("segments", []) if s["segmentId"] == segment_id), None)
-            if not segment:
-                return error_response(404, "Segment not found", origin=origin)
-
-            req = _json_model(SegmentGenerateRequest, event)
-            limit_error = _segment_model_limit_error(task, segment, req.lumaModel)
-            if limit_error:
-                return error_response(400, limit_error, origin=origin)
-            try:
-                prompt = _sanitize_prompt(req.prompt) if req.prompt else None
-                negative_prompt = _sanitize_prompt(req.negativePrompt) if req.negativePrompt else None
-                validate_video_model_mode(req.lumaModel, req.mode)
-            except ValueError as exc:
-                return error_response(400, str(exc), origin=origin)
-            try:
-                validate_video_model_prompt(req.lumaModel, prompt)
-            except ValueError as exc:
-                return error_response(400, str(exc), origin=origin)
-            if prompt:
-                logger.info("Queueing segment generation", extra={**_audit_prompt(prompt), "taskId": task_id, "segmentId": segment_id})
-
-            gen_id = new_id("gen")
-            provider_name = get_video_model_provider(req.lumaModel)
-
-            job_id = _queue_job(
-                store=store,
-                queue=queue,
-                user_id=user_id,
-                task_id=task_id,
-                job_type="segment_generate",
-                payload={
-                    "segmentId": segment_id,
-                    "genId": gen_id,
-                    "lumaModel": req.lumaModel,
-                    "mode": req.mode,
-                    "prompt": prompt,
-                    "negativePrompt": negative_prompt,
-                    "firstFrameVariantId": req.firstFrameVariantId,
-                    "lastFrameVariantId": req.lastFrameVariantId,
-                    "replicateKlingMode": req.replicateKlingMode,
-                    "replicateKlingV3Mode": req.replicateKlingV3Mode,
-                    "wan27Resolution": req.wan27Resolution,
-                    "happyHorseResolution": req.happyHorseResolution,
-                    "preserveFrames": bool(req.preserveFrames),
-                },
-            )
-
-            task.setdefault("segmentGenerations", {})[gen_id] = {
-                "genId": gen_id,
-                "segmentId": segment_id,
-                "luma": {
-                    "provider": provider_name,
-                    "model": req.lumaModel,
-                    "mode": req.mode,
-                    "prompt": prompt,
-                    "negativePrompt": negative_prompt,
-                    "lumaGenerationId": None,
-                },
-                "generationSettings": {"preserveFrames": bool(req.preserveFrames)},
-                "status": "queued",
-                "outputKey": None,
-                "jobId": job_id,
-                "error": None,
-                "segmentCrop": segment.get("crop"),
-                "queuedAt": now_iso(),
-                "createdAt": now_iso(),
-                "updatedAt": now_iso(),
-            }
-            _append_history_event(
-                task,
-                {
-                    "at": now_iso(),
-                    "event": "segment_generation.queued",
-                    "jobId": job_id,
-                    "genId": gen_id,
-                    "segmentId": segment_id,
-                    "model": req.lumaModel,
-                },
-            )
-            store.save_task(task, merge_on_conflict=True)
-            return response(202, {"jobId": job_id, "genId": gen_id}, origin=origin)
-
-        if method == "POST" and len(parts) == 7 and parts[2] == "segments" and parts[4] == "manual-generation" and parts[5] == "upload" and parts[6] == "init":
-            segment_id = parts[3]
-            segment = next((s for s in task.get("segments", []) if s["segmentId"] == segment_id), None)
-            if not segment:
-                return error_response(404, "Segment not found", origin=origin)
-            req = _json_model(ManualSegmentGenerationUploadInitRequest, event)
-            upload_id = new_id("msgu")
-            paths = _asset_paths_for_task(task)
-            upload_key = paths.manual_segment_generation_upload(segment_id, upload_id, req.filename)
-            return response(
-                200,
-                {
-                    "uploadKey": upload_key,
-                    "uploadUrl": asset_store.presign_put(upload_key, expires=900, content_type=req.contentType),
-                },
-                origin=origin,
-            )
-
-        if method == "POST" and len(parts) == 7 and parts[2] == "segments" and parts[4] == "manual-generation" and parts[5] == "upload" and parts[6] == "complete":
-            segment_id = parts[3]
-            segment = next((s for s in task.get("segments", []) if s["segmentId"] == segment_id), None)
-            if not segment:
-                return error_response(404, "Segment not found", origin=origin)
-            req = _json_model(ManualSegmentGenerationUploadCompleteRequest, event)
-            paths = _asset_paths_for_task(task)
-            expected_prefix = f"{paths.task_prefix()}/segments/{segment_id}/manual_uploads/"
-            if not req.uploadKey.startswith(expected_prefix):
-                return error_response(400, "Upload key is outside this segment manual-upload path", origin=origin)
-            try:
-                head = asset_store.head_object(req.uploadKey)
-            except ClientError:
-                return error_response(404, "Uploaded generated video file not found", origin=origin)
-
-            generation = _create_manual_uploaded_segment_generation(
-                task=task,
-                segment=segment,
-                filename=req.filename,
-                model=req.model,
-                mode=req.mode,
-                prompt=_sanitize_prompt(req.prompt) if req.prompt else None,
-                negative_prompt=_sanitize_prompt(req.negativePrompt) if req.negativePrompt else None,
-                first_frame_variant_id=req.firstFrameVariantId,
-                last_frame_variant_id=req.lastFrameVariantId,
-            )
-            crop = segment.get("crop") if isinstance(segment.get("crop"), dict) and segment.get("crop", {}).get("enabled") else None
-            target_width = int(crop.get("outputWidth")) if crop and crop.get("outputWidth") else int(task.get("video", {}).get("editSource", {}).get("width") or 0)
-            target_height = int(crop.get("outputHeight")) if crop and crop.get("outputHeight") else int(task.get("video", {}).get("editSource", {}).get("height") or 0)
-            fps_info = task.get("video", {}).get("editSource", {}).get("fps", {})
-            target_fps = Fraction(int(fps_info.get("num") or 30), int(fps_info.get("den") or 1))
-            normalized_probe = _normalize_uploaded_generated_video(
-                asset_store=asset_store,
-                upload_key=req.uploadKey,
-                output_key=generation["outputKey"],
-                target_width=target_width,
-                target_height=target_height,
-                target_fps=target_fps,
-            )
-            generation["providerDurationSec"] = round(float(normalized_probe.get("duration_sec") or segment.get("durationSec") or 0.0), 3)
-            generation["generationSettings"] = {
-                **(generation.get("generationSettings") or {}),
-                "mediaHasAudio": bool(normalized_probe.get("has_audio")),
-                "sourceSegmentTiming": {
-                    "startFrame": int(segment.get("startFrame") or 0),
-                    "endFrameExclusive": int(segment.get("endFrameExclusive") or 0),
-                    "durationFrames": int(segment.get("durationFrames") or 0),
-                    "durationSec": round(float(segment.get("durationSec") or 0.0), 4),
-                    "fps": {"num": target_fps.numerator, "den": target_fps.denominator},
-                    "width": target_width,
-                    "height": target_height,
-                },
-                "storedOutput": _video_probe_payload(normalized_probe),
-                "timelineConform": {
-                    "policy": "manual_upload_normalize",
-                    "applied": True,
-                    "durationDeltaSec": round(float(normalized_probe.get("duration_sec") or 0.0) - float(segment.get("durationSec") or 0.0), 4),
-                    "frameDelta": int(normalized_probe.get("frame_count") or 0) - int(segment.get("durationFrames") or 0),
-                    "fpsConformed": True,
-                    "resolutionConformed": True,
-                },
-            }
-            try:
-                asset_store.delete_object(req.uploadKey)
-            except Exception:
-                pass
-            task.setdefault("segmentGenerations", {})[generation["genId"]] = generation
-            segment["selectedGenerationId"] = generation["genId"]
-            _append_history_event(
-                task,
-                {
-                    "at": now_iso(),
-                    "event": "segment_generation.manual_upload",
-                    "genId": generation["genId"],
-                    "segmentId": segment_id,
-                    "model": req.model,
-                    "filename": req.filename,
-                    "userId": user_id,
-                },
-            )
-            store.save_task(task, merge_on_conflict=True)
-            return response(200, {"generation": generation}, origin=origin)
 
         if method == "POST" and len(parts) == 5 and parts[2] == "segments" and parts[4] == "chunked-generate":
             segment_id = parts[3]
