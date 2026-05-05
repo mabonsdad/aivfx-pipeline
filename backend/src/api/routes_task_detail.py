@@ -25,9 +25,7 @@ def handle_task_detail_route(
     except KeyError:
         return error_response_fn(404, "Task not found", origin=origin)
 
-    changed = helpers["reconcile_segment_generation_job_states"](task, store)
-    changed = helpers["prune_stale_segment_generations"](task, store) or changed
-    changed = helpers["backfill_segment_generation_preview_refs"](task) or changed
+    changed = helpers["maintain_segment_generations"](task, store)
     changed = helpers["cleanup_legacy_generation_qc"](task) or changed
     changed = helpers["cleanup_custom_reports"](task) or changed
     if changed:

@@ -22,9 +22,7 @@ def handle_tasks_root_routes(
     unique_task_name_fn: Callable[[str, set[str]], str],
     build_file_prefix_fn: Callable[[str, str, set[str]], str],
     load_task_or_404_fn: Callable[..., dict[str, Any]],
-    reconcile_segment_generation_job_states_fn: Callable[..., bool],
-    prune_stale_segment_generations_fn: Callable[..., bool],
-    backfill_segment_generation_preview_refs_fn: Callable[..., bool],
+    maintain_segment_generations_fn: Callable[..., bool],
     cleanup_legacy_generation_qc_fn: Callable[..., bool],
     cleanup_custom_reports_fn: Callable[..., bool],
     task_summary_fn: Callable[[dict[str, Any]], dict[str, Any]],
@@ -66,9 +64,7 @@ def handle_tasks_root_routes(
     if method == "GET" and path == "/tasks":
         task_items = store.list_tasks(user_id)
         for item in task_items:
-            changed = reconcile_segment_generation_job_states_fn(item, store)
-            changed = prune_stale_segment_generations_fn(item, store) or changed
-            changed = backfill_segment_generation_preview_refs_fn(item) or changed
+            changed = maintain_segment_generations_fn(item, store)
             changed = cleanup_legacy_generation_qc_fn(item) or changed
             changed = cleanup_custom_reports_fn(item) or changed
             if changed:
