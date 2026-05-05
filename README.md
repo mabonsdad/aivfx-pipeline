@@ -407,3 +407,18 @@ python3 -m py_compile backend/src/api_handler.py backend/src/workers/processor.p
 ```
 
 Deploy is handled through the existing CDK/static-site workflow used for the live application.
+
+## Baseline Gates
+
+Run these checks before merging refactors:
+
+```bash
+npm run lint:frontend
+npm run build:frontend
+npm run check:backend
+npm run build:infra
+```
+
+Manual release smoke checklist:
+
+- `docs/manual-smoke-checklist.md`

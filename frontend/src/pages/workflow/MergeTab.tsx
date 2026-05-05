@@ -317,7 +317,6 @@ export default function MergeTab({ ctx }: MergeTabProps) {
     describeSegment,
     getSegmentForGeneration,
     sourceFrameCount,
-    mergeMaxFrameIndex,
     mergeInsertStartFrame,
     setMergeInsertStartFrame,
     mergeGeneratedDurationFrames,

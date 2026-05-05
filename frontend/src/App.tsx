@@ -37,7 +37,6 @@ import type { RefineFramesTabCtx } from "./pages/workflow/RefineFramesTab";
 import { useUiStore } from "./store/uiStore";
 import type {
   CustomReportOutputRef,
-  CustomReportRecord,
   ExportRecord,
   FrameVariant,
   JobStatus,
@@ -845,7 +844,7 @@ export default function App() {
     segmentStartSec?: number;
     originalIsSegmentClip?: boolean;
   } | null>(null);
-  const [reportGraphModal, setReportGraphModal] = useState<{ url: string; label: string } | null>(null);
+  const [, setReportGraphModal] = useState<{ url: string; label: string } | null>(null);
   const [motionSyncModalExportId, setMotionSyncModalExportId] = useState<string | null>(null);
   const [qualityMatchModal, setQualityMatchModal] = useState<QualityMatchModalState>({
     isOpen: false,
@@ -2531,7 +2530,6 @@ export default function App() {
   );
   const generationModeConfig = useMemo(() => getGenerationModeConfig(generationInputMode), [generationInputMode]);
   const requiresEndFrameForRoute = generationModeConfig.requiresEndFrame;
-  const hasCompleteOutputForSelectedRange = completeGenerations.length > 0;
   const missingRouteInputsMessage = useMemo(() => {
     if (!editFirstFrame && requiresEndFrameForRoute && !editLastFrame) {
       return "No edited start or end frame selected. Generation will use the original source start and end frames.";
@@ -3415,23 +3413,6 @@ export default function App() {
       }
       return changed ? next : previous;
     });
-  }
-
-  async function deleteCustomReport(taskId: string, report: CustomReportRecord) {
-    const ok = window.confirm(`Delete custom report "${report.name}"?`);
-    if (!ok) return;
-    try {
-      await deleteCustomReportMutation.mutateAsync({ taskId, reportId: report.reportId });
-      if (activeCustomReportId === report.reportId) {
-        goToReport(taskId, "reports", null, true);
-      }
-    } catch (error) {
-      setAppUiError(error instanceof Error ? error.message : "Failed to delete report.");
-    }
-  }
-
-  function openCustomReport(taskId: string, report: CustomReportRecord) {
-    goToReport(taskId, "reports", report.reportId);
   }
 
   function openTaskReport(taskId: string) {

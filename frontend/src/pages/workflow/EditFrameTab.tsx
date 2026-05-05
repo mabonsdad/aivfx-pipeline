@@ -175,7 +175,6 @@ export default function EditFrameTab({ ctx }: EditFrameTabProps) {
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
 
   const canDownloadSourceFrame = Boolean(activeEditFrame?.imageUrl);
-  const activeTabLabel = editFrameTab === "first" ? "Start Frame" : "End Frame";
 
   useEffect(() => {
     if (!isPatchModalOpen) return;

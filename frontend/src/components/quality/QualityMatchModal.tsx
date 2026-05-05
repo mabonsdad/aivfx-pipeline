@@ -207,19 +207,6 @@ function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
-function polygonContainsPoint(points: Array<{ x: number; y: number }>, x: number, y: number): boolean {
-  let inside = false;
-  for (let i = 0, j = points.length - 1; i < points.length; j = i, i += 1) {
-    const xi = points[i].x;
-    const yi = points[i].y;
-    const xj = points[j].x;
-    const yj = points[j].y;
-    const intersects = yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / Math.max(0.0001, yj - yi) + xi;
-    if (intersects) inside = !inside;
-  }
-  return inside;
-}
-
 function applyMorphology(mask: ImageData, op: "grow" | "shrink" | "fill_holes" | "remove_speckles" | "smooth"): ImageData {
   const width = mask.width;
   const height = mask.height;

@@ -105,6 +105,7 @@ from src.video_cleanup.service import (
 )
 from src.video_cleanup.tracking import normalize_mask_bytes, propagate_mask_to_frame, propagate_window, stitch_seeded_masks
 from src.workers.dispatch import dispatch_job
+from src.workers.jobs import build_job_handlers, handle_job_failure
 
 logger = Logger()
 SOURCE_VIDEO_MAX_DURATION_SECONDS = 120
@@ -9342,34 +9343,28 @@ def process_job_record(record: dict[str, Any], *, settings: Any) -> None:
     store.save_job(job)
 
     try:
-        handlers = {
-            "ingest_video": lambda **kwargs: _handle_ingest(**kwargs),
-            "edit_full": lambda **kwargs: _handle_full_edit(**kwargs),
-            "edit_patch": lambda **kwargs: _handle_patch_edit(**kwargs),
-            "api_image_edit_full": lambda **kwargs: _handle_api_image_edit_full(
-                job=kwargs["job"], store=kwargs["store"], asset_store=kwargs["asset_store"], settings=kwargs["settings"]
-            ),
-            "api_image_edit_patch": lambda **kwargs: _handle_api_image_edit_patch(
-                job=kwargs["job"], store=kwargs["store"], asset_store=kwargs["asset_store"], settings=kwargs["settings"]
-            ),
-            "api_video_generate_reference": lambda **kwargs: _handle_api_video_generate_reference(
-                job=kwargs["job"], store=kwargs["store"], asset_store=kwargs["asset_store"], settings=kwargs["settings"]
-            ),
-            "quality_match_apply": lambda **kwargs: _handle_quality_match_apply(**kwargs),
-            "quality_match_sam": lambda **kwargs: _handle_quality_match_sam(**kwargs),
-            "segment_generate": lambda **kwargs: _handle_segment_generate(**kwargs),
-            "chunked_generation_finalize": lambda **kwargs: _handle_chunked_generation_finalize(**kwargs),
-            "merge_alignment_suggestion": lambda **kwargs: _handle_merge_alignment_suggestion(**kwargs),
-            "generation_reconcile_timing": lambda **kwargs: _handle_generation_reconcile_timing(**kwargs),
-            "merge_export": lambda **kwargs: _handle_merge(**kwargs),
-            "qc_report_build": lambda **kwargs: _handle_qc_report_build(**kwargs),
-            "motion_sync_qc": lambda **kwargs: _handle_motion_sync_qc(**kwargs),
-            "video_cleanup_init": lambda **kwargs: _handle_video_cleanup_init(**kwargs),
-            "video_cleanup_track": lambda **kwargs: _handle_video_cleanup_track(**kwargs),
-            "video_cleanup_retrack_window": lambda **kwargs: _handle_video_cleanup_retrack_window(**kwargs),
-            "video_cleanup_preview": lambda **kwargs: _handle_video_cleanup_preview(**kwargs),
-            "video_cleanup_apply": lambda **kwargs: _handle_video_cleanup_apply(**kwargs),
-        }
+        handlers = build_job_handlers(
+            handle_ingest_fn=_handle_ingest,
+            handle_full_edit_fn=_handle_full_edit,
+            handle_patch_edit_fn=_handle_patch_edit,
+            handle_api_image_edit_full_fn=_handle_api_image_edit_full,
+            handle_api_image_edit_patch_fn=_handle_api_image_edit_patch,
+            handle_api_video_generate_reference_fn=_handle_api_video_generate_reference,
+            handle_quality_match_apply_fn=_handle_quality_match_apply,
+            handle_quality_match_sam_fn=_handle_quality_match_sam,
+            handle_segment_generate_fn=_handle_segment_generate,
+            handle_chunked_generation_finalize_fn=_handle_chunked_generation_finalize,
+            handle_merge_alignment_suggestion_fn=_handle_merge_alignment_suggestion,
+            handle_generation_reconcile_timing_fn=_handle_generation_reconcile_timing,
+            handle_merge_fn=_handle_merge,
+            handle_qc_report_build_fn=_handle_qc_report_build,
+            handle_motion_sync_qc_fn=_handle_motion_sync_qc,
+            handle_video_cleanup_init_fn=_handle_video_cleanup_init,
+            handle_video_cleanup_track_fn=_handle_video_cleanup_track,
+            handle_video_cleanup_retrack_window_fn=_handle_video_cleanup_retrack_window,
+            handle_video_cleanup_preview_fn=_handle_video_cleanup_preview,
+            handle_video_cleanup_apply_fn=_handle_video_cleanup_apply,
+        )
         dispatch_job(
             job_type=job_type,
             handlers=handlers,
@@ -9387,114 +9382,25 @@ def process_job_record(record: dict[str, Any], *, settings: Any) -> None:
         job["error"] = str(exc)
         job["finishedAt"] = now_iso()
         store.save_job(job)
-        if job_type.startswith("api_"):
-            request_id = str((job.get("payload") or {}).get("requestId") or "")
-            request_record = store.load_api_request(user_id, request_id) if request_id else None
-            if isinstance(request_record, dict):
-                request_record["status"] = "failed"
-                request_record["finishedAt"] = now_iso()
-                request_record["error"] = {"code": "job_failed", "message": str(exc)}
-                request_logs = request_record.setdefault("logs", [])
-                if isinstance(request_logs, list):
-                    request_logs.append({"at": now_iso(), "message": f"Failed: {exc}"})
-                store.save_api_request(request_record)
+        handled = handle_job_failure(
+            job_type=job_type,
+            job_id=job_id,
+            task_id=str(task_id) if task_id is not None else None,
+            user_id=user_id,
+            job=job,
+            store=store,
+            task=task if isinstance(task, dict) else None,
+            error=exc,
+            now_iso_fn=now_iso,
+            get_cleanup_track_fn=get_cleanup_track,
+            find_chunked_generation_run_fn=_find_chunked_generation_run,
+            mark_chunked_generation_run_failed_fn=_mark_chunked_generation_run_failed,
+        )
+        if handled:
             return
         latest_task = store.load_task(user_id, str(task_id or "")) or task
-        if job_type == "segment_generate":
-            gen_id = str((job.get("payload") or {}).get("genId") or "")
-            generation = latest_task.setdefault("segmentGenerations", {}).get(gen_id)
-            if isinstance(generation, dict):
-                generation["status"] = "failed"
-                generation["error"] = str(exc)
-                generation["updatedAt"] = now_iso()
-                generation["finishedAt"] = now_iso()
-                generation["jobId"] = job_id
-                latest_task.setdefault("history", []).append(
-                    {
-                        "at": now_iso(),
-                        "event": "segment_generation.failed",
-                        "jobId": job_id,
-                        "genId": gen_id,
-                    }
-                )
-                store.save_task(latest_task, merge_on_conflict=True)
-                refreshed_task = store.load_task(user_id, str(task_id or ""))
-                if isinstance(refreshed_task, dict):
-                    _mark_chunked_generation_run_failed(
-                        store=store,
-                        task=refreshed_task,
-                        gen_id=gen_id,
-                        error=str(exc),
-                    )
-                return
-        elif job_type == "qc_report_build":
-            report_id = str((job.get("payload") or {}).get("reportId") or "")
-            reports = latest_task.get("customReports", [])
-            report_record = next((item for item in reports if isinstance(item, dict) and item.get("reportId") == report_id), None)
-            if isinstance(report_record, dict):
-                report_record["status"] = "failed"
-                report_record["updatedAt"] = now_iso()
-                report_record["error"] = str(exc)
-                store.save_task(latest_task, merge_on_conflict=True)
-        elif job_type.startswith("video_cleanup_"):
-            track_id = str((job.get("payload") or {}).get("trackId") or "")
-            track = get_cleanup_track(latest_task, track_id) if track_id else None
-            if isinstance(track, dict):
-                track["status"] = "failed"
-                track["updatedAt"] = now_iso()
-                track["error"] = str(exc)
-            latest_task.setdefault("history", []).append(
-                {
-                    "at": now_iso(),
-                    "event": "video_cleanup.failed",
-                    "jobId": job_id,
-                    "trackId": track_id,
-                }
-            )
-            store.save_task(latest_task, merge_on_conflict=True)
-            return
-        elif job_type == "chunked_generation_finalize":
-            run_id = str((job.get("payload") or {}).get("runId") or "")
-            run = _find_chunked_generation_run(latest_task, run_id) if run_id else None
-            if isinstance(run, dict):
-                run["saveStatus"] = "failed"
-                run["saveError"] = str(exc)
-                run["updatedAt"] = now_iso()
-                store.save_task(latest_task, merge_on_conflict=True)
-            return
-        elif job_type == "merge_alignment_suggestion":
-            gen_id = str((job.get("payload") or {}).get("genId") or "")
-            generation = latest_task.setdefault("segmentGenerations", {}).get(gen_id)
-            if isinstance(generation, dict):
-                generation["mergeAlignmentSuggestion"] = {
-                    "status": "failed",
-                    "jobId": job_id,
-                    "updatedAt": now_iso(),
-                    "error": str(exc),
-                }
-                store.save_task(latest_task, merge_on_conflict=True)
-            return
-        elif job_type == "generation_reconcile_timing":
-            payload = job.get("payload") or {}
-            gen_id = str(payload.get("genId") or "")
-            source_gen_id = str(payload.get("sourceGenId") or "")
-            generation = latest_task.setdefault("segmentGenerations", {}).get(gen_id)
-            if isinstance(generation, dict):
-                generation["status"] = "failed"
-                generation["error"] = str(exc)
-                generation["updatedAt"] = now_iso()
-                generation["finishedAt"] = now_iso()
-            source_generation = latest_task.setdefault("segmentGenerations", {}).get(source_gen_id)
-            if isinstance(source_generation, dict):
-                source_generation["timingReconcile"] = {
-                    "status": "failed",
-                    "jobId": job_id,
-                    "resultGenId": gen_id,
-                    "updatedAt": now_iso(),
-                    "error": str(exc),
-                }
-            store.save_task(latest_task, merge_on_conflict=True)
-            return
+        if not isinstance(latest_task, dict):
+            raise
         latest_task["status"] = "error"
         latest_task.setdefault("history", []).append({"at": now_iso(), "event": "job.failed", "jobId": job_id})
         store.save_task(latest_task, merge_on_conflict=True)

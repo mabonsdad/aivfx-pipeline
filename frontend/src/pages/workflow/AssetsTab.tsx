@@ -362,7 +362,6 @@ function CreateAssetReportModal({
 
 export default function AssetsTab({ ctx }: AssetsTabProps) {
   const {
-    selectedTaskId,
     task,
     assetsLoading,
     pageTitle,

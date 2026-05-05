@@ -202,7 +202,6 @@ type PickFrameTabProps = {
 export default function PickFrameTab({ ctx }: PickFrameTabProps) {
   const {
     timelinePlaybackUrl,
-    timelineVideoRef,
     frameCount,
     task,
     fpsValue,
@@ -218,8 +217,6 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
     selectedRange,
     generationInputMode,
     defaultVideoSegment,
-    wholeVideoNeedsChunking,
-    wholeVideoSinglePassLimitSeconds,
     onBeginCustomSegmentEdit,
     onCancelWorkingRangeDraft,
     onContinueToEditFrames,
@@ -233,9 +230,6 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
 
   const sourceWidth = Number(task?.video?.editSource?.width ?? 0);
   const sourceHeight = Number(task?.video?.editSource?.height ?? 0);
-  const totalFrameCount = frameCount(task);
-  const sourceFps = fpsValue(task);
-  const sourceDurationSec = sourceFps > 0 ? totalFrameCount / sourceFps : 0;
   const canOpenCropTool = Boolean(selectedSegmentId || selectedRange);
   const [isWorkingRangeModalOpen, setIsWorkingRangeModalOpen] = useState(false);
 
@@ -569,7 +563,6 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
     };
   }, [cropDraft, modalLayoutTick, sourceHeight, sourceWidth, isCropModalOpen]);
 
-  const sourceAspectRatio = sourceWidth > 0 && sourceHeight > 0 ? `${sourceWidth} / ${sourceHeight}` : "16 / 9";
   return (
     <div className="space-y-4">
       {uiError ? (

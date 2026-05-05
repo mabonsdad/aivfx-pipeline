@@ -21,7 +21,6 @@ import type {
   FrameRecord,
   FrameVariant,
   JobStatus,
-  QcReportResult,
   SegmentGeneration,
   SegmentRecord,
   TaskDetail,
@@ -291,11 +290,6 @@ function resolveVariant(
     return frame.variants.find((variant) => variant.variantId === frame.selectedVariantId) ?? null;
   }
   return null;
-}
-
-function hasGraphEvidence(row: VideoReportRow): boolean {
-  const artifacts = row.standard?.artifacts;
-  return Boolean(artifacts?.timelineGraphUrl || artifacts?.timelineCsvUrl || artifacts?.diffVideoUrl);
 }
 
 function selectionMarker(checked: boolean): string {
