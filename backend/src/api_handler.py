@@ -23,6 +23,7 @@ from src.api.routes_external_api import handle_external_api_routes
 from src.api.routes_jobs import handle_job_status
 from src.api.routes_public import handle_health, handle_options
 from src.api.routes_task_assets import handle_task_asset_routes
+from src.api.routes_task_cleanup import handle_task_cleanup_routes
 from src.api.routes_task_detail import handle_task_detail_route
 from src.api.routes_task_reports import handle_task_report_routes
 from src.api.routes_tasks_root import handle_tasks_root_routes
@@ -81,16 +82,7 @@ from src.models.schemas import (
 )
 from src.quality_match.apply_flow import _allocate_refined_variant_storage, create_refined_variant_from_upload
 from src.quality_match.service import QualityMatchSettings, analyse_quality_match, preview_quality_match_from_mask
-from src.video_cleanup.models import VideoCleanupSettings
-from src.video_cleanup.schemas import (
-    VideoCleanupApplyRequest,
-    VideoCleanupCreateRequest,
-    VideoCleanupKeyframeUploadCompleteRequest,
-    VideoCleanupKeyframeUploadInitRequest,
-    VideoCleanupPreviewRequest,
-    VideoCleanupSamAssistRequest,
-)
-from src.video_cleanup.service import add_or_replace_keyframe, get_cleanup_track, resolve_first_mask_key_from_analysis
+from src.video_cleanup.service import get_cleanup_track, resolve_first_mask_key_from_analysis
 logger = Logger()
 settings = load_settings()
 CHUNKED_CONSERVATIVE_DURATION_SECONDS = 6
@@ -1646,238 +1638,29 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
         if task_asset_response is not None:
             return task_asset_response
 
-        if method == "GET" and len(parts) == 4 and parts[2] == "cleanup-tracks":
-            track_id = parts[3]
-            track = get_cleanup_track(task, track_id)
-            if not isinstance(track, dict):
-                return error_response(404, "Cleanup track not found", origin=origin)
-            return response(200, {"track": _cleanup_track_response(track, asset_store)}, origin=origin)
-
-        if method == "POST" and len(parts) == 6 and parts[2] == "cleanup-tracks" and parts[4] == "keyframes" and parts[5] == "upload-init":
-            track_id = parts[3]
-            track = get_cleanup_track(task, track_id)
-            if not isinstance(track, dict):
-                return error_response(404, "Cleanup track not found", origin=origin)
-            req = _json_model(VideoCleanupKeyframeUploadInitRequest, event)
-            if not req.contentType.lower().startswith("image/"):
-                return error_response(400, "Cleanup keyframe masks must be image uploads", origin=origin)
-            if req.frameIndexLocal >= int(track.get("source", {}).get("frameCount") or 0):
-                return error_response(400, "Frame index is outside cleanup track bounds", origin=origin)
-            paths = _asset_paths_for_task(task)
-            upload_key = paths.cleanup_track_keyframe_mask(track_id, req.frameIndexLocal)
-            return response(
-                200,
-                {
-                    "uploadKey": upload_key,
-                    "uploadUrl": asset_store.presign_put(upload_key, expires=900, content_type=req.contentType),
-                },
-                origin=origin,
-            )
-
-        if method == "POST" and len(parts) == 6 and parts[2] == "cleanup-tracks" and parts[4] == "keyframes" and parts[5] == "complete":
-            track_id = parts[3]
-            track = get_cleanup_track(task, track_id)
-            if not isinstance(track, dict):
-                return error_response(404, "Cleanup track not found", origin=origin)
-            req = _json_model(VideoCleanupKeyframeUploadCompleteRequest, event)
-            if req.frameIndexLocal >= int(track.get("source", {}).get("frameCount") or 0):
-                return error_response(400, "Frame index is outside cleanup track bounds", origin=origin)
-            expected_key = _asset_paths_for_task(task).cleanup_track_keyframe_mask(track_id, req.frameIndexLocal)
-            if req.uploadKey != expected_key:
-                return error_response(400, "Upload key does not match the cleanup track keyframe location", origin=origin)
-            try:
-                asset_store.head_object(req.uploadKey)
-            except ClientError:
-                return error_response(404, "Uploaded keyframe mask not found", origin=origin)
-            keyframe_id = new_id("kf")
-            track["status"] = "tracking"
-            track.pop("error", None)
-            track["updatedAt"] = now_iso()
-            store.save_task(task)
-            job_id = _queue_job(
-                store=store,
-                queue=queue,
-                user_id=user_id,
-                task_id=task_id,
-                job_type="video_cleanup_retrack_window",
-                payload={
-                    "trackId": track_id,
-                    "frameIndexLocal": req.frameIndexLocal,
-                    "uploadKey": req.uploadKey,
-                    "propagationMode": req.propagationMode,
-                    "keyframeId": keyframe_id,
-                },
-            )
-            return response(202, {"jobId": job_id, "keyframeId": keyframe_id}, origin=origin)
-
-        if method == "POST" and len(parts) == 5 and parts[2] == "cleanup-tracks" and parts[4] == "sam-assist":
-            track_id = parts[3]
-            track = get_cleanup_track(task, track_id)
-            if not isinstance(track, dict):
-                return error_response(404, "Cleanup track not found", origin=origin)
-            req = _json_model(VideoCleanupSamAssistRequest, event)
-            cleanup_prefix = f"{_asset_paths_for_task(task).cleanup_track_prefix(track_id)}/"
-            if req.existingMaskKey and not str(req.existingMaskKey).startswith(cleanup_prefix):
-                return error_response(400, "existingMaskKey is outside this cleanup track", origin=origin)
-            if req.frameIndexLocal >= int(track.get("source", {}).get("frameCount") or 0):
-                return error_response(400, "Frame index is outside cleanup track bounds", origin=origin)
-            track["status"] = "tracking"
-            track.pop("error", None)
-            track["updatedAt"] = now_iso()
-            store.save_task(task)
-            job_id = _queue_job(
-                store=store,
-                queue=queue,
-                user_id=user_id,
-                task_id=task_id,
-                job_type="video_cleanup_retrack_window",
-                payload={
-                    "trackId": track_id,
-                    "frameIndexLocal": req.frameIndexLocal,
-                    "positivePoints": [point.model_dump() for point in req.positivePoints],
-                    "negativePoints": [point.model_dump() for point in req.negativePoints],
-                    "box": (
-                        {
-                            "x": req.box.x,
-                            "y": req.box.y,
-                            "w": req.box.width,
-                            "h": req.box.height,
-                        }
-                        if req.box
-                        else None
-                    ),
-                    "existingMaskKey": req.existingMaskKey,
-                    "restrictToMaskBounds": req.restrictToMaskBounds,
-                    "edgeBias": req.edgeBias,
-                    "propagationMode": req.propagationMode,
-                },
-            )
-            return response(202, {"jobId": job_id, "genId": gen_id}, origin=origin)
-
-        if method == "POST" and len(parts) == 5 and parts[2] == "cleanup-tracks" and parts[4] == "preview":
-            track_id = parts[3]
-            track = get_cleanup_track(task, track_id)
-            if not isinstance(track, dict):
-                return error_response(404, "Cleanup track not found", origin=origin)
-            req = _json_model(VideoCleanupPreviewRequest, event)
-            settings_payload = req.settings.model_dump(exclude_none=True) if req.settings else track.get("settings")
-            job_id = _queue_job(
-                store=store,
-                queue=queue,
-                user_id=user_id,
-                task_id=task_id,
-                job_type="video_cleanup_preview",
-                payload={"trackId": track_id, "settings": settings_payload},
-            )
-            return response(202, {"jobId": job_id, "genId": gen_id}, origin=origin)
-
-        if method == "POST" and len(parts) == 5 and parts[2] == "cleanup-tracks" and parts[4] == "apply":
-            track_id = parts[3]
-            track = get_cleanup_track(task, track_id)
-            if not isinstance(track, dict):
-                return error_response(404, "Cleanup track not found", origin=origin)
-            req = _json_model(VideoCleanupApplyRequest, event)
-            settings_payload = req.settings.model_dump(exclude_none=True) if req.settings else track.get("settings")
-            job_id = _queue_job(
-                store=store,
-                queue=queue,
-                user_id=user_id,
-                task_id=task_id,
-                job_type="video_cleanup_apply",
-                payload={
-                    "trackId": track_id,
-                    "settings": settings_payload,
-                    "createSegmentGenerationVariant": bool(req.createSegmentGenerationVariant),
-                },
-            )
-            return response(202, {"jobId": job_id}, origin=origin)
-
-        if method == "POST" and len(parts) == 7 and parts[2] == "segments" and parts[4] == "generations" and parts[6] == "cleanup-tracks":
-            segment_id = parts[3]
-            generation_id = parts[5]
-            segment = next((item for item in task.get("segments", []) if item.get("segmentId") == segment_id), None)
-            generation = task.get("segmentGenerations", {}).get(generation_id)
-            if not isinstance(segment, dict) or not isinstance(generation, dict):
-                return error_response(404, "Segment or generation not found", origin=origin)
-            if generation.get("segmentId") != segment_id:
-                return error_response(400, "Generation does not belong to this segment", origin=origin)
-            if generation.get("status") != "complete":
-                return error_response(400, "Cleanup tracks require a completed generation", origin=origin)
-            req = _json_model(VideoCleanupCreateRequest, event)
-            analysis = (task.get("qualityMatchAnalyses") or {}).get(req.firstMaskSource.analysisId)
-            if not isinstance(analysis, dict):
-                return error_response(404, "Quality Match analysis not found", origin=origin)
-            if analysis.get("frameId") != segment.get("startFrameId"):
-                return error_response(400, "Cleanup seed analysis must belong to the segment start frame", origin=origin)
-            first_mask_key = resolve_first_mask_key_from_analysis(analysis)
-            if not first_mask_key:
-                return error_response(400, "Selected Quality Match analysis does not expose a keep mask", origin=origin)
-            settings_payload = req.settings.model_dump(exclude_none=True) if req.settings else None
-            cleanup_settings = VideoCleanupSettings.from_payload(settings_payload)
-            track_id = new_id("trk")
-            crop = segment.get("crop") if isinstance(segment.get("crop"), dict) else None
-            width = int(crop.get("outputWidth")) if isinstance(crop, dict) and crop.get("outputWidth") else int(task.get("video", {}).get("editSource", {}).get("width") or 0)
-            height = int(crop.get("outputHeight")) if isinstance(crop, dict) and crop.get("outputHeight") else int(task.get("video", {}).get("editSource", {}).get("height") or 0)
-            frame_count = max(1, int(segment.get("durationFrames") or 1))
-            track_record = {
-                "trackId": track_id,
-                "taskId": task_id,
-                "segmentId": segment_id,
-                "generationId": generation_id,
-                "status": "created",
-                "source": {
-                    "editSourceKey": segment.get("segmentClipKey") or task.get("video", {}).get("editSource", {}).get("s3Key"),
-                    "generatedSegmentKey": generation.get("outputKey"),
-                    "startFrameIndex": int(segment.get("startFrame") or 0),
-                    "endFrameExclusive": int(segment.get("endFrameExclusive") or 0),
-                    "fpsNum": int(task.get("video", {}).get("editSource", {}).get("fps", {}).get("num") or 30),
-                    "fpsDen": int(task.get("video", {}).get("editSource", {}).get("fps", {}).get("den") or 1),
-                    "width": width,
-                    "height": height,
-                    "frameCount": frame_count,
-                },
-                "seed": {
-                    "firstFrameIndexLocal": 0,
-                    "firstMaskKey": first_mask_key,
-                    "sourceFrameVariantId": generation.get("sourceFirstFrameVariantId"),
-                    "generatedFirstFrameVariantId": None,
-                    "firstMaskSource": {
-                        "type": req.firstMaskSource.type,
-                        "analysisId": req.firstMaskSource.analysisId,
-                    },
-                },
-                "settings": cleanup_settings.to_dict(),
-                "tracking": {
-                    "samProvider": "fal_sam2",
-                    "propagationRuns": [],
-                    "keyframes": [],
-                },
-                "review": {
-                    "approved": False,
-                },
-                "apply": {},
-                "createdAt": now_iso(),
-                "updatedAt": now_iso(),
-            }
-            add_or_replace_keyframe(track=track_record, frame_index_local=0, mask_key=first_mask_key, source="seed_first")
-            task.setdefault("videoCleanupTracks", []).append(track_record)
-            store.save_task(task)
-            job_id = _queue_job(
-                store=store,
-                queue=queue,
-                user_id=user_id,
-                task_id=task_id,
-                job_type="video_cleanup_init",
-                payload={
-                    "trackId": track_id,
-                    "segmentId": segment_id,
-                    "generationId": generation_id,
-                    "firstMaskSourceKey": first_mask_key,
-                    "firstMaskAnalysisId": req.firstMaskSource.analysisId,
-                    "settings": cleanup_settings.to_dict(),
-                },
-            )
-            return response(201, {"trackId": track_id, "jobId": job_id}, origin=origin)
+        task_cleanup_response = handle_task_cleanup_routes(
+            method,
+            task_id=task_id,
+            parts=parts,
+            event=event,
+            origin=origin,
+            user_id=user_id,
+            task=task,
+            store=store,
+            asset_store=asset_store,
+            json_model=_json_model,
+            response_fn=response,
+            error_response_fn=error_response,
+            new_id_fn=new_id,
+            now_iso_fn=now_iso,
+            queue_job_fn=lambda **kwargs: _queue_job(queue=queue, **kwargs),
+            asset_paths_for_task_fn=_asset_paths_for_task,
+            cleanup_track_response_fn=_cleanup_track_response,
+            get_cleanup_track_fn=get_cleanup_track,
+            resolve_first_mask_key_from_analysis_fn=resolve_first_mask_key_from_analysis,
+        )
+        if task_cleanup_response is not None:
+            return task_cleanup_response
 
         task_report_response = handle_task_report_routes(
             method,

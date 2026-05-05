@@ -266,3 +266,91 @@ def test_get_task_report_route_returns_report_payload(monkeypatch) -> None:
     assert result["statusCode"] == 200
     payload = json.loads(result["body"])
     assert payload["report"]["reportId"] == "report_1"
+
+
+def test_cleanup_sam_assist_route_returns_job_id(monkeypatch) -> None:
+    task = {
+        "taskId": "task_1",
+        "userId": "user-1",
+        "name": "Task 1",
+        "filePrefix": "",
+        "videoCleanupTracks": [
+            {
+                "trackId": "trk_1",
+                "status": "created",
+                "source": {"frameCount": 12},
+            }
+        ],
+    }
+    saved: list[dict] = []
+
+    class _Store:
+        def save_task(self, task_payload: dict):
+            saved.append(json.loads(json.dumps(task_payload)))
+            return task_payload
+
+    class _AssetStore:
+        pass
+
+    monkeypatch.setattr(api_handler, "get_user_id", lambda _event: "user-1")
+    monkeypatch.setattr(api_handler, "get_user_claims", lambda _event: {"email": "u@example.com"})
+    monkeypatch.setattr(api_handler, "S3JsonStore", lambda _bucket: _Store())
+    monkeypatch.setattr(api_handler, "AssetStore", lambda _bucket, _region: _AssetStore())
+    monkeypatch.setattr(api_handler, "JobQueue", lambda _url: object())
+    monkeypatch.setattr(api_handler, "_load_task_or_404", lambda _store, _user_id, _task_id: task)
+    monkeypatch.setattr(api_handler, "_queue_job", lambda **_kwargs: "job_1")
+
+    result = api_handler._route(
+        _event(
+            "POST",
+            "/tasks/task_1/cleanup-tracks/trk_1/sam-assist",
+            {"frameIndexLocal": 2},
+        )
+    )
+    assert result["statusCode"] == 202
+    payload = json.loads(result["body"])
+    assert payload["jobId"] == "job_1"
+    assert "genId" not in payload
+    assert saved and saved[-1]["videoCleanupTracks"][0]["status"] == "tracking"
+
+
+def test_cleanup_preview_route_returns_job_id(monkeypatch) -> None:
+    task = {
+        "taskId": "task_1",
+        "userId": "user-1",
+        "name": "Task 1",
+        "videoCleanupTracks": [
+            {
+                "trackId": "trk_1",
+                "status": "created",
+                "source": {"frameCount": 12},
+                "settings": {},
+            }
+        ],
+    }
+
+    class _Store:
+        pass
+
+    class _AssetStore:
+        pass
+
+    monkeypatch.setattr(api_handler, "get_user_id", lambda _event: "user-1")
+    monkeypatch.setattr(api_handler, "get_user_claims", lambda _event: {"email": "u@example.com"})
+    monkeypatch.setattr(api_handler, "S3JsonStore", lambda _bucket: _Store())
+    monkeypatch.setattr(api_handler, "AssetStore", lambda _bucket, _region: _AssetStore())
+    monkeypatch.setattr(api_handler, "JobQueue", lambda _url: object())
+    monkeypatch.setattr(api_handler, "_load_task_or_404", lambda _store, _user_id, _task_id: task)
+    monkeypatch.setattr(api_handler, "_queue_job", lambda **_kwargs: "job_2")
+
+    result = api_handler._route(
+        _event(
+            "POST",
+            "/tasks/task_1/cleanup-tracks/trk_1/preview",
+            {},
+        )
+    )
+    assert result["statusCode"] == 202
+    payload = json.loads(result["body"])
+    assert payload["jobId"] == "job_2"
+    assert "genId" not in payload
