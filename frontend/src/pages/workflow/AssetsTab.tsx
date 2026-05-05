@@ -4,25 +4,7 @@ import { DeleteIcon, DownloadIcon, IconActionButton, PreviewIcon } from "../../c
 import { PendingButtonLabel, StatusNotice } from "../../components/layout/UiFeedback";
 import { FRAME_TEST_OPTIONS, VIDEO_COMPARE_TEST_OPTIONS, VIDEO_TEST_OPTIONS } from "../../components/reports/QcReportShared";
 import type { CustomReportOutputRef, TaskDetail } from "../../types/api";
-
-type LibraryAsset = {
-  id: string;
-  taskId: string;
-  title: string;
-  subtitle: string;
-  createdAt: string;
-  previewUrl: string;
-  downloadUrl: string;
-  thumbnailUrl?: string;
-  mediaType: "image" | "video";
-  customReportRef?: CustomReportOutputRef;
-  deletePayload:
-    | { assetType: "upload" }
-    | { assetType: "frame_capture"; frameId: string }
-    | { assetType: "frame_variant"; frameId: string; variantId: string }
-    | { assetType: "segment_generation"; genId: string }
-    | { assetType: "export"; exportId: string };
-};
+import type { LibraryAsset } from "../../types/libraryAsset";
 
 type AssetReportGroup = "merged_videos" | "generated_videos" | "edited_frames";
 type ReportType = "qc_frame" | "qc_video" | "video_compare";

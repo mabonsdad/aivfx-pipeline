@@ -23,6 +23,7 @@ import {
 } from "./hooks/useWorkflowRouting";
 import { useVideoFrameStrip, type VideoFrameStripItem } from "./hooks/useVideoFrameStrip";
 import { useTaskLifecycle } from "./hooks/useTaskLifecycle";
+import { useAssetLibraryState } from "./hooks/useAssetLibraryState";
 import { useGenerationConfigState } from "./hooks/useGenerationConfigState";
 import { useGenerationPromptGuidance } from "./hooks/useGenerationPromptGuidance";
 import { useGenerationMergeState } from "./hooks/useGenerationMergeState";
@@ -51,6 +52,7 @@ import type {
   SegmentRecord,
   TaskDetail,
 } from "./types/api";
+import type { LibraryAsset } from "./types/libraryAsset";
 
 type VideoModel = VideoModelId;
 
@@ -96,25 +98,6 @@ type AutomationRunState = {
   cancelRequested: boolean;
   terminal: boolean;
   logs: string[];
-};
-
-type LibraryAsset = {
-  id: string;
-  taskId: string;
-  title: string;
-  subtitle: string;
-  createdAt: string;
-  previewUrl: string;
-  downloadUrl: string;
-  thumbnailUrl?: string;
-  mediaType: "image" | "video";
-  customReportRef?: CustomReportOutputRef;
-  deletePayload:
-    | { assetType: "upload" }
-    | { assetType: "frame_capture"; frameId: string }
-    | { assetType: "frame_variant"; frameId: string; variantId: string }
-    | { assetType: "segment_generation"; genId: string }
-    | { assetType: "export"; exportId: string };
 };
 
 type PatchEngine = PatchEditModelId;
@@ -2480,142 +2463,18 @@ export default function App() {
       lumaPrompt,
     });
 
-  const editedFrameAssets = useMemo<LibraryAsset[]>(() => {
-    const assets: LibraryAsset[] = [];
-    if (!task || !selectedTaskId) return assets;
-    for (const frame of Object.values(task.frames ?? {})) {
-      for (const variant of frame.variants ?? []) {
-        if (!variant.imageUrl) continue;
-        assets.push({
-          id: `variant:${selectedTaskId}:${frame.frameId}:${variant.variantId}`,
-          taskId: selectedTaskId,
-          title: humanizeFilename(keyBasenameFromS3Key(variant.outputKey)),
-          subtitle: `${task.name} · frame ${frame.frameIndex} · ${variant.model}/${variant.type}`,
-          createdAt: variant.createdAt,
-          previewUrl: variant.imageUrl,
-          downloadUrl: variant.imageUrl,
-          mediaType: "image",
-          customReportRef: { assetType: "frame_variant", frameId: frame.frameId, variantId: variant.variantId },
-          deletePayload: { assetType: "frame_variant", frameId: frame.frameId, variantId: variant.variantId },
-        });
-      }
-    }
-    return assets.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-  }, [keyBasenameFromS3Key, selectedTaskId, task]);
-
-  const generatedVideoAssets = useMemo<LibraryAsset[]>(() => {
-    const assets: LibraryAsset[] = [];
-    if (!task || !selectedTaskId) return assets;
-    for (const generation of Object.values(task.segmentGenerations ?? {})) {
-      if (generation.status === "failed") continue;
-      if (!generation.downloadUrl) continue;
-      if (generation.isChunkInternal) continue;
-      assets.push({
-        id: `generation:${selectedTaskId}:${generation.genId}`,
-        taskId: selectedTaskId,
-        title: humanizeFilename(keyBasenameFromS3Key(generation.outputKey || `${generation.genId}.mp4`)),
-        subtitle: `${task.name} · ${generation.luma.model} · ${generation.luma.mode}${generation.manualUpload ? " · manual upload" : ""}`,
-        createdAt: generation.createdAt,
-        previewUrl: generation.downloadUrl,
-        downloadUrl: generation.downloadUrl,
-        thumbnailUrl: generationThumbnailUrl(generation) ?? undefined,
-        mediaType: "video",
-        customReportRef: { assetType: "segment_generation", genId: generation.genId },
-        deletePayload: { assetType: "segment_generation", genId: generation.genId },
-      });
-    }
-    return assets.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-  }, [generationThumbnailUrl, keyBasenameFromS3Key, selectedTaskId, task]);
-
-  const mergedVideoAssets = useMemo<LibraryAsset[]>(() => {
-    const assets: LibraryAsset[] = [];
-    if (!task || !selectedTaskId) return assets;
-    for (const exportItem of task.exports ?? []) {
-      if (!exportItem.downloadUrl) continue;
-      assets.push({
-        id: `export:${selectedTaskId}:${exportItem.exportId}`,
-        taskId: selectedTaskId,
-        title: humanizeFilename(keyBasenameFromS3Key(exportItem.outputKey || `${exportItem.exportId}.mp4`)),
-        subtitle: `${task.name} · merged export`,
-        createdAt: exportItem.createdAt,
-        previewUrl: exportItem.downloadUrl,
-        downloadUrl: exportItem.downloadUrl,
-        mediaType: "video",
-        customReportRef: { assetType: "export", exportId: exportItem.exportId },
-        deletePayload: { assetType: "export", exportId: exportItem.exportId },
-      });
-    }
-    return assets.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-  }, [keyBasenameFromS3Key, selectedTaskId, task]);
-
-  const libraryEditedFrameAssets = useMemo<LibraryAsset[]>(() => {
-    const assets: LibraryAsset[] = [];
-    for (const taskItem of assetTasks) {
-      for (const frame of Object.values(taskItem.frames ?? {})) {
-        for (const variant of frame.variants ?? []) {
-          if (!variant.imageUrl) continue;
-          assets.push({
-            id: `variant:${taskItem.taskId}:${frame.frameId}:${variant.variantId}`,
-            taskId: taskItem.taskId,
-            title: humanizeFilename(keyBasenameFromS3Key(variant.outputKey)),
-            subtitle: `${taskItem.name} · frame ${frame.frameIndex} · ${variant.model}/${variant.type}`,
-            createdAt: variant.createdAt,
-            previewUrl: variant.imageUrl,
-            downloadUrl: variant.imageUrl,
-            mediaType: "image",
-            customReportRef: { assetType: "frame_variant", frameId: frame.frameId, variantId: variant.variantId },
-            deletePayload: { assetType: "frame_variant", frameId: frame.frameId, variantId: variant.variantId },
-          });
-        }
-      }
-    }
-    return assets.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-  }, [assetTasks]);
-
-  const libraryGeneratedVideoAssets = useMemo<LibraryAsset[]>(() => {
-    const assets: LibraryAsset[] = [];
-    for (const taskItem of assetTasks) {
-      for (const generation of Object.values(taskItem.segmentGenerations ?? {})) {
-        if (generation.status === "failed" || generation.isChunkInternal || !generation.downloadUrl) continue;
-        assets.push({
-          id: `generation:${taskItem.taskId}:${generation.genId}`,
-          taskId: taskItem.taskId,
-          title: humanizeFilename(keyBasenameFromS3Key(generation.outputKey || `${generation.genId}.mp4`)),
-          subtitle: `${taskItem.name} · ${generation.luma.model} · ${generation.luma.mode}${generation.manualUpload ? " · manual upload" : ""}`,
-          createdAt: generation.createdAt,
-          previewUrl: generation.downloadUrl,
-          downloadUrl: generation.downloadUrl,
-          thumbnailUrl: generationThumbnailUrl(generation) ?? undefined,
-          mediaType: "video",
-          customReportRef: { assetType: "segment_generation", genId: generation.genId },
-          deletePayload: { assetType: "segment_generation", genId: generation.genId },
-        });
-      }
-    }
-    return assets.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-  }, [assetTasks, generationThumbnailUrl, keyBasenameFromS3Key]);
-
-  const libraryMergedVideoAssets = useMemo<LibraryAsset[]>(() => {
-    const assets: LibraryAsset[] = [];
-    for (const taskItem of assetTasks) {
-      for (const exportItem of taskItem.exports ?? []) {
-        if (!exportItem.downloadUrl) continue;
-        assets.push({
-          id: `export:${taskItem.taskId}:${exportItem.exportId}`,
-          taskId: taskItem.taskId,
-          title: humanizeFilename(keyBasenameFromS3Key(exportItem.outputKey || `${exportItem.exportId}.mp4`)),
-          subtitle: `${taskItem.name} · merged export`,
-          createdAt: exportItem.createdAt,
-          previewUrl: exportItem.downloadUrl,
-          downloadUrl: exportItem.downloadUrl,
-          mediaType: "video",
-          customReportRef: { assetType: "export", exportId: exportItem.exportId },
-          deletePayload: { assetType: "export", exportId: exportItem.exportId },
-        });
-      }
-    }
-    return assets.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-  }, [assetTasks, keyBasenameFromS3Key]);
+  const {
+    editedFrameAssets,
+    generatedVideoAssets,
+    mergedVideoAssets,
+    libraryEditedFrameAssets,
+    libraryGeneratedVideoAssets,
+    libraryMergedVideoAssets,
+  } = useAssetLibraryState({
+    selectedTaskId,
+    selectedTask: task,
+    assetTasks,
+  });
 
   const segmentWindow = useMemo(() => {
     if (!selectedSegment || !task) return null;
