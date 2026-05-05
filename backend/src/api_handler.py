@@ -22,6 +22,9 @@ from src.api.dispatch import parse_method_path, parse_task_path
 from src.api.routes_external_api import handle_external_api_routes
 from src.api.routes_jobs import handle_job_status
 from src.api.routes_public import handle_health, handle_options
+from src.api.routes_task_assets import handle_task_asset_routes
+from src.api.routes_task_detail import handle_task_detail_route
+from src.api.routes_task_reports import handle_task_report_routes
 from src.api.routes_tasks_root import handle_tasks_root_routes
 from src.api.routes_user import handle_me
 from src.core.assets import ApiAssetPaths, AssetPaths, AssetStore
@@ -46,14 +49,11 @@ from src.generation import (
 )
 from src.jobs.queue import JobQueue
 from src.models.schemas import (
-    AssetDeleteRequest,
     ChunkedGenerationCancelRequest,
     ChunkedGenerationPauseRequest,
     ChunkedGenerationRestartRequest,
     ChunkedGenerationSaveDraftRequest,
     ChunkedSegmentGenerateRequest,
-    CustomReportCreateRequest,
-    ExternalQcPairUploadRequest,
     FrameCaptureRequest,
     FullEditRequest,
     ManualFrameUploadCompleteRequest,
@@ -78,7 +78,6 @@ from src.models.schemas import (
     SegmentGenerationExtendRequest,
     SegmentGenerateRequest,
     SegmentPatchRequest,
-    UploadVideoRequest,
 )
 from src.quality_match.apply_flow import _allocate_refined_variant_storage, create_refined_variant_from_upload
 from src.quality_match.service import QualityMatchSettings, analyse_quality_match, preview_quality_match_from_mask
@@ -1589,93 +1588,28 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
     if tasks_root_response is not None:
         return tasks_root_response
 
-    if method == "GET" and path.startswith("/tasks/") and path.count("/") == 2:
-        task_id = path.split("/")[2]
-        try:
-            task = _load_task_or_404(store, user_id, task_id)
-        except KeyError:
-            return error_response(404, "Task not found", origin=origin)
-        changed = _reconcile_segment_generation_job_states(task, store)
-        changed = _prune_stale_segment_generations(task, store) or changed
-        changed = _backfill_segment_generation_preview_refs(task) or changed
-        changed = _cleanup_legacy_generation_qc(task) or changed
-        changed = _cleanup_custom_reports(task) or changed
-        if changed:
-            store.save_task(task)
-
-        decorated = json.loads(json.dumps(task))
-        if decorated.get("status") == "error" and decorated.get("video", {}).get("editSource", {}).get("s3Key"):
-            decorated["status"] = "ready"
-        if decorated.get("video", {}).get("original", {}).get("s3Key"):
-            decorated["video"]["original"]["downloadUrl"] = asset_store.presign_get(
-                decorated["video"]["original"]["s3Key"], expires=PRESIGNED_GET_TTL_SECONDS
-            )
-        if decorated.get("video", {}).get("editSource", {}).get("s3Key"):
-            decorated["video"]["editSource"]["downloadUrl"] = asset_store.presign_get(
-                decorated["video"]["editSource"]["s3Key"], expires=PRESIGNED_GET_TTL_SECONDS
-            )
-        if decorated.get("video", {}).get("previewSource", {}).get("s3Key"):
-            decorated["video"]["previewSource"]["downloadUrl"] = asset_store.presign_get(
-                decorated["video"]["previewSource"]["s3Key"], expires=PRESIGNED_GET_TTL_SECONDS
-            )
-        for _, frame in decorated.get("frames", {}).items():
-            frame["imageUrl"] = asset_store.presign_get(frame["captureKey"], expires=PRESIGNED_GET_TTL_SECONDS)
-            for variant in frame.get("variants", []):
-                variant["imageUrl"] = asset_store.presign_get(variant["outputKey"], expires=PRESIGNED_GET_TTL_SECONDS)
-                patch_meta = variant.get("patchMeta")
-                if isinstance(patch_meta, dict):
-                    patch_only_key = patch_meta.get("patchOnlyKey")
-                    if patch_only_key:
-                        patch_meta["patchOnlyUrl"] = asset_store.presign_get(patch_only_key, expires=PRESIGNED_GET_TTL_SECONDS)
-                    mask_key = patch_meta.get("maskKey")
-                    if mask_key:
-                        patch_meta["maskUrl"] = asset_store.presign_get(mask_key, expires=PRESIGNED_GET_TTL_SECONDS)
-                    ref_key = patch_meta.get("referenceImageKey")
-                    if ref_key:
-                        patch_meta["referenceImageUrl"] = asset_store.presign_get(ref_key, expires=PRESIGNED_GET_TTL_SECONDS)
-            if frame.get("qualityMatchStatus"):
-                _decorate_embedded_s3_keys(frame["qualityMatchStatus"], asset_store)
-        for segment in decorated.get("segments", []):
-            clip_key = segment.get("segmentClipKey")
-            if clip_key:
-                segment["segmentClipUrl"] = asset_store.presign_get(clip_key, expires=PRESIGNED_GET_TTL_SECONDS)
-        if decorated.get("qualityMatchAnalyses"):
-            _decorate_embedded_s3_keys(decorated["qualityMatchAnalyses"], asset_store)
-        if decorated.get("videoCleanupTracks"):
-            _decorate_embedded_s3_keys(decorated["videoCleanupTracks"], asset_store)
-        for _, generation in decorated.get("segmentGenerations", {}).items():
-            if generation.get("outputKey"):
-                generation["downloadUrl"] = asset_store.presign_get(generation["outputKey"], expires=PRESIGNED_GET_TTL_SECONDS)
-            if generation.get("inputMediaKey"):
-                generation["inputMediaUrl"] = asset_store.presign_get(generation["inputMediaKey"], expires=PRESIGNED_GET_TTL_SECONDS)
-            if generation.get("inputFirstFrameKey"):
-                generation["inputFirstFrameUrl"] = asset_store.presign_get(generation["inputFirstFrameKey"], expires=PRESIGNED_GET_TTL_SECONDS)
-            if generation.get("inputLastFrameKey"):
-                generation["inputLastFrameUrl"] = asset_store.presign_get(generation["inputLastFrameKey"], expires=PRESIGNED_GET_TTL_SECONDS)
-            if generation.get("sourceFirstFrameCaptureKey"):
-                generation["sourceFirstFrameCaptureUrl"] = asset_store.presign_get(
-                    generation["sourceFirstFrameCaptureKey"], expires=PRESIGNED_GET_TTL_SECONDS
-                )
-            if generation.get("sourceLastFrameCaptureKey"):
-                generation["sourceLastFrameCaptureUrl"] = asset_store.presign_get(
-                    generation["sourceLastFrameCaptureKey"], expires=PRESIGNED_GET_TTL_SECONDS
-                )
-            generation.pop("qc", None)
-        if decorated.get("chunkedGenerationRuns"):
-            _decorate_embedded_s3_keys(decorated["chunkedGenerationRuns"], asset_store)
-        for pair in decorated.get("externalQcPairs", []):
-            if pair.get("originalKey"):
-                pair["originalUrl"] = asset_store.presign_get(pair["originalKey"], expires=PRESIGNED_GET_TTL_SECONDS)
-            if pair.get("editedKey"):
-                pair["editedUrl"] = asset_store.presign_get(pair["editedKey"], expires=PRESIGNED_GET_TTL_SECONDS)
-        for export in decorated.get("exports", []):
-            output_key = export.get("outputKey")
-            if output_key:
-                export["downloadUrl"] = asset_store.presign_get(output_key, expires=PRESIGNED_GET_TTL_SECONDS)
-            motion_qc = export.get("motionSyncQc")
-            if isinstance(motion_qc, dict):
-                _decorate_embedded_s3_keys(motion_qc, asset_store)
-        return response(200, decorated, origin=origin)
+    task_detail_response = handle_task_detail_route(
+        method,
+        path,
+        user_id=user_id,
+        store=store,
+        asset_store=asset_store,
+        origin=origin,
+        response_fn=response,
+        error_response_fn=error_response,
+        helpers={
+            "load_task_or_404": _load_task_or_404,
+            "reconcile_segment_generation_job_states": _reconcile_segment_generation_job_states,
+            "prune_stale_segment_generations": _prune_stale_segment_generations,
+            "backfill_segment_generation_preview_refs": _backfill_segment_generation_preview_refs,
+            "cleanup_legacy_generation_qc": _cleanup_legacy_generation_qc,
+            "cleanup_custom_reports": _cleanup_custom_reports,
+            "decorate_embedded_s3_keys": _decorate_embedded_s3_keys,
+            "presigned_get_ttl_seconds": PRESIGNED_GET_TTL_SECONDS,
+        },
+    )
+    if task_detail_response is not None:
+        return task_detail_response
 
     task_path = parse_task_path(path)
     if task_path is not None:
@@ -1689,188 +1623,28 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
 
         logger.append_keys(taskId=task_id)
 
-        if method == "POST" and len(parts) == 4 and parts[2] == "uploads" and parts[3] == "video":
-            req = _json_model(UploadVideoRequest, event)
-            if req.sizeBytes > settings.max_upload_bytes:
-                return error_response(400, f"Upload too large (max={settings.max_upload_bytes})", origin=origin)
-            if not req.contentType.startswith("video/"):
-                return error_response(400, "Invalid content type", origin=origin)
-
-            key = _asset_paths_for_task(task).original_video(req.filename)
-            upload_url = asset_store.presign_put(key, expires=900, content_type=req.contentType)
-            task["video"]["original"] = {
-                "s3Key": key,
-                "filename": req.filename,
-                "sizeBytes": req.sizeBytes,
-                "sha256": None,
-            }
-            task["status"] = "created"
-            store.save_task(task)
-            return response(200, {"uploadUrl": upload_url, "s3Key": key}, origin=origin)
-
-        if method == "POST" and len(parts) == 5 and parts[2] == "external-qc" and parts[3] == "pairs" and parts[4] == "uploads":
-            req = _json_model(ExternalQcPairUploadRequest, event)
-            original_is_image = req.originalContentType.startswith("image/")
-            edited_is_image = req.editedContentType.startswith("image/")
-            original_is_video = req.originalContentType.startswith("video/")
-            edited_is_video = req.editedContentType.startswith("video/")
-            if (original_is_image and edited_is_image):
-                media_type = "image"
-            elif (original_is_video and edited_is_video):
-                media_type = "video"
-            else:
-                return error_response(400, "External QC inputs must both be images or both be videos", origin=origin)
-            paths = _asset_paths_for_task(task)
-            pair_id = new_id("extqc")
-            original_key = paths.external_qc_original(pair_id, req.originalFilename)
-            edited_key = paths.external_qc_edited(pair_id, req.editedFilename)
-            now = now_iso()
-            pair = {
-                "pairId": pair_id,
-                "originalFilename": req.originalFilename,
-                "editedFilename": req.editedFilename,
-                "originalContentType": req.originalContentType,
-                "editedContentType": req.editedContentType,
-                "mediaType": media_type,
-                "originalKey": original_key,
-                "editedKey": edited_key,
-                "createdAt": now,
-                "updatedAt": now,
-            }
-            task.setdefault("externalQcPairs", []).append(pair)
-            store.save_task(task)
-            return response(
-                201,
-                {
-                    "pairId": pair_id,
-                    "originalUploadUrl": asset_store.presign_put(original_key, expires=900, content_type=req.originalContentType),
-                    "editedUploadUrl": asset_store.presign_put(edited_key, expires=900, content_type=req.editedContentType),
-                    "pair": {
-                        **pair,
-                        "originalUrl": asset_store.presign_get(original_key, expires=PRESIGNED_GET_TTL_SECONDS),
-                        "editedUrl": asset_store.presign_get(edited_key, expires=PRESIGNED_GET_TTL_SECONDS),
-                    },
-                },
-                origin=origin,
-            )
-
-        if method == "DELETE" and len(parts) == 3 and parts[2] == "assets":
-            req = _json_model(AssetDeleteRequest, event)
-
-            def _delete_key_if_present(key: str | None) -> None:
-                if not key:
-                    return
-                try:
-                    asset_store.delete_object(key)
-                except ClientError:
-                    logger.warning("Asset delete failed", extra={"taskId": task_id, "key": key})
-
-            if req.assetType == "upload":
-                original = task.get("video", {}).get("original", {})
-                key = original.get("s3Key")
-                if not key:
-                    return error_response(404, "Upload not found", origin=origin)
-                _delete_key_if_present(key)
-                task.setdefault("video", {}).pop("original", None)
-                if not task.get("video", {}).get("editSource"):
-                    task["status"] = "created"
-                store.save_task(task)
-                return response(200, {"ok": True}, origin=origin)
-
-            if req.assetType == "frame_capture":
-                frame_id = req.frameId
-                frame = task.get("frames", {}).get(frame_id or "")
-                if not frame:
-                    return error_response(404, "Frame not found", origin=origin)
-                is_referenced = any(
-                    seg.get("startFrameId") == frame_id or seg.get("endFrameId") == frame_id
-                    for seg in task.get("segments", [])
-                )
-                if is_referenced:
-                    return error_response(400, "Frame is used by segment boundaries", origin=origin)
-                _delete_key_if_present(frame.get("captureKey"))
-                for variant in frame.get("variants", []):
-                    _delete_key_if_present(variant.get("outputKey"))
-                    patch_meta = variant.get("patchMeta", {})
-                    _delete_key_if_present(patch_meta.get("patchOnlyKey"))
-                    _delete_key_if_present(patch_meta.get("maskKey"))
-                analyses = task.get("qualityMatchAnalyses", {})
-                if isinstance(analyses, dict):
-                    remove_analysis_ids = [
-                        analysis_id
-                        for analysis_id, analysis in analyses.items()
-                        if isinstance(analysis, dict) and analysis.get("frameId") == frame_id
-                    ]
-                    for analysis_id in remove_analysis_ids:
-                        analyses.pop(analysis_id, None)
-                task.get("frames", {}).pop(frame_id, None)
-                store.save_task(task)
-                return response(200, {"ok": True}, origin=origin)
-
-            if req.assetType == "frame_variant":
-                frame_id = req.frameId
-                variant_id = req.variantId
-                frame = task.get("frames", {}).get(frame_id or "")
-                if not frame:
-                    return error_response(404, "Frame not found", origin=origin)
-                variants = frame.get("variants", [])
-                variant = next((v for v in variants if v.get("variantId") == variant_id), None)
-                if not variant:
-                    return error_response(404, "Variant not found", origin=origin)
-                _delete_key_if_present(variant.get("outputKey"))
-                patch_meta = variant.get("patchMeta", {})
-                _delete_key_if_present(patch_meta.get("patchOnlyKey"))
-                _delete_key_if_present(patch_meta.get("maskKey"))
-                frame["variants"] = [v for v in variants if v.get("variantId") != variant_id]
-                if frame.get("selectedVariantId") == variant_id:
-                    frame["selectedVariantId"] = frame["variants"][0]["variantId"] if frame["variants"] else None
-                analyses = task.get("qualityMatchAnalyses", {})
-                if isinstance(analyses, dict):
-                    remove_analysis_ids = [
-                        analysis_id
-                        for analysis_id, analysis in analyses.items()
-                        if isinstance(analysis, dict)
-                        and analysis.get("frameId") == frame_id
-                        and analysis.get("variantId") == variant_id
-                    ]
-                    for analysis_id in remove_analysis_ids:
-                        analyses.pop(analysis_id, None)
-                    status = frame.get("qualityMatchStatus")
-                    if isinstance(status, dict):
-                        source_analysis = status.get("qualityMatchSourceAnalysisId")
-                        if source_analysis in remove_analysis_ids:
-                            frame["qualityMatchStatus"] = None
-                            frame["qualityMatched"] = False
-                _cleanup_custom_reports(task)
-                store.save_task(task)
-                return response(200, {"ok": True}, origin=origin)
-
-            if req.assetType == "segment_generation":
-                gen_id = req.genId
-                generation = task.get("segmentGenerations", {}).get(gen_id or "")
-                if not generation:
-                    return error_response(404, "Generation not found", origin=origin)
-                _delete_key_if_present(generation.get("outputKey"))
-                task.get("segmentGenerations", {}).pop(gen_id, None)
-                for segment in task.get("segments", []):
-                    if segment.get("selectedGenerationId") == gen_id:
-                        segment["selectedGenerationId"] = None
-                _cleanup_custom_reports(task)
-                store.save_task(task)
-                return response(200, {"ok": True}, origin=origin)
-
-            if req.assetType == "export":
-                export_id = req.exportId
-                exports = task.get("exports", [])
-                export_item = next((e for e in exports if e.get("exportId") == export_id), None)
-                if not export_item:
-                    return error_response(404, "Export not found", origin=origin)
-                _delete_key_if_present(export_item.get("outputKey"))
-                task["exports"] = [e for e in exports if e.get("exportId") != export_id]
-                store.save_task(task)
-                return response(200, {"ok": True}, origin=origin)
-
-            return error_response(400, "Unsupported asset type", origin=origin)
+        task_asset_response = handle_task_asset_routes(
+            method,
+            task_id=task_id,
+            parts=parts,
+            event=event,
+            origin=origin,
+            task=task,
+            store=store,
+            asset_store=asset_store,
+            json_model=_json_model,
+            response_fn=response,
+            error_response_fn=error_response,
+            new_id_fn=new_id,
+            now_iso_fn=now_iso,
+            max_upload_bytes=settings.max_upload_bytes,
+            presigned_get_ttl_seconds=PRESIGNED_GET_TTL_SECONDS,
+            logger=logger,
+            asset_paths_for_task_fn=_asset_paths_for_task,
+            cleanup_custom_reports_fn=_cleanup_custom_reports,
+        )
+        if task_asset_response is not None:
+            return task_asset_response
 
         if method == "GET" and len(parts) == 4 and parts[2] == "cleanup-tracks":
             track_id = parts[3]
@@ -2105,136 +1879,31 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             )
             return response(201, {"trackId": track_id, "jobId": job_id}, origin=origin)
 
-        if method == "POST" and len(parts) == 3 and parts[2] == "reports":
-            req = _json_model(CustomReportCreateRequest, event)
-            raw_refs = [item.model_dump(exclude_none=True) for item in req.outputRefs]
-            asset_refs = _normalize_custom_report_refs(task, raw_refs)
-            if not asset_refs:
-                return error_response(400, "No valid report outputs selected", origin=origin)
-            if req.reportType == "video_compare":
-                generation_refs = [item for item in asset_refs if item.get("assetType") == "segment_generation"]
-                if len(generation_refs) < 2:
-                    return error_response(400, "Select at least two generated videos for a comparison report", origin=origin)
-                segment_keys: set[tuple[str, int]] = set()
-                for ref in generation_refs:
-                    generation = task.get("segmentGenerations", {}).get(ref.get("genId"))
-                    segment = (
-                        next((item for item in task.get("segments", []) if item.get("segmentId") == generation.get("segmentId")), None)
-                        if isinstance(generation, dict)
-                        else None
-                    )
-                    if not isinstance(generation, dict) or generation.get("status") != "complete" or not generation.get("outputKey"):
-                        return error_response(400, "Comparison reports can only include completed generated videos", origin=origin)
-                    if not isinstance(segment, dict):
-                        return error_response(400, "Selected generated videos must be linked to a segment", origin=origin)
-                    segment_keys.add((str(segment.get("segmentId")), int(segment.get("startFrame") or 0)))
-                if len(segment_keys) != 1:
-                    return error_response(400, "Select generated videos from the same segment/start frame for this comparison report", origin=origin)
-            tests = _normalize_custom_report_tests(req.reportType, req.tests)
-            if not tests:
-                return error_response(400, "No valid QC tests selected", origin=origin)
-            custom_reports = task.setdefault("customReports", [])
-            report_type_label = "QC Frame" if req.reportType == "qc_frame" else "Video Compare" if req.reportType == "video_compare" else "QC Video"
-            report_name = (req.name or "").strip()
-            if not report_name:
-                report_name = f"{report_type_label} Report {len(custom_reports) + 1}"
-            now = now_iso()
-            report_id = new_id("report")
-            result_key = S3JsonStore.report_result_key(user_id, task_id, report_id)
-            job_id = _queue_job(
-                store=store,
-                queue=queue,
-                user_id=user_id,
-                task_id=task_id,
-                job_type="qc_report_build",
-                payload={"reportId": report_id},
-            )
-            report = {
-                "reportId": report_id,
-                "reportType": req.reportType,
-                "name": report_name[:80],
-                "assetRefs": asset_refs,
-                "tests": tests,
-                "status": "queued",
-                "jobId": job_id,
-                "resultKey": result_key,
-                "createdAt": now,
-                "updatedAt": now,
-            }
-            custom_reports.append(report)
-            _cleanup_custom_reports(task)
-            store.save_task(task)
-            return response(201, {"reportId": report["reportId"], "report": report, "jobId": job_id}, origin=origin)
-
-        if method == "GET" and len(parts) == 4 and parts[2] == "reports":
-            report_id = parts[3]
-            reports = task.get("customReports", [])
-            report = next((item for item in reports if isinstance(item, dict) and item.get("reportId") == report_id), None)
-            if not report:
-                return error_response(404, "Report not found", origin=origin)
-            result_key = report.get("resultKey")
-            payload: dict[str, Any] = {"report": report}
-            if isinstance(result_key, str) and result_key:
-                result_payload = store.get_json(result_key)
-                if isinstance(result_payload, dict):
-                    _decorate_embedded_s3_keys(result_payload, asset_store)
-                    payload["result"] = result_payload
-            return response(200, payload, origin=origin)
-
-        if method == "DELETE" and len(parts) == 4 and parts[2] == "reports":
-            report_id = parts[3]
-            reports = task.get("customReports", [])
-            if not isinstance(reports, list):
-                return error_response(404, "Report not found", origin=origin)
-            report = next((item for item in reports if isinstance(item, dict) and item.get("reportId") == report_id), None)
-            before = len(reports)
-            removed_report = report if isinstance(report, dict) else None
-            task["customReports"] = [
-                report
-                for report in reports
-                if not (isinstance(report, dict) and report.get("reportId") == report_id)
-            ]
-            if len(task["customReports"]) == before:
-                return error_response(404, "Report not found", origin=origin)
-            result_key = report.get("resultKey") if isinstance(report, dict) else None
-            if isinstance(result_key, str) and result_key:
-                try:
-                    store.delete_json(result_key)
-                except Exception:
-                    logger.warning("Failed to delete report result", extra={"reportId": report_id, "resultKey": result_key})
-            removed_external_pair_ids = {
-                str(asset_ref.get("pairId") or "")
-                for asset_ref in (removed_report.get("assetRefs") or [])
-                if isinstance(asset_ref, dict) and asset_ref.get("assetType") == "external_frame_pair" and asset_ref.get("pairId")
-            } if isinstance(removed_report, dict) else set()
-            if removed_external_pair_ids:
-                remaining_pair_ids = {
-                    str(asset_ref.get("pairId") or "")
-                    for report_item in task["customReports"]
-                    if isinstance(report_item, dict)
-                    for asset_ref in (report_item.get("assetRefs") or [])
-                    if isinstance(asset_ref, dict) and asset_ref.get("assetType") == "external_frame_pair" and asset_ref.get("pairId")
-                }
-                keep_ids = remaining_pair_ids & removed_external_pair_ids
-                if keep_ids != removed_external_pair_ids:
-                    kept_pairs: list[dict[str, Any]] = []
-                    for pair in task.get("externalQcPairs", []):
-                        if not isinstance(pair, dict):
-                            continue
-                        pair_id = str(pair.get("pairId") or "")
-                        if pair_id not in removed_external_pair_ids or pair_id in keep_ids:
-                            kept_pairs.append(pair)
-                            continue
-                        for key_name in ("originalKey", "editedKey"):
-                            key_value = pair.get(key_name)
-                            if isinstance(key_value, str) and key_value:
-                                try:
-                                    asset_store.delete_object(key_value)
-                                except Exception:
-                                    logger.warning("Failed to delete external QC asset", extra={"taskId": task_id, "pairId": pair_id, "key": key_value})
-                    task["externalQcPairs"] = kept_pairs
-            store.save_task(task)
-            return response(200, {"ok": True}, origin=origin)
+        task_report_response = handle_task_report_routes(
+            method,
+            task_id=task_id,
+            parts=parts,
+            event=event,
+            origin=origin,
+            user_id=user_id,
+            task=task,
+            store=store,
+            asset_store=asset_store,
+            json_model=_json_model,
+            response_fn=response,
+            error_response_fn=error_response,
+            new_id_fn=new_id,
+            now_iso_fn=now_iso,
+            queue_job_fn=lambda **kwargs: _queue_job(queue=queue, **kwargs),
+            normalize_custom_report_refs_fn=_normalize_custom_report_refs,
+            normalize_custom_report_tests_fn=_normalize_custom_report_tests,
+            cleanup_custom_reports_fn=_cleanup_custom_reports,
+            decorate_embedded_s3_keys_fn=_decorate_embedded_s3_keys,
+            report_result_key_fn=lambda owner_id, report_task_id, report_id: S3JsonStore.report_result_key(owner_id, report_task_id, report_id),
+            logger=logger,
+        )
+        if task_report_response is not None:
+            return task_report_response
 
         if method == "POST" and len(parts) == 5 and parts[2] == "exports" and parts[4] == "motion-qc":
             export_id = parts[3]
