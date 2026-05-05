@@ -29,6 +29,7 @@ import { useGenerationConfigState } from "./hooks/useGenerationConfigState";
 import { useGenerationPromptGuidance } from "./hooks/useGenerationPromptGuidance";
 import { useGenerationMergeState } from "./hooks/useGenerationMergeState";
 import { useSelectedSegmentPreview } from "./hooks/useSelectedSegmentPreview";
+import { useTaskDataQueries } from "./hooks/useTaskDataQueries";
 import { useReportOutputSelection } from "./hooks/useReportOutputSelection";
 import type {
   PatchEditModelId,
@@ -157,8 +158,6 @@ const AssetsTab = lazy(() => import("./pages/workflow/AssetsTab"));
 const JobsPanel = lazy(() => import("./pages/workflow/JobsPanel"));
 
 const MAX_TRACKED_JOB_IDS = 40;
-const TASK_URL_REFRESH_MS = 15 * 60 * 1000;
-const ACTIVE_TASK_POLL_MS = 3000;
 const URL_REFRESH_IDLE_MS = 2 * 60 * 1000;
 const AUTOMATION_CANCELLED = "__automation_cancelled__";
 const SEGMENT_SELECTION_STORAGE_KEY = "aivfx:lastSegmentByTask:v1";
@@ -226,27 +225,6 @@ function remapGeneratedStripItems(
       imageUrl: imageBySourceFrame.get(sourceFrameIndex) ?? null,
     };
   });
-}
-
-function hasActiveTaskWork(task: TaskDetail | undefined): boolean {
-  if (!task) return false;
-  for (const generation of Object.values(task.segmentGenerations ?? {})) {
-    if (generation.status === "queued" || generation.status === "running") return true;
-  }
-  for (const run of task.chunkedGenerationRuns ?? []) {
-    if (run.status === "created" || run.status === "running") return true;
-  }
-  for (const track of task.videoCleanupTracks ?? []) {
-    if (["created", "preparing", "tracking", "applying"].includes(track.status)) return true;
-  }
-  for (const report of task.customReports ?? []) {
-    if (report.status === "queued" || report.status === "running") return true;
-  }
-  for (const exportItem of task.exports ?? []) {
-    const motionSyncStatus = exportItem.motionSyncQc?.status;
-    if (motionSyncStatus === "queued" || motionSyncStatus === "running") return true;
-  }
-  return false;
 }
 
 function generationThumbnailUrl(generation: SegmentGeneration): string | null {
@@ -1058,48 +1036,16 @@ export default function App() {
     [automationSelectedVideoOptionIds],
   );
 
-  const taskQuery = useQuery({
-    queryKey: ["task", selectedTaskId],
-    queryFn: async () => apiClient.getTask(selectedTaskId as string),
-    enabled: isAuthed && !!selectedTaskId && !isReportTab,
-    staleTime: 15_000,
-    refetchInterval: (query) => {
-      if (!(isAuthed && !!selectedTaskId && isPageVisible)) return false;
-      const currentTask = query.state.data as TaskDetail | undefined;
-      return hasActiveTaskWork(currentTask) ? ACTIVE_TASK_POLL_MS : TASK_URL_REFRESH_MS;
-    },
-    refetchOnMount: "always",
-    refetchOnWindowFocus: false,
-    refetchOnReconnect: false,
-  });
-  const reportTaskQuery = useQuery({
-    queryKey: ["task", "report", reportTaskId],
-    queryFn: async () => apiClient.getTask(reportTaskId as string),
-    enabled: isAuthed && !!reportTaskId && isReportTab,
-    staleTime: 15_000,
-    refetchInterval: (query) => {
-      if (!(isAuthed && !!reportTaskId && isPageVisible)) return false;
-      const currentTask = query.state.data as TaskDetail | undefined;
-      return hasActiveTaskWork(currentTask) ? ACTIVE_TASK_POLL_MS : TASK_URL_REFRESH_MS;
-    },
-    refetchOnMount: "always",
-    refetchOnWindowFocus: false,
-    refetchOnReconnect: false,
-  });
-  const assetTaskQueries = useQueries({
-    queries: (tasksQuery.data ?? []).map((taskItem) => ({
-      queryKey: ["task", "assets", taskItem.taskId],
-      queryFn: () => apiClient.getTask(taskItem.taskId),
-      enabled: isAuthed && tab === "asset_library" && isPageVisible,
-      refetchOnWindowFocus: false as const,
-    })),
-  });
-  const task = taskQuery.data;
-  const reportTask = reportTaskQuery.data;
-  const assetTasks = useMemo(
-    () => assetTaskQueries.map((query) => query.data).filter((item): item is TaskDetail => Boolean(item)),
-    [assetTaskQueries],
-  );
+  const { taskQuery, reportTaskQuery, task, reportTask, assetTasks, assetsLoading, assetLibraryLoading } =
+    useTaskDataQueries({
+      isAuthed,
+      selectedTaskId,
+      reportTaskId,
+      isReportTab,
+      isAssetLibraryTab: tab === "asset_library",
+      isPageVisible,
+      tasks: tasksQuery.data ?? [],
+    });
   const selectedMotionSyncExport = useMemo<ExportRecord | null>(() => {
     if (!motionSyncModalExportId) return null;
     return (task?.exports ?? []).find((item) => item.exportId === motionSyncModalExportId) ?? null;
@@ -1131,8 +1077,8 @@ export default function App() {
     segmentsById,
   });
 
-  const assetsLoading = tab === "assets" && (taskQuery.isPending || taskQuery.isFetching) && !task;
-  const assetLibraryLoading = tab === "asset_library" && assetTaskQueries.some((query) => query.isPending || query.isFetching) && assetTasks.length === 0;
+  const assetsTabLoading = tab === "assets" && assetsLoading;
+  const assetLibraryTabLoading = tab === "asset_library" && assetLibraryLoading;
   const selectedSegment = task?.segments.find((s) => s.segmentId === selectedSegmentId) ?? null;
   const totalVideoFrames = frameCount(task);
   const defaultVideoSegment = useMemo(
@@ -4381,8 +4327,8 @@ export default function App() {
   const { assetsTabCtx, assetLibraryTabCtx } = useAssetsTabContexts({
     selectedTaskId,
     task,
-    assetsLoading,
-    assetLibraryLoading,
+    assetsLoading: assetsTabLoading,
+    assetLibraryLoading: assetLibraryTabLoading,
     mergedVideoAssets,
     mergedAssetsVisible,
     setMergedAssetsVisible,
