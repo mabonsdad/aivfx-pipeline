@@ -24,6 +24,7 @@ import {
 import { useVideoFrameStrip, type VideoFrameStripItem } from "./hooks/useVideoFrameStrip";
 import { useTaskLifecycle } from "./hooks/useTaskLifecycle";
 import { useAssetLibraryState } from "./hooks/useAssetLibraryState";
+import { useAssetsTabContexts } from "./hooks/useAssetsTabContexts";
 import { useGenerationConfigState } from "./hooks/useGenerationConfigState";
 import { useGenerationPromptGuidance } from "./hooks/useGenerationPromptGuidance";
 import { useGenerationMergeState } from "./hooks/useGenerationMergeState";
@@ -36,7 +37,6 @@ import type {
 } from "./lib/generated/videoContracts";
 import { getGenerationModeConfig, type GenerateInputMode } from "./lib/generationModeRegistry";
 import { currentUser, login, logout } from "./lib/auth";
-import type { AssetsTabCtx } from "./pages/workflow/AssetsTab";
 import type { EditFrameTabCtx } from "./pages/workflow/EditFrameTab";
 import type { GenerateTabCtx } from "./pages/workflow/GenerateTab";
 import type { JobsPanelCtx } from "./pages/workflow/JobsPanel";
@@ -4378,101 +4378,41 @@ export default function App() {
     ],
   );
 
-  const assetsTabCtx = useMemo<AssetsTabCtx>(
-    () => ({
-      selectedTaskId,
-      task,
-      assetsLoading,
-      mergedVideoAssets,
-      mergedAssetsVisible,
-      setMergedAssetsVisible,
-      generatedVideoAssets,
-      generatedAssetsVisible,
-      setGeneratedAssetsVisible,
-      editedFrameAssets,
-      editedFrameAssetsVisible,
-      setEditedFrameAssetsVisible,
-      selectedReportOutputs,
-      reportOutputRefKey,
-      toggleCustomReportOutput,
-      clearCustomReportOutputs,
-      handleDeleteAsset,
-      createCustomReport: createCustomReportMutation.mutateAsync,
-      isCreatingCustomReport: createCustomReportMutation.isPending,
-      formatAssetDate,
-      onNext: () => {
-        if (selectedTaskId) {
-          goToReport(selectedTaskId, "reports", null);
-        }
-      },
-      nextDisabled: !selectedTaskId,
-      nextWarning: !selectedTaskId ? "Select a task before opening reports." : null,
-    }),
-    [
-      selectedTaskId,
-      task,
-      assetsLoading,
-      mergedVideoAssets,
-      mergedAssetsVisible,
-      generatedVideoAssets,
-      generatedAssetsVisible,
-      editedFrameAssets,
-      editedFrameAssetsVisible,
-      selectedReportOutputs,
-      handleDeleteAsset,
-      createCustomReportMutation.mutateAsync,
-      createCustomReportMutation.isPending,
-      goToReport,
-      clearCustomReportOutputs,
-    ],
-  );
-
-  const assetLibraryTabCtx = useMemo<AssetsTabCtx>(
-    () => ({
-      selectedTaskId,
-      task,
-      assetsLoading: assetLibraryLoading,
-      pageTitle: "Asset Library",
-      pageDescription: "Latest merged videos, generated videos, and edited frames across all source videos for this account.",
-      showNext: false,
-      mergedVideoAssets: libraryMergedVideoAssets,
-      mergedAssetsVisible: libraryMergedAssetsVisible,
-      setMergedAssetsVisible: setLibraryMergedAssetsVisible,
-      generatedVideoAssets: libraryGeneratedVideoAssets,
-      generatedAssetsVisible: libraryGeneratedAssetsVisible,
-      setGeneratedAssetsVisible: setLibraryGeneratedAssetsVisible,
-      editedFrameAssets: libraryEditedFrameAssets,
-      editedFrameAssetsVisible: libraryEditedFrameAssetsVisible,
-      setEditedFrameAssetsVisible: setLibraryEditedFrameAssetsVisible,
-      selectedReportOutputs,
-      reportOutputRefKey,
-      toggleCustomReportOutput,
-      clearCustomReportOutputs,
-      handleDeleteAsset,
-      createCustomReport: createCustomReportMutation.mutateAsync,
-      isCreatingCustomReport: createCustomReportMutation.isPending,
-      formatAssetDate,
-      onNext: () => undefined,
-      nextDisabled: true,
-      nextWarning: null,
-    }),
-    [
-      selectedTaskId,
-      task,
-      assetLibraryLoading,
-      libraryMergedVideoAssets,
-      libraryMergedAssetsVisible,
-      libraryGeneratedVideoAssets,
-      libraryGeneratedAssetsVisible,
-      libraryEditedFrameAssets,
-      libraryEditedFrameAssetsVisible,
-      selectedReportOutputs,
-      handleDeleteAsset,
-      createCustomReportMutation.mutateAsync,
-      createCustomReportMutation.isPending,
-      clearCustomReportOutputs,
-    ],
-  );
+  const { assetsTabCtx, assetLibraryTabCtx } = useAssetsTabContexts({
+    selectedTaskId,
+    task,
+    assetsLoading,
+    assetLibraryLoading,
+    mergedVideoAssets,
+    mergedAssetsVisible,
+    setMergedAssetsVisible,
+    generatedVideoAssets,
+    generatedAssetsVisible,
+    setGeneratedAssetsVisible,
+    editedFrameAssets,
+    editedFrameAssetsVisible,
+    setEditedFrameAssetsVisible,
+    libraryMergedVideoAssets,
+    libraryMergedAssetsVisible,
+    setLibraryMergedAssetsVisible,
+    libraryGeneratedVideoAssets,
+    libraryGeneratedAssetsVisible,
+    setLibraryGeneratedAssetsVisible,
+    libraryEditedFrameAssets,
+    libraryEditedFrameAssetsVisible,
+    setLibraryEditedFrameAssetsVisible,
+    selectedReportOutputs,
+    reportOutputRefKey,
+    toggleCustomReportOutput,
+    clearCustomReportOutputs,
+    handleDeleteAsset,
+    createCustomReport: createCustomReportMutation.mutateAsync,
+    isCreatingCustomReport: createCustomReportMutation.isPending,
+    formatAssetDate,
+    goToReport: (taskId: string) => {
+      goToReport(taskId, "reports", null);
+    },
+  });
 
   const jobsPanelCtx = useMemo<JobsPanelCtx>(
     () => ({
