@@ -444,3 +444,84 @@ def test_manual_segment_upload_init_route_returns_upload_details(monkeypatch) ->
     payload = json.loads(result["body"])
     assert "/segments/seg_1/manual_uploads/" in payload["uploadKey"]
     assert payload["uploadUrl"].startswith("https://upload.example/")
+
+
+def test_chunked_generation_pause_route_updates_run_status(monkeypatch) -> None:
+    task = {
+        "taskId": "task_1",
+        "userId": "user-1",
+        "name": "Task 1",
+        "chunkedGenerationRuns": [{"runId": "run_1", "status": "running", "chunks": []}],
+    }
+    saved: list[dict] = []
+
+    class _Store:
+        def save_task(self, task_payload: dict, merge_on_conflict: bool = False):
+            saved.append(json.loads(json.dumps(task_payload)))
+            return task_payload
+
+    class _AssetStore:
+        pass
+
+    monkeypatch.setattr(api_handler, "get_user_id", lambda _event: "user-1")
+    monkeypatch.setattr(api_handler, "get_user_claims", lambda _event: {"email": "u@example.com"})
+    monkeypatch.setattr(api_handler, "S3JsonStore", lambda _bucket: _Store())
+    monkeypatch.setattr(api_handler, "AssetStore", lambda _bucket, _region: _AssetStore())
+    monkeypatch.setattr(api_handler, "JobQueue", lambda _url: object())
+    monkeypatch.setattr(api_handler, "_load_task_or_404", lambda _store, _user_id, _task_id: task)
+
+    result = api_handler._route(
+        _event(
+            "POST",
+            "/tasks/task_1/chunked-generations/run_1/pause",
+            {"reason": "manual pause"},
+        )
+    )
+    assert result["statusCode"] == 200
+    payload = json.loads(result["body"])
+    assert payload["ok"] is True
+    assert saved
+    run = saved[-1]["chunkedGenerationRuns"][0]
+    assert run["status"] == "paused"
+    assert run["pauseReason"] == "manual pause"
+
+
+def test_chunked_generation_save_draft_route_queues_finalize_job(monkeypatch) -> None:
+    task = {
+        "taskId": "task_1",
+        "userId": "user-1",
+        "name": "Task 1",
+        "chunkedGenerationRuns": [{"runId": "run_1", "status": "complete", "chunks": []}],
+    }
+    saved: list[dict] = []
+
+    class _Store:
+        def save_task(self, task_payload: dict, merge_on_conflict: bool = False):
+            saved.append(json.loads(json.dumps(task_payload)))
+            return task_payload
+
+    class _AssetStore:
+        pass
+
+    monkeypatch.setattr(api_handler, "get_user_id", lambda _event: "user-1")
+    monkeypatch.setattr(api_handler, "get_user_claims", lambda _event: {"email": "u@example.com"})
+    monkeypatch.setattr(api_handler, "S3JsonStore", lambda _bucket: _Store())
+    monkeypatch.setattr(api_handler, "AssetStore", lambda _bucket, _region: _AssetStore())
+    monkeypatch.setattr(api_handler, "JobQueue", lambda _url: object())
+    monkeypatch.setattr(api_handler, "_load_task_or_404", lambda _store, _user_id, _task_id: task)
+    monkeypatch.setattr(api_handler, "_queue_job", lambda **_kwargs: "job_finalize")
+
+    result = api_handler._route(
+        _event(
+            "POST",
+            "/tasks/task_1/chunked-generations/run_1/save-draft",
+            {},
+        )
+    )
+    assert result["statusCode"] == 202
+    payload = json.loads(result["body"])
+    assert payload["jobId"] == "job_finalize"
+    assert saved
+    run = saved[-1]["chunkedGenerationRuns"][0]
+    assert run["saveStatus"] == "queued"
+    assert run["saveJobId"] == "job_finalize"
