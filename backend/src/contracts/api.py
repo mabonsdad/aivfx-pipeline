@@ -41,6 +41,20 @@ MANUAL_REFINE_EXPORT_FORMAT_IDS: tuple[str, ...] = ("psd", "png_zip")
 QC_EDGE_SUPPRESSION_IDS: tuple[str, ...] = ("off", "low", "medium", "high")
 QC_SAM_PROMPT_TYPE_IDS: tuple[str, ...] = ("points", "box")
 QC_EDGE_BIAS_IDS: tuple[str, ...] = ("conservative", "balanced", "inclusive")
+LUMA_UNI_MODEL_IDS: tuple[str, ...] = ("uni-1", "uni-1-max")
+LUMA_UNI_STYLE_IDS: tuple[str, ...] = ("auto", "manga")
+LUMA_UNI_OUTPUT_FORMAT_IDS: tuple[str, ...] = ("png", "jpeg")
+TOPAZ_VIDEO_MODEL_IDS: tuple[str, ...] = (
+    "Proteus",
+    "Artemis HQ",
+    "Nyx Fast",
+    "Starlight Sharp",
+)
+TOPAZ_UPSCALE_PRESET_IDS: tuple[str, ...] = (
+    "balanced",
+    "recover_detail",
+    "fast_sharpen",
+)
 
 
 class PatchRectPayload(TypedDict):
@@ -90,6 +104,15 @@ class ReconcileTimingPayload(TypedDict):
     playbackRate: NotRequired[float | None]
 
 
+class ExportTopazUpscalePayload(TypedDict):
+    force: NotRequired[bool]
+    model: NotRequired[str]
+    preset: NotRequired[str]
+    upscaleFactor: NotRequired[float]
+    targetFps: NotRequired[int | None]
+    h264Output: NotRequired[bool]
+
+
 class CropEdgeFeatherPayload(TypedDict):
     top: int
     right: int
@@ -121,6 +144,9 @@ class ApiImageEditFullPayload(TypedDict):
     model: str
     prompt: str
     inputAssetKey: str
+    lumaUniModel: NotRequired[Literal["uni-1", "uni-1-max"] | None]
+    lumaUniStyle: NotRequired[Literal["auto", "manga"] | None]
+    lumaUniOutputFormat: NotRequired[Literal["png", "jpeg"] | None]
 
 
 class ApiImageEditPatchPayload(TypedDict):

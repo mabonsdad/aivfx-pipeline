@@ -115,6 +115,9 @@ def handle_external_api_routes(
                 "model": req.model,
                 "prompt": prompt,
                 "inputAssetKey": req.inputAssetKey,
+                "lumaUniModel": req.lumaUniModel,
+                "lumaUniStyle": req.lumaUniStyle,
+                "lumaUniOutputFormat": req.lumaUniOutputFormat,
             },
             enqueue=False,
         )
@@ -123,13 +126,18 @@ def handle_external_api_routes(
             "userId": user_id,
             "workflow": "image_edit_full",
             "model": req.model,
-            "provider": "openai" if req.model in {"chatgpt", "chatgpt_latest"} else "gemini",
+            "provider": "luma"
+            if req.model in {"luma_uni_1", "luma_uni_1_max", "luma_uni_1_1"}
+            else ("openai" if req.model in {"chatgpt", "chatgpt_latest"} else "gemini"),
             "status": "queued",
             "jobId": job_id,
             "createdAt": now_iso_fn(),
             "updatedAt": now_iso_fn(),
             "request": {
                 "prompt": prompt,
+                "lumaUniModel": req.lumaUniModel,
+                "lumaUniStyle": req.lumaUniStyle,
+                "lumaUniOutputFormat": req.lumaUniOutputFormat,
             },
             "inputAssets": {
                 "input": input_asset,

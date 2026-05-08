@@ -70,6 +70,7 @@ from src.models.schemas import (
     ManualRefineUploadInitRequest,
     MergeRequest,
     MotionSyncQcRunRequest,
+    ExportTopazUpscaleRequest,
     QualityMatchAnalyseRequest,
     QualityMatchApplyRequest,
     QualityMatchMaskUploadRequest,
@@ -1602,6 +1603,62 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             store.save_task(task)
             return response(202, {"jobId": job_id}, origin=origin)
 
+        if method == "POST" and len(parts) == 5 and parts[2] == "exports" and parts[4] == "topaz-upscale":
+            export_id = parts[3]
+            exports = task.get("exports", [])
+            export_item = next((entry for entry in exports if entry.get("exportId") == export_id), None)
+            if not export_item:
+                return error_response(404, "Export not found", origin=origin)
+            if not export_item.get("outputKey"):
+                return error_response(400, "Export output unavailable", origin=origin)
+            req = _json_model(ExportTopazUpscaleRequest, event)
+            upscale_state = export_item.get("topazUpscale") if isinstance(export_item.get("topazUpscale"), dict) else {}
+            existing_job_id = upscale_state.get("jobId")
+            existing_result_export_id = upscale_state.get("resultExportId")
+            if (
+                not req.force
+                and isinstance(existing_job_id, str)
+                and upscale_state.get("status") in {"queued", "running"}
+            ):
+                return response(
+                    202,
+                    {"jobId": existing_job_id, "exportId": existing_result_export_id, "alreadyRunning": True},
+                    origin=origin,
+                )
+
+            result_export_id = new_id("exp")
+            job_id = _queue_job(
+                store=store,
+                queue=queue,
+                user_id=user_id,
+                task_id=task_id,
+                job_type="export_topaz_upscale",
+                payload={
+                    "sourceExportId": export_id,
+                    "resultExportId": result_export_id,
+                    "request": {
+                        "preset": req.preset,
+                        "model": req.model,
+                        "upscaleFactor": req.upscaleFactor,
+                        "targetFps": req.targetFps,
+                        "h264Output": req.h264Output,
+                    },
+                },
+            )
+            export_item["topazUpscale"] = {
+                "status": "queued",
+                "updatedAt": now_iso(),
+                "jobId": job_id,
+                "resultExportId": result_export_id,
+                "preset": req.preset,
+                "model": req.model,
+                "upscaleFactor": req.upscaleFactor,
+                "targetFps": req.targetFps,
+                "h264Output": req.h264Output,
+            }
+            store.save_task(task)
+            return response(202, {"jobId": job_id, "exportId": result_export_id}, origin=origin)
+
         if method == "POST" and len(parts) == 3 and parts[2] == "ingest":
             original = task.get("video", {}).get("original")
             if not original:
@@ -2214,6 +2271,9 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                     "prompt": prompt,
                     "sourceKey": source_key,
                     "sourceVariantId": source_variant_id,
+                    "lumaUniModel": req.lumaUniModel,
+                    "lumaUniStyle": req.lumaUniStyle,
+                    "lumaUniOutputFormat": req.lumaUniOutputFormat,
                 },
             )
             return response(202, {"jobId": job_id}, origin=origin)
@@ -2593,6 +2653,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
     job_response = handle_job_status(
         method,
         path,
+        event=event,
         user_id=user_id,
         store=store,
         origin=origin,

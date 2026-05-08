@@ -55,13 +55,19 @@ from src.integrations.fal import (
     submit_happy_horse_video_edit,
     submit_sora_2_image_to_video_pro,
     submit_seedance_reference_to_video,
+    submit_topaz_video_upscale,
 )
 from src.jobs.queue import JobQueue
 from src.integrations.kling import (
     create_start_end_generation as create_kling_start_end_generation,
     get_generation_response as get_kling_generation_response,
 )
-from src.integrations.luma import create_modify_generation, get_generation
+from src.integrations.luma import (
+    create_modify_generation,
+    create_uni_image_edit_generation,
+    get_generation,
+    get_uni_generation,
+)
 from src.integrations.openai_images import generate_image_edit as generate_openai_image_edit
 from src.integrations.replicate import (
     REPLICATE_KLING_O1_VERSION,
@@ -144,6 +150,7 @@ ADV_QC_OUTER_RING_PX = 24
 ADV_QC_TOP_REGION_COUNT = 8
 MOTION_SYNC_SAMPLE_FPS = 6
 MOTION_SYNC_MAX_LAG_SEC = 3.0
+TOPAZ_UPSCALE_TIMEOUT_SEC = 7200
 FRAME_REPORT_ADVANCED_TESTS = {
     "frame_composite",
     "frame_perceptual",
@@ -152,6 +159,33 @@ FRAME_REPORT_ADVANCED_TESTS = {
     "frame_naturalness",
     "frame_texture",
 }
+
+
+class JobCancelledError(RuntimeError):
+    pass
+
+
+def _cancel_message_for_job(job: dict[str, Any]) -> str:
+    reason = str(job.get("cancelReason") or "").strip()
+    return f"Cancelled by user: {reason}" if reason else "Cancelled by user"
+
+
+def _raise_if_cancel_requested(job: dict[str, Any], store: S3JsonStore) -> None:
+    user_id = str(job.get("userId") or "")
+    job_id = str(job.get("jobId") or "")
+    if not user_id or not job_id:
+        return
+    latest_job = store.load_job(user_id, job_id)
+    if not isinstance(latest_job, dict) or not latest_job.get("cancelRequestedAt"):
+        return
+    job.update(latest_job)
+    message = _cancel_message_for_job(latest_job)
+    if str(job.get("status") or "").lower() != "failed":
+        job["status"] = "failed"
+        job["error"] = message
+        job["finishedAt"] = now_iso()
+        store.save_job(job)
+    raise JobCancelledError(message)
 def _segment_generation_provider_name(model: str) -> str:
     return get_video_model_provider(model)
 
@@ -698,6 +732,7 @@ def _ensure_segment_clip(
 
 
 def _job_progress(job: dict[str, Any], store: S3JsonStore, progress: int, status: str, logs: str | None = None) -> None:
+    _raise_if_cancel_requested(job, store)
     job["progress"] = progress
     job["status"] = status
     if logs:
@@ -1418,6 +1453,77 @@ def _wait_luma_complete(api_key: str, generation_id: str, *, timeout_sec: int = 
         time.sleep(6)
 
 
+def _parse_luma_uni_output_url(payload: dict[str, Any]) -> str:
+    output = payload.get("output")
+    if isinstance(output, list):
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            maybe = item.get("url")
+            if isinstance(maybe, str) and maybe.startswith("http"):
+                return maybe
+    raise RuntimeError(f"Luma Uni completion payload missing output URL: {payload}")
+
+
+def _wait_luma_uni_complete(api_key: str, generation_id: str, *, timeout_sec: int = 1200) -> dict[str, Any]:
+    start = time.time()
+    while True:
+        payload = get_uni_generation(api_key=api_key, generation_id=generation_id)
+        state = str(payload.get("state") or "").lower()
+        if state in {"completed", "complete", "succeeded", "success"}:
+            return payload
+        if state in {"failed", "error", "cancelled"}:
+            raise RuntimeError(f"Luma Uni generation failed: {payload}")
+        if time.time() - start > timeout_sec:
+            raise TimeoutError("Luma Uni generation poll timeout")
+        time.sleep(6)
+
+
+def _is_luma_uni_full_edit_model(model_name: str) -> bool:
+    return model_name in {"luma_uni_1", "luma_uni_1_max", "luma_uni_1_1"}
+
+
+def _resolve_luma_uni_options(model_name: str, payload: dict[str, Any]) -> tuple[str, str, str]:
+    if model_name == "luma_uni_1_max":
+        resolved_model = "uni-1-max"
+    elif model_name == "luma_uni_1":
+        resolved_model = "uni-1"
+    else:
+        resolved_model = str(payload.get("lumaUniModel") or "uni-1")
+    resolved_style = str(payload.get("lumaUniStyle") or "auto")
+    resolved_output_format = str(payload.get("lumaUniOutputFormat") or "png")
+    return resolved_model, resolved_style, resolved_output_format
+
+
+def _clean_optional_api_key(value: Any) -> str | None:
+    if value is None:
+        return None
+    key = str(value).strip()
+    if not key:
+        return None
+    # Ignore common placeholder values so they don't shadow real configured keys.
+    if key.upper() in {"SET_ME", "CHANGEME", "CHANGE_ME", "REPLACE_ME"}:
+        return None
+    return key
+
+
+def _is_luma_agents_api_key(value: str) -> bool:
+    return value.startswith("luma-api-")
+
+
+def _resolve_luma_uni_api_key(secrets: dict[str, Any]) -> str | None:
+    # Uni (agents.lumalabs.ai) requires an Agents API key (`luma-api-*`).
+    # Prefer the dedicated Agents key first, then allow LUMA_API_KEY only
+    # when it is also an Agents-style token.
+    luma_agents_key = _clean_optional_api_key(secrets.get("LUMA_AGENTS_API_KEY"))
+    if luma_agents_key and _is_luma_agents_api_key(luma_agents_key):
+        return luma_agents_key
+    luma_api_key = _clean_optional_api_key(secrets.get("LUMA_API_KEY"))
+    if luma_api_key and _is_luma_agents_api_key(luma_api_key):
+        return luma_api_key
+    return None
+
+
 def _parse_runway_output_url(payload: dict[str, Any]) -> str:
     output = payload.get("output") or payload.get("outputUrls") or payload.get("artifactUrls") or payload.get("artifacts")
     if isinstance(output, list):
@@ -1569,7 +1675,7 @@ def _parse_fal_video_output_url(payload: dict[str, Any]) -> str:
         maybe = video.get("url")
         if isinstance(maybe, str) and maybe.startswith("http"):
             return maybe
-    raise RuntimeError(f"fal.ai Seedance output missing video URL: {payload}")
+    raise RuntimeError(f"fal.ai output missing video URL: {payload}")
 
 
 def _wait_fal_queue_complete(api_key: str, *, created: dict[str, Any], timeout_sec: int = 3600) -> dict[str, Any]:
@@ -1585,11 +1691,11 @@ def _wait_fal_queue_complete(api_key: str, *, created: dict[str, Any], timeout_s
         if status == "COMPLETED":
             return get_fal_queue_result(api_key=api_key, response_url=response_url)
         if status in {"FAILED", "ERROR", "CANCELLED"}:
-            raise RuntimeError(f"fal.ai Seedance request failed: {payload}")
+            raise RuntimeError(f"fal.ai request failed: {payload}")
         if payload.get("error"):
-            raise RuntimeError(f"fal.ai Seedance request failed: {payload}")
+            raise RuntimeError(f"fal.ai request failed: {payload}")
         if time.time() - start > timeout_sec:
-            raise TimeoutError(f"fal.ai Seedance poll timeout for request {request_id or 'unknown'}")
+            raise TimeoutError(f"fal.ai poll timeout for request {request_id or 'unknown'}")
         time.sleep(8)
 
 
@@ -1945,6 +2051,35 @@ def _handle_full_edit(
             prompt=payload["prompt"],
             input_image_bytes=src_bytes,
         )
+    elif _is_luma_uni_full_edit_model(model_name):
+        luma_key = _resolve_luma_uni_api_key(secrets)
+        if not luma_key:
+            raise RuntimeError(
+                "Luma Uni requires a Luma Agents key (`luma-api-*`) in LUMA_AGENTS_API_KEY (or LUMA_API_KEY if it is also a luma-api-* key). "
+                "Dream Machine keys (`luma-*`) work for video but are not valid for agents.lumalabs.ai."
+            )
+        provider_name = "luma"
+        luma_uni_model, luma_uni_style, luma_uni_output_format = _resolve_luma_uni_options(model_name, payload)
+        _job_progress(job, store, 30, "running", "Submitting Luma Uni 1.1 image edit")
+        source_url = asset_store.presign_get(source_key, expires=3600)
+        created = create_uni_image_edit_generation(
+            api_key=luma_key,
+            source_url=source_url,
+            prompt=payload["prompt"],
+            model=luma_uni_model,
+            style=luma_uni_style,
+            output_format=luma_uni_output_format,
+        )
+        generation_id = str(created.get("id") or "")
+        if not generation_id:
+            raise RuntimeError(f"Luma Uni create response missing id: {created}")
+        _job_progress(job, store, 55, "running", "Polling Luma Uni 1.1 image edit")
+        result = _wait_luma_uni_complete(luma_key, generation_id)
+        output_url = _parse_luma_uni_output_url(result)
+        with tempfile.TemporaryDirectory() as td:
+            temp_path = Path(td) / "luma_uni_output"
+            _download_url_to_path(output_url, temp_path, timeout=240)
+            out_bytes = temp_path.read_bytes()
     else:
         gemini_key = secrets["GEMINI_API_KEY"]
         _job_progress(job, store, 30, "running", "Calling Gemini edit")
@@ -1974,7 +2109,7 @@ def _handle_full_edit(
         "outputKey": output_key,
         "processingDurationSec": _processing_duration_seconds(job.get("startedAt"), now_iso()),
         "generationSettings": {
-            "provider": "gemini",
+            "provider": provider_name,
             "workflow": "full",
             "prompt": payload["prompt"],
             "sourceKey": source_key,
@@ -1983,7 +2118,13 @@ def _handle_full_edit(
             "outputResolution": {"width": normalized_image.width, "height": normalized_image.height},
         },
     }
-    variant["generationSettings"]["provider"] = provider_name
+    if _is_luma_uni_full_edit_model(model_name):
+        luma_uni_model, luma_uni_style, luma_uni_output_format = _resolve_luma_uni_options(model_name, payload)
+        variant["generationSettings"]["lumaUni"] = {
+            "model": luma_uni_model,
+            "style": luma_uni_style,
+            "outputFormat": luma_uni_output_format,
+        }
     frame.setdefault("variants", []).append(variant)
     if not frame.get("selectedVariantId"):
         frame["selectedVariantId"] = variant_id
@@ -2222,6 +2363,35 @@ def _handle_api_image_edit_full(
             prompt=str(payload["prompt"]),
             input_image_bytes=src_bytes,
         )
+    elif _is_luma_uni_full_edit_model(model_name):
+        luma_key = _resolve_luma_uni_api_key(secrets)
+        if not luma_key:
+            raise RuntimeError(
+                "Luma Uni requires a Luma Agents key (`luma-api-*`) in LUMA_AGENTS_API_KEY (or LUMA_API_KEY if it is also a luma-api-* key). "
+                "Dream Machine keys (`luma-*`) work for video but are not valid for agents.lumalabs.ai."
+            )
+        provider_name = "luma"
+        luma_uni_model, luma_uni_style, luma_uni_output_format = _resolve_luma_uni_options(model_name, payload)
+        _api_request_progress(job=job, store=store, request_record=request_record, progress=35, status="running", logs="Submitting Luma Uni 1.1 image edit")
+        source_url = asset_store.presign_get(str(payload["inputAssetKey"]), expires=3600)
+        created = create_uni_image_edit_generation(
+            api_key=luma_key,
+            source_url=source_url,
+            prompt=str(payload["prompt"]),
+            model=luma_uni_model,
+            style=luma_uni_style,
+            output_format=luma_uni_output_format,
+        )
+        generation_id = str(created.get("id") or "")
+        if not generation_id:
+            raise RuntimeError(f"Luma Uni create response missing id: {created}")
+        _api_request_progress(job=job, store=store, request_record=request_record, progress=55, status="running", logs="Polling Luma Uni 1.1 image edit")
+        result = _wait_luma_uni_complete(luma_key, generation_id)
+        output_url = _parse_luma_uni_output_url(result)
+        with tempfile.TemporaryDirectory() as td:
+            temp_path = Path(td) / "luma_uni_output"
+            _download_url_to_path(output_url, temp_path, timeout=240)
+            out_bytes = temp_path.read_bytes()
     else:
         gemini_key = secrets["GEMINI_API_KEY"]
         _api_request_progress(job=job, store=store, request_record=request_record, progress=35, status="running", logs="Calling Gemini image edit")
@@ -2256,6 +2426,11 @@ def _handle_api_image_edit_full(
         "outputResolution": {"width": normalized_image.width, "height": normalized_image.height},
         "outputAlignedToInput": True,
     }
+    if _is_luma_uni_full_edit_model(model_name):
+        luma_uni_model, luma_uni_style, luma_uni_output_format = _resolve_luma_uni_options(model_name, payload)
+        request_record.setdefault("request", {})["lumaUniModel"] = luma_uni_model
+        request_record.setdefault("request", {})["lumaUniStyle"] = luma_uni_style
+        request_record.setdefault("request", {})["lumaUniOutputFormat"] = luma_uni_output_format
     request_record["error"] = None
     _save_api_request(store, request_record)
     _job_progress(job, store, 100, "complete", "API full image edit completed")
@@ -5805,6 +5980,8 @@ def _build_video_report_row(
                 prefix="standard",
             )
             source_frame_offset = max(0, int(video_alignment.get("sourceFrameOffset") or 0))
+            source_frame_count = int(original_probe.get("frame_count") or 0)
+            generated_frame_count = int(generated_probe.get("frame_count") or 0)
             source_offset_sec = source_frame_offset / float(target_fps)
             common_duration_sec = max(
                 0.1,
@@ -5813,22 +5990,14 @@ def _build_video_report_row(
                     float(generated_probe.get("duration_sec") or 0.0),
                 ),
             )
-
-            original_frames = _extract_sampled_frames(
-                original_standard_path,
-                td_path / "orig_frames",
+            sample_rows = _frame_aligned_sample_rows(
+                source_frame_offset=source_frame_offset,
+                source_frame_count=source_frame_count,
+                generated_frame_count=generated_frame_count,
+                fps=target_fps,
                 sample_fps=QC_SAMPLE_FPS,
-                duration_sec=common_duration_sec,
-                start_sec=source_offset_sec,
             )
-            generated_frames = _extract_sampled_frames(
-                generated_standard_path,
-                td_path / "gen_frames",
-                sample_fps=QC_SAMPLE_FPS,
-                duration_sec=common_duration_sec,
-            )
-            paired_count = min(len(original_frames), len(generated_frames))
-            if paired_count == 0:
+            if not sample_rows:
                 raise RuntimeError("No sampled frames available for QC analysis")
 
             video_mask_key = (
@@ -5839,12 +6008,16 @@ def _build_video_report_row(
             video_mask_bytes = asset_store.read_bytes(video_mask_key) if isinstance(video_mask_key, str) else None
             video_mask = _load_optional_mask(video_mask_bytes, (analysis_width, analysis_height))
             per_frame_rows: list[dict[str, Any]] = []
-            for frame_idx in range(paired_count):
-                orig_image = Image.open(original_frames[frame_idx]).convert("RGB")
-                gen_image = Image.open(generated_frames[frame_idx]).convert("RGB")
-                sample_time_sec = frame_idx / float(QC_SAMPLE_FPS)
-                source_frame_index = int(round((source_offset_sec + sample_time_sec) * float(target_fps)))
-                generated_frame_index = int(round(sample_time_sec * float(target_fps)))
+            for sample_row in sample_rows:
+                frame_idx = int(sample_row["index"])
+                source_frame_index = int(sample_row["sourceFrameIndex"])
+                generated_frame_index = int(sample_row["generatedFrameIndex"])
+                orig_frame_path = td_path / "orig_frames" / f"frame_{frame_idx:05d}.png"
+                gen_frame_path = td_path / "gen_frames" / f"frame_{frame_idx:05d}.png"
+                extract_frame_png(str(original_standard_path), source_frame_index, str(orig_frame_path))
+                extract_frame_png(str(generated_standard_path), generated_frame_index, str(gen_frame_path))
+                orig_image = Image.open(orig_frame_path).convert("RGB")
+                gen_image = Image.open(gen_frame_path).convert("RGB")
                 row_metrics, row_diff, row_binary, _ = _analyze_image_pair(
                     orig_image,
                     gen_image,
@@ -5855,8 +6028,8 @@ def _build_video_report_row(
                 per_frame_rows.append(
                     {
                         "index": frame_idx,
-                        "timeSec": round(source_offset_sec + sample_time_sec, 4),
-                        "generatedTimeSec": round(sample_time_sec, 4),
+                        "timeSec": float(sample_row["timeSec"]),
+                        "generatedTimeSec": float(sample_row["generatedTimeSec"]),
                         "sourceFrameIndex": source_frame_index,
                         "generatedFrameIndex": generated_frame_index,
                         "sourceFrameOffset": source_frame_offset,
@@ -6264,6 +6437,8 @@ def _build_export_video_report_row(
                 prefix="export",
             )
             source_frame_offset = max(0, int(video_alignment.get("sourceFrameOffset") or 0))
+            source_frame_count = int(original_probe.get("frame_count") or 0)
+            export_frame_count = int(export_probe.get("frame_count") or 0)
             source_offset_sec = source_frame_offset / float(target_fps)
             common_duration_sec = max(
                 0.1,
@@ -6272,31 +6447,27 @@ def _build_export_video_report_row(
                     float(export_probe.get("duration_sec") or 0.0),
                 ),
             )
-
-            original_frames = _extract_sampled_frames(
-                original_standard_path,
-                td_path / "orig_frames",
+            sample_rows = _frame_aligned_sample_rows(
+                source_frame_offset=source_frame_offset,
+                source_frame_count=source_frame_count,
+                generated_frame_count=export_frame_count,
+                fps=target_fps,
                 sample_fps=QC_SAMPLE_FPS,
-                duration_sec=common_duration_sec,
-                start_sec=source_offset_sec,
             )
-            export_frames = _extract_sampled_frames(
-                export_standard_path,
-                td_path / "export_frames",
-                sample_fps=QC_SAMPLE_FPS,
-                duration_sec=common_duration_sec,
-            )
-            paired_count = min(len(original_frames), len(export_frames))
-            if paired_count == 0:
+            if not sample_rows:
                 raise RuntimeError("No sampled frames available for export QC analysis")
 
             per_frame_rows: list[dict[str, Any]] = []
-            for frame_idx in range(paired_count):
-                orig_image = Image.open(original_frames[frame_idx]).convert("RGB")
-                export_image = Image.open(export_frames[frame_idx]).convert("RGB")
-                sample_time_sec = frame_idx / float(QC_SAMPLE_FPS)
-                source_frame_index = int(round((source_offset_sec + sample_time_sec) * float(target_fps)))
-                generated_frame_index = int(round(sample_time_sec * float(target_fps)))
+            for sample_row in sample_rows:
+                frame_idx = int(sample_row["index"])
+                source_frame_index = int(sample_row["sourceFrameIndex"])
+                generated_frame_index = int(sample_row["generatedFrameIndex"])
+                orig_frame_path = td_path / "orig_frames" / f"frame_{frame_idx:05d}.png"
+                export_frame_path = td_path / "export_frames" / f"frame_{frame_idx:05d}.png"
+                extract_frame_png(str(original_standard_path), source_frame_index, str(orig_frame_path))
+                extract_frame_png(str(export_standard_path), generated_frame_index, str(export_frame_path))
+                orig_image = Image.open(orig_frame_path).convert("RGB")
+                export_image = Image.open(export_frame_path).convert("RGB")
                 row_metrics, row_diff, row_binary, _ = _analyze_image_pair(
                     orig_image,
                     export_image,
@@ -6307,8 +6478,8 @@ def _build_export_video_report_row(
                 per_frame_rows.append(
                     {
                         "index": frame_idx,
-                        "timeSec": round(source_offset_sec + sample_time_sec, 4),
-                        "generatedTimeSec": round(sample_time_sec, 4),
+                        "timeSec": float(sample_row["timeSec"]),
+                        "generatedTimeSec": float(sample_row["generatedTimeSec"]),
                         "sourceFrameIndex": source_frame_index,
                         "generatedFrameIndex": generated_frame_index,
                         "sourceFrameOffset": source_frame_offset,
@@ -6879,29 +7050,74 @@ def _best_aligned_generated_frame_index(
     work_dir: Path,
     prefix: str,
     search_radius: int = 2,
+    max_search_radius: int = 24,
     region_mask: Image.Image | None = None,
 ) -> tuple[int, Image.Image, float]:
-    candidates = sorted(
-        {
-            max(0, min(frame_count - 1, expected_frame_index + delta))
-            for delta in range(-search_radius, search_radius + 1)
-        }
-    )
+    if frame_count <= 0:
+        return 0, source_image, 0.0
+
+    def _score_window(center_index: int, radius: int) -> tuple[int | None, Image.Image | None, float, bool, bool]:
+        low = max(0, center_index - radius)
+        high = min(frame_count - 1, center_index + radius)
+        candidates = list(range(low, high + 1))
+        local_best_index: int | None = None
+        local_best_image: Image.Image | None = None
+        local_best_score = -1.0
+        for candidate_index in candidates:
+            candidate_path = work_dir / f"{prefix}_candidate_{candidate_index:04d}.png"
+            extract_frame_png(str(generated_path), candidate_index, str(candidate_path))
+            candidate_image = Image.open(candidate_path).convert("RGB")
+            score = _video_compare_similarity(source_image, candidate_image, region_mask=region_mask)
+            if score > local_best_score:
+                local_best_index = candidate_index
+                local_best_image = candidate_image
+                local_best_score = score
+        if local_best_index is None or local_best_image is None:
+            return None, None, -1.0, False, False
+        return (
+            local_best_index,
+            local_best_image,
+            local_best_score,
+            local_best_index == low,
+            local_best_index == high,
+        )
+
+    clamped_expected = max(0, min(frame_count - 1, expected_frame_index))
     best_index: int | None = None
     best_image: Image.Image | None = None
     best_score = -1.0
-    for candidate_index in candidates:
-        candidate_path = work_dir / f"{prefix}_candidate_{candidate_index:04d}.png"
-        extract_frame_png(str(generated_path), candidate_index, str(candidate_path))
-        candidate_image = Image.open(candidate_path).convert("RGB")
-        score = _video_compare_similarity(source_image, candidate_image, region_mask=region_mask)
-        if score > best_score:
-            best_index = candidate_index
-            best_image = candidate_image
-            best_score = score
+    center_index = clamped_expected
+    radius = max(1, int(search_radius))
+    visited_windows: set[tuple[int, int]] = set()
+    for _ in range(6):
+        low = max(0, center_index - radius)
+        high = min(frame_count - 1, center_index + radius)
+        window_key = (low, high)
+        if window_key in visited_windows:
+            break
+        visited_windows.add(window_key)
+        local_best_index, local_best_image, local_best_score, hit_low, hit_high = _score_window(center_index, radius)
+        if local_best_index is None or local_best_image is None:
+            break
+        if local_best_score > best_score:
+            best_index = local_best_index
+            best_image = local_best_image
+            best_score = local_best_score
+        if radius >= max_search_radius:
+            break
+        if hit_low:
+            center_index = max(0, local_best_index - max(1, radius // 2))
+            radius = min(max_search_radius, radius * 2)
+            continue
+        if hit_high:
+            center_index = min(frame_count - 1, local_best_index + max(1, radius // 2))
+            radius = min(max_search_radius, radius * 2)
+            continue
+        break
+
     if best_index is None or best_image is None:
         fallback_path = work_dir / f"{prefix}_fallback_{max(0, expected_frame_index):04d}.png"
-        fallback_index = max(0, min(frame_count - 1, expected_frame_index))
+        fallback_index = clamped_expected
         extract_frame_png(str(generated_path), fallback_index, str(fallback_path))
         return fallback_index, Image.open(fallback_path).convert("RGB"), 0.0
     return best_index, best_image, round(best_score, 4)
@@ -7025,49 +7241,56 @@ def compute_merge_alignment_suggestion(
         )
         anchor_offset_frames = max(0, int(video_alignment.get("sourceFrameOffset") or 0))
         source_offset_sec = anchor_offset_frames / float(target_fps)
-        common_duration_sec = max(
-            0.1,
-            min(
-                max(0.0, float(original_probe.get("duration_sec") or 0.0) - source_offset_sec),
-                float(generated_probe.get("duration_sec") or 0.0),
-            ),
-        )
-        original_frames = _extract_sampled_frames(
-            original_standard_path,
-            td_path / "merge_orig_frames",
-            sample_fps=QC_SAMPLE_FPS,
-            duration_sec=common_duration_sec,
-            start_sec=source_offset_sec,
-        )
+        source_frame_count = int(original_probe.get("frame_count") or 0)
         generated_frame_count = int(generated_probe.get("frame_count") or 0)
+        common_frame_count = min(max(0, source_frame_count - anchor_offset_frames), generated_frame_count)
         drift_rows: list[dict[str, Any]] = []
-        paired_count = len(original_frames)
-        for frame_idx, original_frame_path in enumerate(original_frames):
+        fps_value = float(target_fps)
+        sample_interval_sec = 1.0 / float(QC_SAMPLE_FPS)
+        sample_time_sec = 0.0
+        previous_relative_index = -1
+        sample_index = 0
+        while (
+            sample_index < QC_ANALYSIS_MAX_FRAMES
+            and common_frame_count > 0
+            and sample_time_sec <= ((common_frame_count - 1) / max(1e-9, fps_value)) + 1e-9
+        ):
+            relative_frame_index = int(round(sample_time_sec * fps_value))
+            if relative_frame_index <= previous_relative_index:
+                relative_frame_index = previous_relative_index + 1
+            if relative_frame_index >= common_frame_count:
+                break
+            source_frame_index = anchor_offset_frames + relative_frame_index
+            expected_generated_frame_index = relative_frame_index
+            original_frame_path = td_path / "merge_orig_frames" / f"frame_{sample_index:05d}.png"
+            extract_frame_png(str(original_standard_path), source_frame_index, str(original_frame_path))
             source_image = Image.open(original_frame_path).convert("RGB")
-            sample_time_sec = frame_idx / float(QC_SAMPLE_FPS)
-            expected_generated_frame_index = max(0, min(generated_frame_count - 1, int(round(sample_time_sec * float(target_fps)))))
             matched_generated_frame_index, _matched_generated_image, match_similarity = _best_aligned_generated_frame_index(
                 generated_path=generated_standard_path,
                 source_image=source_image,
                 expected_frame_index=expected_generated_frame_index,
                 frame_count=generated_frame_count,
                 work_dir=td_path / "merge_drift",
-                prefix=f"merge_{generation.get('genId', 'gen')}_{frame_idx:04d}",
+                prefix=f"merge_{generation.get('genId', 'gen')}_{sample_index:04d}",
                 search_radius=3,
                 region_mask=alignment_region_mask,
             )
             drift_delta_frames = int(matched_generated_frame_index - expected_generated_frame_index)
             drift_rows.append(
                 {
-                    "index": frame_idx,
-                    "timeSec": round(source_offset_sec + sample_time_sec, 4),
-                    "sourceFrameIndex": int(round((source_offset_sec + sample_time_sec) * float(target_fps))),
+                    "index": sample_index,
+                    "timeSec": round(source_frame_index / fps_value, 4),
+                    "sourceFrameIndex": source_frame_index,
                     "expectedGeneratedFrameIndex": expected_generated_frame_index,
                     "matchedGeneratedFrameIndex": matched_generated_frame_index,
                     "frameDeltaDrift": drift_delta_frames,
                     "matchSimilarity": match_similarity,
                 }
             )
+            previous_relative_index = relative_frame_index
+            sample_index += 1
+            sample_time_sec += sample_interval_sec
+        paired_count = len(drift_rows)
 
     early_window = drift_rows[: min(3, len(drift_rows))]
     late_window = drift_rows[max(0, len(drift_rows) - 3) :]
@@ -7130,6 +7353,7 @@ def compute_merge_alignment_suggestion(
 
     recommendation = "trim_only"
     notes: list[str] = []
+    notes.append("Drift samples use direct frame-index extraction on both source and generated clips for frame-accurate matching.")
     if crop_settings:
         notes.append("Alignment was analysed against the same cropped source region, not the full original frame.")
     if alignment_mask_mode == "outside_edit_mask":
@@ -7885,6 +8109,49 @@ def _extract_interval_frames(
     return rows
 
 
+def _frame_aligned_sample_rows(
+    *,
+    source_frame_offset: int,
+    source_frame_count: int,
+    generated_frame_count: int,
+    fps: Fraction,
+    sample_fps: int,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    common_frame_count = min(max(0, source_frame_count - max(0, source_frame_offset)), max(0, generated_frame_count))
+    if common_frame_count <= 0:
+        return rows
+    fps_value = float(fps)
+    sample_interval_sec = 1.0 / float(max(1, sample_fps))
+    sample_time_sec = 0.0
+    previous_relative_index = -1
+    sample_index = 0
+    while (
+        sample_index < QC_ANALYSIS_MAX_FRAMES
+        and sample_time_sec <= ((common_frame_count - 1) / max(1e-9, fps_value)) + 1e-9
+    ):
+        relative_frame_index = int(round(sample_time_sec * fps_value))
+        if relative_frame_index <= previous_relative_index:
+            relative_frame_index = previous_relative_index + 1
+        if relative_frame_index >= common_frame_count:
+            break
+        source_frame_index = source_frame_offset + relative_frame_index
+        generated_frame_index = relative_frame_index
+        rows.append(
+            {
+                "index": sample_index,
+                "sourceFrameIndex": source_frame_index,
+                "generatedFrameIndex": generated_frame_index,
+                "timeSec": round(source_frame_index / fps_value, 4),
+                "generatedTimeSec": round(generated_frame_index / fps_value, 4),
+            }
+        )
+        previous_relative_index = relative_frame_index
+        sample_index += 1
+        sample_time_sec += sample_interval_sec
+    return rows
+
+
 def _build_external_video_report_rows(
     *,
     task: dict[str, Any],
@@ -8211,6 +8478,161 @@ def _handle_qc_report_build(
     store.save_task(task)
     _job_progress(job, store, 100, "complete", "QC report build complete")
     job["resultRefs"] = {"reportId": report_id, "resultKey": result_key}
+    store.save_job(job)
+    return job
+
+
+def _find_export_record(task: dict[str, Any], export_id: str) -> dict[str, Any] | None:
+    exports = task.get("exports")
+    if not isinstance(exports, list):
+        return None
+    return next((item for item in exports if isinstance(item, dict) and item.get("exportId") == export_id), None)
+
+
+def _topaz_preset_defaults(preset: str) -> dict[str, Any]:
+    if preset == "recover_detail":
+        return {
+            "recover_detail": 0.7,
+            "noise": 0.12,
+            "compression": 0.1,
+            "halo": 0.08,
+            "grain": 0.0,
+        }
+    if preset == "fast_sharpen":
+        return {
+            "recover_detail": 0.3,
+            "noise": 0.2,
+            "compression": 0.15,
+            "halo": 0.15,
+            "grain": 0.0,
+        }
+    return {
+        "recover_detail": 0.45,
+        "noise": 0.15,
+        "compression": 0.1,
+        "halo": 0.1,
+        "grain": 0.0,
+    }
+
+
+def _handle_export_topaz_upscale(
+    *,
+    job: dict[str, Any],
+    store: S3JsonStore,
+    asset_store: AssetStore,
+    task: dict[str, Any],
+    settings: Any,
+) -> dict[str, Any]:
+    payload = job.get("payload") or {}
+    source_export_id = str(payload.get("sourceExportId") or "")
+    result_export_id = str(payload.get("resultExportId") or "")
+    if not source_export_id:
+        raise RuntimeError("Missing sourceExportId for Topaz upscale")
+    if not result_export_id:
+        raise RuntimeError("Missing resultExportId for Topaz upscale")
+
+    source_export = _find_export_record(task, source_export_id)
+    if not source_export:
+        raise RuntimeError(f"Export {source_export_id} not found")
+    source_output_key = str(source_export.get("outputKey") or "")
+    if not source_output_key:
+        raise RuntimeError("Source export output missing")
+
+    request = payload.get("request") if isinstance(payload.get("request"), dict) else {}
+    preset = str(request.get("preset") or "balanced")
+    model = str(request.get("model") or "Proteus")
+    upscale_factor = float(request.get("upscaleFactor") or 1.0)
+    target_fps = request.get("targetFps")
+    h264_output = bool(request.get("h264Output"))
+
+    topaz_state = source_export.setdefault("topazUpscale", {})
+    topaz_state.update(
+        {
+            "status": "running",
+            "updatedAt": now_iso(),
+            "jobId": job.get("jobId"),
+            "resultExportId": result_export_id,
+            "preset": preset,
+            "model": model,
+            "upscaleFactor": upscale_factor,
+            "targetFps": target_fps if isinstance(target_fps, int) else None,
+            "h264Output": h264_output,
+        }
+    )
+    store.save_task(task)
+    _job_progress(job, store, 10, "running", "Preparing Topaz upscale request")
+
+    secrets = load_secret(settings.secrets_arn)
+    fal_api_key = secrets.get("FAL_API_KEY")
+    if not fal_api_key:
+        raise RuntimeError("FAL_API_KEY is required for Topaz upscale")
+
+    request_payload: dict[str, Any] = {
+        "video_url": asset_store.presign_get(source_output_key, expires=6 * 3600),
+        "model": model,
+        "upscale_factor": upscale_factor,
+        "H264_output": h264_output,
+    }
+    if isinstance(target_fps, int) and target_fps > 0:
+        request_payload["target_fps"] = target_fps
+    request_payload.update(_topaz_preset_defaults(preset))
+    request_payload_for_state = {k: v for k, v in request_payload.items() if k != "video_url"}
+
+    _job_progress(job, store, 30, "running", "Submitting Topaz upscale job")
+    created = submit_topaz_video_upscale(api_key=fal_api_key, input=request_payload)
+    _job_progress(job, store, 55, "running", "Topaz upscale running")
+    result = _wait_fal_queue_complete(fal_api_key, created=created, timeout_sec=TOPAZ_UPSCALE_TIMEOUT_SEC)
+    output_url = _parse_fal_video_output_url(result)
+
+    s3 = boto3.client("s3")
+    paths = _asset_paths(task)
+    result_output_key = paths.export_output(result_export_id)
+    with tempfile.TemporaryDirectory() as td:
+        td_path = Path(td)
+        downloaded_path = td_path / "topaz_upscaled.mp4"
+        _download_url_to_path(output_url, downloaded_path, timeout=900)
+        output_probe = ffprobe_video(str(downloaded_path))
+        _upload_s3(s3, settings.assets_bucket, result_output_key, downloaded_path, "video/mp4")
+
+    existing_result_export = _find_export_record(task, result_export_id)
+    result_export_record = {
+        "exportId": result_export_id,
+        "outputKey": result_output_key,
+        "createdAt": now_iso(),
+        "sourceExportId": source_export_id,
+        "topazUpscale": {
+            "status": "complete",
+            "updatedAt": now_iso(),
+            "jobId": job.get("jobId"),
+            "preset": preset,
+            "model": model,
+            "upscaleFactor": upscale_factor,
+            "targetFps": target_fps if isinstance(target_fps, int) else None,
+            "h264Output": h264_output,
+            "provider": "fal",
+            "providerModel": "fal-ai/topaz/upscale/video",
+            "output": _video_timing_payload(output_probe),
+        },
+    }
+    if isinstance(existing_result_export, dict):
+        existing_result_export.update(result_export_record)
+    else:
+        task.setdefault("exports", []).append(result_export_record)
+
+    topaz_state.update(
+        {
+            "status": "complete",
+            "updatedAt": now_iso(),
+            "resultExportId": result_export_id,
+            "resultOutputKey": result_output_key,
+            "provider": "fal",
+            "providerModel": "fal-ai/topaz/upscale/video",
+            "submittedInput": request_payload_for_state,
+        }
+    )
+    store.save_task(task)
+    _job_progress(job, store, 100, "complete", "Topaz upscale complete")
+    job["resultRefs"] = {"sourceExportId": source_export_id, "exportId": result_export_id, "outputKey": result_output_key}
     store.save_job(job)
     return job
 
@@ -9345,7 +9767,15 @@ def process_job_record(record: dict[str, Any], *, settings: Any) -> None:
     if not job:
         raise RuntimeError(f"Job not found: {job_id}")
     job_type = str(job.get("type") or "")
-    if str(job.get("status") or "").lower() == "complete":
+    status = str(job.get("status") or "").lower()
+    if status == "complete":
+        return
+    if job.get("cancelRequestedAt"):
+        if status != "failed":
+            job["status"] = "failed"
+            job["error"] = _cancel_message_for_job(job)
+            job["finishedAt"] = now_iso()
+            store.save_job(job)
         return
     task = None if job_type.startswith("api_") else store.load_task(user_id, str(task_id or ""))
     if not job_type.startswith("api_") and not task:
@@ -9359,6 +9789,7 @@ def process_job_record(record: dict[str, Any], *, settings: Any) -> None:
     store.save_job(job)
 
     try:
+        _raise_if_cancel_requested(job, store)
         handlers = build_job_handlers(
             handle_ingest_fn=_handle_ingest,
             handle_full_edit_fn=_handle_full_edit,
@@ -9373,6 +9804,7 @@ def process_job_record(record: dict[str, Any], *, settings: Any) -> None:
             handle_merge_alignment_suggestion_fn=_handle_merge_alignment_suggestion,
             handle_generation_reconcile_timing_fn=_handle_generation_reconcile_timing,
             handle_merge_fn=_handle_merge,
+            handle_export_topaz_upscale_fn=_handle_export_topaz_upscale,
             handle_qc_report_build_fn=_handle_qc_report_build,
             handle_motion_sync_qc_fn=_handle_motion_sync_qc,
             handle_video_cleanup_init_fn=_handle_video_cleanup_init,
@@ -9392,6 +9824,30 @@ def process_job_record(record: dict[str, Any], *, settings: Any) -> None:
                 "settings": settings,
             },
         )
+    except JobCancelledError as exc:
+        logger.info(
+            "Job cancelled",
+            extra={"jobId": job_id, "taskId": task_id, "userId": user_id, "jobType": job_type},
+        )
+        job["status"] = "failed"
+        job["error"] = str(exc)
+        job["finishedAt"] = now_iso()
+        store.save_job(job)
+        handle_job_failure(
+            job_type=job_type,
+            job_id=job_id,
+            task_id=str(task_id) if task_id is not None else None,
+            user_id=user_id,
+            job=job,
+            store=store,
+            task=task if isinstance(task, dict) else None,
+            error=exc,
+            now_iso_fn=now_iso,
+            get_cleanup_track_fn=get_cleanup_track,
+            find_chunked_generation_run_fn=_find_chunked_generation_run,
+            mark_chunked_generation_run_failed_fn=_mark_chunked_generation_run_failed,
+        )
+        return
     except Exception as exc:
         logger.exception("Job failed", extra={"jobId": job_id, "taskId": task_id, "userId": user_id})
         job["status"] = "failed"

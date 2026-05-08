@@ -589,8 +589,34 @@ export type ChunkedGenerationRun = {
 export type ExportRecord = {
   exportId: string;
   outputKey: string;
+  sourceExportId?: string;
   createdAt: string;
   downloadUrl?: string;
+  topazUpscale?: {
+    status: "queued" | "running" | "complete" | "failed";
+    updatedAt?: string;
+    jobId?: string;
+    resultExportId?: string;
+    resultOutputKey?: string;
+    resultOutputUrl?: string;
+    preset?: "balanced" | "recover_detail" | "fast_sharpen" | string;
+    model?: string;
+    upscaleFactor?: number;
+    targetFps?: number | null;
+    h264Output?: boolean;
+    provider?: string;
+    providerModel?: string;
+    submittedInput?: Record<string, unknown>;
+    error?: string;
+    output?: {
+      width?: number;
+      height?: number;
+      fps?: { num: number; den: number };
+      durationSec?: number;
+      frameCount?: number;
+      isVfr?: boolean;
+    };
+  };
   motionSyncQc?: {
     status: "queued" | "running" | "complete" | "failed";
     updatedAt?: string;
@@ -725,6 +751,7 @@ export type JobStatus = {
   progress: number;
   createdAt?: string;
   updatedAt?: string;
+  payload?: Record<string, unknown>;
   logs?: Array<{ at: string; message: string }>;
   error?: string;
   resultRefs?: Record<string, unknown>;

@@ -8,6 +8,7 @@ import type {
   AssetDeletePayload,
   ChunkedSegmentGeneratePayload,
   CustomReportCreatePayload,
+  ExportTopazUpscalePayload,
   MergePayload,
   ManualRefineExportFormatId,
   QcEdgeBiasId,
@@ -186,7 +187,11 @@ export const apiClient = {
   fullEdit: (
     taskId: string,
     frameId: string,
-    payload: { model: FullEditModelId; prompt: string; sourceVariantId?: string },
+    payload: {
+      model: FullEditModelId;
+      prompt: string;
+      sourceVariantId?: string;
+    },
   ) =>
     api<{ jobId: string }>(`/tasks/${taskId}/frames/${frameId}/edits/full`, {
       method: "POST",
@@ -625,6 +630,11 @@ export const apiClient = {
       method: "POST",
       body: JSON.stringify(payload ?? {}),
     }),
+  runTopazUpscale: (taskId: string, exportId: string, payload?: ExportTopazUpscalePayload) =>
+    api<{ jobId: string; exportId?: string; alreadyRunning?: boolean }>(`/tasks/${taskId}/exports/${exportId}/topaz-upscale`, {
+      method: "POST",
+      body: JSON.stringify(payload ?? {}),
+    }),
   deleteAsset: (
     taskId: string,
     payload: AssetDeletePayload,
@@ -640,4 +650,9 @@ export const apiClient = {
   deleteCustomReport: (taskId: string, reportId: string) =>
     api<{ ok: true }>(`/tasks/${taskId}/reports/${reportId}`, { method: "DELETE" }),
   getJob: (jobId: string) => api<JobStatus>(`/jobs/${jobId}`),
+  cancelJob: (jobId: string, payload?: { reason?: string }) =>
+    api<{ ok: true; jobId: string; status?: string; cancelRequestedAt?: string; alreadyRequested?: boolean; alreadyTerminal?: boolean }>(
+      `/jobs/${jobId}/cancel`,
+      { method: "POST", body: JSON.stringify(payload ?? {}) },
+    ),
 };

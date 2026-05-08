@@ -44,6 +44,8 @@ The underlying storage is still task-based, but the UI now presents each task as
      - reconcile timing, merge alignment, and export
      - crop merge-back
      - tracked keep-mask cleanup on eligible source-motion outputs
+   - Align & Retime now uses a compact `Suggested / Controls` flow with explicit start-shift, trim, and stretch controls.
+   - Alignment suggestions do not auto-apply. Users explicitly apply suggestion values before reconcile.
    - Merge previews, zoom tools, alignment suggestion, and optional retime are all part of this stage.
 
 5. **Assets**
@@ -55,6 +57,7 @@ The underlying storage is still task-based, but the UI now presents each task as
    - Reports primarily list existing reports for the current source video, without orphaning older saved reports.
    - Quality reports compare original, edited, refined, generated, and merged assets.
    - Custom QC supports two uploaded images or two uploaded videos; video uploads are sampled from the first frame and then every two seconds.
+   - Internal source/generated frame pairing for report QC now uses direct frame-index extraction for frame-accurate comparisons.
    - Video comparison reports compare selected generations from the same working range/start frame with aligned frame grids, diff grids, zoomed crops, model settings, input/output resolution, fps, duration, and frame counts.
    - The standalone API playground is served at `/experiments/aivfx/api-test.html`.
    - A nav link opens the API logs page, showing external API jobs with input/output asset previews and errors.

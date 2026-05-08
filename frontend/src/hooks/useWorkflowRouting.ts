@@ -41,18 +41,42 @@ export function taskRoute(taskId: string, tab: TabId): string {
   return `/tasks/${encodeURIComponent(taskId)}/${TAB_ROUTE_SEGMENT[tab]}`;
 }
 
-export function useWorkflowRouteState(pathname: string): WorkflowRouteState {
+function parseRouteStateFromPath(candidatePath: string): WorkflowRouteState {
+  const normalizedPath = candidatePath.replace(/\/+$/, "") || "/";
+  const parts = normalizedPath.split("/").filter(Boolean);
+  const tasksIndex = parts.findIndex((part) => part === "tasks");
+  if (tasksIndex >= 0) {
+    const taskId = parts[tasksIndex + 1] ? decodeURIComponent(parts[tasksIndex + 1]) : null;
+    const tabFromRoute = parts[tasksIndex + 2] ? ROUTE_SEGMENT_TO_TAB[parts[tasksIndex + 2]] ?? null : null;
+    return { taskId, tab: tabFromRoute };
+  }
+  const directTab = parts[0] ? ROUTE_SEGMENT_TO_TAB[parts[0]] ?? null : null;
+  return { taskId: null, tab: directTab };
+}
+
+function extractHashPath(hash: string): string | null {
+  if (!hash) return null;
+  const stripped = hash.startsWith("#") ? hash.slice(1) : hash;
+  if (!stripped.startsWith("/")) return null;
+  return stripped.split("?")[0] ?? null;
+}
+
+function normalizedPath(pathname: string): string {
+  return pathname.replace(/\/+$/, "") || "/";
+}
+
+export function useWorkflowRouteState(pathname: string, hash = ""): WorkflowRouteState {
   return useMemo(() => {
-    const normalizedPath = pathname.replace(/\/+$/, "") || "/";
-    const parts = normalizedPath.split("/").filter(Boolean);
-    if (parts[0] === "tasks") {
-      const taskId = parts[1] ? decodeURIComponent(parts[1]) : null;
-      const tabFromRoute = parts[2] ? ROUTE_SEGMENT_TO_TAB[parts[2]] ?? null : null;
-      return { taskId, tab: tabFromRoute };
+    const fromPathname = parseRouteStateFromPath(pathname);
+    if (fromPathname.taskId || fromPathname.tab) {
+      return fromPathname;
     }
-    const directTab = parts[0] ? ROUTE_SEGMENT_TO_TAB[parts[0]] ?? null : null;
-    return { taskId: null, tab: directTab };
-  }, [pathname]);
+    const hashPath = extractHashPath(hash);
+    if (hashPath) {
+      return parseRouteStateFromPath(hashPath);
+    }
+    return fromPathname;
+  }, [hash, pathname]);
 }
 
 export function useReportRouteState(search: string): {
@@ -80,6 +104,7 @@ export function useCanonicalTaskRoute(params: {
   storeSelectedTaskId: string | null;
   taskIds: string[];
   locationPathname: string;
+  locationHash: string;
   locationSearch: string;
   navigate: NavigateFunction;
   setSelectedTaskId: (taskId: string | null) => void;
@@ -90,6 +115,7 @@ export function useCanonicalTaskRoute(params: {
     storeSelectedTaskId,
     taskIds,
     locationPathname,
+    locationHash,
     locationSearch,
     navigate,
     setSelectedTaskId,
@@ -103,19 +129,24 @@ export function useCanonicalTaskRoute(params: {
       setSelectedTaskId(fallbackTaskId);
     }
     const desiredTab = routeState.tab ?? "timeline";
-    const normalizedPath = locationPathname.replace(/\/+$/, "") || "/";
+    const hashPath = extractHashPath(locationHash);
+    const normalizedCurrentPath = normalizedPath(locationPathname);
+    const normalizedHashPath = hashPath ? normalizedPath(hashPath) : null;
+    const normalizedPathnameLooksRouted = normalizedCurrentPath.includes("/tasks/") || normalizedCurrentPath.split("/").filter(Boolean)[0] in ROUTE_SEGMENT_TO_TAB;
+    const currentPath = normalizedPathnameLooksRouted ? normalizedCurrentPath : normalizedHashPath ?? normalizedCurrentPath;
     const expectedPath = taskRoute(fallbackTaskId, desiredTab);
-    if (normalizedPath !== expectedPath) {
+    if (currentPath !== expectedPath) {
       navigate(
         {
           pathname: expectedPath,
           search: desiredTab === "report" ? locationSearch : "",
         },
-        { replace: normalizedPath === "/" },
+        { replace: currentPath === "/" },
       );
     }
   }, [
     isAuthed,
+    locationHash,
     locationPathname,
     locationSearch,
     navigate,

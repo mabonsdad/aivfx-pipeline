@@ -22,6 +22,8 @@ from src.contracts.api import (  # noqa: E402
     QC_SAM_PROMPT_TYPE_IDS,
     SEGMENT_CROP_ASPECT_IDS,
     TASK_STATUS_IDS,
+    TOPAZ_UPSCALE_PRESET_IDS,
+    TOPAZ_VIDEO_MODEL_IDS,
     ApiAssetUploadInitPayload,
     ApiImageEditFullPayload,
     ApiImageEditPatchPayload,
@@ -31,6 +33,7 @@ from src.contracts.api import (  # noqa: E402
     CropEdgeFeatherPayload,
     CustomReportCreatePayload,
     CustomReportOutputRefPayload,
+    ExportTopazUpscalePayload,
     MergeGenerationAdjustmentPayload,
     MergePayload,
     PatchRectPayload,
@@ -181,6 +184,10 @@ def _write_api_contracts() -> None:
             "\n",
             _ts_array("QC_EDGE_BIAS_IDS", QC_EDGE_BIAS_IDS),
             "\n",
+            _ts_array("TOPAZ_VIDEO_MODEL_IDS", TOPAZ_VIDEO_MODEL_IDS),
+            "\n",
+            _ts_array("TOPAZ_UPSCALE_PRESET_IDS", TOPAZ_UPSCALE_PRESET_IDS),
+            "\n",
             "export type TaskStatusId = (typeof TASK_STATUS_IDS)[number];\n",
             "export type JobStatusId = (typeof JOB_STATUS_IDS)[number];\n",
             "export type AssetUploadTypeId = (typeof ASSET_UPLOAD_TYPE_IDS)[number];\n",
@@ -192,6 +199,8 @@ def _write_api_contracts() -> None:
             "export type QcEdgeSuppressionId = (typeof QC_EDGE_SUPPRESSION_IDS)[number];\n",
             "export type QcSamPromptTypeId = (typeof QC_SAM_PROMPT_TYPE_IDS)[number];\n",
             "export type QcEdgeBiasId = (typeof QC_EDGE_BIAS_IDS)[number];\n\n",
+            "export type TopazVideoModelId = (typeof TOPAZ_VIDEO_MODEL_IDS)[number];\n",
+            "export type TopazUpscalePresetId = (typeof TOPAZ_UPSCALE_PRESET_IDS)[number];\n\n",
         ]
     )
 
@@ -209,6 +218,7 @@ def _write_api_contracts() -> None:
         ("ApiImageEditPatchPayload", ApiImageEditPatchPayload),
         ("ApiReferenceVideoGeneratePayload", ApiReferenceVideoGeneratePayload),
         ("AssetDeletePayload", AssetDeletePayload),
+        ("ExportTopazUpscalePayload", ExportTopazUpscalePayload),
         ("CustomReportOutputRefPayload", CustomReportOutputRefPayload),
         ("CustomReportCreatePayload", CustomReportCreatePayload),
     ]

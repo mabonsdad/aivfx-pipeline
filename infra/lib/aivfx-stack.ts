@@ -34,7 +34,9 @@ export class AivfxStack extends cdk.Stack {
       .split(",")
       .map((value) => value.trim())
       .filter(Boolean);
-    const allowedOriginsRaw = process.env.ALLOWED_WEB_ORIGINS ?? "https://www.shwsh.co.uk,https://s3.eu-west-2.amazonaws.com";
+    const allowedOriginsRaw =
+      process.env.ALLOWED_WEB_ORIGINS ??
+      "https://www.shwsh.co.uk,https://shwsh.co.uk,https://s3.eu-west-2.amazonaws.com";
     const allowedOrigins = allowedOriginsRaw
       .split(",")
       .map((value) => value.trim())

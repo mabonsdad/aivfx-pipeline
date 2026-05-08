@@ -15,6 +15,8 @@ from src.contracts.api import (
     QC_SAM_PROMPT_TYPE_IDS,
     SEGMENT_CROP_ASPECT_IDS,
     TASK_STATUS_IDS,
+    TOPAZ_UPSCALE_PRESET_IDS,
+    TOPAZ_VIDEO_MODEL_IDS,
 )
 from src.contracts.video import FULL_EDIT_MODEL_IDS, PATCH_EDIT_MODEL_IDS, VIDEO_MODE_IDS, VIDEO_MODEL_IDS
 
@@ -55,11 +57,14 @@ def test_generated_frontend_api_contract_matches_backend_contract() -> None:
     assert _parse_ts_const(source, "QC_EDGE_SUPPRESSION_IDS") == QC_EDGE_SUPPRESSION_IDS
     assert _parse_ts_const(source, "QC_SAM_PROMPT_TYPE_IDS") == QC_SAM_PROMPT_TYPE_IDS
     assert _parse_ts_const(source, "QC_EDGE_BIAS_IDS") == QC_EDGE_BIAS_IDS
+    assert _parse_ts_const(source, "TOPAZ_VIDEO_MODEL_IDS") == TOPAZ_VIDEO_MODEL_IDS
+    assert _parse_ts_const(source, "TOPAZ_UPSCALE_PRESET_IDS") == TOPAZ_UPSCALE_PRESET_IDS
 
     for type_name in (
         "SegmentGeneratePayload",
         "ChunkedSegmentGeneratePayload",
         "ApiReferenceVideoGeneratePayload",
         "CustomReportCreatePayload",
+        "ExportTopazUpscalePayload",
     ):
         assert f"export type {type_name} =" in source

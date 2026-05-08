@@ -79,6 +79,7 @@ export default function NewTaskModal({
         <div className="mb-4 flex items-center justify-between">
           <h3 className="text-lg font-semibold">Upload New Video</h3>
           <button
+            type="button"
             className="text-sm text-ink/60 underline disabled:cursor-not-allowed disabled:opacity-50"
             onClick={onClose}
             disabled={isBusy}
@@ -206,6 +207,7 @@ export default function NewTaskModal({
             </StatusNotice>
           ) : null}
           <button
+            type="button"
             className="w-full rounded-md bg-accent px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-50"
             disabled={!canSubmit || taskNameAlreadyExists || isBusy}
             onClick={onSubmit}

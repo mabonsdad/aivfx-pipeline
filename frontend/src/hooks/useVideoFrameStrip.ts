@@ -18,6 +18,13 @@ function isValidHttpUrl(value: string | null | undefined): value is string {
   }
 }
 
+function resetDetachedVideoElement(video: HTMLVideoElement): void {
+  video.pause();
+  video.removeAttribute("src");
+  // Avoids browsers trying to resolve an empty src to the current HTML document.
+  video.load();
+}
+
 export function useVideoFrameStrip({
   videoUrl,
   fps,
@@ -89,8 +96,7 @@ export function useVideoFrameStrip({
         if (!cancelled) {
           setItems(uniqueFrames.map((frameIndex) => ({ frameIndex, imageUrl: null })));
         }
-        video.pause();
-        video.src = "";
+        resetDetachedVideoElement(video);
         return;
       }
 
@@ -102,8 +108,7 @@ export function useVideoFrameStrip({
         if (!cancelled) {
           setItems(uniqueFrames.map((frameIndex) => ({ frameIndex, imageUrl: null })));
         }
-        video.pause();
-        video.src = "";
+        resetDetachedVideoElement(video);
         return;
       }
 
@@ -154,8 +159,7 @@ export function useVideoFrameStrip({
         }
       }
 
-      video.pause();
-      video.src = "";
+      resetDetachedVideoElement(video);
       if (!cancelled) {
         setItems(results);
       }

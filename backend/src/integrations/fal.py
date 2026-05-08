@@ -15,6 +15,7 @@ FAL_SEEDANCE_REFERENCE_TO_VIDEO_MODEL = "bytedance/seedance-2.0/reference-to-vid
 FAL_SORA_2_IMAGE_TO_VIDEO_PRO_MODEL = "fal-ai/sora-2/image-to-video/pro"
 FAL_HAPPY_HORSE_VIDEO_EDIT_MODEL = "alibaba/happy-horse/video-edit"
 FAL_HAPPY_HORSE_IMAGE_TO_VIDEO_MODEL = "alibaba/happy-horse/image-to-video"
+FAL_TOPAZ_VIDEO_UPSCALE_MODEL = "fal-ai/topaz/upscale/video"
 CONTENT_POLICY_MESSAGE = (
     "fal.ai rejected the Seedance request because the reference image or video appears to contain "
     "a real-person likeness or other private information. This endpoint does not expose a setting "
@@ -99,6 +100,15 @@ def submit_happy_horse_image_to_video(*, api_key: str, input: dict[str, Any]) ->
     return _request_json(
         "POST",
         f"{FAL_QUEUE_ENDPOINT}/{FAL_HAPPY_HORSE_IMAGE_TO_VIDEO_MODEL}",
+        api_key=api_key,
+        payload=input,
+    )
+
+
+def submit_topaz_video_upscale(*, api_key: str, input: dict[str, Any]) -> dict[str, Any]:
+    return _request_json(
+        "POST",
+        f"{FAL_QUEUE_ENDPOINT}/{FAL_TOPAZ_VIDEO_UPSCALE_MODEL}",
         api_key=api_key,
         payload=input,
     )

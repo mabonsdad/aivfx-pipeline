@@ -12,6 +12,7 @@ export default function WorkflowTabs({ tabs, activeTab, onSelect, variant = "pri
       {tabs.map(({ id, label }, index) => (
         <div key={id} className="flex items-center gap-2">
           <button
+            type="button"
             onClick={() => onSelect(id)}
             className={`flex items-center gap-2 rounded-md text-sm transition ${
               activeTab === id
@@ -34,7 +35,7 @@ export default function WorkflowTabs({ tabs, activeTab, onSelect, variant = "pri
             ) : null}
             {label}
           </button>
-          {isPrimary && index < tabs.length - 1 ? <span className="text-ink/35">→</span> : null}
+          {isPrimary && index < tabs.length - 1 ? <span className="pointer-events-none select-none text-ink/35">→</span> : null}
         </div>
       ))}
     </div>

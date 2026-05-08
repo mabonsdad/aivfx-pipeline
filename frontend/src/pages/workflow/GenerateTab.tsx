@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
 
 import { CompareIcon, DeleteIcon, DownloadIcon, IconActionButton, PreviewIcon } from "../../components/layout/MediaActionButtons";
-import { PendingButtonLabel, StatusNotice } from "../../components/layout/UiFeedback";
+import { PendingButtonLabel, Spinner, StatusNotice } from "../../components/layout/UiFeedback";
 import FrameLimitInfoButton from "../../components/workflow/FrameLimitInfoButton";
 import type {
   HappyHorseResolutionId,
@@ -15,6 +15,19 @@ import type { GenerateInputMode } from "../../lib/generationModeRegistry";
 import type { ChunkedGenerationRun, CustomReportOutputRef, SegmentGeneration, SegmentRecord, TaskDetail } from "../../types/api";
 
 type VideoModel = VideoModelId;
+
+type PendingGenerationCard = {
+  jobId: string;
+  segmentId: string;
+  genId?: string;
+  model: string;
+  mode: string;
+  status: "queued" | "running" | "failed";
+  progress: number;
+  createdAt?: string;
+  updatedAt?: string;
+  error?: string;
+};
 
 export type GenerateTabCtx = {
   viewMode: "create" | "outputs";
@@ -82,6 +95,8 @@ export type GenerateTabCtx = {
   task: TaskDetail | undefined;
   originalPreviewIsSegmentClip: boolean;
   selectedSegmentGenerations: SegmentGeneration[];
+  pendingGenerations: PendingGenerationCard[];
+  requestCancelPendingGenerationJob: (jobId: string) => Promise<void>;
   selectedReportOutputs: Record<string, { taskId: string; ref: CustomReportOutputRef }>;
   reportOutputRefKey: (ref: CustomReportOutputRef) => string;
   toggleCustomReportOutput: (taskId: string, ref: CustomReportOutputRef) => void;
@@ -174,6 +189,8 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
     task,
     originalPreviewIsSegmentClip,
     selectedSegmentGenerations,
+    pendingGenerations,
+    requestCancelPendingGenerationJob,
     generationCardsVisible,
     truncateIdentifier,
     selectSegmentGeneration,
@@ -191,6 +208,7 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
   const [chunkPromptDrafts, setChunkPromptDrafts] = useState<Record<number, string>>({});
   const [manualUploadPending, setManualUploadPending] = useState(false);
   const [manualUploadError, setManualUploadError] = useState<string | null>(null);
+  const [cancellingPendingJobIds, setCancellingPendingJobIds] = useState<Record<string, boolean>>({});
   const lastSavedRunRef = useRef<string | null>(null);
   const promptDraftRunIdRef = useRef<string | null>(null);
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
@@ -205,6 +223,12 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
     !selectedSegmentOverLimit &&
     !wholeVideoNeedsChunking &&
     !generationPromptError;
+  const selectedGenerationIds = new Set(selectedSegmentGenerations.map((generation) => generation.genId));
+  const pendingGenerationCards = pendingGenerations.filter((job) => !job.genId || !selectedGenerationIds.has(job.genId));
+  const totalOutputCards = pendingGenerationCards.length + selectedSegmentGenerations.length;
+  const visiblePendingGenerationCards = pendingGenerationCards.slice(0, generationCardsVisible);
+  const visibleGenerationSlots = Math.max(0, generationCardsVisible - visiblePendingGenerationCards.length);
+  const visibleSegmentGenerations = selectedSegmentGenerations.slice(0, visibleGenerationSlots);
 
   useEffect(() => {
     if (!latestChunkedRun) return;
@@ -813,7 +837,55 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
           </div>
         </div>
         <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-          {selectedSegmentGenerations.slice(0, generationCardsVisible).map((gen, index) => {
+          {visiblePendingGenerationCards.map((job) => (
+            <div
+              key={`pending-${job.jobId}`}
+              className={`rounded border p-2 ${job.status === "failed" ? "border-red-200 bg-red-50" : "border-amber-200 bg-amber-50"}`}
+            >
+              <div className="mb-2 flex items-center justify-between gap-2 text-xs">
+                <span className="inline-flex items-center gap-1 uppercase text-ink/70">
+                  {job.status === "queued" || job.status === "running" ? <Spinner className="h-3 w-3" /> : null}
+                  {job.status}
+                </span>
+                <span className="text-[11px] text-ink/50">{job.progress}%</span>
+              </div>
+              <div className="flex aspect-video w-full items-center justify-center rounded-md border border-dashed border-ink/20 bg-white text-xs text-ink/60">
+                Generated output pending
+              </div>
+              <p className="mt-2 text-xs font-medium text-ink/80">
+                {job.model} / {job.mode}
+              </p>
+              <p className="text-[11px] text-ink/60">{formatCompactTimestamp(job.updatedAt ?? job.createdAt)}</p>
+              {job.error ? (
+                <p className="mt-1 line-clamp-3 text-[11px] text-red-700" title={job.error}>
+                  {job.error}
+                </p>
+              ) : null}
+              <div className="mt-2 flex items-center gap-2">
+                <button type="button" className="rounded border border-ink/20 bg-white px-3 py-2 text-xs text-ink/60" disabled>
+                  Waiting...
+                </button>
+                <IconActionButton
+                  title="Cancel job"
+                  tone="danger"
+                  disabled={Boolean(cancellingPendingJobIds[job.jobId])}
+                  onClick={() => {
+                    setCancellingPendingJobIds((previous) => ({ ...previous, [job.jobId]: true }));
+                    void requestCancelPendingGenerationJob(job.jobId).finally(() => {
+                      setCancellingPendingJobIds((previous) => {
+                        const next = { ...previous };
+                        delete next[job.jobId];
+                        return next;
+                      });
+                    });
+                  }}
+                >
+                  <DeleteIcon />
+                </IconActionButton>
+              </div>
+            </div>
+          ))}
+          {visibleSegmentGenerations.map((gen, index) => {
               const isSelected = selectedPreviewGeneration?.genId === gen.genId;
               return (
             <div
@@ -931,12 +1003,12 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
             }
           )}
         </div>
-        {generationCardsVisible < selectedSegmentGenerations.length ? (
+        {generationCardsVisible < totalOutputCards ? (
           <button className="text-sm text-accent underline" onClick={() => setGenerationCardsVisible((count) => count + 6)}>
             More...
           </button>
         ) : null}
-        {selectedSegmentGenerations.length === 0 ? <p className="text-sm text-ink/60">No generated outputs for this working range yet.</p> : null}
+        {totalOutputCards === 0 ? <p className="text-sm text-ink/60">No generated outputs for this working range yet.</p> : null}
         {nextWarning ? (
           <StatusNotice variant="warning">
             <p className="text-xs">{nextWarning}</p>

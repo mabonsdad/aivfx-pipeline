@@ -47,6 +47,7 @@ def test_build_job_handlers_routes_api_handler_inputs() -> None:
         handle_merge_alignment_suggestion_fn=_capture("merge_align"),
         handle_generation_reconcile_timing_fn=_capture("reconcile"),
         handle_merge_fn=_capture("merge"),
+        handle_export_topaz_upscale_fn=_capture("topaz"),
         handle_qc_report_build_fn=_capture("qc"),
         handle_motion_sync_qc_fn=_capture("motion"),
         handle_video_cleanup_init_fn=_capture("cleanup_init"),
@@ -94,3 +95,37 @@ def test_handle_job_failure_updates_generation_alignment_state() -> None:
     assert isinstance(suggestion, dict)
     assert suggestion["status"] == "failed"
     assert suggestion["jobId"] == "job_1"
+
+
+def test_handle_job_failure_updates_topaz_state() -> None:
+    store = _Store()
+    store.task = {
+        "exports": [
+            {
+                "exportId": "exp_src",
+                "outputKey": "users/u/tasks/t/exports/out.mp4",
+            }
+        ]
+    }
+    handled = handle_job_failure(
+        job_type="export_topaz_upscale",
+        job_id="job_topaz",
+        task_id="task_1",
+        user_id="user_1",
+        job={"payload": {"sourceExportId": "exp_src", "resultExportId": "exp_new"}},
+        store=store,
+        task=store.task,
+        error=RuntimeError("fal unavailable"),
+        now_iso_fn=lambda: "2026-05-06T12:00:00Z",
+        get_cleanup_track_fn=lambda _task, _track_id: None,
+        find_chunked_generation_run_fn=lambda _task, _run_id: None,
+        mark_chunked_generation_run_failed_fn=lambda **_kwargs: None,
+    )
+
+    assert handled is True
+    exports = (store.task or {}).get("exports", [])
+    assert isinstance(exports, list) and exports
+    topaz_state = exports[0].get("topazUpscale")
+    assert isinstance(topaz_state, dict)
+    assert topaz_state["status"] == "failed"
+    assert topaz_state["jobId"] == "job_topaz"

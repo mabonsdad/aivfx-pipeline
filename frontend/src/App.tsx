@@ -17,6 +17,7 @@ import {
   taskRoute,
   type ReportView,
   type TabId,
+  type WorkflowRouteState,
   useCanonicalTaskRoute,
   useReportRouteState,
   useWorkflowRouteState,
@@ -42,7 +43,6 @@ import { PRIMARY_WORKFLOW_TABS, type PrimaryWorkflowSection } from "./lib/workfl
 import { currentUser, login, logout } from "./lib/auth";
 import type { EditFrameTabCtx } from "./pages/workflow/EditFrameTab";
 import type { GenerateTabCtx } from "./pages/workflow/GenerateTab";
-import type { JobsPanelCtx } from "./pages/workflow/JobsPanel";
 import type { MergeTabCtx } from "./pages/workflow/MergeTab";
 import type { PickFrameTabCtx } from "./pages/workflow/PickFrameTab";
 import type { RefineFramesTabCtx } from "./pages/workflow/RefineFramesTab";
@@ -148,6 +148,31 @@ type QualityMatchModalState = {
   alreadyReviewed: boolean;
 };
 
+type PendingEditJobCard = {
+  jobId: string;
+  frameId: string;
+  model: string;
+  status: "queued" | "running" | "failed";
+  progress: number;
+  createdAt?: string;
+  updatedAt?: string;
+  error?: string;
+  type: "edit_full" | "edit_patch";
+};
+
+type PendingGenerationCard = {
+  jobId: string;
+  segmentId: string;
+  genId?: string;
+  model: string;
+  mode: string;
+  status: "queued" | "running" | "failed";
+  progress: number;
+  createdAt?: string;
+  updatedAt?: string;
+  error?: string;
+};
+
 const ReportsPage = lazy(() => import("./pages/ReportsPage"));
 const CustomQcPage = lazy(() => import("./pages/CustomQcPage"));
 const ApiLogsPage = lazy(() => import("./pages/ApiLogsPage"));
@@ -157,7 +182,6 @@ const RefineFramesTab = lazy(() => import("./pages/workflow/RefineFramesTab"));
 const GenerateTab = lazy(() => import("./pages/workflow/GenerateTab"));
 const MergeTab = lazy(() => import("./pages/workflow/MergeTab"));
 const AssetsTab = lazy(() => import("./pages/workflow/AssetsTab"));
-const JobsPanel = lazy(() => import("./pages/workflow/JobsPanel"));
 
 const MAX_TRACKED_JOB_IDS = 40;
 const URL_REFRESH_IDLE_MS = 2 * 60 * 1000;
@@ -236,6 +260,11 @@ function generationThumbnailUrl(generation: SegmentGeneration): string | null {
     generation.sourceLastFrameCaptureUrl ??
     null
   );
+}
+
+function jobPayloadString(job: JobStatus, key: string): string | null {
+  const value = job.payload?.[key];
+  return typeof value === "string" && value.trim() ? value : null;
 }
 
 function workflowSectionForTab(tab: TabId): PrimaryWorkflowSection | null {
@@ -503,6 +532,7 @@ function FrameSelectCard({
               frame {frame.frameIndex} ({frame.timecode})
             </p>
             <button
+              type="button"
               onClick={onClear}
               className="rounded border border-ink/20 bg-white px-2 py-1 text-xs"
               title="Clear selected frame"
@@ -513,6 +543,7 @@ function FrameSelectCard({
         </div>
       ) : (
         <button
+          type="button"
           onClick={onSelect}
           className="w-full rounded-md border border-accent bg-accent/10 px-3 py-4 text-left transition hover:bg-accent/20"
         >
@@ -534,6 +565,7 @@ function MergeTrackStrip({
   overlapEnd,
   prefix,
   frameLabelPosition = "bottom",
+  labelFrameSource = "display",
 }: {
   title: string;
   items: VideoFrameStripItem[];
@@ -544,6 +576,7 @@ function MergeTrackStrip({
   overlapEnd?: number;
   prefix: string;
   frameLabelPosition?: "top" | "bottom";
+  labelFrameSource?: "display" | "source";
 }) {
   const itemWidthPx = 96;
   const overlapMin = overlapStart != null && overlapEnd != null ? Math.min(overlapStart, overlapEnd) : null;
@@ -576,6 +609,10 @@ function MergeTrackStrip({
           {slots.map((slot) => {
             const item = slot.item;
             const inOverlap = overlapMin != null && overlapMax != null && slot.frameIndex >= overlapMin && slot.frameIndex <= overlapMax;
+            const labelFrameIndex =
+              labelFrameSource === "source" && typeof item?.sourceFrameIndex === "number"
+                ? item.sourceFrameIndex
+                : slot.frameIndex;
             return (
               <div
                 key={`${title}:${slot.frameIndex}`}
@@ -586,7 +623,7 @@ function MergeTrackStrip({
               >
                 {frameLabelPosition === "top" ? (
                   <p className="truncate px-1 py-1 text-[10px] text-ink/70">
-                    {slot.frameIndex >= 0 ? `${prefix}${slot.frameIndex}` : ""}
+                    {labelFrameIndex >= 0 ? `${prefix}${labelFrameIndex}` : ""}
                   </p>
                 ) : null}
                 {item?.imageUrl ? (
@@ -598,7 +635,7 @@ function MergeTrackStrip({
                 )}
                 {frameLabelPosition === "bottom" ? (
                   <p className="truncate px-1 py-1 text-[10px] text-ink/70">
-                    {slot.frameIndex >= 0 ? `${prefix}${slot.frameIndex}` : ""}
+                    {labelFrameIndex >= 0 ? `${prefix}${labelFrameIndex}` : ""}
                   </p>
                 ) : null}
               </div>
@@ -649,6 +686,7 @@ function MergeBoundaryPreview({
     overlapEnd?: number;
     prefix: string;
     frameLabelPosition?: "top" | "bottom";
+    labelFrameSource?: "display" | "source";
   };
   secondTrack: {
     title: string;
@@ -660,6 +698,7 @@ function MergeBoundaryPreview({
     overlapEnd?: number;
     prefix: string;
     frameLabelPosition?: "top" | "bottom";
+    labelFrameSource?: "display" | "source";
   };
 }) {
   return (
@@ -704,7 +743,8 @@ export default function App() {
   const [isPageVisible, setIsPageVisible] = useState(
     typeof document === "undefined" ? true : document.visibilityState === "visible",
   );
-  const routeState = useWorkflowRouteState(location.pathname);
+  const routeState = useWorkflowRouteState(location.pathname, location.hash);
+  const [routeOverride, setRouteOverride] = useState<WorkflowRouteState | null>(null);
   const { reportView, activeCustomReportId } = useReportRouteState(location.search);
   const {
     selectedReportOutputs,
@@ -720,9 +760,10 @@ export default function App() {
   const [libraryEditedFrameAssetsVisible, setLibraryEditedFrameAssetsVisible] = useState(6);
   const [libraryGeneratedAssetsVisible, setLibraryGeneratedAssetsVisible] = useState(6);
   const [generationCardsVisible, setGenerationCardsVisible] = useState(6);
-  const [jobsVisible, setJobsVisible] = useState(6);
   const [prompt, setPrompt] = useState("");
-  const [model, setModel] = useState<"nano_banana" | "nano_banana_pro" | "chatgpt" | "chatgpt_latest">("nano_banana_pro");
+  const [model, setModel] = useState<
+    "nano_banana" | "nano_banana_pro" | "chatgpt" | "chatgpt_latest" | "luma_uni_1" | "luma_uni_1_max"
+  >("nano_banana_pro");
   const [patchPrompt, setPatchPrompt] = useState("");
   const [patchEngine, setPatchEngine] = useState<PatchEngine>("nano_banana_pro");
   const [runwareRepaintingScale, setRunwareRepaintingScale] = useState(0.7);
@@ -791,6 +832,7 @@ export default function App() {
   } | null>(null);
   const [, setReportGraphModal] = useState<{ url: string; label: string } | null>(null);
   const [motionSyncModalExportId, setMotionSyncModalExportId] = useState<string | null>(null);
+  const [topazUpscalePendingExportId, setTopazUpscalePendingExportId] = useState<string | null>(null);
   const [qualityMatchModal, setQualityMatchModal] = useState<QualityMatchModalState>({
     isOpen: false,
     frameId: null,
@@ -890,17 +932,29 @@ export default function App() {
     refetchOnReconnect: false,
   });
 
-  const tab: TabId = routeState.tab ?? "timeline";
+  const effectiveRouteState = routeOverride ?? routeState;
+  const tab: TabId = effectiveRouteState.tab ?? "timeline";
   const activeWorkflowSection = workflowSectionForTab(tab);
   const activePostTab: TabId = tab === "merge" ? tab : "merge";
   const isReportTab = tab === "report";
-  const selectedTaskId = routeState.taskId ?? storeSelectedTaskId;
+  const selectedTaskId = effectiveRouteState.taskId ?? storeSelectedTaskId;
   const reportTaskId = selectedTaskId;
+
+  useEffect(() => {
+    if (!routeOverride) return;
+    const routeSettled =
+      routeState.taskId === routeOverride.taskId &&
+      routeState.tab === routeOverride.tab;
+    if (routeSettled) {
+      setRouteOverride(null);
+    }
+  }, [routeOverride, routeState.tab, routeState.taskId]);
 
   const setTab = useCallback(
     (nextTab: TabId, taskIdOverride?: string | null, replace = false) => {
       const targetTaskId = taskIdOverride ?? selectedTaskId ?? tasksQuery.data?.[0]?.taskId ?? null;
       if (!targetTaskId) return;
+      setRouteOverride({ taskId: targetTaskId, tab: nextTab });
       navigate(taskRoute(targetTaskId, nextTab), { replace });
     },
     [navigate, selectedTaskId, tasksQuery.data],
@@ -937,6 +991,7 @@ export default function App() {
       const nextPath = taskRoute(taskId, "report");
       const nextSearch = `?${params.toString()}`;
       if (location.pathname === nextPath && location.search === nextSearch) return;
+      setRouteOverride({ taskId, tab: "report" });
       navigate({ pathname: nextPath, search: nextSearch }, { replace });
     },
     [location.pathname, location.search, navigate],
@@ -988,10 +1043,11 @@ export default function App() {
 
   useCanonicalTaskRoute({
     isAuthed,
-    routeState,
+    routeState: effectiveRouteState,
     storeSelectedTaskId,
     taskIds: (tasksQuery.data ?? []).map((taskItem) => taskItem.taskId),
     locationPathname: location.pathname,
+    locationHash: location.hash,
     locationSearch: location.search,
     navigate,
     setSelectedTaskId,
@@ -1569,6 +1625,19 @@ export default function App() {
       await queryClient.invalidateQueries({ queryKey: ["task", "assets", variables.taskId] });
     },
   });
+  const cancelJobMutation = useMutation({
+    mutationFn: async ({ jobId, reason }: { jobId: string; reason?: string }) => apiClient.cancelJob(jobId, { reason }),
+    onSuccess: async (_result, variables) => {
+      setJobIds((previous) => appendTrackedJobId(previous, variables.jobId));
+      await queryClient.invalidateQueries({ queryKey: ["job", variables.jobId] });
+      await queryClient.invalidateQueries({ queryKey: ["tasks"] });
+      if (selectedTaskId) {
+        await queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
+        await queryClient.invalidateQueries({ queryKey: ["task", "report", selectedTaskId] });
+        await queryClient.invalidateQueries({ queryKey: ["task", "assets", selectedTaskId] });
+      }
+    },
+  });
 
   const captureMutation = useMutation({
     mutationFn: async ({ frameIndex }: { frameIndex: number }) => {
@@ -2049,6 +2118,41 @@ export default function App() {
     },
   });
 
+  const runTopazUpscaleMutation = useMutation({
+    mutationFn: async ({
+      exportId,
+      payload,
+    }: {
+      exportId: string;
+      payload: {
+        preset: "balanced" | "recover_detail" | "fast_sharpen";
+        model: string;
+        upscaleFactor: number;
+        h264Output: boolean;
+        force?: boolean;
+      };
+    }) => {
+      if (!selectedTaskId) throw new Error("Select a task");
+      return apiClient.runTopazUpscale(selectedTaskId, exportId, payload);
+    },
+    onMutate: async ({ exportId }) => {
+      setTopazUpscalePendingExportId(exportId);
+    },
+    onSuccess: async (result) => {
+      if (result.jobId) {
+        setJobIds((prev) => appendTrackedJobId(prev, result.jobId));
+      }
+      if (selectedTaskId) {
+        await queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
+        await queryClient.invalidateQueries({ queryKey: ["task", "report", selectedTaskId] });
+        await queryClient.invalidateQueries({ queryKey: ["task", "assets", selectedTaskId] });
+      }
+    },
+    onSettled: () => {
+      setTopazUpscalePendingExportId(null);
+    },
+  });
+
   const createCustomReportMutation = useMutation({
     mutationFn: ({
       taskId,
@@ -2099,6 +2203,8 @@ export default function App() {
     for (const exportItem of task?.exports ?? []) {
       const motionJobId = exportItem.motionSyncQc?.jobId;
       if (motionJobId) ids.push(motionJobId);
+      const topazJobId = exportItem.topazUpscale?.jobId;
+      if (topazJobId) ids.push(topazJobId);
     }
     return ids;
   }, [task?.chunkedGenerationRuns, task?.customReports, task?.exports, task?.segmentGenerations]);
@@ -2216,6 +2322,81 @@ export default function App() {
         ),
     [jobQueries, selectedTaskId],
   );
+
+  const dismissPendingEditJob = useCallback((jobId: string) => {
+    setJobIds((previous) => previous.filter((id) => id !== jobId));
+    seenDoneRef.current.delete(jobId);
+  }, []);
+
+  const requestCancelPendingEditJob = useCallback(
+    async (jobId: string) => {
+      try {
+        await cancelJobMutation.mutateAsync({ jobId, reason: "Cancelled from Edit step" });
+      } catch (error) {
+        setAppUiError(error instanceof Error ? error.message : "Failed to cancel job");
+      }
+    },
+    [cancelJobMutation, setAppUiError],
+  );
+
+  const requestCancelPendingGenerationJob = useCallback(
+    async (jobId: string) => {
+      try {
+        await cancelJobMutation.mutateAsync({ jobId, reason: "Cancelled from Outputs step" });
+      } catch (error) {
+        setAppUiError(error instanceof Error ? error.message : "Failed to cancel job");
+      }
+    },
+    [cancelJobMutation, setAppUiError],
+  );
+
+  const pendingEditJobs = useMemo<PendingEditJobCard[]>(() => {
+    if (!activeEditFrame?.frameId) return [];
+    const frameId = activeEditFrame.frameId;
+    const cards: PendingEditJobCard[] = [];
+    for (const job of sortedJobs) {
+      if (job.type !== "edit_full" && job.type !== "edit_patch") continue;
+      if (job.status !== "queued" && job.status !== "running" && job.status !== "failed") continue;
+      const payloadFrameId = jobPayloadString(job, "frameId");
+      if (payloadFrameId !== frameId) continue;
+      cards.push({
+        jobId: job.jobId,
+        frameId,
+        model: jobPayloadString(job, "model") ?? "Unknown model",
+        status: job.status as "queued" | "running" | "failed",
+        progress: Number.isFinite(job.progress) ? Math.max(0, Math.min(100, Math.round(job.progress))) : 0,
+        createdAt: job.createdAt,
+        updatedAt: job.updatedAt,
+        error: job.error,
+        type: job.type as "edit_full" | "edit_patch",
+      });
+    }
+    return cards.sort((a, b) => new Date(b.updatedAt ?? b.createdAt ?? 0).getTime() - new Date(a.updatedAt ?? a.createdAt ?? 0).getTime());
+  }, [activeEditFrame?.frameId, sortedJobs]);
+
+  const pendingGenerations = useMemo<PendingGenerationCard[]>(() => {
+    if (!selectedSegmentId) return [];
+    const cards: PendingGenerationCard[] = [];
+    for (const job of sortedJobs) {
+      if (job.type !== "segment_generate") continue;
+      if (job.status !== "queued" && job.status !== "running" && job.status !== "failed") continue;
+      const segmentId = jobPayloadString(job, "segmentId");
+      if (segmentId !== selectedSegmentId) continue;
+      cards.push({
+        jobId: job.jobId,
+        segmentId,
+        genId: jobPayloadString(job, "genId") ?? undefined,
+        model: jobPayloadString(job, "lumaModel") ?? "Unknown model",
+        mode: jobPayloadString(job, "mode") ?? "unknown_mode",
+        status: job.status as "queued" | "running" | "failed",
+        progress: Number.isFinite(job.progress) ? Math.max(0, Math.min(100, Math.round(job.progress))) : 0,
+        createdAt: job.createdAt,
+        updatedAt: job.updatedAt,
+        error: job.error,
+      });
+    }
+    return cards.sort((a, b) => new Date(b.updatedAt ?? b.createdAt ?? 0).getTime() - new Date(a.updatedAt ?? a.createdAt ?? 0).getTime());
+  }, [selectedSegmentId, sortedJobs]);
 
   const mergeFps = fpsValue(task);
   const mergeOriginalStartFrame = mergeTargetSegment?.startFrame ?? 0;
@@ -2487,12 +2668,6 @@ export default function App() {
       state.suggestion &&
       (mergeAlignmentSuggestionJobId ? state.jobId === mergeAlignmentSuggestionJobId : !mergeAlignmentSuggestion)
     ) {
-      const segmentStartFrame = mergeTargetSegment?.startFrame ?? 0;
-      setMergeInsertStartFrame(state.suggestion.suggested.startFrameOverride - segmentStartFrame);
-      setMergeTrimStartFrames(state.suggestion.suggested.trimStartFrames);
-      setMergeTrimEndFrames(state.suggestion.suggested.trimEndFrames);
-      setMergePlaybackRate(state.suggestion.analysis.suggestedPlaybackRate || 1);
-      setMergeApplyRetime(state.suggestion.analysis.recommendation === "retime_recommended");
       setMergeAlignmentSuggestion(state.suggestion);
       setMergeAlignmentSuggestionJobId(null);
       setMergeAlignmentSuggestionError(null);
@@ -2506,11 +2681,7 @@ export default function App() {
     jobStatusById,
     mergeAlignmentSuggestion,
     mergeAlignmentSuggestionJobId,
-    mergeTargetSegment?.startFrame,
     mergeTargetGeneration?.mergeAlignmentSuggestion,
-    setMergeInsertStartFrame,
-    setMergeTrimEndFrames,
-    setMergeTrimStartFrames,
   ]);
 
   useEffect(() => {
@@ -2528,22 +2699,12 @@ export default function App() {
       return;
     }
     const suggestion = result as NonNullable<typeof mergeAlignmentSuggestion>;
-    const segmentStartFrame = mergeTargetSegment?.startFrame ?? 0;
-    setMergeInsertStartFrame(suggestion.suggested.startFrameOverride - segmentStartFrame);
-    setMergeTrimStartFrames(suggestion.suggested.trimStartFrames);
-    setMergeTrimEndFrames(suggestion.suggested.trimEndFrames);
-    setMergePlaybackRate(suggestion.analysis.suggestedPlaybackRate || 1);
-    setMergeApplyRetime(suggestion.analysis.recommendation === "retime_recommended");
     setMergeAlignmentSuggestion(suggestion);
     setMergeAlignmentSuggestionJobId(null);
     setMergeAlignmentSuggestionError(null);
   }, [
     mergeAlignmentSuggestionJob,
     mergeAlignmentSuggestionJobId,
-    mergeTargetSegment?.startFrame,
-    setMergeInsertStartFrame,
-    setMergeTrimEndFrames,
-    setMergeTrimStartFrames,
   ]);
 
   useEffect(() => {
@@ -3540,6 +3701,14 @@ export default function App() {
 
   async function handleTabChange(nextTab: TabId) {
     if (nextTab === tab) return;
+    const leavingPostProcess = tab === "merge" && nextTab !== "merge";
+    if (leavingPostProcess) {
+      setMotionSyncModalExportId(null);
+      setVideoCleanupModal({
+        isOpen: false,
+        generationId: null,
+      });
+    }
     if (tab === "timeline" && nextTab !== "timeline" && nextTab !== "report" && nextTab !== "custom_qc" && nextTab !== "api_logs" && nextTab !== "asset_library") {
       const shouldUseWholeVideo = videoWorkMode !== "custom_segment" || (!selectedSegmentId && !selectedRange);
       if (shouldUseWholeVideo) {
@@ -3879,6 +4048,9 @@ export default function App() {
       fullEditMutation,
       activeEditSourceImageUrl,
       activeEditCandidates,
+      pendingEditJobs,
+      dismissPendingEditJob,
+      requestCancelPendingEditJob,
       selectCompareCandidate,
       setImagePreviewModal,
       setImageCompareModal,
@@ -3932,6 +4104,7 @@ export default function App() {
       fullEditMutation,
       activeEditSourceImageUrl,
       activeEditCandidates,
+      pendingEditJobs,
       selectCompareCandidate,
       setImageCompareModal,
       selectedTaskId,
@@ -3951,6 +4124,8 @@ export default function App() {
       patchPrompt,
       patchEditMutation,
       maskHasPaint,
+      dismissPendingEditJob,
+      requestCancelPendingEditJob,
       renderPatchOverlay,
     ],
   );
@@ -4068,6 +4243,8 @@ export default function App() {
       task,
       originalPreviewIsSegmentClip,
       selectedSegmentGenerations,
+      pendingGenerations,
+      requestCancelPendingGenerationJob,
       selectedReportOutputs,
       reportOutputRefKey,
       toggleCustomReportOutput,
@@ -4138,6 +4315,7 @@ export default function App() {
       task,
       originalPreviewIsSegmentClip,
       selectedSegmentGenerations,
+      pendingGenerations,
       selectedReportOutputs,
       generationCardsVisible,
       selectSegmentGeneration,
@@ -4146,6 +4324,7 @@ export default function App() {
       selectedTaskId,
       refreshSignedUrlsForTask,
       handleDeleteAsset,
+      requestCancelPendingGenerationJob,
     ],
   );
 
@@ -4233,6 +4412,11 @@ export default function App() {
       keyBasenameFromS3Key,
       formatCompactTimestamp,
       openMotionSyncModal,
+      queueTopazUpscale: (exportId, payload) => {
+        runTopazUpscaleMutation.mutate({ exportId, payload });
+      },
+      isTopazUpscalePending: runTopazUpscaleMutation.isPending,
+      topazUpscalePendingExportId,
       task,
       hasMultiChunkOutput: selectedSegmentChunkedGenerationRuns.some((run) => run.chunks.length > 1),
       onTrackJobId: (jobId) => setJobIds((previous) => appendTrackedJobId(previous, jobId)),
@@ -4303,8 +4487,12 @@ export default function App() {
       extendSegmentGenerationMutation.error,
       sortedExports,
       openMotionSyncModal,
+      runTopazUpscaleMutation.mutate,
+      runTopazUpscaleMutation.isPending,
+      topazUpscalePendingExportId,
       task,
       selectedSegmentChunkedGenerationRuns,
+      pendingGenerations,
     ],
   );
 
@@ -4344,22 +4532,13 @@ export default function App() {
     },
   });
 
-  const jobsPanelCtx = useMemo<JobsPanelCtx>(
-    () => ({
-      sortedJobs,
-      jobsVisible,
-      setJobsVisible,
-    }),
-    [sortedJobs, jobsVisible],
-  );
-
   if (!isAuthed) {
     return (
       <main className="min-h-screen bg-bg p-8 text-ink">
         <div className="mx-auto max-w-3xl rounded-2xl border border-ink/10 bg-card p-8 shadow-sm">
           <h1 className="text-3xl font-semibold">AI-assisted VFX Micro Pipeline</h1>
           <p className="mt-3 text-ink/70">Authenticate with Cognito to start creating tasks and processing video segments.</p>
-          <button className="mt-6 rounded-lg bg-accent px-5 py-3 text-white" onClick={() => login()}>
+          <button type="button" className="mt-6 rounded-lg bg-accent px-5 py-3 text-white" onClick={() => login()}>
             Sign In
           </button>
         </div>
@@ -4542,11 +4721,6 @@ export default function App() {
             )}
           </div>
 
-          {tab !== "api_logs" && tab !== "asset_library" ? (
-            <Suspense fallback={<div className="rounded-2xl border border-ink/10 bg-card p-4 text-sm text-ink/60">Loading jobs...</div>}>
-              <JobsPanel ctx={jobsPanelCtx} />
-            </Suspense>
-          ) : null}
         </section>
       </div>
       <PreviewModals

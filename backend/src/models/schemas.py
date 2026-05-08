@@ -16,6 +16,13 @@ from src.contracts.video import (
     VIDEO_MODEL_IDS,
     WAN27_RESOLUTION_IDS,
 )
+from src.contracts.api import (
+    LUMA_UNI_MODEL_IDS,
+    LUMA_UNI_OUTPUT_FORMAT_IDS,
+    LUMA_UNI_STYLE_IDS,
+    TOPAZ_UPSCALE_PRESET_IDS,
+    TOPAZ_VIDEO_MODEL_IDS,
+)
 
 
 def _validate_choice(value: str, *, field_name: str, allowed: tuple[str, ...]) -> str:
@@ -77,11 +84,35 @@ class FullEditRequest(BaseModel):
     model: str
     prompt: str = Field(min_length=1)
     sourceVariantId: str | None = None
+    lumaUniModel: str | None = None
+    lumaUniStyle: str | None = None
+    lumaUniOutputFormat: str | None = None
 
     @field_validator("model")
     @classmethod
     def validate_model(cls, value: str) -> str:
         return _validate_choice(value, field_name="model", allowed=FULL_EDIT_MODEL_IDS)
+
+    @field_validator("lumaUniModel")
+    @classmethod
+    def validate_luma_uni_model(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        return _validate_choice(value, field_name="lumaUniModel", allowed=LUMA_UNI_MODEL_IDS)
+
+    @field_validator("lumaUniStyle")
+    @classmethod
+    def validate_luma_uni_style(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        return _validate_choice(value, field_name="lumaUniStyle", allowed=LUMA_UNI_STYLE_IDS)
+
+    @field_validator("lumaUniOutputFormat")
+    @classmethod
+    def validate_luma_uni_output_format(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        return _validate_choice(value, field_name="lumaUniOutputFormat", allowed=LUMA_UNI_OUTPUT_FORMAT_IDS)
 
 
 class PatchRect(BaseModel):
@@ -200,11 +231,35 @@ class ApiImageEditFullRequest(BaseModel):
     model: str
     prompt: str = Field(min_length=1)
     inputAssetKey: str = Field(min_length=1)
+    lumaUniModel: str | None = None
+    lumaUniStyle: str | None = None
+    lumaUniOutputFormat: str | None = None
 
     @field_validator("model")
     @classmethod
     def validate_model(cls, value: str) -> str:
         return _validate_choice(value, field_name="model", allowed=FULL_EDIT_MODEL_IDS)
+
+    @field_validator("lumaUniModel")
+    @classmethod
+    def validate_luma_uni_model(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        return _validate_choice(value, field_name="lumaUniModel", allowed=LUMA_UNI_MODEL_IDS)
+
+    @field_validator("lumaUniStyle")
+    @classmethod
+    def validate_luma_uni_style(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        return _validate_choice(value, field_name="lumaUniStyle", allowed=LUMA_UNI_STYLE_IDS)
+
+    @field_validator("lumaUniOutputFormat")
+    @classmethod
+    def validate_luma_uni_output_format(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        return _validate_choice(value, field_name="lumaUniOutputFormat", allowed=LUMA_UNI_OUTPUT_FORMAT_IDS)
 
 
 class ApiImageEditPatchRequest(BaseModel):
@@ -389,6 +444,25 @@ class MotionSyncQcRunRequest(BaseModel):
     force: bool = False
 
 
+class ExportTopazUpscaleRequest(BaseModel):
+    force: bool = False
+    model: str = "Proteus"
+    preset: str = "balanced"
+    upscaleFactor: float = Field(default=1.0, ge=1.0, le=4.0)
+    targetFps: int | None = Field(default=None, ge=16, le=60)
+    h264Output: bool = False
+
+    @field_validator("model")
+    @classmethod
+    def validate_model(cls, value: str) -> str:
+        return _validate_choice(value, field_name="model", allowed=TOPAZ_VIDEO_MODEL_IDS)
+
+    @field_validator("preset")
+    @classmethod
+    def validate_preset(cls, value: str) -> str:
+        return _validate_choice(value, field_name="preset", allowed=TOPAZ_UPSCALE_PRESET_IDS)
+
+
 class QualityMatchSettingsRequest(BaseModel):
     diffThreshold: float = Field(default=0.08, ge=0.01, le=0.99)
     minRegionAreaPct: float = Field(default=0.0005, ge=0.0, le=0.1)
@@ -526,7 +600,18 @@ class CustomReportCreateRequest(BaseModel):
 class TaskFrameVariant(BaseModel):
     variantId: str
     type: Literal["full", "patch", "extension_anchor"]
-    model: Literal["nano_banana", "nano_banana_pro", "chatgpt", "chatgpt_latest", "runware_flux_fill", "runware_ace_pp", "generated_extension_anchor"]
+    model: Literal[
+        "nano_banana",
+        "nano_banana_pro",
+        "chatgpt",
+        "chatgpt_latest",
+        "luma_uni_1",
+        "luma_uni_1_max",
+        "luma_uni_1_1",
+        "runware_flux_fill",
+        "runware_ace_pp",
+        "generated_extension_anchor",
+    ]
     promptHash: str
     createdAt: datetime
     jobId: str | None = None

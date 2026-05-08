@@ -799,7 +799,7 @@ export default function VideoCleanupModal({
     : "grid min-h-0 flex-1 gap-0 lg:grid-cols-[300px_minmax(0,1fr)_340px]";
 
   const content = (
-      <div className={`${embedded ? "flex min-h-[68vh] w-full flex-col overflow-hidden rounded-2xl border border-ink/15 bg-card text-ink" : "flex h-[92vh] w-[min(1400px,96vw)] flex-col overflow-hidden rounded-2xl border border-ink/15 bg-card text-ink"}`} onClick={(event) => event.stopPropagation()}>
+      <div className={`${embedded ? "relative flex min-h-[68vh] w-full flex-col overflow-hidden rounded-2xl border border-ink/15 bg-card text-ink" : "relative flex h-[92vh] w-[min(1400px,96vw)] flex-col overflow-hidden rounded-2xl border border-ink/15 bg-card text-ink"}`} onClick={(event) => event.stopPropagation()}>
         <div className="flex items-start justify-between border-b border-ink/10 px-5 py-4">
           <div>
             <p className="text-xs uppercase tracking-[0.22em] text-ink/45">Post Process Cleanup</p>

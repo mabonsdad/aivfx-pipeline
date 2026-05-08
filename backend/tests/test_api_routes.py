@@ -61,6 +61,104 @@ def test_jobs_route_returns_job_when_authorized(monkeypatch) -> None:
     assert payload["jobId"] == "job_123"
 
 
+def test_jobs_cancel_route_marks_queued_generation_job_failed_and_cleans_generation(monkeypatch) -> None:
+    class _Store:
+        def __init__(self) -> None:
+            self.job = {
+                "jobId": "job_123",
+                "userId": "user-1",
+                "taskId": "task_1",
+                "type": "segment_generate",
+                "status": "queued",
+                "progress": 0,
+                "payload": {"genId": "gen_1", "segmentId": "seg_1"},
+                "createdAt": "2026-05-07T10:00:00Z",
+                "updatedAt": "2026-05-07T10:00:00Z",
+            }
+            self.task = {
+                "taskId": "task_1",
+                "userId": "user-1",
+                "segmentGenerations": {
+                    "gen_1": {
+                        "genId": "gen_1",
+                        "segmentId": "seg_1",
+                        "status": "queued",
+                        "jobId": "job_123",
+                    }
+                },
+                "segments": [],
+                "history": [],
+            }
+
+        def load_job(self, user_id: str, job_id: str):
+            if user_id == "user-1" and job_id == "job_123":
+                return self.job
+            return None
+
+        def save_job(self, job: dict):
+            self.job = job
+            return job
+
+        def load_task(self, user_id: str, task_id: str):
+            if user_id == "user-1" and task_id == "task_1":
+                return self.task
+            return None
+
+        def save_task(self, task_payload: dict, **_kwargs):
+            self.task = task_payload
+            return task_payload
+
+    store = _Store()
+    monkeypatch.setattr(api_handler, "get_user_id", lambda _event: "user-1")
+    monkeypatch.setattr(api_handler, "get_user_claims", lambda _event: {"email": "u@example.com"})
+    monkeypatch.setattr(api_handler, "S3JsonStore", lambda _bucket: store)
+    monkeypatch.setattr(api_handler, "AssetStore", lambda _bucket, _region: object())
+    monkeypatch.setattr(api_handler, "JobQueue", lambda _url: object())
+
+    result = api_handler._route(_event("POST", "/jobs/job_123/cancel", {"reason": "user requested stop"}))
+    assert result["statusCode"] == 202
+    payload = json.loads(result["body"])
+    assert payload["ok"] is True
+    assert payload["jobId"] == "job_123"
+
+    assert store.job["status"] == "failed"
+    assert store.job.get("cancelRequestedAt")
+    assert "Cancelled by user" in str(store.job.get("error"))
+    generation = store.task["segmentGenerations"]["gen_1"]
+    assert generation["status"] == "failed"
+    assert "Cancelled by user" in str(generation.get("error"))
+
+
+def test_jobs_cancel_route_returns_terminal_marker_for_completed_job(monkeypatch) -> None:
+    class _Store:
+        def __init__(self) -> None:
+            self.job = {
+                "jobId": "job_done",
+                "userId": "user-1",
+                "taskId": "task_1",
+                "type": "segment_generate",
+                "status": "complete",
+                "progress": 100,
+            }
+
+        def load_job(self, user_id: str, job_id: str):
+            if user_id == "user-1" and job_id == "job_done":
+                return self.job
+            return None
+
+    monkeypatch.setattr(api_handler, "get_user_id", lambda _event: "user-1")
+    monkeypatch.setattr(api_handler, "get_user_claims", lambda _event: {"email": "u@example.com"})
+    monkeypatch.setattr(api_handler, "S3JsonStore", lambda _bucket: _Store())
+    monkeypatch.setattr(api_handler, "AssetStore", lambda _bucket, _region: object())
+    monkeypatch.setattr(api_handler, "JobQueue", lambda _url: object())
+
+    result = api_handler._route(_event("POST", "/jobs/job_done/cancel", {"reason": "late click"}))
+    assert result["statusCode"] == 200
+    payload = json.loads(result["body"])
+    assert payload["ok"] is True
+    assert payload["alreadyTerminal"] is True
+
+
 def test_api_requests_list_route_returns_empty_list(monkeypatch) -> None:
     class _Store:
         def list_api_requests(self, user_id: str):
@@ -654,3 +752,98 @@ def test_generation_reconcile_timing_route_queues_derived_generation(monkeypatch
     assert payload["genId"] == "gen_abc"
     assert saved
     assert "gen_abc" in saved[-1]["segmentGenerations"]
+
+
+def test_export_topaz_upscale_route_queues_job(monkeypatch) -> None:
+    task = {
+        "taskId": "task_1",
+        "userId": "user-1",
+        "name": "Task 1",
+        "exports": [
+            {
+                "exportId": "exp_1",
+                "outputKey": "users/user-1/tasks/task_1/exports/output.mp4",
+                "createdAt": "2026-05-06T10:00:00Z",
+            }
+        ],
+    }
+    saved: list[dict] = []
+
+    class _Store:
+        def save_task(self, task_payload: dict):
+            saved.append(json.loads(json.dumps(task_payload)))
+            return task_payload
+
+    class _AssetStore:
+        pass
+
+    monkeypatch.setattr(api_handler, "get_user_id", lambda _event: "user-1")
+    monkeypatch.setattr(api_handler, "get_user_claims", lambda _event: {"email": "u@example.com"})
+    monkeypatch.setattr(api_handler, "S3JsonStore", lambda _bucket: _Store())
+    monkeypatch.setattr(api_handler, "AssetStore", lambda _bucket, _region: _AssetStore())
+    monkeypatch.setattr(api_handler, "JobQueue", lambda _url: object())
+    monkeypatch.setattr(api_handler, "_load_task_or_404", lambda _store, _user_id, _task_id: task)
+    monkeypatch.setattr(api_handler, "_queue_job", lambda **_kwargs: "job_topaz")
+    monkeypatch.setattr(api_handler, "new_id", lambda prefix: f"{prefix}_new")
+
+    result = api_handler._route(
+        _event(
+            "POST",
+            "/tasks/task_1/exports/exp_1/topaz-upscale",
+            {"preset": "balanced", "model": "Proteus", "upscaleFactor": 2.0, "h264Output": True},
+        )
+    )
+    assert result["statusCode"] == 202
+    payload = json.loads(result["body"])
+    assert payload["jobId"] == "job_topaz"
+    assert payload["exportId"] == "exp_new"
+    assert saved
+    state = saved[-1]["exports"][0]["topazUpscale"]
+    assert state["status"] == "queued"
+    assert state["jobId"] == "job_topaz"
+    assert state["resultExportId"] == "exp_new"
+
+
+def test_export_topaz_upscale_route_returns_existing_running_job(monkeypatch) -> None:
+    task = {
+        "taskId": "task_1",
+        "userId": "user-1",
+        "name": "Task 1",
+        "exports": [
+            {
+                "exportId": "exp_1",
+                "outputKey": "users/user-1/tasks/task_1/exports/output.mp4",
+                "topazUpscale": {
+                    "status": "running",
+                    "jobId": "job_existing",
+                    "resultExportId": "exp_prev",
+                },
+            }
+        ],
+    }
+
+    class _Store:
+        pass
+
+    class _AssetStore:
+        pass
+
+    monkeypatch.setattr(api_handler, "get_user_id", lambda _event: "user-1")
+    monkeypatch.setattr(api_handler, "get_user_claims", lambda _event: {"email": "u@example.com"})
+    monkeypatch.setattr(api_handler, "S3JsonStore", lambda _bucket: _Store())
+    monkeypatch.setattr(api_handler, "AssetStore", lambda _bucket, _region: _AssetStore())
+    monkeypatch.setattr(api_handler, "JobQueue", lambda _url: object())
+    monkeypatch.setattr(api_handler, "_load_task_or_404", lambda _store, _user_id, _task_id: task)
+
+    result = api_handler._route(
+        _event(
+            "POST",
+            "/tasks/task_1/exports/exp_1/topaz-upscale",
+            {"preset": "balanced"},
+        )
+    )
+    assert result["statusCode"] == 202
+    payload = json.loads(result["body"])
+    assert payload["alreadyRunning"] is True
+    assert payload["jobId"] == "job_existing"
+    assert payload["exportId"] == "exp_prev"

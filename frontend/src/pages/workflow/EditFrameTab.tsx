@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState, type ChangeEvent, type PointerEve
 import { apiClient } from "../../api/client";
 
 import { CompareIcon, DeleteIcon, DownloadIcon, EditIcon, IconActionButton, PreviewIcon } from "../../components/layout/MediaActionButtons";
-import { PendingButtonLabel, StatusNotice } from "../../components/layout/UiFeedback";
+import { PendingButtonLabel, Spinner, StatusNotice } from "../../components/layout/UiFeedback";
 import type { FrameVariant } from "../../types/api";
 
 type EditFrameCandidate = {
@@ -16,6 +16,18 @@ type EditFrameCandidate = {
   variant?: FrameVariant;
   qualityMatched?: boolean;
   isSelected: boolean;
+};
+
+type PendingEditJobCard = {
+  jobId: string;
+  frameId: string;
+  model: string;
+  status: "queued" | "running" | "failed";
+  progress: number;
+  createdAt?: string;
+  updatedAt?: string;
+  error?: string;
+  type: "edit_full" | "edit_patch";
 };
 
 type PatchReferenceImage = {
@@ -40,11 +52,14 @@ export type EditFrameTabCtx = {
     | null;
   prompt: string;
   setPrompt: (value: string) => void;
-  model: "nano_banana" | "nano_banana_pro" | "chatgpt" | "chatgpt_latest";
-  setModel: (value: "nano_banana" | "nano_banana_pro" | "chatgpt" | "chatgpt_latest") => void;
+  model: "nano_banana" | "nano_banana_pro" | "chatgpt" | "chatgpt_latest" | "luma_uni_1" | "luma_uni_1_max";
+  setModel: (value: "nano_banana" | "nano_banana_pro" | "chatgpt" | "chatgpt_latest" | "luma_uni_1" | "luma_uni_1_max") => void;
   fullEditMutation: { isPending: boolean; mutate: (frameId: string) => void };
   activeEditSourceImageUrl: string | null;
   activeEditCandidates: EditFrameCandidate[];
+  pendingEditJobs: PendingEditJobCard[];
+  dismissPendingEditJob: (jobId: string) => void;
+  requestCancelPendingEditJob: (jobId: string) => Promise<void>;
   selectCompareCandidate: (frameId: string, tabKey: "first" | "last", candidate: EditFrameCandidate) => void;
   setImagePreviewModal: (value: { url: string; label: string } | null) => void;
   setImageCompareModal: (value: { originalUrl: string; compareUrl: string; label: string } | null) => void;
@@ -125,6 +140,9 @@ export default function EditFrameTab({ ctx }: EditFrameTabProps) {
     fullEditMutation,
     activeEditSourceImageUrl,
     activeEditCandidates,
+    pendingEditJobs,
+    dismissPendingEditJob,
+    requestCancelPendingEditJob,
     selectCompareCandidate,
     setImagePreviewModal,
     setImageCompareModal,
@@ -172,6 +190,7 @@ export default function EditFrameTab({ ctx }: EditFrameTabProps) {
   const [downloadBusy, setDownloadBusy] = useState<"psd" | "png_zip" | null>(null);
   const [downloadError, setDownloadError] = useState<string | null>(null);
   const [manualUploadPending, setManualUploadPending] = useState(false);
+  const [cancellingPendingJobIds, setCancellingPendingJobIds] = useState<Record<string, boolean>>({});
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
 
   const canDownloadSourceFrame = Boolean(activeEditFrame?.imageUrl);
@@ -200,6 +219,122 @@ export default function EditFrameTab({ ctx }: EditFrameTabProps) {
       ),
     [activeEditCandidates],
   );
+  const originalEditCandidate = useMemo(
+    () => activeEditCandidates.find((candidate) => candidate.kind === "original") ?? null,
+    [activeEditCandidates],
+  );
+  const variantEditCandidates = useMemo(
+    () => activeEditCandidates.filter((candidate) => candidate.kind !== "original"),
+    [activeEditCandidates],
+  );
+
+  function renderEditCandidateCard(candidate: EditFrameCandidate) {
+    return (
+      <div
+        key={candidate.id}
+        className={`rounded border p-2 ${
+          candidate.isSelected ? "border-teal-500 bg-teal-50" : "border-ink/10"
+        }`}
+      >
+        <button
+          type="button"
+          className="block w-full"
+          onClick={() => {
+            if (!activeEditFrame) return;
+            selectCompareCandidate(activeEditFrame.frameId, editFrameTab, candidate);
+          }}
+          title="Select for comparison and generation"
+        >
+          <img src={candidate.imageUrl} className="mb-2 w-full rounded bg-bg object-contain" loading="lazy" decoding="async" />
+        </button>
+        <p className="text-xs font-medium text-ink/80">{candidate.label}</p>
+        <p className="text-[11px] text-ink/60">{formatCompactTimestamp(candidate.createdAt)}</p>
+        <div className="mt-2 flex items-center gap-2">
+          <IconActionButton title="Preview" onClick={() => setImagePreviewModal({ url: candidate.imageUrl, label: candidate.label })}>
+            <PreviewIcon />
+          </IconActionButton>
+          <IconActionButton
+            title={candidate.kind === "original" || !activeEditFrame?.imageUrl ? "Compare is only available for edited variants" : "Compare against original"}
+            disabled={candidate.kind === "original" || !activeEditFrame?.imageUrl}
+            onClick={() => {
+              if (candidate.kind === "original" || !activeEditFrame?.imageUrl) return;
+              setImageCompareModal({
+                originalUrl: activeEditFrame.imageUrl,
+                compareUrl: candidate.imageUrl,
+                label: candidate.label,
+              });
+            }}
+          >
+            <CompareIcon />
+          </IconActionButton>
+          <IconActionButton
+            title="Use for editing"
+            onClick={() => {
+              setEditSourceCandidate(editFrameTab, candidate);
+            }}
+          >
+            <EditIcon />
+          </IconActionButton>
+          <IconActionButton
+            title="Download options"
+            onClick={() => {
+              setDownloadError(null);
+              setDownloadBusy(null);
+              setDownloadCandidate(candidate);
+            }}
+          >
+            <DownloadIcon />
+          </IconActionButton>
+          {candidate.kind === "variant" ? (
+            candidate.variant?.variantKind === "refined" ? (
+              <button
+                type="button"
+                className="inline-flex items-center gap-1 rounded border border-teal-300 bg-teal-50 px-2 py-2 text-[11px] font-medium text-teal-700"
+                disabled
+              >
+                <QaTickIcon />
+                <span>QA</span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="rounded border border-ink/20 bg-white px-2 py-2 text-[11px] font-medium text-ink disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={!candidate.variantId || !refineableVariantIds.has(candidate.variantId)}
+                title={candidate.variantId ? "Open QA refine tools for this edited frame" : "Only generated variants can be refined"}
+                onClick={() => {
+                  if (!candidate.variantId) return;
+                  openRefineModalForVariant(candidate.variantId);
+                }}
+              >
+                QA
+              </button>
+            )
+          ) : null}
+          <IconActionButton
+            title={candidate.kind === "original" ? "Original frame cannot be deleted" : "Delete variant"}
+            tone="danger"
+            disabled={candidate.kind === "original" || !activeEditFrame || !candidate.variantId}
+            onClick={() => {
+              if (!activeEditFrame || !candidate.variantId) return;
+              handleDeleteAsset({
+                id: `variant:${activeEditFrame.frameId}:${candidate.variantId}`,
+                taskId: selectedTaskId ?? "",
+                title: candidate.label,
+                subtitle: "",
+                createdAt: candidate.createdAt ?? new Date().toISOString(),
+                previewUrl: candidate.imageUrl,
+                downloadUrl: candidate.imageUrl,
+                mediaType: "image",
+                deletePayload: { assetType: "frame_variant", frameId: activeEditFrame.frameId, variantId: candidate.variantId },
+              });
+            }}
+          >
+            <DeleteIcon />
+          </IconActionButton>
+        </div>
+      </div>
+    );
+  }
 
   function triggerDirectDownload(url: string, filename?: string) {
     const link = document.createElement("a");
@@ -311,13 +446,15 @@ export default function EditFrameTab({ ctx }: EditFrameTabProps) {
                     <div className="flex flex-wrap items-center gap-2">
                       <select
                         value={model}
-                        onChange={(e) => setModel(e.target.value as "nano_banana" | "nano_banana_pro" | "chatgpt" | "chatgpt_latest")}
+                        onChange={(e) => setModel(e.target.value as EditFrameTabCtx["model"])}
                         className="rounded-md border border-ink/20 px-2 py-2"
                       >
                         <option value="nano_banana_pro">Nano Banana Pro</option>
                         <option value="nano_banana">Nano Banana Std</option>
                         <option value="chatgpt">ChatGPT-image 1.5</option>
                         <option value="chatgpt_latest">ChatGPT-image 2.0</option>
+                        <option value="luma_uni_1">Luma Uni-1</option>
+                        <option value="luma_uni_1_max">Luma Uni-1 Max</option>
                       </select>
                       <button
                         type="button"
@@ -338,6 +475,11 @@ export default function EditFrameTab({ ctx }: EditFrameTabProps) {
                         <PendingButtonLabel isPending={fullEditMutation.isPending} idle="Edit" pending="Queueing edit..." />
                       </button>
                     </div>
+                    {model === "luma_uni_1" || model === "luma_uni_1_max" ? (
+                      <p className="text-xs text-ink/60">
+                        Luma Uni uses natural-language image editing and preserves source dimensions. Uni-1 Max improves quality at higher cost/latency.
+                      </p>
+                    ) : null}
                   </div>
                 </div>
 
@@ -345,110 +487,62 @@ export default function EditFrameTab({ ctx }: EditFrameTabProps) {
                   <p className="font-medium">Frame variants</p>
                   {patchQueuedNotice ? (
                     <StatusNotice variant="loading">
-                      <p className="text-xs">Patch edit queued. Track progress in Jobs while the new frame variant is generated.</p>
+                      <p className="text-xs">Patch edit queued. A pending card will appear in this grid while the new frame variant is generated.</p>
                     </StatusNotice>
                   ) : null}
                   {!activeEditFrame ? (
                     <p className="text-xs text-ink/60">Choose a frame in Source first.</p>
                   ) : null}
                   <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                    {activeEditCandidates.map((candidate) => (
+                    {originalEditCandidate ? renderEditCandidateCard(originalEditCandidate) : null}
+                    {pendingEditJobs.map((job) => (
                       <div
-                        key={candidate.id}
+                        key={job.jobId}
                         className={`rounded border p-2 ${
-                          candidate.isSelected ? "border-teal-500 bg-teal-50" : "border-ink/10"
+                          job.status === "failed" ? "border-red-200 bg-red-50" : "border-amber-200 bg-amber-50"
                         }`}
                       >
-                        <button
-                          type="button"
-                          className="block w-full"
-                          onClick={() => {
-                            if (!activeEditFrame) return;
-                            selectCompareCandidate(activeEditFrame.frameId, editFrameTab, candidate);
-                          }}
-                          title="Select for comparison and generation"
-                        >
-                          <img src={candidate.imageUrl} className="mb-2 w-full rounded bg-bg object-contain" loading="lazy" decoding="async" />
-                        </button>
-                        <p className="text-xs font-medium text-ink/80">{candidate.label}</p>
-                        <p className="text-[11px] text-ink/60">{formatCompactTimestamp(candidate.createdAt)}</p>
+                        <div className="mb-2 flex items-center justify-between gap-2 text-xs">
+                          <span className="inline-flex items-center gap-1 uppercase text-ink/70">
+                            {job.status === "queued" || job.status === "running" ? <Spinner className="h-3 w-3" /> : null}
+                            {job.status}
+                          </span>
+                          <span className="text-[11px] text-ink/60">{job.progress}%</span>
+                        </div>
+                        <div className="mb-2 flex aspect-video w-full items-center justify-center rounded-md border border-dashed border-ink/20 bg-white text-xs text-ink/60">
+                          {job.type === "edit_patch" ? "Patch edit pending" : "Frame edit pending"}
+                        </div>
+                        <p className="text-xs font-medium text-ink/80">{job.model}</p>
+                        <p className="text-[11px] text-ink/60">{formatCompactTimestamp(job.updatedAt ?? job.createdAt)}</p>
+                        {job.error ? (
+                          <p className="mt-1 line-clamp-3 text-[11px] text-red-700" title={job.error}>
+                            {job.error}
+                          </p>
+                        ) : null}
                         <div className="mt-2 flex items-center gap-2">
-                          <IconActionButton title="Preview" onClick={() => setImagePreviewModal({ url: candidate.imageUrl, label: candidate.label })}>
-                            <PreviewIcon />
-                          </IconActionButton>
-                          <IconActionButton
-                            title={candidate.kind === "original" || !activeEditFrame?.imageUrl ? "Compare is only available for edited variants" : "Compare against original"}
-                            disabled={candidate.kind === "original" || !activeEditFrame?.imageUrl}
-                            onClick={() => {
-                              if (candidate.kind === "original" || !activeEditFrame?.imageUrl) return;
-                              setImageCompareModal({
-                                originalUrl: activeEditFrame.imageUrl,
-                                compareUrl: candidate.imageUrl,
-                                label: candidate.label,
-                              });
-                            }}
+                          <button
+                            type="button"
+                            className="rounded border border-ink/20 bg-white px-3 py-2 text-xs text-ink/60"
+                            disabled
                           >
-                            <CompareIcon />
-                          </IconActionButton>
+                            Waiting...
+                          </button>
                           <IconActionButton
-                            title="Use for editing"
-                            onClick={() => {
-                              setEditSourceCandidate(editFrameTab, candidate);
-                            }}
-                          >
-                            <EditIcon />
-                          </IconActionButton>
-                          <IconActionButton
-                            title="Download options"
-                            onClick={() => {
-                              setDownloadError(null);
-                              setDownloadBusy(null);
-                              setDownloadCandidate(candidate);
-                            }}
-                          >
-                            <DownloadIcon />
-                          </IconActionButton>
-                          {candidate.kind === "variant" ? (
-                            candidate.variant?.variantKind === "refined" ? (
-                              <button
-                                type="button"
-                                className="inline-flex items-center gap-1 rounded border border-teal-300 bg-teal-50 px-2 py-2 text-[11px] font-medium text-teal-700"
-                                disabled
-                              >
-                                <QaTickIcon />
-                                <span>QA</span>
-                              </button>
-                            ) : (
-                              <button
-                                type="button"
-                                className="rounded border border-ink/20 bg-white px-2 py-2 text-[11px] font-medium text-ink disabled:cursor-not-allowed disabled:opacity-50"
-                                disabled={!candidate.variantId || !refineableVariantIds.has(candidate.variantId)}
-                                title={candidate.variantId ? "Open QA refine tools for this edited frame" : "Only generated variants can be refined"}
-                                onClick={() => {
-                                  if (!candidate.variantId) return;
-                                  openRefineModalForVariant(candidate.variantId);
-                                }}
-                              >
-                                QA
-                              </button>
-                            )
-                          ) : null}
-                          <IconActionButton
-                            title={candidate.kind === "original" ? "Original frame cannot be deleted" : "Delete variant"}
+                            title={job.status === "failed" ? "Remove failed placeholder" : "Cancel job"}
                             tone="danger"
-                            disabled={candidate.kind === "original" || !activeEditFrame || !candidate.variantId}
+                            disabled={Boolean(cancellingPendingJobIds[job.jobId])}
                             onClick={() => {
-                              if (!activeEditFrame || !candidate.variantId) return;
-                              handleDeleteAsset({
-                                id: `variant:${activeEditFrame.frameId}:${candidate.variantId}`,
-                                taskId: selectedTaskId ?? "",
-                                title: candidate.label,
-                                subtitle: "",
-                                createdAt: candidate.createdAt ?? new Date().toISOString(),
-                                previewUrl: candidate.imageUrl,
-                                downloadUrl: candidate.imageUrl,
-                                mediaType: "image",
-                                deletePayload: { assetType: "frame_variant", frameId: activeEditFrame.frameId, variantId: candidate.variantId },
+                              if (job.status === "failed") {
+                                dismissPendingEditJob(job.jobId);
+                                return;
+                              }
+                              setCancellingPendingJobIds((previous) => ({ ...previous, [job.jobId]: true }));
+                              void requestCancelPendingEditJob(job.jobId).finally(() => {
+                                setCancellingPendingJobIds((previous) => {
+                                  const next = { ...previous };
+                                  delete next[job.jobId];
+                                  return next;
+                                });
                               });
                             }}
                           >
@@ -457,6 +551,7 @@ export default function EditFrameTab({ ctx }: EditFrameTabProps) {
                         </div>
                       </div>
                     ))}
+                    {variantEditCandidates.map((candidate) => renderEditCandidateCard(candidate))}
                   </div>
                 </div>
 

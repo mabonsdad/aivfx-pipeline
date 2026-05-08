@@ -37,7 +37,7 @@ export default function JobsPanel({ ctx }: JobsPanelProps) {
           );
         })}
         {jobsVisible < sortedJobs.length ? (
-          <button className="text-sm text-accent underline" onClick={() => setJobsVisible((count) => count + 6)}>
+          <button type="button" className="text-sm text-accent underline" onClick={() => setJobsVisible((count) => count + 6)}>
             More...
           </button>
         ) : null}

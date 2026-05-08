@@ -65,6 +65,7 @@ export type MergeTabCtx = {
       overlapEnd?: number;
       prefix: string;
       frameLabelPosition?: "top" | "bottom";
+      labelFrameSource?: "display" | "source";
     };
     secondTrack: {
       title: string;
@@ -76,6 +77,7 @@ export type MergeTabCtx = {
       overlapEnd?: number;
       prefix: string;
       frameLabelPosition?: "top" | "bottom";
+      labelFrameSource?: "display" | "source";
     };
   }>;
   mergeGeneratedEndAnchor: number;
@@ -139,6 +141,18 @@ export type MergeTabCtx = {
   keyBasenameFromS3Key: (key: string) => string;
   formatCompactTimestamp: (iso: string | undefined) => string;
   openMotionSyncModal: (exportId: string) => void;
+  queueTopazUpscale: (
+    exportId: string,
+    payload: {
+      preset: "balanced" | "recover_detail" | "fast_sharpen";
+      model: string;
+      upscaleFactor: number;
+      h264Output: boolean;
+      force?: boolean;
+    },
+  ) => void;
+  isTopazUpscalePending: boolean;
+  topazUpscalePendingExportId: string | null;
   task: TaskDetail | undefined;
   hasMultiChunkOutput: boolean;
   onTrackJobId: (jobId: string) => void;
@@ -170,8 +184,27 @@ type CropEdgeFeather = {
   left: number;
 };
 
+type TopazUpscaleSettings = {
+  preset: "balanced" | "recover_detail" | "fast_sharpen";
+  model: string;
+  upscaleFactor: number;
+  h264Output: boolean;
+};
+
+const DEFAULT_TOPAZ_SETTINGS: TopazUpscaleSettings = {
+  preset: "balanced",
+  model: "Proteus",
+  upscaleFactor: 1,
+  h264Output: false,
+};
+
 function clampInteger(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, Math.round(value)));
+}
+
+function formatSignedFrames(value: number | null | undefined): string {
+  const safeValue = Math.round(Number(value ?? 0));
+  return `${safeValue >= 0 ? "+" : ""}${safeValue}f`;
 }
 
 function frameWindow(centerFrame: number, before: number, after: number, minFrame: number, maxFrame: number): number[] {
@@ -465,10 +498,7 @@ export default function MergeTab({ ctx }: MergeTabProps) {
     setMergeTrimEndFrames,
     temporalFeatherFrames,
     setTemporalFeatherFrames,
-    mergeOriginalStartFrame,
-    mergeOriginalEndFrameExclusive,
     mergeOriginalDurationFrames,
-    formatFramesAndSeconds,
     mergeFps,
     mergeVisibleDurationFramesBeforeRetime,
     mergeEffectiveDurationFrames,
@@ -514,6 +544,9 @@ export default function MergeTab({ ctx }: MergeTabProps) {
     keyBasenameFromS3Key,
     formatCompactTimestamp,
     openMotionSyncModal,
+    queueTopazUpscale,
+    isTopazUpscalePending,
+    topazUpscalePendingExportId,
     task,
     hasMultiChunkOutput,
     onTrackJobId,
@@ -525,7 +558,9 @@ export default function MergeTab({ ctx }: MergeTabProps) {
   const [extendAnchorFramesFromEnd, setExtendAnchorFramesFromEnd] = useState("5");
   const [extendDurationSeconds, setExtendDurationSeconds] = useState("");
   const [extendPrompt, setExtendPrompt] = useState("");
+  const [showAdvancedAlignmentDetails, setShowAdvancedAlignmentDetails] = useState(false);
   const [boundaryZoomModal, setBoundaryZoomModal] = useState<BoundaryZoomModalState | null>(null);
+  const [topazSettingsByExportId, setTopazSettingsByExportId] = useState<Record<string, TopazUpscaleSettings>>({});
   const selectedExtendGeneration = useMemo(
     () => completeGenerations.find((generation) => generation.genId === extendGenerationId) ?? null,
     [completeGenerations, extendGenerationId],
@@ -568,17 +603,87 @@ export default function MergeTab({ ctx }: MergeTabProps) {
   );
   const shouldShowExtendAlert = needsExtension;
   const currentGenerationFrameDifference = mergeEffectiveDurationFrames - mergeOriginalDurationFrames;
+  const generationLengthWarning = useMemo(() => {
+    if (currentGenerationFrameDifference === 0) return null;
+    const absDiff = Math.abs(currentGenerationFrameDifference);
+    const direction = currentGenerationFrameDifference > 0 ? "longer" : "shorter";
+    const nextAction = currentGenerationFrameDifference > 0 ? "trimming" : "extending";
+    return `Generation is ${absDiff} frames ${direction} than source (generation ${mergeEffectiveDurationFrames}f / source ${mergeOriginalDurationFrames}f). Once the start is aligned consider ${nextAction} or stretch to fit.`;
+  }, [currentGenerationFrameDifference, mergeEffectiveDurationFrames, mergeOriginalDurationFrames]);
   const suggestedInsertOffset =
     mergeAlignmentSuggestion && mergeTargetSegment
       ? mergeAlignmentSuggestion.suggested.startFrameOverride - (mergeTargetSegment.startFrame ?? 0)
       : null;
+  const retimeDurationMinFrames = Math.max(1, Math.ceil(mergeVisibleDurationFramesBeforeRetime / 20));
+  const retimeDurationMaxFrames = Math.max(retimeDurationMinFrames, mergeVisibleDurationFramesBeforeRetime * 20);
+  const endShiftControlMinFrames = mergeInsertStartFrame + retimeDurationMinFrames - mergeOriginalDurationFrames;
+  const endShiftControlMaxFrames = mergeInsertStartFrame + retimeDurationMaxFrames - mergeOriginalDurationFrames;
+  const applyDesiredEndShift = useCallback(
+    (desiredEndShift: number) => {
+      const clampedDesiredEndShift = clampInteger(desiredEndShift, endShiftControlMinFrames, endShiftControlMaxFrames);
+      const desiredDurationFramesRaw = mergeOriginalDurationFrames + clampedDesiredEndShift - mergeInsertStartFrame;
+      const desiredDurationFrames = clampInteger(desiredDurationFramesRaw, retimeDurationMinFrames, retimeDurationMaxFrames);
+      const nextPlaybackRate = mergeVisibleDurationFramesBeforeRetime / Math.max(1, desiredDurationFrames);
+      const clampedRate = Math.max(0.05, Math.min(20, nextPlaybackRate));
+      const shouldApplyRetime = Math.abs(desiredDurationFrames - mergeVisibleDurationFramesBeforeRetime) > 0;
+      setMergePlaybackRate(clampedRate);
+      setMergeApplyRetime(shouldApplyRetime);
+    },
+    [
+      endShiftControlMaxFrames,
+      endShiftControlMinFrames,
+      mergeInsertStartFrame,
+      mergeOriginalDurationFrames,
+      mergeVisibleDurationFramesBeforeRetime,
+      retimeDurationMaxFrames,
+      retimeDurationMinFrames,
+      setMergeApplyRetime,
+      setMergePlaybackRate,
+    ],
+  );
+  const applySuggestedAlignment = useCallback(() => {
+    if (!mergeAlignmentSuggestion || suggestedInsertOffset == null) return;
+    setMergeInsertStartFrame(suggestedInsertOffset);
+    setMergeTrimStartFrames(mergeAlignmentSuggestion.suggested.trimStartFrames);
+    setMergeTrimEndFrames(mergeAlignmentSuggestion.suggested.trimEndFrames);
+    const suggestedRate = Math.max(0.05, Math.min(20, mergeAlignmentSuggestion.analysis.suggestedPlaybackRate || 1));
+    setMergePlaybackRate(suggestedRate);
+    setMergeApplyRetime(Math.abs(suggestedRate - 1) > 0.0005);
+  }, [
+    mergeAlignmentSuggestion,
+    setMergeApplyRetime,
+    setMergeInsertStartFrame,
+    setMergePlaybackRate,
+    setMergeTrimEndFrames,
+    setMergeTrimStartFrames,
+    suggestedInsertOffset,
+  ]);
+  const suggestedTimeline = useMemo(() => {
+    if (!mergeAlignmentSuggestion || suggestedInsertOffset == null) return null;
+    const suggestedTrimStart = Math.max(0, mergeAlignmentSuggestion.suggested.trimStartFrames);
+    const suggestedTrimEnd = Math.max(0, mergeAlignmentSuggestion.suggested.trimEndFrames);
+    const suggestedVisibleBefore = Math.max(1, mergeGeneratedDurationFrames - suggestedTrimStart - suggestedTrimEnd);
+    const suggestedRate = Math.max(0.05, Math.min(20, mergeAlignmentSuggestion.analysis.suggestedPlaybackRate || 1));
+    const suggestedVisibleAfter = Math.max(1, Math.round(suggestedVisibleBefore / suggestedRate));
+    const suggestedEndShift = suggestedInsertOffset + suggestedVisibleAfter - mergeOriginalDurationFrames;
+    return {
+      suggestedTrimStart,
+      suggestedTrimEnd,
+      suggestedRate,
+      suggestedVisibleBefore,
+      suggestedVisibleAfter,
+      suggestedEndShift,
+      suggestedRetimeShift: suggestedVisibleAfter - suggestedVisibleBefore,
+    };
+  }, [mergeAlignmentSuggestion, mergeGeneratedDurationFrames, mergeOriginalDurationFrames, suggestedInsertOffset]);
   const actionableSuggestionNotes = useMemo(() => {
     if (!mergeAlignmentSuggestion) return [];
     return mergeAlignmentSuggestion.analysis.notes.filter(
       (note) =>
         !note.startsWith("Alignment was analysed against") &&
         !note.startsWith("Alignment and drift were measured against") &&
-        !note.startsWith("No usable edit mask was available"),
+        !note.startsWith("No usable edit mask was available") &&
+        !note.startsWith("Drift samples use direct frame-index extraction"),
     );
   }, [mergeAlignmentSuggestion]);
   const mergeTargetCrop = useMemo(() => {
@@ -657,6 +762,27 @@ export default function MergeTab({ ctx }: MergeTabProps) {
   const cropPreviewOriginalImageUrl = cropPreviewOriginalFrame[0]?.imageUrl ?? null;
   const cropPreviewGeneratedImageUrl = cropPreviewGeneratedFrame[0]?.imageUrl ?? null;
 
+  const topazSettingsForExport = useCallback(
+    (exportId: string): TopazUpscaleSettings => topazSettingsByExportId[exportId] ?? DEFAULT_TOPAZ_SETTINGS,
+    [topazSettingsByExportId],
+  );
+
+  const updateTopazSettings = useCallback(
+    (exportId: string, patch: Partial<TopazUpscaleSettings>) => {
+      setTopazSettingsByExportId((previous) => {
+        const current = previous[exportId] ?? DEFAULT_TOPAZ_SETTINGS;
+        return {
+          ...previous,
+          [exportId]: {
+            ...current,
+            ...patch,
+          },
+        };
+      });
+    },
+    [],
+  );
+
   const resetExtensionFormForGeneration = useCallback((generation: SegmentGeneration | null) => {
     const segment = generation ? getSegmentForGeneration(generation) : null;
     const defaultAlignment = Math.max(0, (segment?.endFrameExclusive ?? 1) - 6);
@@ -696,7 +822,7 @@ export default function MergeTab({ ctx }: MergeTabProps) {
       tools.push({
         id: "extend",
         title: "Extend generation",
-        description: "Continue from an existing output",
+        description: "Lengthen the duration of an existing generation using a frame from its end.",
         alert: shouldShowExtendAlert ? "Extend the generation to match the current working range" : null,
       });
     }
@@ -711,7 +837,7 @@ export default function MergeTab({ ctx }: MergeTabProps) {
       tools.push({
         id: "cleanup",
         title: "Comp / clean-up",
-        description: "Create tracked mask to comp the generated regions back onto source to recover original fidelity",
+        description: "Recover source fidelity by comping selected region onto the generated video",
         disabled: cleanupToolDisabled,
       });
     }
@@ -883,7 +1009,7 @@ export default function MergeTab({ ctx }: MergeTabProps) {
             const isActive = selectedToolId === tool.id;
             const isDisabled = Boolean(tool.disabled);
             return (
-              <div key={tool.id} className="flex min-w-[15.5rem] max-w-[19rem] flex-none items-center">
+              <div key={tool.id} className="flex min-w-[10.9rem] max-w-[13.3rem] flex-none items-stretch">
                 <button
                   type="button"
                   disabled={isDisabled}
@@ -891,7 +1017,7 @@ export default function MergeTab({ ctx }: MergeTabProps) {
                     if (isDisabled) return;
                     setSelectedToolId(tool.id);
                   }}
-                  className={`w-full rounded-lg border px-3 py-3 text-left transition ${
+                  className={`h-full w-full rounded-lg border px-3 py-3 text-left transition ${
                     isDisabled
                       ? "cursor-not-allowed border-ink/10 bg-ink/5 text-ink/40"
                       : isActive
@@ -901,19 +1027,21 @@ export default function MergeTab({ ctx }: MergeTabProps) {
                 >
                   <p className="text-sm font-semibold">{tool.title}</p>
                   <p className="mt-1 text-xs leading-snug opacity-85">{tool.description}</p>
-                  {tool.alert ? (
-                    <p className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-[11px] font-medium text-amber-900">
-                      {tool.alert}
-                    </p>
-                  ) : null}
-                  {tool.id === "cleanup" && cleanupBlockedByTiming ? (
-                    <p className="mt-2 text-[11px] text-ink/55">
-                      Requires an aligned/retimed output when generation and source frame lengths differ.
-                    </p>
-                  ) : null}
+                  <div className="mt-2 min-h-[2.5rem]">
+                    {tool.alert ? (
+                      <p className="rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-[11px] font-medium text-amber-900">
+                        {tool.alert}
+                      </p>
+                    ) : null}
+                    {tool.id === "cleanup" && cleanupBlockedByTiming ? (
+                      <p className="text-[11px] text-ink/55">
+                        Requires an aligned/retimed output when generation and source frame lengths differ.
+                      </p>
+                    ) : null}
+                  </div>
                 </button>
                 {index < visibleToolSequence.length - 1 ? (
-                  <div className="-mx-1 z-10 flex h-full items-center">
+                  <div className="-mx-1 z-10 flex h-full items-center pointer-events-none select-none">
                     <div className="rounded-full border border-ink/15 bg-white px-1.5 py-0.5 text-[11px] text-ink/65">&#8594;</div>
                   </div>
                 ) : null}
@@ -1028,10 +1156,14 @@ export default function MergeTab({ ctx }: MergeTabProps) {
         )
       ) : null}
       {showMergeIntoSourceTool && (selectedToolId === "align_retime" || selectedToolId === "merge") ? (
-      <>
-      <div className="rounded-lg border border-ink/15 bg-bg p-3">
-        <div className="flex items-center gap-2">
-          <p className="text-sm font-semibold">{selectedToolId === "align_retime" ? "Align & Retime" : "Merge into source"}</p>
+      <div className="rounded-lg border border-ink/15 bg-bg p-4">
+        <div className="mb-3 flex items-start justify-between gap-2">
+          <div>
+            <h4 className="text-base font-semibold">{selectedToolId === "align_retime" ? "Align & Retime" : "Merge into source"}</h4>
+            {selectedToolId === "align_retime" ? (
+              <p className="mt-1 text-[11px] text-ink/65">Start / end shift = generation starts or ends later than source.</p>
+            ) : null}
+          </div>
           <HelpInfoButton
             title={selectedToolId === "align_retime" ? "Alignment and retime" : "Merge composition"}
             lines={
@@ -1047,178 +1179,43 @@ export default function MergeTab({ ctx }: MergeTabProps) {
                     "Temporal feather controls overlap blending at the merge boundaries.",
                     "When crop is active, crop-edge feather controls let you soften each edge independently before overlay.",
                     "Use the preview timelines and crop overlay preview to verify boundary quality.",
-                  ]
+                ]
             }
           />
         </div>
-      </div>
       <div className="space-y-3">
         {mergeTargetGeneration && mergeTargetSegment ? (
           <>
             <div className="space-y-3 rounded-lg border border-ink/10 p-3">
-              <div className="space-y-2">
-                <p className="text-sm font-medium text-ink">Current Alignment</p>
-                <div className="grid gap-2 rounded-lg border border-ink/10 bg-white p-3 md:grid-cols-3">
-                  <div>
-                    <p className="text-[11px] uppercase tracking-wide text-ink/50">Source frame length</p>
-                    <p className="mt-1 text-lg font-semibold text-ink">{mergeOriginalDurationFrames}f</p>
-                  </div>
-                  <div>
-                    <p className="text-[11px] uppercase tracking-wide text-ink/50">Generation frame length</p>
-                    <p className="mt-1 text-lg font-semibold text-ink">{mergeEffectiveDurationFrames}f</p>
-                  </div>
-                  <div>
-                    <p className="text-[11px] uppercase tracking-wide text-ink/50">Generation frame difference</p>
-                    <p className={`mt-1 text-lg font-semibold ${currentGenerationFrameDifference === 0 ? "text-ink" : currentGenerationFrameDifference > 0 ? "text-orange-700" : "text-teal-700"}`}>
-                      {currentGenerationFrameDifference >= 0 ? "+" : ""}
-                      {currentGenerationFrameDifference}f
-                    </p>
-                  </div>
-                </div>
-              </div>
+              {generationLengthWarning ? (
+                <p className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800">{generationLengthWarning}</p>
+              ) : null}
               {selectedToolId === "align_retime" ? (
                 <>
-                  <div className="space-y-3">
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                      <div className="space-y-2">
-                        <p className="text-sm font-medium text-ink">Suggested Merge Alignment</p>
-                        <div className="flex flex-wrap items-center gap-2">
-                          <button
-                            type="button"
-                            className="rounded-md border border-ink/20 bg-white px-3 py-2 text-sm text-ink disabled:cursor-not-allowed disabled:opacity-60"
-                            disabled={isSuggestingMergeAlignment}
-                            onClick={suggestMergeAlignment}
-                          >
-                            <PendingButtonLabel
-                              isPending={isSuggestingMergeAlignment}
-                              idle="Suggest alignment"
-                              pending="Analysing alignment..."
-                            />
-                          </button>
-                          {mergeAlignmentSuggestion ? (
-                            <p className="text-xs text-ink/65">
-                              Confidence <span className="font-medium text-ink">{mergeAlignmentSuggestion.analysis.confidence.toFixed(2)}</span>
-                            </p>
-                          ) : null}
-                        </div>
-                      </div>
-                      <div className="max-w-xl rounded-lg border border-ink/10 bg-bg px-3 py-2 text-[11px] leading-5 text-ink/65">
-                        Alignment and drift analysis uses pixel comparisons to match frames, and where feasible focuses on unedited regions outside of the mask and matching any cropping.
-                      </div>
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        className="rounded-md border border-ink/20 bg-white px-3 py-2 text-sm text-ink disabled:cursor-not-allowed disabled:opacity-60"
+                        disabled={isSuggestingMergeAlignment}
+                        onClick={suggestMergeAlignment}
+                      >
+                        <PendingButtonLabel
+                          isPending={isSuggestingMergeAlignment}
+                          idle="Suggest alignment"
+                          pending="Analysing alignment..."
+                        />
+                      </button>
+                      <button
+                        type="button"
+                        className="rounded-md border border-teal-600 bg-teal-50 px-3 py-2 text-sm text-teal-800 disabled:cursor-not-allowed disabled:opacity-60"
+                        disabled={!mergeAlignmentSuggestion}
+                        onClick={applySuggestedAlignment}
+                      >
+                        Apply suggested
+                      </button>
                     </div>
                   </div>
-                  {mergeAlignmentSuggestion ? (
-                    <StatusNotice
-                      variant={
-                        mergeAlignmentSuggestion.analysis.recommendation === "rerender_recommended"
-                          ? "error"
-                          : mergeAlignmentSuggestion.analysis.recommendation === "retime_recommended" ||
-                              mergeAlignmentSuggestion.analysis.recommendation === "piecewise_reconcile_recommended"
-                            ? "warning"
-                            : "info"
-                      }
-                    >
-                  <div className="grid gap-4 md:grid-cols-2">
-                    <div className="space-y-3 rounded-lg border border-ink/10 bg-white p-3">
-                      <p className="text-sm font-medium text-ink">Alignment</p>
-                      <div className="flex items-end justify-between gap-3">
-                        <div>
-                          <p className="text-[11px] text-ink/55">Source insert start</p>
-                          <p className="text-xl font-semibold text-ink">
-                            {suggestedInsertOffset != null && suggestedInsertOffset >= 0 ? "+" : ""}
-                            {suggestedInsertOffset ?? 0}f
-                          </p>
-                        </div>
-                        <p className="text-[11px] text-ink/60">positive values start generation later</p>
-                      </div>
-                      <div className="grid gap-3 sm:grid-cols-2">
-                        <div>
-                          <p className="text-[11px] text-ink/55">Trim generation start</p>
-                          <p className="text-xl font-semibold text-ink">{mergeAlignmentSuggestion.suggested.trimStartFrames}f</p>
-                        </div>
-                        <div>
-                          <p className="text-[11px] text-ink/55">Trim generation end</p>
-                          <p className="text-xl font-semibold text-ink">{mergeAlignmentSuggestion.suggested.trimEndFrames}f</p>
-                        </div>
-                      </div>
-                      <div className="grid gap-3 sm:grid-cols-2">
-                        <div>
-                          <p className="text-[11px] text-ink/55">Source offset</p>
-                          <p className="text-lg font-semibold text-ink">{mergeAlignmentSuggestion.analysis.sourceFrameOffset}f</p>
-                        </div>
-                        <div>
-                          <p className="text-[11px] text-ink/55">Settled baseline drift</p>
-                          <p className="text-lg font-semibold text-ink">
-                            {(mergeAlignmentSuggestion.analysis.stableBaselineDriftFrames ?? 0) >= 0 ? "+" : ""}
-                            {mergeAlignmentSuggestion.analysis.stableBaselineDriftFrames ?? 0}f
-                          </p>
-                        </div>
-                      </div>
-                    </div>
-                    <div className="space-y-3 rounded-lg border border-ink/10 bg-white p-3">
-                      <p className="text-sm font-medium text-ink">Calculated drift</p>
-                      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                        <div>
-                          <p className="text-[11px] text-ink/55">Early drift</p>
-                          <p className="text-xl font-semibold text-ink">
-                            {mergeAlignmentSuggestion.analysis.earlyMedianDriftFrames >= 0 ? "+" : ""}
-                            {mergeAlignmentSuggestion.analysis.earlyMedianDriftFrames}f
-                          </p>
-                        </div>
-                        <div>
-                          <p className="text-[11px] text-ink/55">Quarter drift</p>
-                          <p className="text-xl font-semibold text-ink">
-                            {(mergeAlignmentSuggestion.analysis.quarterMedianDriftFrames ?? 0) >= 0 ? "+" : ""}
-                            {mergeAlignmentSuggestion.analysis.quarterMedianDriftFrames ?? 0}f
-                          </p>
-                        </div>
-                        <div>
-                          <p className="text-[11px] text-ink/55">Middle drift</p>
-                          <p className="text-xl font-semibold text-ink">
-                            {(mergeAlignmentSuggestion.analysis.middleMedianDriftFrames ?? 0) >= 0 ? "+" : ""}
-                            {mergeAlignmentSuggestion.analysis.middleMedianDriftFrames ?? 0}f
-                          </p>
-                        </div>
-                        <div>
-                          <p className="text-[11px] text-ink/55">Late drift</p>
-                          <p className="text-xl font-semibold text-ink">
-                            {mergeAlignmentSuggestion.analysis.lateMedianDriftFrames >= 0 ? "+" : ""}
-                            {mergeAlignmentSuggestion.analysis.lateMedianDriftFrames}f
-                          </p>
-                        </div>
-                        <div>
-                          <p className="text-[11px] text-ink/55">Residual end drift</p>
-                          <p className="text-xl font-semibold text-ink">
-                            {mergeAlignmentSuggestion.analysis.residualEndFrames >= 0 ? "+" : ""}
-                            {mergeAlignmentSuggestion.analysis.residualEndFrames}f
-                          </p>
-                        </div>
-                        <div>
-                          <p className="text-[11px] text-ink/55">Estimated retime</p>
-                          <p className="text-xl font-semibold text-ink">{mergeAlignmentSuggestion.analysis.suggestedPlaybackRate.toFixed(4)}x</p>
-                        </div>
-                      </div>
-                      <div className="grid gap-3 sm:grid-cols-2">
-                        <div>
-                          <p className="text-[11px] text-ink/55">Drift slope</p>
-                          <p className="text-lg font-semibold text-ink">{(mergeAlignmentSuggestion.analysis.driftSlopeFramesPerSourceFrame ?? 0).toFixed(4)}</p>
-                        </div>
-                        <div>
-                          <p className="text-[11px] text-ink/55">Residual fit error</p>
-                          <p className="text-lg font-semibold text-ink">{(mergeAlignmentSuggestion.analysis.linearFitMaeFrames ?? 0).toFixed(2)}f</p>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                  {actionableSuggestionNotes.length ? (
-                    <div className="mt-3 space-y-1 text-xs text-ink/75">
-                      {actionableSuggestionNotes.slice(0, 2).map((note) => (
-                        <p key={note}>{note}</p>
-                      ))}
-                    </div>
-                  ) : null}
-                    </StatusNotice>
-                  ) : null}
                   {mergeAlignmentSuggestionError ? (
                     <StatusNotice variant="error">
                       <p className="text-xs">{mergeAlignmentSuggestionError}</p>
@@ -1229,57 +1226,105 @@ export default function MergeTab({ ctx }: MergeTabProps) {
                       <p className="text-xs">{reconcileTimingError}</p>
                     </StatusNotice>
                   ) : null}
-                  <div className="rounded-lg border border-ink/10 bg-white p-3">
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div>
-                    <p className="text-xs font-medium text-ink/85">Uniform retime before merge</p>
-                    <p className="mt-1 text-[11px] text-ink/60">
-                      Use this when drift builds steadily through the clip after the opening frames have been trimmed. It rescales the generated segment timing before merge.
-                    </p>
+                  <div className="overflow-x-auto rounded-lg border border-ink/10 bg-white">
+                    <div className="min-w-[48rem]">
+                      <div className="grid grid-cols-[8rem_repeat(4,minmax(0,1fr))] border-b border-ink/10 bg-bg text-[11px] uppercase tracking-wide text-ink/55">
+                        <p className="px-3 py-2">&nbsp;</p>
+                        <p className="px-3 py-2">Shift start</p>
+                        <p className="px-3 py-2">Trim start</p>
+                        <p className="px-3 py-2">Trim end</p>
+                        <p className="px-3 py-2">Stretch clip</p>
+                      </div>
+                      <div className="grid grid-cols-[8rem_repeat(4,minmax(0,1fr))] border-b border-ink/10 text-sm">
+                        <p className="px-3 py-2 text-ink/70">Suggested</p>
+                        <p className="px-3 py-2 font-medium text-ink">
+                          {mergeAlignmentSuggestion && suggestedInsertOffset != null ? formatSignedFrames(suggestedInsertOffset) : "—"}
+                        </p>
+                        <p className="px-3 py-2 font-medium text-ink">
+                          {suggestedTimeline ? formatSignedFrames(suggestedTimeline.suggestedTrimStart) : "—"}
+                        </p>
+                        <p className="px-3 py-2 font-medium text-ink">
+                          {suggestedTimeline ? formatSignedFrames(suggestedTimeline.suggestedTrimEnd) : "—"}
+                        </p>
+                        <p className="px-3 py-2 font-medium text-ink">
+                          {suggestedTimeline ? formatSignedFrames(suggestedTimeline.suggestedEndShift) : "—"}
+                        </p>
+                      </div>
+                      <div className="grid grid-cols-[8rem_repeat(4,minmax(0,1fr))] gap-0 text-sm">
+                        <p className="px-3 py-2 text-ink/70">Controls</p>
+                        <div className="px-3 py-2">
+                          <input
+                            type="number"
+                            value={mergeInsertStartFrame}
+                            min={mergeInsertStartFrameLowerBound}
+                            max={mergeInsertStartFrameUpperBound}
+                            onChange={(event) => setMergeInsertStartFrame(Number(event.target.value) || 0)}
+                            className="w-24 rounded-md border border-ink/20 px-2 py-1.5 text-sm"
+                          />
+                        </div>
+                        <div className="px-3 py-2">
+                          <input
+                            type="number"
+                            value={mergeTrimStartFrames}
+                            min={0}
+                            max={Math.max(0, mergeGeneratedDurationFrames - 1)}
+                            onChange={(event) => setMergeTrimStartFrames(Number(event.target.value) || 0)}
+                            className="w-24 rounded-md border border-ink/20 px-2 py-1.5 text-sm"
+                          />
+                        </div>
+                        <div className="px-3 py-2">
+                          <input
+                            type="number"
+                            value={mergeTrimEndFrames}
+                            min={0}
+                            max={Math.max(0, mergeGeneratedDurationFrames - 1)}
+                            onChange={(event) => setMergeTrimEndFrames(Number(event.target.value) || 0)}
+                            className="w-24 rounded-md border border-ink/20 px-2 py-1.5 text-sm"
+                          />
+                        </div>
+                        <div className="px-3 py-2">
+                          <input
+                            type="number"
+                            value={mergeEndOffsetFrames}
+                            min={endShiftControlMinFrames}
+                            max={endShiftControlMaxFrames}
+                            onChange={(event) => applyDesiredEndShift(Number(event.target.value) || 0)}
+                            className="w-24 rounded-md border border-ink/20 px-2 py-1.5 text-sm"
+                          />
+                        </div>
+                      </div>
+                    </div>
                   </div>
-                  <label className="inline-flex items-center gap-2 text-sm text-ink">
-                    <input
-                      type="checkbox"
-                      checked={mergeApplyRetime}
-                      onChange={(event) => setMergeApplyRetime(event.target.checked)}
-                    />
-                    Apply retime
-                  </label>
-                </div>
-                <div className="mt-3 flex flex-wrap items-center gap-3">
-                  <label className="space-y-1 text-xs text-ink/70">
-                    <span className="block font-medium text-ink/80">Playback rate</span>
-                    <input
-                      type="number"
-                      min={0.05}
-                      max={20}
-                      step={0.0001}
-                      value={mergePlaybackRate}
-                      onChange={(e) => setMergePlaybackRate(Number(e.target.value) || 1)}
-                      disabled={!mergeApplyRetime}
-                      className="w-28 rounded-md border border-ink/20 px-2 py-2 text-sm disabled:cursor-not-allowed disabled:bg-bg disabled:opacity-60"
-                    />
-                  </label>
-                  <p className="text-[11px] text-ink/60">
-                    `1.0` keeps original timing. Values above `1.0` speed the generated clip up; below `1.0` slow it down.
-                  </p>
-                </div>
-                <div className="mt-3 grid gap-3 text-[11px] text-ink/65 md:grid-cols-2">
-                  <div className="px-1 py-1">
-                    <p className="text-[11px] text-ink/55">Frames before retime</p>
-                    <p className="mt-1 text-xl font-semibold text-ink">{mergeVisibleDurationFramesBeforeRetime}f</p>
-                    <p>{(mergeVisibleDurationFramesBeforeRetime / Math.max(1, mergeFps)).toFixed(2)}s</p>
-                  </div>
-                  <div className="px-1 py-1">
-                    <p className="text-[11px] text-ink/55">Frames after retime</p>
-                    <p className="mt-1 text-xl font-semibold text-ink">{mergeEffectiveDurationFrames}f</p>
-                    <p>{(mergeEffectiveDurationFrames / Math.max(1, mergeFps)).toFixed(2)}s</p>
-                  </div>
-                </div>
-                  </div>
+                  <button
+                    type="button"
+                    className="text-xs font-medium text-ink/75 underline-offset-2 hover:text-ink hover:underline"
+                    onClick={() => setShowAdvancedAlignmentDetails((prev) => !prev)}
+                  >
+                    {showAdvancedAlignmentDetails ? "Hide Advance" : "Advance"}
+                  </button>
+                  {showAdvancedAlignmentDetails ? (
+                    <div className="grid gap-3 rounded-md border border-ink/10 bg-bg p-3 text-[11px] text-ink/70 md:grid-cols-2 xl:grid-cols-3">
+                      <p>Retime applied: <span className="font-medium text-ink">{mergeApplyRetime ? "yes" : "no"}</span></p>
+                      <p>Playback rate: <span className="font-medium text-ink">{mergePlaybackRate.toFixed(4)}x</span></p>
+                      <p>Frames before retime: <span className="font-medium text-ink">{mergeVisibleDurationFramesBeforeRetime}f</span></p>
+                      <p>Frames after retime: <span className="font-medium text-ink">{mergeEffectiveDurationFrames}f</span></p>
+                      <p>Early drift: <span className="font-medium text-ink">{formatSignedFrames(mergeAlignmentSuggestion?.analysis.earlyMedianDriftFrames ?? 0)}</span></p>
+                      <p>Quarter drift: <span className="font-medium text-ink">{formatSignedFrames(mergeAlignmentSuggestion?.analysis.quarterMedianDriftFrames ?? 0)}</span></p>
+                      <p>Middle drift: <span className="font-medium text-ink">{formatSignedFrames(mergeAlignmentSuggestion?.analysis.middleMedianDriftFrames ?? 0)}</span></p>
+                      <p>Late drift: <span className="font-medium text-ink">{formatSignedFrames(mergeAlignmentSuggestion?.analysis.lateMedianDriftFrames ?? 0)}</span></p>
+                      <p>Residual end drift: <span className="font-medium text-ink">{formatSignedFrames(mergeAlignmentSuggestion?.analysis.residualEndFrames ?? 0)}</span></p>
+                      <p>Baseline offset: <span className="font-medium text-ink">{formatSignedFrames(mergeAlignmentSuggestion?.analysis.stableBaselineDriftFrames ?? 0)}</span></p>
+                      <p>Residual fit error: <span className="font-medium text-ink">{(mergeAlignmentSuggestion?.analysis.linearFitMaeFrames ?? 0).toFixed(2)}f</span></p>
+                      <p className="md:col-span-2 xl:col-span-3">Drift sampling method: direct frame-index extraction on both source and generated clips for frame-accurate matching.</p>
+                      {actionableSuggestionNotes.length ? (
+                        <p className="md:col-span-2 xl:col-span-3">{actionableSuggestionNotes.slice(0, 2).join(" ")}</p>
+                      ) : null}
+                    </div>
+                  ) : null}
                 </>
               ) : null}
-              <div className={`grid gap-3 ${selectedToolId === "align_retime" ? "xl:grid-cols-2" : ""}`}>
+              {selectedToolId === "merge" ? (
+              <div className="grid gap-3">
                 <div className="space-y-3 rounded-lg border border-ink/10 bg-bg p-3">
                   <p className="text-xs font-semibold uppercase tracking-wide text-ink/55">Start alignment</p>
                   <div className="grid gap-3 md:grid-cols-2">
@@ -1302,55 +1347,20 @@ export default function MergeTab({ ctx }: MergeTabProps) {
                   </div>
                 </div>
                 <div className="space-y-3 rounded-lg border border-ink/10 bg-bg p-3">
-                  <p className="text-xs font-semibold uppercase tracking-wide text-ink/55">
-                    {selectedToolId === "align_retime" ? "End alignment" : "Merge blend"}
-                  </p>
+                  <p className="text-xs font-semibold uppercase tracking-wide text-ink/55">Merge blend</p>
                   <div className="grid gap-3">
-                    {selectedToolId === "align_retime" ? (
-                      <NumberAdjustField
-                        label="Trim generation end"
-                        hint="Hide inconsistent generated tail frames at the end of the insert."
-                        value={mergeTrimEndFrames}
-                        min={0}
-                        max={Math.max(0, mergeGeneratedDurationFrames - 1)}
-                        onChange={setMergeTrimEndFrames}
-                      />
-                    ) : null}
-                    {selectedToolId === "merge" ? (
-                      <NumberAdjustField
-                        label="Temporal feather"
-                        hint="Blend a small overlap at the start and end merge boundaries."
-                        value={temporalFeatherFrames}
-                        min={0}
-                        max={30}
-                        onChange={setTemporalFeatherFrames}
-                      />
-                    ) : null}
+                    <NumberAdjustField
+                      label="Temporal feather"
+                      hint="Blend a small overlap at the start and end merge boundaries."
+                      value={temporalFeatherFrames}
+                      min={0}
+                      max={30}
+                      onChange={setTemporalFeatherFrames}
+                    />
                   </div>
                 </div>
               </div>
-              <div className="grid gap-2 rounded-md bg-bg p-2 text-xs text-ink/70 md:grid-cols-2">
-                <p>
-                  Original cut: <span className="font-medium text-ink">f{mergeOriginalStartFrame}</span> to{" "}
-                  <span className="font-medium text-ink">f{Math.max(mergeOriginalStartFrame, mergeOriginalEndFrameExclusive - 1)}</span> (
-                  {formatFramesAndSeconds(mergeOriginalDurationFrames, mergeFps)})
-                </p>
-                <p>
-                  Generated in merge: <span className="font-medium text-ink">{formatFramesAndSeconds(mergeEffectiveDurationFrames, mergeFps)}</span>{" "}
-                  (from source {formatFramesAndSeconds(mergeGeneratedDurationFrames, mergeFps)})
-                </p>
-                <p>
-                  Insert offset: <span className="font-medium text-ink">{mergeInsertStartFrame >= 0 ? "+" : ""}{mergeInsertStartFrame}f</span>
-                </p>
-                <p>
-                  Insert window now: <span className="font-medium text-ink">f{mergeInsertStartFrameEffective}</span> to{" "}
-                  <span className="font-medium text-ink">f{Math.max(mergeInsertStartFrameEffective, mergeEffectiveEndFrameExclusive - 1)}</span>
-                </p>
-                <p className={mergeEndOffsetFrames !== 0 ? "font-semibold text-orange-700" : ""}>
-                  End shift from original cut: {mergeEndOffsetFrames >= 0 ? "+" : ""}
-                  {mergeEndOffsetFrames} frames ({(mergeEndOffsetFrames / Math.max(1, mergeFps)).toFixed(2)}s)
-                </p>
-              </div>
+              ) : null}
               {selectedToolId === "merge" && mergeTargetCrop ? (
                 <div className="space-y-3 rounded-lg border border-ink/10 bg-white p-3">
                   <div>
@@ -1460,6 +1470,14 @@ export default function MergeTab({ ctx }: MergeTabProps) {
                   </div>
                 </div>
               ) : null}
+              {selectedToolId === "merge" && !mergeTargetCrop ? (
+                <StatusNotice variant="info">
+                  <p className="text-xs">
+                    Crop-edge feather preview is available when a segment crop is active. Set a crop in Select to enable
+                    per-edge feather controls.
+                  </p>
+                </StatusNotice>
+              ) : null}
             </div>
 
             <div className="space-y-2">
@@ -1487,6 +1505,7 @@ export default function MergeTab({ ctx }: MergeTabProps) {
                   overlapStart: selectedToolId === "merge" && mergeFeatherClamped > 0 ? mergeGeneratedStartAnchor : undefined,
                   overlapEnd: selectedToolId === "merge" && mergeFeatherClamped > 0 ? mergeGeneratedStartAnchor + mergeFeatherClamped - 1 : undefined,
                   prefix: "g",
+                  labelFrameSource: "source",
                 }}
               />
             </div>
@@ -1505,6 +1524,7 @@ export default function MergeTab({ ctx }: MergeTabProps) {
                   overlapStart: selectedToolId === "merge" && mergeFeatherClamped > 0 ? mergeGeneratedEndAnchor - mergeFeatherClamped + 1 : undefined,
                   overlapEnd: selectedToolId === "merge" && mergeFeatherClamped > 0 ? mergeGeneratedEndAnchor : undefined,
                   prefix: "g",
+                  labelFrameSource: "source",
                 }}
                 secondTrack={{
                   title: "Source track",
@@ -1534,6 +1554,7 @@ export default function MergeTab({ ctx }: MergeTabProps) {
             </button>
           ) : null}
           <button
+            type="button"
             className={`rounded-md px-4 py-2 disabled:cursor-not-allowed disabled:opacity-60 ${
               selectedToolId === "merge" ? "bg-accent2 text-white" : "border border-ink/20 bg-white text-ink"
             }`}
@@ -1551,16 +1572,28 @@ export default function MergeTab({ ctx }: MergeTabProps) {
             <PendingButtonLabel isPending={mergeMutation.isPending} idle="Merge generated output" pending="Merging..." />
           </button>
         </div>
+        {selectedToolId === "merge" ? (
+          <div className="rounded-md border border-ink/10 bg-bg p-3">
+            <p className="text-sm font-medium text-ink">Topaz Enhance / Upscale</p>
+            {sortedExports.length ? (
+              <p className="mt-1 text-xs text-ink/65">
+                Use the controls in the Merged exports panel below to queue Topaz for each merged output.
+              </p>
+            ) : (
+              <p className="mt-1 text-xs text-ink/65">
+                Run Merge generated output first, then Topaz controls will appear per export below.
+              </p>
+            )}
+          </div>
+        ) : null}
         {extendGenerationError ? (
           <StatusNotice variant="error">
             <p>{extendGenerationError}</p>
           </StatusNotice>
         ) : null}
       </div>
-      </>
-      ) : null}
       {showMergeIntoSourceTool && selectedToolId === "merge" ? (
-      <div className="space-y-2">
+      <div className="mt-3 space-y-2 rounded-lg border border-ink/10 bg-white p-3">
         <p className="text-sm font-medium text-ink/80">Merged exports</p>
         {!sortedExports.length ? <p className="text-sm text-ink/60">No merged exports yet.</p> : null}
         {sortedExports.map((exp) => (
@@ -1569,6 +1602,7 @@ export default function MergeTab({ ctx }: MergeTabProps) {
             <p className="text-xs text-ink/60">
               {exp.exportId} · {formatCompactTimestamp(exp.createdAt)}
             </p>
+            {exp.sourceExportId ? <p className="text-xs text-ink/55">Derived from export {exp.sourceExportId}</p> : null}
             {exp.motionSyncQc?.status ? (
               <p
                 className={`text-xs ${
@@ -1580,6 +1614,21 @@ export default function MergeTab({ ctx }: MergeTabProps) {
                 }`}
               >
                 Motion QA: {exp.motionSyncQc.status}
+              </p>
+            ) : null}
+            {exp.topazUpscale?.status ? (
+              <p
+                className={`text-xs ${
+                  exp.topazUpscale.status === "failed"
+                    ? "text-red-700"
+                    : exp.topazUpscale.status === "complete"
+                      ? "text-teal-700"
+                      : "text-amber-700"
+                }`}
+              >
+                Topaz: {exp.topazUpscale.status}
+                {exp.topazUpscale.model ? ` · ${exp.topazUpscale.model}` : ""}
+                {typeof exp.topazUpscale.upscaleFactor === "number" ? ` · ${exp.topazUpscale.upscaleFactor}x` : ""}
               </p>
             ) : null}
             <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -1601,8 +1650,82 @@ export default function MergeTab({ ctx }: MergeTabProps) {
                 Motion QA
               </button>
             </div>
+            <div className="mt-3 space-y-2 rounded-md border border-ink/10 bg-bg p-2">
+              <p className="text-xs font-medium text-ink/75">Topaz Enhance / Upscale</p>
+              <div className="grid gap-2 md:grid-cols-4">
+                <label className="space-y-1 text-[11px] text-ink/70">
+                  <span className="block font-medium text-ink/80">Preset</span>
+                  <select
+                    className="w-full rounded border border-ink/20 bg-white px-2 py-1.5 text-xs"
+                    value={topazSettingsForExport(exp.exportId).preset}
+                    onChange={(event) =>
+                      updateTopazSettings(exp.exportId, {
+                        preset: event.target.value as TopazUpscaleSettings["preset"],
+                      })
+                    }
+                  >
+                    <option value="balanced">Balanced</option>
+                    <option value="recover_detail">Recover detail</option>
+                    <option value="fast_sharpen">Fast sharpen</option>
+                  </select>
+                </label>
+                <label className="space-y-1 text-[11px] text-ink/70">
+                  <span className="block font-medium text-ink/80">Model</span>
+                  <select
+                    className="w-full rounded border border-ink/20 bg-white px-2 py-1.5 text-xs"
+                    value={topazSettingsForExport(exp.exportId).model}
+                    onChange={(event) => updateTopazSettings(exp.exportId, { model: event.target.value })}
+                  >
+                    <option value="Proteus">Proteus</option>
+                    <option value="Artemis HQ">Artemis HQ</option>
+                    <option value="Nyx Fast">Nyx Fast</option>
+                    <option value="Starlight Sharp">Starlight Sharp</option>
+                  </select>
+                </label>
+                <label className="space-y-1 text-[11px] text-ink/70">
+                  <span className="block font-medium text-ink/80">Scale</span>
+                  <select
+                    className="w-full rounded border border-ink/20 bg-white px-2 py-1.5 text-xs"
+                    value={topazSettingsForExport(exp.exportId).upscaleFactor}
+                    onChange={(event) => updateTopazSettings(exp.exportId, { upscaleFactor: Number(event.target.value) || 1 })}
+                  >
+                    <option value={1}>1x (enhance only)</option>
+                    <option value={2}>2x</option>
+                    <option value={4}>4x</option>
+                  </select>
+                </label>
+                <label className="inline-flex items-center gap-2 self-end pb-1 text-[11px] text-ink/70">
+                  <input
+                    type="checkbox"
+                    checked={topazSettingsForExport(exp.exportId).h264Output}
+                    onChange={(event) => updateTopazSettings(exp.exportId, { h264Output: event.target.checked })}
+                  />
+                  H264 output
+                </label>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  className="rounded bg-teal-600 px-3 py-1.5 text-xs text-white disabled:cursor-not-allowed disabled:opacity-60"
+                  disabled={isTopazUpscalePending && topazUpscalePendingExportId === exp.exportId}
+                  onClick={() => queueTopazUpscale(exp.exportId, topazSettingsForExport(exp.exportId))}
+                >
+                  <PendingButtonLabel
+                    isPending={isTopazUpscalePending && topazUpscalePendingExportId === exp.exportId}
+                    idle="Queue Topaz pass"
+                    pending="Queueing Topaz..."
+                  />
+                </button>
+                {exp.topazUpscale?.resultExportId ? (
+                  <span className="text-[11px] text-ink/60">Latest Topaz export: {exp.topazUpscale.resultExportId}</span>
+                ) : null}
+              </div>
+              {exp.topazUpscale?.error ? <p className="text-[11px] text-red-700">{exp.topazUpscale.error}</p> : null}
+            </div>
           </div>
         ))}
+      </div>
+      ) : null}
       </div>
       ) : null}
       {nextWarning && (selectedToolId === "align_retime" || selectedToolId === "merge") ? (

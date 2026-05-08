@@ -137,4 +137,22 @@ def handle_job_failure(
         store.save_task(latest_task, merge_on_conflict=True)
         return True
 
+    if job_type == "export_topaz_upscale":
+        payload = job.get("payload") or {}
+        source_export_id = str(payload.get("sourceExportId") or "")
+        result_export_id = str(payload.get("resultExportId") or "")
+        exports = latest_task.get("exports")
+        if isinstance(exports, list):
+            source_export = next((item for item in exports if isinstance(item, dict) and item.get("exportId") == source_export_id), None)
+            if isinstance(source_export, dict):
+                source_export["topazUpscale"] = {
+                    "status": "failed",
+                    "jobId": job_id,
+                    "updatedAt": now_iso_fn(),
+                    "resultExportId": result_export_id or None,
+                    "error": str(error),
+                }
+        store.save_task(latest_task, merge_on_conflict=True)
+        return True
+
     return False

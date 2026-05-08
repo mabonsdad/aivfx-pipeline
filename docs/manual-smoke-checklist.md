@@ -24,7 +24,9 @@ Use this checklist after deploys and before large refactors.
    - Generate one segment video from edited start input.
    - Confirm job completes and generation appears in outputs.
 6. **Merge**
-   - Select generated output and run merge/export.
+   - Select generated output, open **Align & Retime**, run **Suggest alignment**, then **Apply suggested**.
+   - Confirm controls are not auto-filled before clicking **Apply suggested**.
+   - Run reconcile timing or merge/export.
    - Confirm merged export appears and is playable/downloadable.
 7. **Report**
    - Create one QC report from an output asset.

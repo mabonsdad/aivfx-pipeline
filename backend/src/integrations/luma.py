@@ -65,3 +65,38 @@ def get_generation(*, api_key: str, generation_id: str) -> dict[str, Any]:
         f"https://api.lumalabs.ai/dream-machine/v1/generations/{generation_id}",
         token=api_key,
     )
+
+
+def create_uni_image_edit_generation(
+    *,
+    api_key: str,
+    source_url: str,
+    prompt: str,
+    model: str = "uni-1",
+    style: str | None = None,
+    output_format: str | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "type": "image_edit",
+        "prompt": prompt,
+        "source": {"url": source_url},
+        "model": model,
+    }
+    if style:
+        payload["style"] = style
+    if output_format:
+        payload["output_format"] = output_format
+    return _request(
+        "POST",
+        "https://agents.lumalabs.ai/v1/generations",
+        token=api_key,
+        payload=payload,
+    )
+
+
+def get_uni_generation(*, api_key: str, generation_id: str) -> dict[str, Any]:
+    return _request(
+        "GET",
+        f"https://agents.lumalabs.ai/v1/generations/{generation_id}",
+        token=api_key,
+    )

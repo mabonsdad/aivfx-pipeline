@@ -68,6 +68,19 @@ export const QC_EDGE_BIAS_IDS = [
   "inclusive",
 ] as const;
 
+export const TOPAZ_VIDEO_MODEL_IDS = [
+  "Proteus",
+  "Artemis HQ",
+  "Nyx Fast",
+  "Starlight Sharp",
+] as const;
+
+export const TOPAZ_UPSCALE_PRESET_IDS = [
+  "balanced",
+  "recover_detail",
+  "fast_sharpen",
+] as const;
+
 export type TaskStatusId = (typeof TASK_STATUS_IDS)[number];
 export type JobStatusId = (typeof JOB_STATUS_IDS)[number];
 export type AssetUploadTypeId = (typeof ASSET_UPLOAD_TYPE_IDS)[number];
@@ -79,6 +92,9 @@ export type ManualRefineExportFormatId = (typeof MANUAL_REFINE_EXPORT_FORMAT_IDS
 export type QcEdgeSuppressionId = (typeof QC_EDGE_SUPPRESSION_IDS)[number];
 export type QcSamPromptTypeId = (typeof QC_SAM_PROMPT_TYPE_IDS)[number];
 export type QcEdgeBiasId = (typeof QC_EDGE_BIAS_IDS)[number];
+
+export type TopazVideoModelId = (typeof TOPAZ_VIDEO_MODEL_IDS)[number];
+export type TopazUpscalePresetId = (typeof TOPAZ_UPSCALE_PRESET_IDS)[number];
 
 export type PatchRectPayload = {
   x: number;
@@ -158,6 +174,9 @@ export type ApiImageEditFullPayload = {
   model: string;
   prompt: string;
   inputAssetKey: string;
+  lumaUniModel?: "uni-1" | "uni-1-max" | null;
+  lumaUniStyle?: "auto" | "manga" | null;
+  lumaUniOutputFormat?: "png" | "jpeg" | null;
 };
 
 export type ApiImageEditPatchPayload = {
@@ -200,6 +219,15 @@ export type AssetDeletePayload = {
   variantId?: string | null;
   genId?: string | null;
   exportId?: string | null;
+};
+
+export type ExportTopazUpscalePayload = {
+  force?: boolean;
+  model?: string;
+  preset?: string;
+  upscaleFactor?: number;
+  targetFps?: number | null;
+  h264Output?: boolean;
 };
 
 export type CustomReportOutputRefPayload = {

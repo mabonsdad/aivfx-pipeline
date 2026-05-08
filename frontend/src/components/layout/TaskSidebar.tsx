@@ -32,12 +32,12 @@ export default function TaskSidebar({
     <aside className="col-span-12 rounded-2xl border border-ink/10 bg-card p-3 md:col-span-2">
       <div className="mb-3 flex items-center justify-between">
         <h2 className="text-base font-semibold">Videos</h2>
-        <button onClick={onSignOut} className="text-xs text-ink/60 underline">
+        <button type="button" onClick={onSignOut} className="text-xs text-ink/60 underline">
           Sign out
         </button>
       </div>
 
-      <button className="mb-3 w-full rounded-md bg-accent px-3 py-1.5 text-xs text-white" onClick={onOpenNewTask}>
+      <button type="button" className="mb-3 w-full rounded-md bg-accent px-3 py-1.5 text-xs text-white" onClick={onOpenNewTask}>
         Upload New Video
       </button>
 
@@ -80,7 +80,7 @@ export default function TaskSidebar({
                 </svg>
               </button>
             </div>
-            <button className="w-full pr-12 text-left" onClick={() => onSelectTask(taskItem.taskId)}>
+            <button type="button" className="w-full pr-12 text-left" onClick={() => onSelectTask(taskItem.taskId)}>
               <p className="truncate text-sm font-medium leading-tight">{taskItem.name}</p>
               {taskItem.status === "error" ? <p className="text-[10px] font-semibold uppercase tracking-wide text-red-600">ERROR</p> : null}
             </button>
@@ -88,13 +88,13 @@ export default function TaskSidebar({
         ))}
       </div>
       <div className="mt-3 space-y-2">
-        <button className="block text-xs text-accent underline" onClick={onOpenAssetLibrary}>
+        <button type="button" className="block text-xs text-accent underline" onClick={onOpenAssetLibrary}>
           Open Asset Library
         </button>
-        <button className="block text-xs text-accent underline" onClick={onOpenCustomQc}>
+        <button type="button" className="block text-xs text-accent underline" onClick={onOpenCustomQc}>
           Custom QC test
         </button>
-        <button className="block text-xs text-accent underline" onClick={onOpenApiLogs}>
+        <button type="button" className="block text-xs text-accent underline" onClick={onOpenApiLogs}>
           API Logs
         </button>
       </div>

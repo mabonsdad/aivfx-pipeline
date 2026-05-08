@@ -54,6 +54,9 @@ export const FULL_EDIT_MODEL_IDS = [
   "nano_banana_pro",
   "chatgpt",
   "chatgpt_latest",
+  "luma_uni_1",
+  "luma_uni_1_max",
+  "luma_uni_1_1",
 ] as const;
 
 export const PATCH_EDIT_MODEL_IDS = [
