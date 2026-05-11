@@ -198,6 +198,11 @@ const DEFAULT_TOPAZ_SETTINGS: TopazUpscaleSettings = {
   h264Output: false,
 };
 
+function asFiniteNumber(value: unknown): number | null {
+  const numeric = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
 function clampInteger(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, Math.round(value)));
 }
@@ -205,6 +210,28 @@ function clampInteger(value: number, min: number, max: number): number {
 function formatSignedFrames(value: number | null | undefined): string {
   const safeValue = Math.round(Number(value ?? 0));
   return `${safeValue >= 0 ? "+" : ""}${safeValue}f`;
+}
+
+function estimateGenerationDurationFrames(generation: SegmentGeneration, fps: number, fallbackDurationFrames: number): number {
+  const storedFrameCount = asFiniteNumber(generation.generationSettings?.storedOutput?.frameCount);
+  if (storedFrameCount != null && storedFrameCount > 0) {
+    return Math.max(1, Math.round(storedFrameCount));
+  }
+  const durationSec =
+    asFiniteNumber(generation.generationSettings?.storedOutput?.durationSec) ??
+    asFiniteNumber(generation.providerDurationSec) ??
+    asFiniteNumber(generation.generationSettings?.providerDurationSec) ??
+    asFiniteNumber(generation.requestedDurationSec);
+  if (durationSec != null && durationSec > 0 && fps > 0) {
+    return Math.max(1, Math.round(durationSec * fps));
+  }
+  return Math.max(1, fallbackDurationFrames);
+}
+
+function statusLabelForGeneration(generation: SegmentGeneration): string {
+  const status = String(generation.status || "").toLowerCase();
+  if (!status) return "unknown";
+  return status;
 }
 
 function frameWindow(centerFrame: number, before: number, after: number, minFrame: number, maxFrame: number): number[] {
@@ -561,11 +588,56 @@ export default function MergeTab({ ctx }: MergeTabProps) {
   const [showAdvancedAlignmentDetails, setShowAdvancedAlignmentDetails] = useState(false);
   const [boundaryZoomModal, setBoundaryZoomModal] = useState<BoundaryZoomModalState | null>(null);
   const [topazSettingsByExportId, setTopazSettingsByExportId] = useState<Record<string, TopazUpscaleSettings>>({});
+  const allSegmentGenerations = useMemo(() => Object.values(task?.segmentGenerations ?? {}), [task?.segmentGenerations]);
   const selectedExtendGeneration = useMemo(
     () => completeGenerations.find((generation) => generation.genId === extendGenerationId) ?? null,
     [completeGenerations, extendGenerationId],
   );
   const selectedExtendSegment = selectedExtendGeneration ? getSegmentForGeneration(selectedExtendGeneration) : null;
+  const extendChainGenerations = useMemo(() => {
+    if (!selectedExtendGeneration) return [] as SegmentGeneration[];
+    const byId = new Map(allSegmentGenerations.map((generation) => [generation.genId, generation]));
+    const childrenByParent = new Map<string, string[]>();
+    for (const generation of allSegmentGenerations) {
+      const parentId = generation.parentGenerationId ?? generation.extension?.parentGenerationId ?? null;
+      if (!parentId) continue;
+      const siblings = childrenByParent.get(parentId) ?? [];
+      siblings.push(generation.genId);
+      childrenByParent.set(parentId, siblings);
+    }
+    const lineageIds = new Set<string>();
+    const queue: string[] = [selectedExtendGeneration.genId];
+    while (queue.length) {
+      const currentId = queue.shift();
+      if (!currentId || lineageIds.has(currentId)) continue;
+      lineageIds.add(currentId);
+      const children = childrenByParent.get(currentId) ?? [];
+      for (const childId of children) {
+        if (!lineageIds.has(childId)) {
+          queue.push(childId);
+        }
+      }
+    }
+    return Array.from(lineageIds)
+      .map((generationId) => byId.get(generationId))
+      .filter((generation): generation is SegmentGeneration => Boolean(generation))
+      .sort((left, right) => {
+        const leftTs = new Date(left.createdAt || 0).getTime();
+        const rightTs = new Date(right.createdAt || 0).getTime();
+        return leftTs - rightTs;
+      });
+  }, [allSegmentGenerations, selectedExtendGeneration]);
+  const extendMergedExport = useMemo(() => {
+    if (!extendChainGenerations.length) return null;
+    const chainGenerationIds = new Set(extendChainGenerations.map((generation) => generation.genId));
+    return (
+      [...sortedExports]
+        .sort((left, right) => new Date(right.createdAt || 0).getTime() - new Date(left.createdAt || 0).getTime())
+        .find((exportRecord) =>
+          (exportRecord.selectedSegmentGenerationIds ?? []).some((generationId) => chainGenerationIds.has(generationId)),
+        ) ?? null
+    );
+  }, [extendChainGenerations, sortedExports]);
   const parsedAlignmentFrame = Number(extendAlignmentFrame);
   const parsedAnchorFramesFromEnd = Number(extendAnchorFramesFromEnd);
   const parsedDurationSeconds = extendDurationSeconds.trim() ? Number(extendDurationSeconds) : undefined;
@@ -784,15 +856,25 @@ export default function MergeTab({ ctx }: MergeTabProps) {
   );
 
   const resetExtensionFormForGeneration = useCallback((generation: SegmentGeneration | null) => {
+    const anchorFramesFromEndDefault = 5;
     const segment = generation ? getSegmentForGeneration(generation) : null;
-    const defaultAlignment = Math.max(0, (segment?.endFrameExclusive ?? 1) - 6);
-    const defaultDuration = Math.max(1, Math.ceil(segment?.durationSec ?? 5));
+    const segmentStartFrame = segment?.startFrame ?? 0;
+    const segmentEndFrameExclusive = Math.max(segmentStartFrame + 1, segment?.endFrameExclusive ?? segmentStartFrame + 1);
+    const segmentDurationFrames = Math.max(1, segmentEndFrameExclusive - segmentStartFrame);
+    const estimatedGeneratedFrames = generation ? estimateGenerationDurationFrames(generation, mergeFps, segmentDurationFrames) : segmentDurationFrames;
+    const estimatedAnchorFrameIndex = Math.max(0, estimatedGeneratedFrames - 1 - anchorFramesFromEndDefault);
+    const maxSourceFrame = sourceFrameCount > 0 ? Math.max(0, sourceFrameCount - 1) : segmentEndFrameExclusive - 1;
+    const defaultAlignment = clampInteger(segmentStartFrame + estimatedAnchorFrameIndex, segmentStartFrame, Math.max(segmentStartFrame, maxSourceFrame));
+    const remainingFrames = sourceFrameCount > 0 ? Math.max(1, sourceFrameCount - defaultAlignment) : segmentDurationFrames;
+    const maxDurationSecondsFromRemaining = Math.max(1, Math.floor(remainingFrames / Math.max(1, mergeFps)));
+    const baseDurationSeconds = Math.max(1, Math.ceil(segment?.durationSec ?? estimatedGeneratedFrames / Math.max(1, mergeFps)));
+    const defaultDuration = clampInteger(baseDurationSeconds, 1, Math.min(15, Math.max(1, maxDurationSecondsFromRemaining)));
     setExtendGenerationId(generation?.genId ?? "");
     setExtendAlignmentFrame(String(defaultAlignment));
-    setExtendAnchorFramesFromEnd("5");
+    setExtendAnchorFramesFromEnd(String(anchorFramesFromEndDefault));
     setExtendDurationSeconds(String(defaultDuration));
     setExtendPrompt(generation?.luma.prompt ?? "");
-  }, [getSegmentForGeneration]);
+  }, [getSegmentForGeneration, mergeFps, sourceFrameCount]);
 
   function handleExtendGenerationChange(genId: string) {
     const generation = completeGenerations.find((item) => item.genId === genId) ?? null;
@@ -1055,7 +1137,7 @@ export default function MergeTab({ ctx }: MergeTabProps) {
           <div className="space-y-3">
             <div>
               <h4 className="text-base font-semibold">Extend generation</h4>
-              <p className="mt-1 text-sm text-ink/60">Creates the next working-range continuation from an existing output.</p>
+              <p className="mt-1 text-sm text-ink/60">Continue from an existing output.</p>
             </div>
             <label className="block space-y-1 text-sm">
               <span className="font-medium">Previous output</span>
@@ -1134,6 +1216,112 @@ export default function MergeTab({ ctx }: MergeTabProps) {
               >
                 <PendingButtonLabel isPending={isExtendingGeneration} idle="Queue next continuation" pending="Queueing continuation..." />
               </button>
+            </div>
+            {extendGenerationError ? (
+              <StatusNotice variant="error">
+                <p className="text-xs">{extendGenerationError}</p>
+              </StatusNotice>
+            ) : null}
+            <div className="space-y-2 rounded-md border border-ink/10 bg-white p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-sm font-medium text-ink">Continuation chain outputs</p>
+                <p className="text-[11px] text-ink/60">
+                  Showing base generation plus continuations queued from this selected output.
+                </p>
+              </div>
+              {!extendChainGenerations.length ? <p className="text-xs text-ink/60">No continuation jobs or clips yet for this generation.</p> : null}
+              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                {extendChainGenerations.map((generation) => {
+                  const isBaseGeneration = generation.genId === selectedExtendGeneration?.genId;
+                  const status = statusLabelForGeneration(generation);
+                  const isPending = status === "queued" || status === "running";
+                  const isFailed = status === "failed";
+                  const borderTone = isFailed
+                    ? "border-red-200 bg-red-50"
+                    : isPending
+                      ? "border-amber-200 bg-amber-50"
+                      : isBaseGeneration
+                        ? "border-teal-400 bg-teal-50"
+                        : "border-ink/10 bg-bg";
+                  const generationSegment = getSegmentForGeneration(generation);
+                  return (
+                    <div key={`extend-chain-${generation.genId}`} className={`rounded border p-2 ${borderTone}`}>
+                      <div className="mb-2 flex items-center justify-between gap-2 text-xs">
+                        <span className="uppercase text-ink/70">{status}</span>
+                        <span className="text-[11px] text-ink/55">{isBaseGeneration ? "base" : "continuation"}</span>
+                      </div>
+                      {generation.downloadUrl ? (
+                        <video
+                          className="aspect-video w-full rounded-md border border-ink/10 bg-black/80 object-cover"
+                          src={generation.downloadUrl}
+                          preload="metadata"
+                          muted
+                          playsInline
+                        />
+                      ) : (
+                        <div className="flex aspect-video w-full items-center justify-center rounded-md border border-dashed border-ink/25 bg-white text-xs text-ink/60">
+                          {isPending ? "Waiting for generated output..." : "Generated video unavailable"}
+                        </div>
+                      )}
+                      <p className="mt-2 text-xs font-medium text-ink/85">{generation.luma.model}</p>
+                      {generationSegment ? <p className="text-[11px] text-ink/60">{describeSegment(generationSegment)}</p> : null}
+                      <p className="text-[11px] text-ink/60">{formatCompactTimestamp(generation.updatedAt ?? generation.createdAt)}</p>
+                      {isFailed && generation.error ? (
+                        <p className="mt-1 line-clamp-3 text-[11px] text-red-700" title={generation.error}>
+                          {generation.error}
+                        </p>
+                      ) : null}
+                      <div className="mt-2 flex flex-wrap items-center gap-2">
+                        {generation.downloadUrl ? (
+                          <a
+                            className="rounded border border-ink/20 bg-white px-2.5 py-1.5 text-[11px] text-ink"
+                            href={generation.downloadUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            Open
+                          </a>
+                        ) : (
+                          <button
+                            type="button"
+                            className="rounded border border-ink/20 bg-white px-2.5 py-1.5 text-[11px] text-ink/50"
+                            disabled
+                          >
+                            Waiting...
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="rounded-md border border-ink/10 bg-bg p-2">
+                <p className="text-xs font-medium text-ink/75">Merged chain output</p>
+                {extendMergedExport ? (
+                  <div className="mt-1 flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-xs text-ink/70">
+                      {humanizeFilename(keyBasenameFromS3Key(extendMergedExport.outputKey || `${extendMergedExport.exportId}.mp4`))}
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[11px] text-ink/55">{formatCompactTimestamp(extendMergedExport.createdAt)}</span>
+                      {extendMergedExport.downloadUrl ? (
+                        <a
+                          className="rounded border border-ink/20 bg-white px-2.5 py-1.5 text-[11px] text-ink"
+                          href={extendMergedExport.downloadUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          Download
+                        </a>
+                      ) : (
+                        <span className="text-[11px] text-ink/50">Export is still processing</span>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <p className="mt-1 text-xs text-ink/60">No merged export found for this continuation chain yet.</p>
+                )}
+              </div>
             </div>
           </div>
         </div>
@@ -1585,11 +1773,6 @@ export default function MergeTab({ ctx }: MergeTabProps) {
               </p>
             )}
           </div>
-        ) : null}
-        {extendGenerationError ? (
-          <StatusNotice variant="error">
-            <p>{extendGenerationError}</p>
-          </StatusNotice>
         ) : null}
       </div>
       {showMergeIntoSourceTool && selectedToolId === "merge" ? (

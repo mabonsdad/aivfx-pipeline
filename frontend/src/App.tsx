@@ -33,6 +33,7 @@ import { useGenerationMergeState } from "./hooks/useGenerationMergeState";
 import { useSelectedSegmentPreview } from "./hooks/useSelectedSegmentPreview";
 import { useTaskDataQueries } from "./hooks/useTaskDataQueries";
 import { useReportOutputSelection } from "./hooks/useReportOutputSelection";
+import { getPromptWizardModelConfig, type PromptWizardMode, type PromptWizardResult } from "./lib/promptWizardConfig";
 import type {
   PatchEditModelId,
   VideoModeId,
@@ -176,6 +177,7 @@ type PendingGenerationCard = {
 const ReportsPage = lazy(() => import("./pages/ReportsPage"));
 const CustomQcPage = lazy(() => import("./pages/CustomQcPage"));
 const ApiLogsPage = lazy(() => import("./pages/ApiLogsPage"));
+const AdminPromptWizardPage = lazy(() => import("./pages/AdminPromptWizardPage"));
 const PickFrameTab = lazy(() => import("./pages/workflow/PickFrameTab"));
 const EditFrameTab = lazy(() => import("./pages/workflow/EditFrameTab"));
 const RefineFramesTab = lazy(() => import("./pages/workflow/RefineFramesTab"));
@@ -215,6 +217,31 @@ function sleep(ms: number): Promise<void> {
 function formatFramesAndSeconds(frames: number, fps: number): string {
   const safeFps = fps > 0 ? fps : 30;
   return `${frames}f / ${(frames / safeFps).toFixed(2)}s`;
+}
+
+function promptWizardModeForInput(inputMode: GenerateInputMode): PromptWizardMode | null {
+  if (inputMode === "start_video") return "start_video";
+  if (inputMode === "start_end") return "start_end";
+  return null;
+}
+
+function lumaModeBucket(mode: string): "adhere" | "flex" | "reimagine" | null {
+  if (mode.startsWith("adhere")) return "adhere";
+  if (mode.startsWith("flex")) return "flex";
+  if (mode.startsWith("reimagine")) return "reimagine";
+  return null;
+}
+
+function validatePromptWizardResult(result: PromptWizardResult, requiredMarkers: string[]): PromptWizardResult {
+  const recommendedPrompt = result.recommended_prompt ?? "";
+  const missing = requiredMarkers.filter((marker) => !recommendedPrompt.includes(marker));
+  if (missing.length) {
+    throw new Error(`Prompt Wizard response missing required marker(s): ${missing.join(", ")}`);
+  }
+  if (requiredMarkers.length && !result.required_markers_present) {
+    throw new Error("Prompt Wizard response reported missing required markers.");
+  }
+  return { ...result, negative_prompt: "" };
 }
 
 function generatedOutputFrameToSourceFrame(
@@ -407,6 +434,7 @@ function videoModelLabel(model: VideoModel): string {
   if (model === "wan2.2-animate") return "Wan 2.2 Animate";
   if (model === "wan2.7-videoedit") return "Wan 2.7 VideoEdit";
   if (model === "wan2.7-i2v") return "Wan 2.7 Image to Video";
+  if (model === "ltx-2.3-pro") return "LTX 2.3 Pro";
   return model;
 }
 
@@ -435,6 +463,7 @@ function videoModelDurationConstraints(model: VideoModel): {
   if (model === "wan2.2-animate") return { maxSeconds: 10 };
   if (model === "wan2.7-videoedit") return { minSeconds: 2, maxSeconds: 10 };
   if (model === "wan2.7-i2v") return { minSeconds: 2, maxSeconds: 10 };
+  if (model === "ltx-2.3-pro") return { minSeconds: 6, maxSeconds: 10 };
   return { maxSeconds: 60 };
 }
 
@@ -497,6 +526,7 @@ const AUTOMATION_VIDEO_OPTIONS: AutomationVideoOption[] = [
   { id: "kling-v3-omni-video:start_video:kling_v3_omni_video_edit", label: "Kling v3 Omni Video (Start frame + video)", inputMode: "start_video", lumaModel: "kling-v3-omni-video", mode: "kling_v3_omni_video_edit" },
   { id: "seedance-2.0-reference-to-video:start_video:seedance_reference_to_video", label: "Seedance 2.0 Reference to Video (Start frame + video)", inputMode: "start_video", lumaModel: "seedance-2.0-reference-to-video", mode: "seedance_reference_to_video" },
   { id: "kling-2.6:start_end:kling_start_end", label: "Kling 2.6 (Start/End frame)", inputMode: "start_end", lumaModel: "kling-2.6", mode: "kling_start_end" },
+  { id: "ltx-2.3-pro:start_end:ltx23_i2v_start_end", label: "LTX 2.3 Pro (Start/End frame)", inputMode: "start_end", lumaModel: "ltx-2.3-pro", mode: "ltx23_i2v_start_end" },
   { id: "kling-2.6:start_only:kling_start_only", label: "Kling 2.6 (Start frame only)", inputMode: "start_only", lumaModel: "kling-2.6", mode: "kling_start_only" },
   { id: "veo-3.1:start_end:veo_start_end", label: "Veo 3.1 (Start/End frame)", inputMode: "start_end", lumaModel: "veo-3.1", mode: "veo_start_end" },
   { id: "veo-3.1:start_only:veo_start_only", label: "Veo 3.1 (Start frame only)", inputMode: "start_only", lumaModel: "veo-3.1", mode: "veo_start_only" },
@@ -953,7 +983,13 @@ export default function App() {
   const setTab = useCallback(
     (nextTab: TabId, taskIdOverride?: string | null, replace = false) => {
       const targetTaskId = taskIdOverride ?? selectedTaskId ?? tasksQuery.data?.[0]?.taskId ?? null;
-      if (!targetTaskId) return;
+      if (!targetTaskId) {
+        if (nextTab === "admin") {
+          setRouteOverride({ taskId: null, tab: "admin" });
+          navigate("/admin", { replace });
+        }
+        return;
+      }
       setRouteOverride({ taskId: targetTaskId, tab: nextTab });
       navigate(taskRoute(targetTaskId, nextTab), { replace });
     },
@@ -1866,10 +1902,51 @@ export default function App() {
         ? generationInputMode === "start_end"
           ? "wan27_i2v_start_end"
           : "wan27_i2v_start_only"
+      : lumaModel === "ltx-2.3-pro"
+        ? "ltx23_i2v_start_end"
       : lumaModel === "wan2.7-videoedit"
         ? "wan27_video_edit"
       : advancedMode;
   }, [advancedMode, generationInputMode, lumaModel]);
+
+  const improvePromptWizardMutation = useMutation({
+    mutationFn: async (): Promise<PromptWizardResult> => {
+      if (!selectedTaskId || !selectedSegmentId) throw new Error("Select a segment");
+      const promptWizardMode = promptWizardModeForInput(generationInputMode);
+      if (!promptWizardMode) {
+        throw new Error("Prompt Wizard is only available for first frame + video and first frame + last frame modes.");
+      }
+      const config = getPromptWizardModelConfig(lumaModel, promptWizardMode);
+      if (!config) {
+        throw new Error("Prompt Wizard is not configured for this model and mode.");
+      }
+      const trimmedPrompt = lumaPrompt.trim();
+      if (!trimmedPrompt) {
+        throw new Error("Prompt is required");
+      }
+      const firstFrameVariantId = refineSourceVariantIds.first || compareVariantIds.first || null;
+      const requestPayload = {
+        selected_model: lumaModel,
+        provider: config.provider,
+        provider_model: config.providerModel,
+        endpoint_used: config.endpointUsed,
+        mode: promptWizardMode,
+        user_draft_prompt: trimmedPrompt,
+        has_source_video: generationInputMode === "start_video",
+        has_edited_first_frame: Boolean(firstFrameVariantId && firstFrameVariantId !== "original"),
+        has_last_frame: generationInputMode === "start_end",
+        app_required_markers: config.requiredMarkers,
+        supports_negative_prompt: false as const,
+        duration_seconds: selectedSegment ? selectedSegment.durationSec : null,
+        aspect_ratio: selectedSegment?.crop?.aspect ?? null,
+        luma_mode: lumaModel === "ray-2" || lumaModel === "ray-flash-2" ? lumaModeBucket(advancedMode) : null,
+        user_visible_model_name: config.dropdownName,
+        first_frame_variant_id: firstFrameVariantId,
+      };
+      const response = await apiClient.improveSegmentPrompt(selectedTaskId, selectedSegmentId, requestPayload);
+      return validatePromptWizardResult(response.result, config.requiredMarkers);
+    },
+  });
 
   const generateSegmentMutation = useMutation({
     mutationFn: async () => {
@@ -2585,6 +2662,11 @@ export default function App() {
   const selectedSegmentOverLimit = Boolean(selectedSegmentLimit?.overLimit);
   const selectedSegmentLimitMessage = selectedSegmentLimit?.message ?? null;
   const generationModeConfig = useMemo(() => getGenerationModeConfig(generationInputMode), [generationInputMode]);
+  const promptWizardMode = useMemo(() => promptWizardModeForInput(generationInputMode), [generationInputMode]);
+  const promptWizardConfig = useMemo(
+    () => (promptWizardMode ? getPromptWizardModelConfig(lumaModel, promptWizardMode) : null),
+    [lumaModel, promptWizardMode],
+  );
   const requiresEndFrameForRoute = generationModeConfig.requiresEndFrame;
   const { generationHelp, missingRouteInputsMessage, generationInputNote, generationPromptPlaceholder, generationPromptError } =
     useGenerationPromptGuidance({
@@ -3709,7 +3791,15 @@ export default function App() {
         generationId: null,
       });
     }
-    if (tab === "timeline" && nextTab !== "timeline" && nextTab !== "report" && nextTab !== "custom_qc" && nextTab !== "api_logs" && nextTab !== "asset_library") {
+    if (
+      tab === "timeline" &&
+      nextTab !== "timeline" &&
+      nextTab !== "report" &&
+      nextTab !== "custom_qc" &&
+      nextTab !== "api_logs" &&
+      nextTab !== "asset_library" &&
+      nextTab !== "admin"
+    ) {
       const shouldUseWholeVideo = videoWorkMode !== "custom_segment" || (!selectedSegmentId && !selectedRange);
       if (shouldUseWholeVideo) {
         try {
@@ -4210,6 +4300,13 @@ export default function App() {
       setPreserveFrames,
       lumaPrompt,
       setLumaPrompt,
+      promptWizardSupported: Boolean(promptWizardConfig),
+      improvePromptWithWizard: async () => {
+        const result = await improvePromptWizardMutation.mutateAsync();
+        setLumaPrompt(result.recommended_prompt);
+        return { userAdvice: result.user_advice, warnings: result.warnings };
+      },
+      isPromptWizardPending: improvePromptWizardMutation.isPending,
       lumaContinuationPrompt,
       setLumaContinuationPrompt,
       generationPromptPlaceholder,
@@ -4284,6 +4381,8 @@ export default function App() {
       sora2Resolution,
       preserveFrames,
       lumaPrompt,
+      promptWizardConfig,
+      improvePromptWizardMutation,
       lumaContinuationPrompt,
       generationPromptPlaceholder,
       generationPromptError,
@@ -4568,6 +4667,9 @@ export default function App() {
           onOpenApiLogs={() => {
             void handleTabChange("api_logs");
           }}
+          onOpenAdmin={() => {
+            void handleTabChange("admin");
+          }}
         />
 
         <section className="col-span-12 space-y-4 md:col-span-10">
@@ -4582,7 +4684,7 @@ export default function App() {
             </StatusNotice>
           ) : null}
           <div className="rounded-2xl border border-ink/10 bg-card p-4">
-            {tab !== "custom_qc" && tab !== "api_logs" && tab !== "asset_library" ? (
+            {tab !== "custom_qc" && tab !== "api_logs" && tab !== "asset_library" && tab !== "admin" ? (
               <div className="space-y-3">
                 <WorkflowTabs
                   tabs={primaryTabs}
@@ -4717,6 +4819,12 @@ export default function App() {
             {tab === "api_logs" && (
               <Suspense fallback={<p className="text-sm text-ink/60">Loading API logs...</p>}>
                 <ApiLogsPage />
+              </Suspense>
+            )}
+
+            {tab === "admin" && (
+              <Suspense fallback={<p className="text-sm text-ink/60">Loading admin...</p>}>
+                <AdminPromptWizardPage />
               </Suspense>
             )}
           </div>

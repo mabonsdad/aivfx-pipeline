@@ -237,6 +237,17 @@ VIDEO_MODELS: dict[str, VideoModelCapability] = {
         first_frame_profile="wan27_edit",
         provider_input_namespace="replicate",
     ),
+    "ltx-2.3-pro": VideoModelCapability(
+        model="ltx-2.3-pro",
+        label="LTX 2.3 Pro",
+        provider="replicate",
+        allowed_modes=frozenset({"ltx23_i2v_start_end"}),
+        max_seconds=10,
+        min_seconds=6,
+        requires_prompt=True,
+        first_frame_profile="ltx23_i2v",
+        provider_input_namespace="replicate",
+    ),
 }
 
 if frozenset(VIDEO_MODELS.keys()) != frozenset(VIDEO_MODEL_IDS):

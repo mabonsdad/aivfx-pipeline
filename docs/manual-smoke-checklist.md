@@ -11,6 +11,7 @@ Use this checklist after deploys and before large refactors.
 ## Smoke Flow
 1. **Login**
    - Sign in and confirm task list and navigation load without console/API auth errors.
+   - Click the sidebar brand/home logo and confirm it opens `https://www.shwsh.co.uk/experiments/aivfx/`.
 2. **Upload**
    - Create a task and upload a source video.
    - Confirm upload completes and asset appears in task details.
@@ -31,6 +32,9 @@ Use this checklist after deploys and before large refactors.
 7. **Report**
    - Create one QC report from an output asset.
    - Confirm report job completes and report artifacts render in Reports.
+8. **Off-flow navigation**
+   - Open Asset Library and Admin pages.
+   - Confirm the sidebar brand/home logo still appears and always returns to the app home URL.
 
 ## Expected Result
 - End-to-end flow completes without blocking errors.

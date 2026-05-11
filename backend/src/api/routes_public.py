@@ -10,8 +10,8 @@ def handle_options(method: str, *, origin: str | None) -> dict[str, Any] | None:
         "statusCode": 204,
         "headers": {
             "access-control-allow-origin": origin or "*",
-            "access-control-allow-methods": "GET,POST,PATCH,DELETE,OPTIONS",
-            "access-control-allow-headers": "authorization,content-type",
+            "access-control-allow-methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
+            "access-control-allow-headers": "authorization,content-type,x-admin-pin",
             "access-control-allow-credentials": "true",
         },
         "body": "",

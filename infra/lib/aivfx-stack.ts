@@ -247,10 +247,11 @@ export class AivfxStack extends cdk.Stack {
       createDefaultStage: false,
       corsPreflight: {
         allowCredentials: true,
-        allowHeaders: ["authorization", "content-type"],
+        allowHeaders: ["authorization", "content-type", "x-admin-pin"],
         allowMethods: [
           apigwv2.CorsHttpMethod.GET,
           apigwv2.CorsHttpMethod.POST,
+          apigwv2.CorsHttpMethod.PUT,
           apigwv2.CorsHttpMethod.PATCH,
           apigwv2.CorsHttpMethod.DELETE,
           apigwv2.CorsHttpMethod.OPTIONS,
@@ -280,6 +281,7 @@ export class AivfxStack extends cdk.Stack {
       methods: [
         apigwv2.HttpMethod.GET,
         apigwv2.HttpMethod.POST,
+        apigwv2.HttpMethod.PUT,
         apigwv2.HttpMethod.PATCH,
         apigwv2.HttpMethod.DELETE,
       ],
@@ -292,6 +294,7 @@ export class AivfxStack extends cdk.Stack {
       methods: [
         apigwv2.HttpMethod.GET,
         apigwv2.HttpMethod.POST,
+        apigwv2.HttpMethod.PUT,
         apigwv2.HttpMethod.PATCH,
         apigwv2.HttpMethod.DELETE,
       ],

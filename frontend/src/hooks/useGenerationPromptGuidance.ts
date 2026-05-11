@@ -84,6 +84,16 @@ function generationModelHelp(modelName: VideoModelId, modeValue: string, inputMo
       ],
     };
   }
+  if (modelName === "ltx-2.3-pro") {
+    return {
+      title: "LTX 2.3 Pro (Start/End)",
+      lines: [
+        "Uses the selected start and end frames only. No source working-range video is sent for this mode.",
+        "Prompting works best when you describe visible motion and one clear camera move between the start and end images.",
+        "Replicate LTX retake is video-only (no image input), so this app currently does not use retake for start frame + video flows.",
+      ],
+    };
+  }
   if (modelName === "kling-2.6") {
     return {
       title: inputMode === "start_only" ? "Kling 2.6 (Start Frame)" : "Kling 2.6 Start/End",
@@ -231,6 +241,9 @@ export function useGenerationPromptGuidance({
         ? "Uses the selected edited start and end frames only. No source working-range video is sent."
         : "Uses only the selected edited start frame. No source working-range video is sent.";
     }
+    if (lumaModel === "ltx-2.3-pro") {
+      return "Uses the selected edited start and end frames only with Replicate LTX 2.3 Pro image_to_video. LTX retake is not image-referenced, so it is not used in this flow.";
+    }
     if (lumaModel === "runway-gen4-aleph") {
       return "Uses the selected working-range video plus the selected edited start frame as an image reference. Prompt should describe the intended transformation while preserving motion and camera continuity. Runway may center-crop to the chosen output ratio.";
     }
@@ -269,6 +282,9 @@ export function useGenerationPromptGuidance({
       return generationInputMode === "start_end"
         ? "Animate from the first frame to the final frame with coherent camera motion and stable subject detail."
         : "Animate from this first frame with clear subject motion, camera motion and scene continuity.";
+    }
+    if (lumaModel === "ltx-2.3-pro") {
+      return "Describe one clear camera move and subject motion that transitions naturally from the start frame into the end frame.";
     }
     if (lumaModel === "runway-gen4-aleph") {
       return "Transform the horse into the white unicorn from the reference image while preserving camera movement, timing and background continuity.";
@@ -321,6 +337,9 @@ export function useGenerationPromptGuidance({
       return generationInputMode === "start_end"
         ? "Wan 2.7 Image to Video requires a prompt describing the motion and the transition between the start and end frames."
         : "Wan 2.7 Image to Video requires a prompt describing the intended motion from the first frame.";
+    }
+    if (lumaModel === "ltx-2.3-pro" && !promptValue) {
+      return "LTX 2.3 Pro requires a prompt describing motion and camera transition between the start and end frames.";
     }
     if (lumaModel === "runway-gen4-aleph" && !promptValue) {
       return "Runway Gen-4 Aleph requires a prompt describing the intended transformation.";

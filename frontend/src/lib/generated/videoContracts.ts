@@ -18,6 +18,7 @@ export const VIDEO_MODEL_IDS = [
   "wan2.2-animate",
   "wan2.7-videoedit",
   "wan2.7-i2v",
+  "ltx-2.3-pro",
 ] as const;
 
 export const VIDEO_MODE_IDS = [
@@ -47,6 +48,7 @@ export const VIDEO_MODE_IDS = [
   "wan27_video_edit",
   "wan27_i2v_start_only",
   "wan27_i2v_start_end",
+  "ltx23_i2v_start_end",
 ] as const;
 
 export const FULL_EDIT_MODEL_IDS = [

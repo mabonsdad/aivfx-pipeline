@@ -23,6 +23,7 @@ const START_VIDEO_ROWS: FrameLimitRow[] = [
 
 const START_END_ROWS: FrameLimitRow[] = [
   { model: "Kling 2.6", maxSeconds: 10, modelFps: 48, maxFrameCount: 480 },
+  { model: "LTX 2.3 Pro", maxSeconds: 10, modelFps: 24, maxFrameCount: 240 },
   { model: "Veo 3.1", maxSeconds: 8, modelFps: 24, maxFrameCount: 192 },
   { model: "Veo 3.1 Fast", maxSeconds: 8, modelFps: 24, maxFrameCount: 192 },
   { model: "Seedance 2.0", maxSeconds: 15, modelFps: 24, maxFrameCount: 360 },

@@ -1,6 +1,11 @@
 import { getIdToken } from "../lib/auth";
 import { config } from "../lib/config";
 import type {
+  PromptWizardAdminConfig,
+  PromptWizardRequest,
+  PromptWizardResult,
+} from "../lib/promptWizardConfig";
+import type {
   ApiAssetUploadInitPayload,
   ApiImageEditFullPayload,
   ApiImageEditPatchPayload,
@@ -66,6 +71,7 @@ type ChunkedSegmentGenerateApiPayload = Omit<ChunkedSegmentGeneratePayload, "lum
   replicateKlingV3Mode?: ReplicateKlingV3ModeId | null;
   wan27Resolution?: Wan27ResolutionId | null;
 };
+type SegmentPromptWizardApiPayload = PromptWizardRequest;
 
 function extractApiErrorMessage(payload: unknown, fallback: string): string {
   if (payload && typeof payload === "object") {
@@ -107,6 +113,23 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 export const apiClient = {
   me: () => api<{ userId: string; email?: string; username?: string }>("/me"),
+  getPromptWizardAdminConfig: (pin?: string) =>
+    api<{
+      config: PromptWizardAdminConfig;
+      access: { isOwner: boolean; viaPin: boolean };
+    }>("/admin/prompt-wizard-config", {
+      method: "GET",
+      headers: pin ? { "x-admin-pin": pin } : undefined,
+    }),
+  updatePromptWizardAdminConfig: (payload: PromptWizardAdminConfig, pin?: string) =>
+    api<{
+      config: PromptWizardAdminConfig;
+      access: { isOwner: boolean; viaPin: boolean };
+    }>("/admin/prompt-wizard-config", {
+      method: "PUT",
+      headers: pin ? { "x-admin-pin": pin } : undefined,
+      body: JSON.stringify(payload),
+    }),
   listTasks: () => api<{ tasks: TaskSummary[] }>("/tasks"),
   createTask: (name: string) => api<{ taskId: string }>("/tasks", { method: "POST", body: JSON.stringify({ name }) }),
   deleteTask: (taskId: string) => api<{ ok: true }>(`/tasks/${taskId}`, { method: "DELETE" }),
@@ -442,6 +465,15 @@ export const apiClient = {
     },
   ) =>
     api<{ generation: { genId: string } }>(`/tasks/${taskId}/segments/${segmentId}/manual-generation/upload/complete`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  improveSegmentPrompt: (
+    taskId: string,
+    segmentId: string,
+    payload: SegmentPromptWizardApiPayload,
+  ) =>
+    api<{ result: PromptWizardResult }>(`/tasks/${taskId}/segments/${segmentId}/prompt-wizard`, {
       method: "POST",
       body: JSON.stringify(payload),
     }),

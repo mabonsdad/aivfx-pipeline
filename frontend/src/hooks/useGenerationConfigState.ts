@@ -28,6 +28,7 @@ export const GENERATION_MODELS_BY_INPUT: Record<GenerateInputMode, GenerationMod
   ],
   start_end: [
     { value: "kling-2.6", label: "Kling 2.6" },
+    { value: "ltx-2.3-pro", label: "LTX 2.3 Pro" },
     { value: "wan2.7-i2v", label: "Wan 2.7 Image to Video" },
     { value: "veo-3.1", label: "Veo 3.1" },
     { value: "veo-3.1-fast", label: "Veo 3.1 Fast" },

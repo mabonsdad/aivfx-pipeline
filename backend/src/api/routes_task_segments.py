@@ -6,11 +6,13 @@ from typing import Any, Callable
 from botocore.exceptions import ClientError
 
 from src.core.http import parse_json_body
+from src.core.prompt_wizard_admin import resolve_prompt_wizard_model_config
 from src.models.schemas import (
     ManualSegmentGenerationUploadCompleteRequest,
     ManualSegmentGenerationUploadInitRequest,
     SegmentCreateRequest,
     SegmentGenerateRequest,
+    SegmentPromptWizardRequest,
     SegmentPatchRequest,
 )
 
@@ -53,6 +55,10 @@ def handle_task_segment_routes(
     create_manual_uploaded_segment_generation_fn: Callable[..., dict[str, Any]],
     normalize_uploaded_generated_video_fn: Callable[..., dict[str, Any]],
     video_probe_payload_fn: Callable[[dict[str, Any]], dict[str, Any]],
+    resolve_frame_source_fn: Callable[[dict[str, Any], str | None], tuple[str, str | None]],
+    get_openai_api_key_fn: Callable[[], str],
+    get_prompt_wizard_admin_config_fn: Callable[[], dict[str, Any]],
+    improve_video_prompt_fn: Callable[..., dict[str, Any]],
     logger,
 ) -> dict[str, Any] | None:
     if method == "POST" and len(parts) == 3 and parts[2] == "segments":
@@ -247,6 +253,74 @@ def handle_task_segment_routes(
         )
         store.save_task(task, merge_on_conflict=True)
         return response_fn(202, {"jobId": job_id, "genId": gen_id}, origin=origin)
+
+    if method == "POST" and len(parts) == 5 and parts[2] == "segments" and parts[4] == "prompt-wizard":
+        segment_id = parts[3]
+        segment = _find_segment(task, segment_id)
+        if not isinstance(segment, dict):
+            return error_response_fn(404, "Segment not found", origin=origin)
+        req = json_model(SegmentPromptWizardRequest, event)
+        draft_prompt = sanitize_prompt_fn(req.user_draft_prompt)
+        if not draft_prompt:
+            return error_response_fn(400, "Prompt is required", origin=origin)
+
+        edited_first_frame_url: str | None = None
+        first_frame_variant_id = req.first_frame_variant_id
+        start_frame_id = str(segment.get("startFrameId") or "")
+        start_frame = task.get("frames", {}).get(start_frame_id) if start_frame_id else None
+        if req.has_edited_first_frame and isinstance(start_frame, dict):
+            try:
+                first_frame_key, _ = resolve_frame_source_fn(start_frame, first_frame_variant_id)
+                edited_first_frame_url = asset_store.presign_get(first_frame_key, expires=900)
+            except ValueError:
+                edited_first_frame_url = None
+
+        request_payload = {
+            "selected_model": req.selected_model,
+            "provider": req.provider,
+            "provider_model": req.provider_model,
+            "endpoint_used": req.endpoint_used,
+            "mode": req.mode,
+            "user_draft_prompt": draft_prompt,
+            "has_source_video": req.has_source_video,
+            "has_edited_first_frame": req.has_edited_first_frame,
+            "has_last_frame": req.has_last_frame,
+            "app_required_markers": req.app_required_markers,
+            "supports_negative_prompt": False,
+            "duration_seconds": req.duration_seconds,
+            "aspect_ratio": req.aspect_ratio,
+            "luma_mode": req.luma_mode,
+            "user_visible_model_name": req.user_visible_model_name,
+            "first_frame_variant_id": req.first_frame_variant_id,
+        }
+        admin_config = get_prompt_wizard_admin_config_fn()
+        model_config = resolve_prompt_wizard_model_config(admin_config, req.selected_model, req.mode)
+        if isinstance(model_config, dict):
+            request_payload["provider"] = str(model_config.get("provider") or request_payload["provider"])
+            request_payload["provider_model"] = str(model_config.get("provider_model") or request_payload["provider_model"])
+            request_payload["endpoint_used"] = str(model_config.get("endpoint_used") or request_payload.get("endpoint_used") or "")
+            request_payload["app_required_markers"] = [
+                str(marker)
+                for marker in (model_config.get("required_markers") or [])
+                if str(marker).strip()
+            ]
+            request_payload["user_visible_model_name"] = str(
+                model_config.get("dropdown_name") or request_payload["user_visible_model_name"]
+            )
+        openai_api_key = get_openai_api_key_fn()
+        if not openai_api_key:
+            return error_response_fn(500, "OPENAI_API_KEY is required for Prompt Wizard", origin=origin)
+        try:
+            result = improve_video_prompt_fn(
+                api_key=openai_api_key,
+                request_payload=request_payload,
+                system_prompt=str(admin_config.get("systemPrompt") or "").strip() or None,
+                edited_first_frame_url=edited_first_frame_url,
+            )
+        except Exception as exc:
+            logger.warning("Prompt Wizard request failed", extra={"taskId": task_id, "segmentId": segment_id, "error": str(exc)})
+            return error_response_fn(502, str(exc), origin=origin)
+        return response_fn(200, {"result": result}, origin=origin)
 
     if method == "POST" and len(parts) == 7 and parts[2] == "segments" and parts[4] == "manual-generation" and parts[5] == "upload" and parts[6] == "init":
         segment_id = parts[3]

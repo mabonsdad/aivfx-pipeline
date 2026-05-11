@@ -221,6 +221,32 @@ class SegmentGenerateRequest(BaseModel):
         return _validate_choice(value, field_name="sora2Resolution", allowed=SORA2_RESOLUTION_IDS)
 
 
+class SegmentPromptWizardRequest(BaseModel):
+    selected_model: str = Field(min_length=1, max_length=120)
+    provider: Literal["Luma", "fal.ai", "Runway", "Replicate", "Runware"]
+    provider_model: str = Field(min_length=1, max_length=160)
+    endpoint_used: str | None = Field(default=None, max_length=300)
+    mode: Literal["start_video", "start_end"]
+    user_draft_prompt: str = Field(min_length=1, max_length=4000)
+    has_source_video: bool
+    has_edited_first_frame: bool
+    has_last_frame: bool
+    app_required_markers: list[str] = Field(default_factory=list)
+    supports_negative_prompt: bool = False
+    duration_seconds: float | None = Field(default=None, ge=0, le=120)
+    aspect_ratio: str | None = Field(default=None, max_length=16)
+    luma_mode: Literal["adhere", "flex", "reimagine"] | None = None
+    user_visible_model_name: str = Field(min_length=1, max_length=120)
+    first_frame_variant_id: str | None = Field(default=None, max_length=120)
+
+    @field_validator("supports_negative_prompt")
+    @classmethod
+    def validate_negative_prompt_support(cls, value: bool) -> bool:
+        if value:
+            raise ValueError("supports_negative_prompt must be false")
+        return value
+
+
 class ApiAssetUploadInitRequest(BaseModel):
     filename: str = Field(min_length=1, max_length=255)
     contentType: str = Field(min_length=1, max_length=120)

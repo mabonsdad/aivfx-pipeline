@@ -139,6 +139,8 @@ MAX_PROVIDER_IMAGE_BYTES = 10 * 1024 * 1024
 WAN27_DATA_URL_MAX_BYTES = 6_800_000
 SEEDANCE_REFERENCE_VIDEO_MAX_BYTES = 49_000_000
 KLING_SUPPORTED_DURATIONS = (5, 10)
+LTX23_SUPPORTED_DURATIONS = (6, 8, 10)
+LTX23_SUPPORTED_FPS = (24, 25, 48, 50)
 QC_SAMPLE_FPS = 3
 QC_ANALYSIS_MAX_FRAMES = 90
 QC_DIFF_THRESHOLD = 32
@@ -238,6 +240,16 @@ def _nearest_runware_wan22_resolution(width: int, height: int) -> tuple[int, int
 
 def _nearest_supported_kling_duration(duration_sec: float) -> int:
     return min(KLING_SUPPORTED_DURATIONS, key=lambda value: abs(duration_sec - float(value)))
+
+
+def _nearest_supported_ltx23_duration(duration_sec: float) -> int:
+    bounded = max(float(LTX23_SUPPORTED_DURATIONS[0]), min(float(LTX23_SUPPORTED_DURATIONS[-1]), float(duration_sec)))
+    return min(LTX23_SUPPORTED_DURATIONS, key=lambda value: abs(float(value) - bounded))
+
+
+def _nearest_supported_ltx23_fps(source_fps: Fraction | float) -> int:
+    source_value = float(source_fps)
+    return min(LTX23_SUPPORTED_FPS, key=lambda value: abs(float(value) - source_value))
 
 
 def _sora_supported_duration(duration_sec: float) -> int:
@@ -1814,6 +1826,68 @@ def _run_wan27_i2v_prediction(
     raise RuntimeError("Wan 2.7 image-to-video generation did not produce a result")
 
 
+def _run_ltx23_i2v_prediction(
+    *,
+    api_key: str,
+    prompt: str,
+    first_frame: str,
+    last_frame: str | None,
+    duration_seconds: int,
+    aspect_ratio: str,
+    fps: int,
+    generate_audio: bool,
+    job: dict[str, Any],
+    store: S3JsonStore,
+) -> tuple[str, dict[str, Any]]:
+    input_payload: dict[str, Any] = {
+        "task": "image_to_video",
+        "prompt": prompt,
+        "image": first_frame,
+        "last_frame_image": last_frame,
+        "duration": int(duration_seconds),
+        "aspect_ratio": aspect_ratio if aspect_ratio in {"16:9", "9:16"} else "16:9",
+        "fps": int(fps),
+        "resolution": "1080p",
+        "generate_audio": bool(generate_audio),
+    }
+    if not last_frame:
+        input_payload.pop("last_frame_image")
+    last_exc: BaseException | None = None
+    for retry_index in range(3):
+        _job_progress(job, store, 35, "running", "Creating Replicate LTX 2.3 Pro generation")
+        created = create_replicate_official_model_prediction(
+            api_key=api_key,
+            owner="lightricks",
+            name="ltx-2.3-pro",
+            input=input_payload,
+        )
+        generation_id = created.get("id")
+        if not isinstance(generation_id, str):
+            raise RuntimeError(f"Unexpected Replicate LTX 2.3 Pro create response: {created}")
+        _job_progress(job, store, 55, "running", "Polling Replicate LTX 2.3 Pro generation")
+        try:
+            result = _wait_replicate_complete(api_key, prediction_id=generation_id)
+            return generation_id, result
+        except RuntimeError as exc:
+            last_exc = exc
+            message = str(exc)
+            if ("(E004)" in message or "temporarily unavailable" in message.lower()) and retry_index < 2:
+                wait_sec = 15 * (retry_index + 1)
+                _job_progress(
+                    job,
+                    store,
+                    55,
+                    "running",
+                    f"LTX 2.3 Pro is temporarily unavailable, retrying in {wait_sec}s",
+                )
+                time.sleep(wait_sec)
+                continue
+            raise
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("LTX 2.3 Pro generation did not produce a result")
+
+
 def _alpha_mask_for_rect(size: tuple[int, int], rect: dict[str, int], feather_px: int, bleed_px: int) -> Image.Image:
     mask = Image.new("L", size, 0)
     x = max(0, rect["x"] - bleed_px)
@@ -2623,7 +2697,7 @@ def _handle_api_video_generate_reference(
     capability = get_video_model_capability(model_name)
     requested_mode = str(payload["mode"])
     luma_mode = requested_mode if requested_mode in LUMA_API_ALLOWED_MODES else "flex_1"
-    uses_end_keyframe = requested_mode in {"kling_start_end", "veo_start_end", "wan27_i2v_start_end"}
+    uses_end_keyframe = requested_mode in {"kling_start_end", "veo_start_end", "wan27_i2v_start_end", "ltx23_i2v_start_end"}
     replicate_kling_mode = str(payload.get("replicateKlingMode") or "pro")
     replicate_kling_v3_mode = str(payload.get("replicateKlingV3Mode") or "pro")
     wan27_resolution = str(payload.get("wan27Resolution") or "720p")
@@ -2700,6 +2774,7 @@ def _handle_api_video_generate_reference(
         local_provider_segment: Path | None = None
         wan27_video_transport: str | None = None
         wan27_reference_transport: str | None = None
+        ltx23_reference_transport: str | None = None
         wan27_video_data_url: str | None = None
         sora2_resolution = str(payload.get("sora2Resolution") or "auto")
         sora2_requested_duration_sec: float | None = None
@@ -2707,7 +2782,10 @@ def _handle_api_video_generate_reference(
         replicate_aspect_ratio: str | None = None
         seedance_aspect_ratio: str | None = None
         wan27_aspect_ratio: str | None = None
+        ltx23_aspect_ratio: str | None = None
         seedance_requested_duration_sec: float | None = None
+        ltx23_requested_duration_sec: float | None = None
+        ltx23_requested_fps: int | None = None
         seedance_raw_output_width: int | None = None
         seedance_raw_output_height: int | None = None
         seedance_output_width: int | None = None
@@ -2906,6 +2984,18 @@ def _handle_api_video_generate_reference(
                 first_source_height,
                 landscape=(1280, 720),
                 portrait=(720, 1280),
+            )
+        elif capability.first_frame_profile == "ltx23_i2v":
+            ltx23_aspect_ratio = _nearest_allowed_aspect_ratio(
+                first_source_width,
+                first_source_height,
+                allowed=("16:9", "9:16"),
+            )
+            first_target_w, first_target_h = _target_by_orientation(
+                first_source_width,
+                first_source_height,
+                landscape=(1920, 1080),
+                portrait=(1080, 1920),
             )
         else:
             first_target_w, first_target_h = _target_by_orientation(
@@ -3170,6 +3260,48 @@ def _handle_api_video_generate_reference(
             )
             out_url = _parse_replicate_output_url(result)
             used_provider_model = "wan-video/wan-2.7-i2v"
+        elif model_name == "ltx-2.3-pro":
+            replicate_key = secrets.get("REPLICATE_API_KEY")
+            if not replicate_key:
+                raise RuntimeError("LTX 2.3 Pro requires REPLICATE_API_KEY")
+            if not uses_end_keyframe:
+                raise RuntimeError("LTX 2.3 Pro in this app requires first and last frame mode")
+            ltx23_requested_duration_sec = float(_nearest_supported_ltx23_duration(segment_duration_sec or 6.0))
+            ltx23_requested_fps = _nearest_supported_ltx23_fps(fps)
+            ltx23_aspect_ratio = ltx23_aspect_ratio or _nearest_allowed_aspect_ratio(
+                first_source_width,
+                first_source_height,
+                allowed=("16:9", "9:16"),
+            )
+            ltx23_first_frame_data_url = _prepare_replicate_image_data_url(
+                first_frame_bytes,
+                target_width=first_target_w,
+                target_height=first_target_h,
+                fit_mode=first_frame_fit_mode,
+            )
+            ltx23_last_frame_data_url = _prepare_replicate_image_data_url(
+                last_frame_bytes or first_frame_bytes,
+                target_width=first_target_w,
+                target_height=first_target_h,
+                fit_mode=first_frame_fit_mode,
+            )
+            ltx23_reference_transport = "data_url"
+            _api_request_progress(job=job, store=store, request_record=request_record, progress=40, status="running", logs="Creating LTX 2.3 Pro image-to-video generation")
+            generation_id, result = _run_ltx23_i2v_prediction(
+                api_key=replicate_key,
+                prompt=str(payload.get("prompt") or ""),
+                first_frame=ltx23_first_frame_data_url,
+                last_frame=ltx23_last_frame_data_url,
+                duration_seconds=int(ltx23_requested_duration_sec),
+                aspect_ratio=ltx23_aspect_ratio,
+                fps=ltx23_requested_fps,
+                generate_audio=False,
+                job=job,
+                store=store,
+            )
+            provider_duration_sec = ltx23_requested_duration_sec
+            out_url = _parse_replicate_output_url(result)
+            used_provider_model = "lightricks/ltx-2.3-pro"
         elif model_name == "wan2.2-animate":
             runware_key = secrets.get("RUNWARE_API_KEY")
             if not runware_key:
@@ -3444,11 +3576,17 @@ def _handle_api_video_generate_reference(
         "providerOutputRaw": _video_timing_payload(raw_output_probe),
         "storedOutput": _video_timing_payload(output_probe),
         "timelineConform": timeline_conform,
-        "aspectRatio": replicate_aspect_ratio or seedance_aspect_ratio or (wan27_aspect_ratio if model_name == "wan2.7-videoedit" else None),
+        "aspectRatio": (
+            ltx23_aspect_ratio
+            if model_name == "ltx-2.3-pro"
+            else (replicate_aspect_ratio or seedance_aspect_ratio or (wan27_aspect_ratio if model_name == "wan2.7-videoedit" else None))
+        ),
         "sora2Resolution": sora2_resolution if model_name == "sora-2-image-to-video" else None,
         "happyHorseResolution": happy_horse_resolution if model_name in {"happy-horse-video-edit", "happy-horse-image-to-video"} else None,
         "sora2RequestedDurationSec": sora2_requested_duration_sec if model_name == "sora-2-image-to-video" else None,
         "sora2ProviderDurationSec": sora2_provider_duration_sec if model_name == "sora-2-image-to-video" else None,
+        "ltx23RequestedDurationSec": ltx23_requested_duration_sec if model_name == "ltx-2.3-pro" else None,
+        "ltx23RequestedFps": ltx23_requested_fps if model_name == "ltx-2.3-pro" else None,
         "seedanceRequestedDurationSec": seedance_requested_duration_sec,
         "seedanceRawOutputResolution": (
             {"width": seedance_raw_output_width, "height": seedance_raw_output_height}
@@ -3464,6 +3602,7 @@ def _handle_api_video_generate_reference(
         "wan27VideoTransport": wan27_video_transport,
         "wan27ReferenceTransport": wan27_reference_transport,
         "wan27NegativePrompt": wan27_negative_prompt if model_name == "wan2.7-i2v" else None,
+        "ltx23ReferenceTransport": ltx23_reference_transport if model_name == "ltx-2.3-pro" else None,
         "mediaHasAudio": provider_media_has_audio,
         "providerModel": used_provider_model or model_name,
     }
@@ -3637,7 +3776,7 @@ def _handle_segment_generate(
     capability = get_video_model_capability(model_name)
     requested_mode = payload["mode"]
     luma_mode = requested_mode if requested_mode in LUMA_API_ALLOWED_MODES else "flex_1"
-    uses_end_keyframe = requested_mode in {"kling_start_end", "veo_start_end", "wan27_i2v_start_end"}
+    uses_end_keyframe = requested_mode in {"kling_start_end", "veo_start_end", "wan27_i2v_start_end", "ltx23_i2v_start_end"}
     replicate_kling_mode = str(payload.get("replicateKlingMode") or "pro")
     replicate_kling_v3_mode = str(payload.get("replicateKlingV3Mode") or "pro")
     wan27_resolution = str(payload.get("wan27Resolution") or "720p")
@@ -3676,7 +3815,7 @@ def _handle_segment_generate(
         if end_variant:
             last_frame_key = end_variant["outputKey"]
             source_last_variant_id = end_variant_id
-    if model_name in {"kling-2.6", "veo-3.1", "veo-3.1-fast", "wan2.7-i2v"} and not uses_end_keyframe:
+    if model_name in {"kling-2.6", "veo-3.1", "veo-3.1-fast", "wan2.7-i2v", "ltx-2.3-pro"} and not uses_end_keyframe:
         last_frame_key = first_frame_key
         source_last_variant_id = None
 
@@ -3701,6 +3840,7 @@ def _handle_segment_generate(
     runway_first_frame_uri: str | None = None
     wan27_reference_transport: str | None = None
     wan27_video_transport: str | None = None
+    ltx23_reference_transport: str | None = None
     wan27_video_data_url: str | None = None
     sora2_resolution = str(payload.get("sora2Resolution") or "auto")
     sora2_requested_duration_sec: float | None = None
@@ -3708,7 +3848,10 @@ def _handle_segment_generate(
     replicate_aspect_ratio: str | None = None
     seedance_aspect_ratio: str | None = None
     wan27_aspect_ratio: str | None = None
+    ltx23_aspect_ratio: str | None = None
     seedance_requested_duration_sec: float | None = None
+    ltx23_requested_duration_sec: float | None = None
+    ltx23_requested_fps: int | None = None
     source_segment_width: int | None = None
     source_segment_height: int | None = None
     seedance_raw_output_width: int | None = None
@@ -3926,6 +4069,18 @@ def _handle_segment_generate(
                 landscape=(1280, 720),
                 portrait=(720, 1280),
             )
+        elif capability.first_frame_profile == "ltx23_i2v":
+            ltx23_aspect_ratio = _nearest_allowed_aspect_ratio(
+                first_source_width,
+                first_source_height,
+                allowed=("16:9", "9:16"),
+            )
+            first_target_w, first_target_h = _target_by_orientation(
+                first_source_width,
+                first_source_height,
+                landscape=(1920, 1080),
+                portrait=(1080, 1920),
+            )
         else:
             first_target_w, first_target_h = _target_by_orientation(
                 first_source_width,
@@ -3951,7 +4106,7 @@ def _handle_segment_generate(
         )
         _upload_s3(s3, settings.assets_bucket, first_frame_input_key, local_first_frame, first_frame_content_type)
 
-        if model_name in {"kling-2.6", "veo-3.1", "veo-3.1-fast", "wan2.7-i2v"} and uses_end_keyframe:
+        if model_name in {"kling-2.6", "veo-3.1", "veo-3.1-fast", "wan2.7-i2v", "ltx-2.3-pro"} and uses_end_keyframe:
             last_frame_bytes = asset_store.read_bytes(last_frame_key)
             prepared_last_frame, last_frame_content_type, last_frame_ext = _prepare_first_frame_image_payload(
                 last_frame_bytes,
@@ -3965,7 +4120,7 @@ def _handle_segment_generate(
             last_frame_input_key = paths.segment_provider_last_frame(
                 segment_id,
                 gen_id,
-                "kling" if model_name == "kling-2.6" else ("replicate" if model_name == "wan2.7-i2v" else "runware"),
+                "kling" if model_name == "kling-2.6" else ("replicate" if model_name in {"wan2.7-i2v", "ltx-2.3-pro"} else "runware"),
                 ext=last_frame_ext,
             )
             _upload_s3(s3, settings.assets_bucket, last_frame_input_key, local_last_frame, last_frame_content_type)
@@ -4228,6 +4383,52 @@ def _handle_segment_generate(
         out_url = _parse_replicate_output_url(result)
         provider_name = "replicate"
         used_provider_model = "wan-video/wan-2.7-i2v"
+    elif model_name == "ltx-2.3-pro":
+        replicate_key = secrets.get("REPLICATE_API_KEY")
+        if not replicate_key:
+            raise RuntimeError("LTX 2.3 Pro requires REPLICATE_API_KEY")
+        if not uses_end_keyframe:
+            raise RuntimeError("LTX 2.3 Pro in this app requires first and last frame mode")
+        ltx23_requested_duration_sec = float(_nearest_supported_ltx23_duration(segment_duration_sec or 6.0))
+        ltx23_requested_fps = _nearest_supported_ltx23_fps(fps)
+        ltx23_aspect_ratio = ltx23_aspect_ratio or _nearest_allowed_aspect_ratio(
+            first_target_w,
+            first_target_h,
+            allowed=("16:9", "9:16"),
+        )
+        ltx23_first_frame_data_url = _prepare_replicate_image_data_url(
+            frame_bytes,
+            target_width=first_target_w,
+            target_height=first_target_h,
+            fit_mode=first_frame_fit_mode,
+        )
+        if not last_frame_key:
+            raise RuntimeError("LTX 2.3 Pro requires a last frame")
+        ltx23_last_frame_bytes = asset_store.read_bytes(last_frame_key)
+        ltx23_last_frame_data_url = _prepare_replicate_image_data_url(
+            ltx23_last_frame_bytes,
+            target_width=first_target_w,
+            target_height=first_target_h,
+            fit_mode=first_frame_fit_mode,
+        )
+        ltx23_reference_transport = "data_url"
+        _job_progress(job, store, 35, "running", "Creating Replicate LTX 2.3 Pro generation")
+        generation_id, result = _run_ltx23_i2v_prediction(
+            api_key=replicate_key,
+            prompt=str(payload.get("prompt") or ""),
+            first_frame=ltx23_first_frame_data_url,
+            last_frame=ltx23_last_frame_data_url,
+            duration_seconds=int(ltx23_requested_duration_sec),
+            aspect_ratio=ltx23_aspect_ratio,
+            fps=ltx23_requested_fps,
+            generate_audio=False,
+            job=job,
+            store=store,
+        )
+        provider_duration_sec = ltx23_requested_duration_sec
+        out_url = _parse_replicate_output_url(result)
+        provider_name = "replicate"
+        used_provider_model = "lightricks/ltx-2.3-pro"
     elif model_name == "wan2.2-animate":
         runware_key = secrets.get("RUNWARE_API_KEY")
         if not runware_key:
@@ -4553,9 +4754,13 @@ def _handle_segment_generate(
                     else None
                 ),
                 "aspectRatio": (
+                    ltx23_aspect_ratio
+                    if model_name == "ltx-2.3-pro"
+                    else (
                     replicate_aspect_ratio
                     if model_name in {"kling-o1", "kling-v3-omni-video"}
                     else (seedance_aspect_ratio if model_name == "seedance-2.0-reference-to-video" else (wan27_aspect_ratio if model_name == "wan2.7-videoedit" else None))
+                    )
                 ),
                 "replicateKlingMode": replicate_kling_mode if model_name == "kling-o1" else None,
                 "replicateKlingV3Mode": replicate_kling_v3_mode if model_name == "kling-v3-omni-video" else None,
@@ -4575,6 +4780,9 @@ def _handle_segment_generate(
                 "wan27VideoTransport": wan27_video_transport if model_name == "wan2.7-videoedit" else None,
                 "wan27ReferenceTransport": wan27_reference_transport if model_name in {"wan2.7-videoedit", "wan2.7-i2v"} else None,
                 "wan27NegativePrompt": wan27_negative_prompt if model_name == "wan2.7-i2v" else None,
+                "ltx23ReferenceTransport": ltx23_reference_transport if model_name == "ltx-2.3-pro" else None,
+                "ltx23RequestedDurationSec": ltx23_requested_duration_sec if model_name == "ltx-2.3-pro" else None,
+                "ltx23RequestedFps": ltx23_requested_fps if model_name == "ltx-2.3-pro" else None,
                 "sora2Resolution": sora2_resolution if model_name == "sora-2-image-to-video" else None,
                 "happyHorseResolution": happy_horse_resolution if model_name in {"happy-horse-video-edit", "happy-horse-image-to-video"} else None,
                 "sora2RequestedDurationSec": sora2_requested_duration_sec if model_name == "sora-2-image-to-video" else None,

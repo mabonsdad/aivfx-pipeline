@@ -590,6 +590,7 @@ export type ExportRecord = {
   exportId: string;
   outputKey: string;
   sourceExportId?: string;
+  selectedSegmentGenerationIds?: string[];
   createdAt: string;
   downloadUrl?: string;
   topazUpscale?: {

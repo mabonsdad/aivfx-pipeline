@@ -52,6 +52,7 @@ The underlying storage is still task-based, but the UI now presents each task as
    - Shows merged videos, generated videos, and edited frames for the current source video.
    - Report creation now starts here from selected asset grids.
    - A separate Asset Library page outside the main step flow shows the latest assets across all source videos for the current user.
+   - A persistent top-left brand/home logo in the sidebar links back to `https://www.shwsh.co.uk/experiments/aivfx/` from any page, including Asset Library, API Logs, and Admin.
 
 6. **Reports / API Logs**
    - Reports primarily list existing reports for the current source video, without orphaning older saved reports.
@@ -92,6 +93,7 @@ The app routes models through provider-specific adapters and normalizes inputs/o
 | Wan2.2 A14B | Runware | image-to-video | Provider dimensions are conformed to supported sizes |
 | Wan2.2 Animate | Runware | reference image + reference video | Prompt omitted unless LoRA support is added; strict supported dimensions |
 | Wan2.7 VideoEdit | Replicate | video + reference image | Resolution selectable as 720p or 1080p; reference image is provided in the required provider shape |
+| LTX 2.3 Pro | Replicate | first frame + last frame image-to-video | Uses `lightricks/ltx-2.3-pro` `task=image_to_video`; this app currently routes LTX only for start/end mode |
 
 ## Duration, FPS, and Resolution Handling
 
@@ -421,6 +423,41 @@ Generated files:
 - `frontend/src/lib/generated/apiContracts.ts`
 
 Deploy is handled through the existing CDK/static-site workflow used for the live application.
+
+## Deploying To Live
+
+For this project we normally test against live immediately after a completed change set.
+
+Typical deploy sequence:
+
+1. Deploy infra/backend stack
+
+```bash
+cd infra
+npm install
+npm run build
+npx cdk deploy AivfxStack --require-approval never --outputs-file cdk-outputs.json
+```
+
+2. Build frontend with production env
+
+```bash
+cd frontend
+npm install
+npm run build
+```
+
+3. Upload frontend bundle
+
+```bash
+aws s3 sync frontend/dist s3://shwsh.co.uk/experiments/aivfx/ --delete
+```
+
+4. Invalidate CloudFront
+
+```bash
+aws cloudfront create-invalidation --distribution-id E3LS87IBDVMSCO --paths "/experiments/aivfx/*"
+```
 
 ## Baseline Gates
 

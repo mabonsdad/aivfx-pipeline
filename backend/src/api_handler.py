@@ -19,6 +19,7 @@ from pydantic import ValidationError
 from PIL import Image, ImageOps
 
 from src.api.dispatch import parse_method_path, parse_task_path
+from src.api.routes_admin import handle_admin_routes
 from src.api.routes_external_api import handle_external_api_routes
 from src.api.routes_jobs import handle_job_status
 from src.api.routes_public import handle_health, handle_options
@@ -41,6 +42,10 @@ from src.core.ids import deterministic_frame_id, new_id, prompt_hash
 from src.core.logger import Logger
 from src.core.secrets import load_secret
 from src.core.store import S3JsonStore, now_iso
+from src.core.prompt_wizard_admin import (
+    ADMIN_PROMPT_WIZARD_CONFIG_KEY,
+    normalize_prompt_wizard_admin_config_for_read,
+)
 from src.generation import (
     LUMA_API_ALLOWED_MODES,
     get_video_model_capability,
@@ -59,6 +64,7 @@ from src.generation.maintenance import (
     reconcile_segment_generation_job_states,
 )
 from src.jobs.queue import JobQueue
+from src.integrations.openai_prompt_wizard import improve_video_prompt as improve_openai_video_prompt
 from src.models.schemas import (
     ChunkedSegmentGenerateRequest,
     FrameCaptureRequest,
@@ -1372,6 +1378,20 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
     if me_response is not None:
         return me_response
 
+    admin_response = handle_admin_routes(
+        method,
+        path,
+        event=event,
+        claims=claims,
+        store=store,
+        origin=origin,
+        response_fn=response,
+        error_response_fn=error_response,
+        now_iso_fn=now_iso,
+    )
+    if admin_response is not None:
+        return admin_response
+
     external_api_response = handle_external_api_routes(
         method,
         path,
@@ -1538,6 +1558,12 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             create_manual_uploaded_segment_generation_fn=_create_manual_uploaded_segment_generation,
             normalize_uploaded_generated_video_fn=_normalize_uploaded_generated_video,
             video_probe_payload_fn=_video_probe_payload,
+            resolve_frame_source_fn=_resolve_frame_source,
+            get_openai_api_key_fn=lambda: str(load_secret(settings.secrets_arn).get("OPENAI_API_KEY") or ""),
+            get_prompt_wizard_admin_config_fn=lambda: normalize_prompt_wizard_admin_config_for_read(
+                store.get_json(ADMIN_PROMPT_WIZARD_CONFIG_KEY)
+            ),
+            improve_video_prompt_fn=improve_openai_video_prompt,
             logger=logger,
         )
         if task_segment_response is not None:

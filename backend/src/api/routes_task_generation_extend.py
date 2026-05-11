@@ -59,12 +59,22 @@ def handle_task_generation_extend_route(
     requested_duration_seconds = req.durationSeconds or int(math.ceil(float(previous_segment.get("durationSec") or model_max_seconds)))
     requested_duration_seconds = max(1, min(model_max_seconds, int(requested_duration_seconds)))
     fps = fps_fn(task)
+    alignment_frame_index = req.alignmentFrameIndex
+    requested_alignment_frame_index = alignment_frame_index
+    min_seconds = model_capability.min_seconds
+    if min_seconds is not None:
+        min_frames = max(1, int(math.ceil(float(min_seconds) * float(fps))))
+        remaining_after_requested = max(0, total_frames - alignment_frame_index)
+        if remaining_after_requested < min_frames:
+            latest_valid_alignment = max(0, total_frames - min_frames)
+            if latest_valid_alignment < alignment_frame_index:
+                alignment_frame_index = latest_valid_alignment
+
     desired_frames = max(1, int(round(float(fps) * requested_duration_seconds)))
-    remaining_frames = max(0, total_frames - req.alignmentFrameIndex)
+    remaining_frames = max(0, total_frames - alignment_frame_index)
     if remaining_frames <= 0:
         return error_response_fn(400, "No source frames remain after the selected alignment frame", origin=origin)
     dur_frames = min(desired_frames, remaining_frames)
-    min_seconds = model_capability.min_seconds
     if min_seconds is not None and (dur_frames / float(fps)) + 1e-6 < float(min_seconds):
         return error_response_fn(
             400,
@@ -74,8 +84,8 @@ def handle_task_generation_extend_route(
 
     start, end_excl, dur_frames = resolve_segment_frames_fn(
         task,
-        req.alignmentFrameIndex,
-        end_frame_exclusive=req.alignmentFrameIndex + dur_frames,
+        alignment_frame_index,
+        end_frame_exclusive=alignment_frame_index + dur_frames,
     )
     segment = create_segment_record_fn(task=task, start=start, end_excl=end_excl, dur_frames=dur_frames, asset_store=asset_store)
     limit_error = segment_model_limit_error_fn(task, segment, model)
@@ -101,6 +111,7 @@ def handle_task_generation_extend_route(
     extension_metadata = {
         "parentGenerationId": previous_gen_id,
         "alignmentFrameIndex": start,
+        "requestedAlignmentFrameIndex": requested_alignment_frame_index,
         "anchorFramesFromEnd": req.anchorFramesFromEnd,
         "anchorVariantId": anchor_variant.get("variantId"),
         "sourceGeneratedFrameIndex": anchor_variant.get("sourceGeneratedFrameIndex"),
@@ -135,6 +146,7 @@ def handle_task_generation_extend_route(
             "segmentId": segment["segmentId"],
             "anchorVariantId": anchor_variant.get("variantId"),
             "alignmentFrameIndex": start,
+            "requestedAlignmentFrameIndex": requested_alignment_frame_index,
             "sourceGeneratedFrameIndex": anchor_variant.get("sourceGeneratedFrameIndex"),
         },
         origin=origin,

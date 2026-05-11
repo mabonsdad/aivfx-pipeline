@@ -66,6 +66,9 @@ export type GenerateTabCtx = {
   setPreserveFrames: (value: boolean) => void;
   lumaPrompt: string;
   setLumaPrompt: (value: string) => void;
+  promptWizardSupported: boolean;
+  improvePromptWithWizard: () => Promise<{ userAdvice: string; warnings: string[] }>;
+  isPromptWizardPending: boolean;
   lumaContinuationPrompt: string;
   setLumaContinuationPrompt: (value: string) => void;
   generationPromptPlaceholder: string;
@@ -163,6 +166,9 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
     setPreserveFrames,
     lumaPrompt,
     setLumaPrompt,
+    promptWizardSupported,
+    improvePromptWithWizard,
+    isPromptWizardPending,
     lumaContinuationPrompt,
     setLumaContinuationPrompt,
     generationPromptPlaceholder,
@@ -208,6 +214,9 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
   const [chunkPromptDrafts, setChunkPromptDrafts] = useState<Record<number, string>>({});
   const [manualUploadPending, setManualUploadPending] = useState(false);
   const [manualUploadError, setManualUploadError] = useState<string | null>(null);
+  const [promptWizardAdvice, setPromptWizardAdvice] = useState<string | null>(null);
+  const [promptWizardWarnings, setPromptWizardWarnings] = useState<string[]>([]);
+  const [promptWizardError, setPromptWizardError] = useState<string | null>(null);
   const [cancellingPendingJobIds, setCancellingPendingJobIds] = useState<Record<string, boolean>>({});
   const lastSavedRunRef = useRef<string | null>(null);
   const promptDraftRunIdRef = useRef<string | null>(null);
@@ -283,6 +292,37 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
     } finally {
       setManualUploadPending(false);
     }
+  }
+
+  async function handlePromptWizardClick() {
+    setPromptWizardAdvice(null);
+    setPromptWizardWarnings([]);
+    setPromptWizardError(null);
+    if (!lumaPrompt.trim()) {
+      setPromptWizardError("Write a draft prompt first, then use the Prompt Wizard to improve it.");
+      return;
+    }
+    if (!promptWizardSupported) {
+      setPromptWizardError("Prompt Wizard is currently available for first frame + video and first frame + last frame modes.");
+      return;
+    }
+    try {
+      const result = await improvePromptWithWizard();
+      setPromptWizardAdvice(result.userAdvice || null);
+      setPromptWizardWarnings(result.warnings);
+    } catch {
+      setPromptWizardError("Couldn’t improve the prompt. Your original prompt has not been changed.");
+    }
+  }
+
+  function MagicWandIcon() {
+    return (
+      <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M4 20 20 4" />
+        <path d="m14 4 1.2-2.2L16.4 4l2.2 1.2L16.4 6.4 15.2 8l-1.2-1.6L11.8 5.2 14 4Z" />
+        <path d="m5 13 .8-1.5L6.6 13l1.5.8-1.5.8L5.8 16l-.8-1.4L3.6 13.8 5 13Z" />
+      </svg>
+    );
   }
 
   return (
@@ -404,7 +444,20 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
             ) : (
               <div className="space-y-3">
                 <label className="block space-y-1">
-                  <span className="text-xs font-medium text-ink/75">Opening prompt</span>
+                  <span className="flex items-center justify-between gap-2 text-xs font-medium text-ink/75">
+                    <span>Opening prompt</span>
+                    <button
+                      type="button"
+                      title="Improve prompt"
+                      aria-label="Improve prompt with Prompt Wizard"
+                      className="inline-flex items-center gap-1 rounded-md border border-ink/20 bg-white px-2 py-1 text-[11px] text-ink/75 disabled:cursor-not-allowed disabled:opacity-50"
+                      disabled={isPromptWizardPending || !promptWizardSupported}
+                      onClick={() => void handlePromptWizardClick()}
+                    >
+                      {isPromptWizardPending ? <Spinner className="h-3 w-3" /> : <MagicWandIcon />}
+                      <span>Improve</span>
+                    </button>
+                  </span>
                   <textarea
                     value={lumaPrompt}
                     onChange={(e) => setLumaPrompt(e.target.value)}
@@ -412,6 +465,27 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
                     className="h-20 w-full rounded-md border border-ink/20 p-2"
                   />
                 </label>
+                {promptWizardAdvice ? (
+                  <StatusNotice variant="info">
+                    <p className="text-xs">{promptWizardAdvice}</p>
+                  </StatusNotice>
+                ) : null}
+                {promptWizardWarnings.length ? (
+                  <StatusNotice variant="warning">
+                    <div className="space-y-1">
+                      {promptWizardWarnings.map((warning) => (
+                        <p key={warning} className="text-xs">
+                          {warning}
+                        </p>
+                      ))}
+                    </div>
+                  </StatusNotice>
+                ) : null}
+                {promptWizardError ? (
+                  <StatusNotice variant="warning">
+                    <p className="text-xs">{promptWizardError}</p>
+                  </StatusNotice>
+                ) : null}
                 {lumaModel === "wan2.7-i2v" ? (
                   <label className="block space-y-1">
                     <span className="text-xs font-medium text-ink/75">Negative prompt (optional)</span>

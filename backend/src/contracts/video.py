@@ -20,6 +20,7 @@ VIDEO_MODEL_IDS: tuple[str, ...] = (
     "wan2.2-animate",
     "wan2.7-videoedit",
     "wan2.7-i2v",
+    "ltx-2.3-pro",
 )
 
 VIDEO_MODE_IDS: tuple[str, ...] = (
@@ -49,6 +50,7 @@ VIDEO_MODE_IDS: tuple[str, ...] = (
     "wan27_video_edit",
     "wan27_i2v_start_only",
     "wan27_i2v_start_end",
+    "ltx23_i2v_start_end",
 )
 
 LUMA_API_ALLOWED_MODE_IDS: tuple[str, ...] = (

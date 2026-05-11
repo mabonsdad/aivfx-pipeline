@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 from src import api_handler
 
@@ -40,6 +41,94 @@ def test_unknown_route_returns_404_when_authorized(monkeypatch) -> None:
 
     result = api_handler._route(_event("GET", "/unknown"))
     assert result["statusCode"] == 404
+
+
+def test_admin_prompt_wizard_route_requires_owner_or_pin(monkeypatch) -> None:
+    class _Store:
+        def get_json(self, _key: str):
+            return None
+
+    monkeypatch.setattr(api_handler, "get_user_id", lambda _event: "user-1")
+    monkeypatch.setattr(api_handler, "get_user_claims", lambda _event: {"email": "other@example.com"})
+    monkeypatch.setattr(api_handler, "S3JsonStore", lambda _bucket: _Store())
+    monkeypatch.setattr(api_handler, "AssetStore", lambda _bucket, _region: object())
+    monkeypatch.setattr(api_handler, "JobQueue", lambda _url: object())
+
+    result = api_handler._route(_event("GET", "/admin/prompt-wizard-config"))
+    assert result["statusCode"] == 403
+
+
+def test_admin_prompt_wizard_route_returns_config_for_owner(monkeypatch) -> None:
+    class _Store:
+        def get_json(self, _key: str):
+            return {
+                "schemaVersion": 1,
+                "systemPrompt": "Owner prompt",
+                "models": [],
+                "updatedAt": "2026-05-10T00:00:00Z",
+                "updatedBy": "owner",
+            }
+
+    monkeypatch.setattr(api_handler, "get_user_id", lambda _event: "user-1")
+    monkeypatch.setattr(api_handler, "get_user_claims", lambda _event: {"email": "robin.moore@shwsh.co.uk"})
+    monkeypatch.setattr(api_handler, "S3JsonStore", lambda _bucket: _Store())
+    monkeypatch.setattr(api_handler, "AssetStore", lambda _bucket, _region: object())
+    monkeypatch.setattr(api_handler, "JobQueue", lambda _url: object())
+
+    result = api_handler._route(_event("GET", "/admin/prompt-wizard-config"))
+    assert result["statusCode"] == 200
+    payload = json.loads(result["body"])
+    assert payload["config"]["systemPrompt"] == "Owner prompt"
+    assert payload["access"]["isOwner"] is True
+
+
+def test_admin_prompt_wizard_route_updates_config_with_pin(monkeypatch) -> None:
+    saved_payload: dict | None = None
+
+    class _Store:
+        def get_json(self, _key: str):
+            return None
+
+        def put_json(self, _key: str, payload: dict):
+            nonlocal saved_payload
+            saved_payload = payload
+
+    monkeypatch.setattr(api_handler, "get_user_id", lambda _event: "user-1")
+    monkeypatch.setattr(api_handler, "get_user_claims", lambda _event: {"email": "other@example.com", "sub": "user-1"})
+    monkeypatch.setattr(api_handler, "S3JsonStore", lambda _bucket: _Store())
+    monkeypatch.setattr(api_handler, "AssetStore", lambda _bucket, _region: object())
+    monkeypatch.setattr(api_handler, "JobQueue", lambda _url: object())
+    monkeypatch.setattr(api_handler, "now_iso", lambda: "2026-05-10T12:00:00Z")
+
+    event = _event(
+        "PUT",
+        "/admin/prompt-wizard-config",
+        {
+            "schemaVersion": 1,
+            "systemPrompt": "Updated prompt",
+            "models": [
+                {
+                    "selected_model": "ray-2",
+                    "dropdown_name": "Luma Ray 2",
+                    "mode": "start_video",
+                    "provider": "Luma",
+                    "provider_model": "ray-2",
+                    "endpoint_used": "POST https://api.lumalabs.ai/dream-machine/v1/generations/video/modify",
+                    "required_markers": [],
+                    "supports_negative_prompt": False,
+                    "prompt_strategy": "luma_descriptive_change",
+                }
+            ],
+        },
+    )
+    event["headers"] = {"x-admin-pin": "246810"}
+    result = api_handler._route(event)
+    assert result["statusCode"] == 200
+    payload = json.loads(result["body"])
+    assert payload["config"]["systemPrompt"] == "Updated prompt"
+    assert payload["access"]["viaPin"] is True
+    assert saved_payload is not None
+    assert saved_payload["updatedAt"] == "2026-05-10T12:00:00Z"
 
 
 def test_jobs_route_returns_job_when_authorized(monkeypatch) -> None:
@@ -656,6 +745,90 @@ def test_segment_generation_extend_route_missing_generation_returns_404(monkeypa
         )
     )
     assert result["statusCode"] == 404
+
+
+def test_segment_generation_extend_route_adjusts_late_alignment_to_model_minimum(monkeypatch) -> None:
+    task = {
+        "taskId": "task_1",
+        "userId": "user-1",
+        "name": "Task 1",
+        "video": {"editSource": {"frameCount": 240, "fps": {"num": 24, "den": 1}}},
+        "segments": [
+            {
+                "segmentId": "seg_prev",
+                "startFrame": 0,
+                "endFrameExclusive": 240,
+                "durationFrames": 240,
+                "durationSec": 10.0,
+                "startFrameId": "frame_prev",
+            }
+        ],
+        "segmentGenerations": {
+            "gen_prev": {
+                "genId": "gen_prev",
+                "segmentId": "seg_prev",
+                "status": "complete",
+                "outputKey": "users/user-1/tasks/task_1/generated/gen_prev.mp4",
+                "luma": {"model": "ray-2", "mode": "start_video", "prompt": "Continue motion"},
+                "generationSettings": {},
+            }
+        },
+        "frames": {"frame_prev": {"frameId": "frame_prev", "variants": []}},
+    }
+    saved: list[dict] = []
+
+    class _Store:
+        def save_task(self, task_payload: dict, merge_on_conflict: bool = False):
+            saved.append(json.loads(json.dumps(task_payload)))
+            return task_payload
+
+    class _AssetStore:
+        pass
+
+    monkeypatch.setattr(api_handler, "get_user_id", lambda _event: "user-1")
+    monkeypatch.setattr(api_handler, "get_user_claims", lambda _event: {"email": "u@example.com"})
+    monkeypatch.setattr(api_handler, "S3JsonStore", lambda _bucket: _Store())
+    monkeypatch.setattr(api_handler, "AssetStore", lambda _bucket, _region: _AssetStore())
+    monkeypatch.setattr(api_handler, "JobQueue", lambda _url: object())
+    monkeypatch.setattr(api_handler, "_load_task_or_404", lambda _store, _user_id, _task_id: task)
+    monkeypatch.setattr(api_handler, "supports_generation_extension", lambda _model: True)
+    monkeypatch.setattr(api_handler, "get_video_model_capability", lambda _model: SimpleNamespace(max_seconds=10, min_seconds=4))
+    monkeypatch.setattr(api_handler, "_resolve_segment_frames", lambda _task, start, end_frame_exclusive: (start, end_frame_exclusive, end_frame_exclusive - start))
+
+    def _create_segment_record(*, task: dict, start: int, end_excl: int, dur_frames: int, asset_store: object):
+        segment = {
+            "segmentId": "seg_next",
+            "startFrame": start,
+            "endFrameExclusive": end_excl,
+            "durationFrames": dur_frames,
+            "durationSec": round(dur_frames / 24, 3),
+            "startFrameId": "frame_next",
+        }
+        task.setdefault("segments", []).append(segment)
+        task.setdefault("frames", {})["frame_next"] = {"frameId": "frame_next", "variants": []}
+        return segment
+
+    monkeypatch.setattr(api_handler, "_create_segment_record", _create_segment_record)
+    monkeypatch.setattr(api_handler, "_segment_model_limit_error", lambda _task, _segment, _model: None)
+    monkeypatch.setattr(
+        api_handler,
+        "_copy_generated_anchor_to_frame_variant",
+        lambda **_kwargs: {"variantId": "var_anchor", "sourceGeneratedFrameIndex": 90},
+    )
+    monkeypatch.setattr(api_handler, "_queue_segment_generation_record", lambda **_kwargs: ("gen_next", "job_next"))
+
+    result = api_handler._route(
+        _event(
+            "POST",
+            "/tasks/task_1/segment-generations/gen_prev/extend",
+            {"alignmentFrameIndex": 236, "anchorFramesFromEnd": 5, "durationSeconds": 4, "prompt": "Continue motion"},
+        )
+    )
+    assert result["statusCode"] == 202
+    payload = json.loads(result["body"])
+    assert payload["alignmentFrameIndex"] == 144
+    assert payload["requestedAlignmentFrameIndex"] == 236
+    assert saved
 
 
 def test_generation_merge_alignment_suggestion_route_queues_job(monkeypatch) -> None:
