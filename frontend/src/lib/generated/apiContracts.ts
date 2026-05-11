@@ -135,6 +135,10 @@ export type SegmentGenerationExtendPayload = {
   anchorFramesFromEnd: number;
   durationSeconds?: number | null;
   prompt?: string | null;
+  inputMode?: "start_video" | "start_end" | "start_only" | null;
+  continueToRangeEnd?: boolean;
+  useSourceLastFrame?: boolean;
+  lastFrameVariantId?: string | null;
 };
 
 export type ReconcileTimingPayload = {

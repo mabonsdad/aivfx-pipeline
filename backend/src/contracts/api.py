@@ -96,6 +96,10 @@ class SegmentGenerationExtendPayload(TypedDict):
     anchorFramesFromEnd: int
     durationSeconds: NotRequired[int | None]
     prompt: NotRequired[str | None]
+    inputMode: NotRequired[Literal["start_video", "start_end", "start_only"] | None]
+    continueToRangeEnd: NotRequired[bool]
+    useSourceLastFrame: NotRequired[bool]
+    lastFrameVariantId: NotRequired[str | None]
 
 
 class ReconcileTimingPayload(TypedDict):

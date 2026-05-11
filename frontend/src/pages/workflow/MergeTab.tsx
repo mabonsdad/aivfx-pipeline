@@ -4,7 +4,7 @@ import { HelpInfoButton, PendingButtonLabel, StatusNotice } from "../../componen
 import VideoCleanupModal from "../../components/cleanup/VideoCleanupModal";
 import { useVideoFrameStrip, type VideoFrameStripItem } from "../../hooks/useVideoFrameStrip";
 import { getGenerationModeConfig, type GenerateInputMode } from "../../lib/generationModeRegistry";
-import type { ExportRecord, SegmentGeneration, SegmentRecord, TaskDetail } from "../../types/api";
+import type { ChunkedGenerationRun, ExportRecord, SegmentGeneration, SegmentRecord, TaskDetail } from "../../types/api";
 
 export type MergeTabCtx = {
   onNext: () => void;
@@ -13,7 +13,6 @@ export type MergeTabCtx = {
   generationInputMode: GenerateInputMode;
   mergeTargetGeneration: SegmentGeneration | null;
   mergeTargetSegment: SegmentRecord | null;
-  completeGenerations: SegmentGeneration[];
   describeGeneration: (generation: SegmentGeneration) => string;
   describeSegment: (segment: SegmentRecord) => string;
   getSegmentForGeneration: (generation: SegmentGeneration) => SegmentRecord | null;
@@ -133,9 +132,15 @@ export type MergeTabCtx = {
     anchorFramesFromEnd: number;
     durationSeconds?: number;
     prompt?: string;
+    inputMode?: GenerateInputMode;
+    continueToRangeEnd?: boolean;
+    useSourceLastFrame?: boolean;
+    lastFrameVariantId?: string;
   }) => void;
   isExtendingGeneration: boolean;
   extendGenerationError: string | null;
+  cancelChunkedGeneration: (payload: { runId: string; reason?: string }) => void;
+  isChunkedGenerationMutationPending: boolean;
   sortedExports: ExportRecord[];
   humanizeFilename: (value: string) => string;
   keyBasenameFromS3Key: (key: string) => string;
@@ -232,6 +237,20 @@ function statusLabelForGeneration(generation: SegmentGeneration): string {
   const status = String(generation.status || "").toLowerCase();
   if (!status) return "unknown";
   return status;
+}
+
+const START_END_MODES = new Set(["kling_start_end", "veo_start_end", "wan27_i2v_start_end", "ltx23_i2v_start_end"]);
+const START_ONLY_MODES = new Set(["kling_start_only", "veo_start_only", "wan27_i2v_start_only", "runway_i2v", "sora_i2v", "happy_horse_i2v", "wan_a14b_i2v"]);
+
+function inferGenerationInputMode(generation: SegmentGeneration | null, fallback: GenerateInputMode): GenerateInputMode {
+  const mode = String(generation?.luma.mode ?? "");
+  if (START_END_MODES.has(mode)) return "start_end";
+  if (START_ONLY_MODES.has(mode)) return "start_only";
+  return fallback;
+}
+
+function statusLabelForChunkedRun(run: ChunkedGenerationRun): string {
+  return String(run.status || "").toLowerCase();
 }
 
 function frameWindow(centerFrame: number, before: number, after: number, minFrame: number, maxFrame: number): number[] {
@@ -511,7 +530,6 @@ export default function MergeTab({ ctx }: MergeTabProps) {
     generationInputMode,
     mergeTargetGeneration,
     mergeTargetSegment,
-    completeGenerations,
     describeGeneration,
     describeSegment,
     getSegmentForGeneration,
@@ -566,6 +584,8 @@ export default function MergeTab({ ctx }: MergeTabProps) {
     extendGeneration,
     isExtendingGeneration,
     extendGenerationError,
+    cancelChunkedGeneration,
+    isChunkedGenerationMutationPending,
     sortedExports,
     humanizeFilename,
     keyBasenameFromS3Key,
@@ -580,20 +600,23 @@ export default function MergeTab({ ctx }: MergeTabProps) {
     refreshTask,
   } = ctx;
   const [selectedToolId, setSelectedToolId] = useState<"extend" | "align_retime" | "cleanup" | "merge" | null>(null);
-  const [extendGenerationId, setExtendGenerationId] = useState("");
   const [extendAlignmentFrame, setExtendAlignmentFrame] = useState("");
   const [extendAnchorFramesFromEnd, setExtendAnchorFramesFromEnd] = useState("5");
   const [extendDurationSeconds, setExtendDurationSeconds] = useState("");
   const [extendPrompt, setExtendPrompt] = useState("");
+  const [extendContinueToRangeEnd, setExtendContinueToRangeEnd] = useState(false);
+  const [extendUseSourceLastFrame, setExtendUseSourceLastFrame] = useState(true);
   const [showAdvancedAlignmentDetails, setShowAdvancedAlignmentDetails] = useState(false);
   const [boundaryZoomModal, setBoundaryZoomModal] = useState<BoundaryZoomModalState | null>(null);
   const [topazSettingsByExportId, setTopazSettingsByExportId] = useState<Record<string, TopazUpscaleSettings>>({});
+  const extendFormGenerationIdRef = useRef<string | null>(null);
   const allSegmentGenerations = useMemo(() => Object.values(task?.segmentGenerations ?? {}), [task?.segmentGenerations]);
-  const selectedExtendGeneration = useMemo(
-    () => completeGenerations.find((generation) => generation.genId === extendGenerationId) ?? null,
-    [completeGenerations, extendGenerationId],
+  const selectedExtendGeneration = mergeTargetGeneration;
+  const selectedExtendSegment = mergeTargetSegment;
+  const extendInputMode = useMemo(
+    () => inferGenerationInputMode(selectedExtendGeneration, generationInputMode),
+    [generationInputMode, selectedExtendGeneration],
   );
-  const selectedExtendSegment = selectedExtendGeneration ? getSegmentForGeneration(selectedExtendGeneration) : null;
   const extendChainGenerations = useMemo(() => {
     if (!selectedExtendGeneration) return [] as SegmentGeneration[];
     const byId = new Map(allSegmentGenerations.map((generation) => [generation.genId, generation]));
@@ -638,9 +661,38 @@ export default function MergeTab({ ctx }: MergeTabProps) {
         ) ?? null
     );
   }, [extendChainGenerations, sortedExports]);
+  const extendChainGenerationIds = useMemo(
+    () => new Set(extendChainGenerations.map((generation) => generation.genId)),
+    [extendChainGenerations],
+  );
+  const extendChunkedRuns = useMemo(() => {
+    if (!extendChainGenerationIds.size) return [] as ChunkedGenerationRun[];
+    const generationsById = task?.segmentGenerations ?? {};
+    return [...(task?.chunkedGenerationRuns ?? [])]
+      .filter((run) => {
+        const firstChunkGenerationId = run.chunks?.[0]?.generationId;
+        if (!firstChunkGenerationId) return false;
+        const firstChunkGeneration = generationsById[firstChunkGenerationId];
+        if (!firstChunkGeneration) return false;
+        const parentId = firstChunkGeneration.parentGenerationId ?? firstChunkGeneration.extension?.parentGenerationId ?? null;
+        return Boolean(parentId && extendChainGenerationIds.has(parentId));
+      })
+      .sort((a, b) => new Date(b.updatedAt ?? b.createdAt).getTime() - new Date(a.updatedAt ?? a.createdAt).getTime());
+  }, [extendChainGenerationIds, task?.chunkedGenerationRuns, task?.segmentGenerations]);
+  const selectedExtendEndVariantId = useMemo(() => {
+    if (!selectedExtendSegment) return undefined;
+    const endFrame = task?.frames?.[selectedExtendSegment.endFrameId];
+    if (!endFrame) return undefined;
+    const preferredVariantId = endFrame.selectedVariantId;
+    return preferredVariantId && preferredVariantId !== "original" ? preferredVariantId : undefined;
+  }, [selectedExtendSegment, task?.frames]);
   const parsedAlignmentFrame = Number(extendAlignmentFrame);
   const parsedAnchorFramesFromEnd = Number(extendAnchorFramesFromEnd);
   const parsedDurationSeconds = extendDurationSeconds.trim() ? Number(extendDurationSeconds) : undefined;
+  const durationIsValid =
+    extendContinueToRangeEnd ||
+    parsedDurationSeconds === undefined ||
+    (Number.isInteger(parsedDurationSeconds) && parsedDurationSeconds >= 1 && parsedDurationSeconds <= 15);
   const canSubmitExtension =
     Boolean(selectedExtendGeneration) &&
     Number.isInteger(parsedAlignmentFrame) &&
@@ -649,7 +701,7 @@ export default function MergeTab({ ctx }: MergeTabProps) {
     Number.isInteger(parsedAnchorFramesFromEnd) &&
     parsedAnchorFramesFromEnd >= 1 &&
     parsedAnchorFramesFromEnd <= 60 &&
-    (parsedDurationSeconds === undefined || (Number.isInteger(parsedDurationSeconds) && parsedDurationSeconds >= 1 && parsedDurationSeconds <= 15));
+    durationIsValid;
   const generationModeConfig = useMemo(() => getGenerationModeConfig(generationInputMode), [generationInputMode]);
   const showExtendTool = generationModeConfig.postProcessTools.extend;
   const showReconcileTimingTool = generationModeConfig.postProcessTools.reconcileTiming;
@@ -869,17 +921,13 @@ export default function MergeTab({ ctx }: MergeTabProps) {
     const maxDurationSecondsFromRemaining = Math.max(1, Math.floor(remainingFrames / Math.max(1, mergeFps)));
     const baseDurationSeconds = Math.max(1, Math.ceil(segment?.durationSec ?? estimatedGeneratedFrames / Math.max(1, mergeFps)));
     const defaultDuration = clampInteger(baseDurationSeconds, 1, Math.min(15, Math.max(1, maxDurationSecondsFromRemaining)));
-    setExtendGenerationId(generation?.genId ?? "");
     setExtendAlignmentFrame(String(defaultAlignment));
     setExtendAnchorFramesFromEnd(String(anchorFramesFromEndDefault));
     setExtendDurationSeconds(String(defaultDuration));
     setExtendPrompt(generation?.luma.prompt ?? "");
+    setExtendContinueToRangeEnd(false);
+    setExtendUseSourceLastFrame(true);
   }, [getSegmentForGeneration, mergeFps, sourceFrameCount]);
-
-  function handleExtendGenerationChange(genId: string) {
-    const generation = completeGenerations.find((item) => item.genId === genId) ?? null;
-    resetExtensionFormForGeneration(generation);
-  }
 
   function submitExtension() {
     if (!canSubmitExtension || !selectedExtendGeneration) return;
@@ -887,8 +935,13 @@ export default function MergeTab({ ctx }: MergeTabProps) {
       generationId: selectedExtendGeneration.genId,
       alignmentFrameIndex: parsedAlignmentFrame,
       anchorFramesFromEnd: parsedAnchorFramesFromEnd,
-      durationSeconds: parsedDurationSeconds,
+      durationSeconds: extendContinueToRangeEnd ? undefined : parsedDurationSeconds,
       prompt: extendPrompt.trim() || undefined,
+      inputMode: extendInputMode,
+      continueToRangeEnd: extendContinueToRangeEnd,
+      useSourceLastFrame: extendInputMode === "start_end" ? extendUseSourceLastFrame : false,
+      lastFrameVariantId:
+        extendInputMode === "start_end" && extendUseSourceLastFrame ? selectedExtendEndVariantId : undefined,
     });
   }
 
@@ -956,12 +1009,12 @@ export default function MergeTab({ ctx }: MergeTabProps) {
     if (!selectedStillValid) {
       setSelectedToolId(defaultTool);
     }
-    if (!selectedExtendGeneration && completeGenerations.length) {
-      resetExtensionFormForGeneration(mergeTargetGeneration ?? completeGenerations[0] ?? null);
+    const nextGenerationId = selectedExtendGeneration?.genId ?? null;
+    if (extendFormGenerationIdRef.current !== nextGenerationId) {
+      extendFormGenerationIdRef.current = nextGenerationId;
+      resetExtensionFormForGeneration(selectedExtendGeneration);
     }
   }, [
-    completeGenerations,
-    mergeTargetGeneration,
     needsExtension,
     selectedExtendGeneration,
     selectedToolId,
@@ -1137,91 +1190,133 @@ export default function MergeTab({ ctx }: MergeTabProps) {
           <div className="space-y-3">
             <div>
               <h4 className="text-base font-semibold">Extend generation</h4>
-              <p className="mt-1 text-sm text-ink/60">Continue from an existing output.</p>
+              <p className="mt-1 text-sm text-ink/60">Continue from the generation selected in Current Working References.</p>
             </div>
-            <label className="block space-y-1 text-sm">
-              <span className="font-medium">Previous output</span>
-              <select
-                className="w-full rounded-md border border-ink/20 px-2 py-2"
-                value={extendGenerationId}
-                onChange={(event) => handleExtendGenerationChange(event.target.value)}
-              >
-                {completeGenerations.map((generation) => {
-                  const segment = getSegmentForGeneration(generation);
-                  return (
-                    <option key={generation.genId} value={generation.genId}>
-                      {describeGeneration(generation)}
-                      {segment ? ` · ${describeSegment(segment)}` : ""}
-                    </option>
-                  );
-                })}
-              </select>
-            </label>
-            <div className="grid gap-3 md:grid-cols-3">
-              <label className="space-y-1 text-sm">
-                <span className="block font-medium">Alignment source frame</span>
-                <input
-                  type="number"
-                  min={0}
-                  max={Math.max(0, sourceFrameCount - 1)}
-                  className="w-full rounded-md border border-ink/20 px-2 py-2"
-                  value={extendAlignmentFrame}
-                  onChange={(event) => setExtendAlignmentFrame(event.target.value)}
-                />
-              </label>
-              <label className="space-y-1 text-sm">
-                <span className="block font-medium">Anchor offset from end</span>
-                <input
-                  type="number"
-                  min={1}
-                  max={60}
-                  className="w-full rounded-md border border-ink/20 px-2 py-2"
-                  value={extendAnchorFramesFromEnd}
-                  onChange={(event) => setExtendAnchorFramesFromEnd(event.target.value)}
-                />
-              </label>
-              <label className="space-y-1 text-sm">
-                <span className="block font-medium">Next range seconds</span>
-                <input
-                  type="number"
-                  min={1}
-                  max={15}
-                  className="w-full rounded-md border border-ink/20 px-2 py-2"
-                  value={extendDurationSeconds}
-                  onChange={(event) => setExtendDurationSeconds(event.target.value)}
-                />
-              </label>
-            </div>
-            {selectedExtendSegment ? (
-              <p className="rounded-md bg-white p-2 text-xs text-ink/70">
-                Previous working range: {describeSegment(selectedExtendSegment)}. The next continuation will start at source f
-                {Number.isFinite(parsedAlignmentFrame) ? parsedAlignmentFrame : 0}.
-              </p>
-            ) : null}
-            <label className="block space-y-1 text-sm">
-              <span className="font-medium">Prompt for next continuation</span>
-              <textarea
-                rows={4}
-                className="w-full rounded-md border border-ink/20 px-2 py-2"
-                value={extendPrompt}
-                onChange={(event) => setExtendPrompt(event.target.value)}
-              />
-            </label>
-            <div className="flex justify-end">
-              <button
-                type="button"
-                className="rounded bg-accent2 px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-60"
-                disabled={!canSubmitExtension || isExtendingGeneration}
-                onClick={submitExtension}
-              >
-                <PendingButtonLabel isPending={isExtendingGeneration} idle="Queue next continuation" pending="Queueing continuation..." />
-              </button>
-            </div>
-            {extendGenerationError ? (
-              <StatusNotice variant="error">
-                <p className="text-xs">{extendGenerationError}</p>
+            {selectedExtendGeneration && selectedExtendSegment ? (
+              <>
+                <div className="rounded-md border border-ink/10 bg-white p-2 text-xs text-ink/70">
+                  <p className="font-medium text-ink/85">{describeGeneration(selectedExtendGeneration)}</p>
+                  <p className="mt-1">Current working range: {describeSegment(selectedExtendSegment)}</p>
+                  <p className="mt-1">
+                    Mode:{" "}
+                    {extendInputMode === "start_video"
+                      ? "First frame + source video"
+                      : extendInputMode === "start_end"
+                        ? "First frame + last frame"
+                        : "First frame + text"}
+                  </p>
+                </div>
+                <div className="grid gap-3 md:grid-cols-3">
+                  <label className="space-y-1 text-sm">
+                    <span className="block font-medium">Alignment source frame</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={Math.max(0, sourceFrameCount - 1)}
+                      className="w-full rounded-md border border-ink/20 px-2 py-2"
+                      value={extendAlignmentFrame}
+                      onChange={(event) => setExtendAlignmentFrame(event.target.value)}
+                    />
+                  </label>
+                  <label className="space-y-1 text-sm">
+                    <span className="block font-medium">Anchor offset from end</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={60}
+                      className="w-full rounded-md border border-ink/20 px-2 py-2"
+                      value={extendAnchorFramesFromEnd}
+                      onChange={(event) => setExtendAnchorFramesFromEnd(event.target.value)}
+                    />
+                  </label>
+                  <label className="space-y-1 text-sm">
+                    <span className="block font-medium">Next range seconds</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={15}
+                      className="w-full rounded-md border border-ink/20 px-2 py-2 disabled:bg-ink/5 disabled:text-ink/50"
+                      value={extendDurationSeconds}
+                      onChange={(event) => setExtendDurationSeconds(event.target.value)}
+                      disabled={extendContinueToRangeEnd}
+                    />
+                  </label>
+                </div>
+                <label className="flex items-center gap-2 text-sm text-ink/80">
+                  <input
+                    type="checkbox"
+                    className="h-4 w-4 rounded border border-ink/25"
+                    checked={extendContinueToRangeEnd}
+                    onChange={(event) => setExtendContinueToRangeEnd(event.target.checked)}
+                  />
+                  Continue to end of working range
+                </label>
+                {extendInputMode === "start_end" ? (
+                  <label className="flex items-center gap-2 text-sm text-ink/80">
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 rounded border border-ink/25"
+                      checked={extendUseSourceLastFrame}
+                      onChange={(event) => setExtendUseSourceLastFrame(event.target.checked)}
+                    />
+                    Use source segment last frame as end-frame target
+                  </label>
+                ) : null}
+                {selectedExtendSegment ? (
+                  <p className="rounded-md bg-white p-2 text-xs text-ink/70">
+                    The continuation starts at source f{Number.isFinite(parsedAlignmentFrame) ? parsedAlignmentFrame : 0}.
+                    {extendContinueToRangeEnd
+                      ? " It will continue to the end of the working range and auto-queue extra chunks when needed."
+                      : " Use Next range seconds for one continuation clip."}
+                  </p>
+                ) : null}
+                <label className="block space-y-1 text-sm">
+                  <span className="font-medium">Prompt for next continuation</span>
+                  <textarea
+                    rows={4}
+                    className="w-full rounded-md border border-ink/20 px-2 py-2"
+                    value={extendPrompt}
+                    onChange={(event) => setExtendPrompt(event.target.value)}
+                  />
+                </label>
+                <div className="flex flex-wrap justify-end gap-2">
+                  {extendChunkedRuns
+                    .filter((run) => {
+                      const status = statusLabelForChunkedRun(run);
+                      return status === "created" || status === "running" || status === "paused";
+                    })
+                    .slice(0, 1)
+                    .map((run) => (
+                      <button
+                        key={`stop-run-${run.runId}`}
+                        type="button"
+                        className="rounded border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-700 disabled:cursor-not-allowed disabled:opacity-60"
+                        disabled={isChunkedGenerationMutationPending}
+                        onClick={() => cancelChunkedGeneration({ runId: run.runId, reason: "Stopped from Extend tool" })}
+                      >
+                        {isChunkedGenerationMutationPending ? "Stopping..." : "Stop auto-continue"}
+                      </button>
+                    ))}
+                  <button
+                    type="button"
+                    className="rounded bg-accent2 px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-60"
+                    disabled={!canSubmitExtension || isExtendingGeneration}
+                    onClick={submitExtension}
+                  >
+                    <PendingButtonLabel isPending={isExtendingGeneration} idle="Queue next continuation" pending="Queueing continuation..." />
+                  </button>
+                </div>
+                {extendGenerationError ? (
+                  <StatusNotice variant="error">
+                    <p className="text-xs">{extendGenerationError}</p>
+                  </StatusNotice>
+                ) : null}
+              </>
+            ) : (
+              <StatusNotice variant="warning">
+                <p className="text-xs">Select a completed output in Current Working References to use Extend generation.</p>
               </StatusNotice>
-            ) : null}
+            )}
             <div className="space-y-2 rounded-md border border-ink/10 bg-white p-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <p className="text-sm font-medium text-ink">Continuation chain outputs</p>

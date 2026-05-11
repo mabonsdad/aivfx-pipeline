@@ -2090,12 +2090,20 @@ export default function App() {
       anchorFramesFromEnd,
       durationSeconds,
       prompt,
+      inputMode,
+      continueToRangeEnd,
+      useSourceLastFrame,
+      lastFrameVariantId,
     }: {
       generationId: string;
       alignmentFrameIndex: number;
       anchorFramesFromEnd: number;
       durationSeconds?: number;
       prompt?: string;
+      inputMode?: GenerateInputMode;
+      continueToRangeEnd?: boolean;
+      useSourceLastFrame?: boolean;
+      lastFrameVariantId?: string;
     }) => {
       if (!selectedTaskId) throw new Error("Select a task");
       return apiClient.extendSegmentGeneration(selectedTaskId, generationId, {
@@ -2103,6 +2111,10 @@ export default function App() {
         anchorFramesFromEnd,
         durationSeconds,
         prompt,
+        inputMode,
+        continueToRangeEnd,
+        useSourceLastFrame,
+        lastFrameVariantId,
       });
     },
     onSuccess: async (result) => {
@@ -2401,6 +2413,11 @@ export default function App() {
   );
 
   const dismissPendingEditJob = useCallback((jobId: string) => {
+    setJobIds((previous) => previous.filter((id) => id !== jobId));
+    seenDoneRef.current.delete(jobId);
+  }, []);
+
+  const dismissPendingGenerationJob = useCallback((jobId: string) => {
     setJobIds((previous) => previous.filter((id) => id !== jobId));
     seenDoneRef.current.delete(jobId);
   }, []);
@@ -4341,6 +4358,7 @@ export default function App() {
       originalPreviewIsSegmentClip,
       selectedSegmentGenerations,
       pendingGenerations,
+      dismissPendingGenerationJob,
       requestCancelPendingGenerationJob,
       selectedReportOutputs,
       reportOutputRefKey,
@@ -4415,6 +4433,7 @@ export default function App() {
       originalPreviewIsSegmentClip,
       selectedSegmentGenerations,
       pendingGenerations,
+      dismissPendingGenerationJob,
       selectedReportOutputs,
       generationCardsVisible,
       selectSegmentGeneration,
@@ -4442,7 +4461,6 @@ export default function App() {
       generationInputMode,
       mergeTargetGeneration,
       mergeTargetSegment,
-      completeGenerations,
       describeGeneration,
       describeSegment,
       getSegmentForGeneration,
@@ -4506,6 +4524,8 @@ export default function App() {
       isExtendingGeneration: extendSegmentGenerationMutation.isPending,
       extendGenerationError:
         extendSegmentGenerationMutation.error instanceof Error ? extendSegmentGenerationMutation.error.message : null,
+      cancelChunkedGeneration: cancelChunkedGenerationMutation.mutate,
+      isChunkedGenerationMutationPending: cancelChunkedGenerationMutation.isPending,
       sortedExports,
       humanizeFilename,
       keyBasenameFromS3Key,
@@ -4534,7 +4554,6 @@ export default function App() {
       generationInputMode,
       mergeTargetGeneration,
       mergeTargetSegment,
-      completeGenerations,
       getSegmentForGeneration,
       task?.video?.editSource?.frameCount,
       mergeMaxFrameIndex,
@@ -4584,6 +4603,8 @@ export default function App() {
       extendSegmentGenerationMutation.mutate,
       extendSegmentGenerationMutation.isPending,
       extendSegmentGenerationMutation.error,
+      cancelChunkedGenerationMutation.mutate,
+      cancelChunkedGenerationMutation.isPending,
       sortedExports,
       openMotionSyncModal,
       runTopazUpscaleMutation.mutate,
@@ -4591,7 +4612,6 @@ export default function App() {
       topazUpscalePendingExportId,
       task,
       selectedSegmentChunkedGenerationRuns,
-      pendingGenerations,
     ],
   );
 

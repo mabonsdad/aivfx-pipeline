@@ -404,6 +404,10 @@ class SegmentGenerationExtendRequest(BaseModel):
     anchorFramesFromEnd: int = Field(default=5, ge=1, le=60)
     durationSeconds: int | None = Field(default=None, ge=1, le=15)
     prompt: str | None = None
+    inputMode: Literal["start_video", "start_end", "start_only"] | None = None
+    continueToRangeEnd: bool = False
+    useSourceLastFrame: bool = True
+    lastFrameVariantId: str | None = None
 
 
 class ChunkedSegmentGenerateRequest(BaseModel):

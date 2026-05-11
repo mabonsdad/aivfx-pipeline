@@ -53,7 +53,6 @@ from src.generation import (
     get_video_model_provider,
     resolve_video_model_limit_error,
     supports_chunked_generation,
-    supports_generation_extension,
     validate_video_model_mode,
     validate_video_model_prompt,
 )
@@ -2593,15 +2592,19 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             response_fn=response,
             error_response_fn=error_response,
             now_iso_fn=now_iso,
-            supports_generation_extension_fn=supports_generation_extension,
+            supports_chunked_generation_fn=supports_chunked_generation,
             get_video_model_capability_fn=get_video_model_capability,
             fps_fn=_fps,
+            plan_chunk_windows_fn=_plan_chunk_windows,
             resolve_segment_frames_fn=_resolve_segment_frames,
             create_segment_record_fn=_create_segment_record,
             segment_model_limit_error_fn=_segment_model_limit_error,
             video_model_label_fn=_video_model_label,
             sanitize_prompt_fn=_sanitize_prompt,
             copy_generated_anchor_to_frame_variant_fn=_copy_generated_anchor_to_frame_variant,
+            queue_chunk_generation_for_run_fn=lambda **kwargs: _queue_chunk_generation_for_run(queue=queue, **kwargs),
+            append_history_event_fn=_append_history_event,
+            new_id_fn=new_id,
             queue_segment_generation_record_fn=lambda **kwargs: _queue_segment_generation_record(queue=queue, **kwargs),
         )
         if task_generation_extend_response is not None:

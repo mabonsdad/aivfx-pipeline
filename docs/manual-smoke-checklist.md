@@ -25,6 +25,12 @@ Use this checklist after deploys and before large refactors.
    - Generate one segment video from edited start input.
    - Confirm job completes and generation appears in outputs.
 6. **Merge**
+   - Confirm **Current Working References** has a completed generation selected.
+   - Open **Extend generation** and confirm there is no "Previous output" dropdown.
+   - Queue one continuation with `Continue to end of working range` disabled.
+   - If the selected generation mode is **first frame + last frame**, toggle `Use source segment last frame as end-frame target` and verify both states can be submitted.
+   - Queue one continuation with `Continue to end of working range` enabled and confirm continuation chunks begin queuing automatically.
+   - If an auto-continue run is active, click `Stop auto-continue` and confirm the run stops accepting new chunks.
    - Select generated output, open **Align & Retime**, run **Suggest alignment**, then **Apply suggested**.
    - Confirm controls are not auto-filled before clicking **Apply suggested**.
    - Run reconcile timing or merge/export.
