@@ -661,7 +661,7 @@ export default function MergeTab({ ctx }: MergeTabProps) {
       .sort((left, right) => {
         const leftTs = new Date(left.createdAt || 0).getTime();
         const rightTs = new Date(right.createdAt || 0).getTime();
-        return leftTs - rightTs;
+        return rightTs - leftTs;
       });
   }, [allSegmentGenerations, selectedExtendGeneration]);
   const extendMergedExport = useMemo(() => {

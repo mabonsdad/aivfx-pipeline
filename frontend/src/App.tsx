@@ -1462,8 +1462,9 @@ export default function App() {
     const rememberedByTask = readSegmentSelectionMap();
     const rememberedSegmentId = rememberedByTask[selectedTaskId];
     if (rememberedSegmentId && task?.segments?.length) {
-      const exists = task.segments.some((segment) => segment.segmentId === rememberedSegmentId);
-      if (!exists) {
+      const rememberedSegment = task.segments.find((segment) => segment.segmentId === rememberedSegmentId);
+      const isValidRemembered = Boolean(rememberedSegment && !rememberedSegment.internalOnly);
+      if (!isValidRemembered) {
         delete rememberedByTask[selectedTaskId];
         writeSegmentSelectionMap(rememberedByTask);
       } else {
@@ -1482,11 +1483,28 @@ export default function App() {
 
   useEffect(() => {
     if (!selectedTaskId || !selectedSegmentId) return;
+    const selectedForTask = task?.segments?.find((segment) => segment.segmentId === selectedSegmentId);
+    if (!selectedForTask || selectedForTask.internalOnly) return;
     const rememberedByTask = readSegmentSelectionMap();
     if (rememberedByTask[selectedTaskId] === selectedSegmentId) return;
     rememberedByTask[selectedTaskId] = selectedSegmentId;
     writeSegmentSelectionMap(rememberedByTask);
-  }, [selectedSegmentId, selectedTaskId]);
+  }, [selectedSegmentId, selectedTaskId, task?.segments]);
+
+  useEffect(() => {
+    if (!selectedSegment?.internalOnly) return;
+    const fallbackId =
+      defaultVideoSegment?.segmentId ??
+      task?.segments?.find((segment) => !segment.internalOnly)?.segmentId ??
+      null;
+    if (fallbackId && fallbackId !== selectedSegmentId) {
+      setSelectedSegmentId(fallbackId);
+      return;
+    }
+    if (!fallbackId && selectedSegmentId) {
+      setSelectedSegmentId(null);
+    }
+  }, [defaultVideoSegment?.segmentId, selectedSegment?.internalOnly, selectedSegmentId, setSelectedSegmentId, task?.segments]);
 
   useEffect(() => {
     if (segmentDraftActive) return;
@@ -2189,11 +2207,9 @@ export default function App() {
     },
     onSuccess: async (result) => {
       setJobIds((prev) => appendTrackedJobId(prev, result.jobId));
-      setSelectedSegmentId(result.segmentId);
       await queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
       await queryClient.invalidateQueries({ queryKey: ["task", "report", selectedTaskId] });
       await queryClient.invalidateQueries({ queryKey: ["task", "assets", selectedTaskId] });
-      setTab("outputs");
     },
   });
 

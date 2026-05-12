@@ -45,6 +45,8 @@ The underlying storage is still task-based, but the UI now presents each task as
      - reconcile timing, merge alignment, and export
      - crop merge-back
      - tracked keep-mask cleanup on eligible source-motion outputs
+   - Extend continuation chunks are now created as internal child ranges, so they do not replace the user-visible working-range selection.
+   - Queueing an extension keeps the user in Post Process (no auto-navigation back to Generate), and continuation outputs are shown newest-first in the Extend grid.
    - Align & Retime now uses a compact `Suggested / Controls` flow with explicit start-shift, trim, and stretch controls.
    - Alignment suggestions do not auto-apply. Users explicitly apply suggestion values before reconcile.
    - Merge previews, zoom tools, alignment suggestion, and optional retime are all part of this stage.

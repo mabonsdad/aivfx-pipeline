@@ -323,7 +323,14 @@ def handle_task_generation_extend_route(
         alignment_frame_index,
         end_frame_exclusive=alignment_frame_index + dur_frames,
     )
-    segment = create_segment_record_fn(task=task, start=start, end_excl=end_excl, dur_frames=dur_frames, asset_store=asset_store)
+    segment = create_segment_record_fn(
+        task=task,
+        start=start,
+        end_excl=end_excl,
+        dur_frames=dur_frames,
+        asset_store=asset_store,
+        internal_only=True,
+    )
     limit_error = segment_model_limit_error_fn(task, segment, model)
     if limit_error:
         task["segments"] = [item for item in task.get("segments", []) if item.get("segmentId") != segment.get("segmentId")]

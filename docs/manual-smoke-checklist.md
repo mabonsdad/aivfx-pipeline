@@ -27,9 +27,12 @@ Use this checklist after deploys and before large refactors.
 6. **Merge**
    - Confirm **Current Working References** has a completed generation selected.
    - Open **Extend generation** and confirm there is no "Previous output" dropdown.
+   - Queue one continuation and confirm the page stays in **Post Process** (no forced tab change).
+   - Confirm the selected working range does not switch to an internal child segment after queueing.
    - Queue one continuation with `Continue to end of working range` disabled.
    - If the selected generation mode is **first frame + last frame**, toggle `Use source segment last frame as end-frame target` and verify both states can be submitted.
    - Queue one continuation with `Continue to end of working range` enabled and confirm continuation chunks begin queuing automatically.
+   - Confirm continuation clips in the Extend grid are ordered newest-first.
    - If an auto-continue run is active, click `Stop auto-continue` and confirm the run stops accepting new chunks.
    - Select generated output, open **Align & Retime**, run **Suggest alignment**, then **Apply suggested**.
    - Confirm controls are not auto-filled before clicking **Apply suggested**.
