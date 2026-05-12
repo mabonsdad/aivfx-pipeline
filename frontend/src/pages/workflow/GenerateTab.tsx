@@ -96,6 +96,7 @@ export type GenerateTabCtx = {
   frameVariantImageUrl: (frameId: string | null | undefined, variantId: string | null | undefined) => string | null;
   segmentWindow: { startSec: number; endSec: number; startLabel: string; endLabel: string } | null;
   originalSegmentPreviewUrl: string | null;
+  originalSegmentCompareUrl: string | null;
   uploadManualGeneratedVideo: (file: File) => Promise<string>;
   selectedPreviewGeneration: SegmentGeneration | null;
   task: TaskDetail | undefined;
@@ -197,6 +198,7 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
     frameVariantImageUrl,
     segmentWindow,
     originalSegmentPreviewUrl,
+    originalSegmentCompareUrl,
     uploadManualGeneratedVideo,
     selectedPreviewGeneration,
     task,
@@ -1060,12 +1062,12 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
                   <PreviewIcon />
                 </IconActionButton>
                 <IconActionButton
-                  title={!originalSegmentPreviewUrl || !gen.downloadUrl ? "Compare is unavailable until both source and output previews are ready" : "Compare against source"}
-                  disabled={!originalSegmentPreviewUrl || !gen.downloadUrl}
+                  title={!originalSegmentCompareUrl || !gen.downloadUrl ? "Compare is unavailable until both source and output previews are ready" : "Compare against source"}
+                  disabled={!originalSegmentCompareUrl || !gen.downloadUrl}
                   onClick={() => {
-                    if (!originalSegmentPreviewUrl || !gen.downloadUrl) return;
+                    if (!originalSegmentCompareUrl || !gen.downloadUrl) return;
                     setVideoCompareModal({
-                      originalUrl: originalSegmentPreviewUrl,
+                      originalUrl: originalSegmentCompareUrl,
                       compareUrl: gen.downloadUrl,
                       label: describeGeneration(gen),
                       posterUrl: generationThumbnailUrl(gen),

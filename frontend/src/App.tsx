@@ -2779,7 +2779,7 @@ export default function App() {
     assetTasks,
   });
 
-  const { segmentWindow, originalPreviewIsSegmentClip, stableOriginalSegmentPreviewUrl } = useSelectedSegmentPreview({
+  const { segmentWindow, originalPreviewIsSegmentClip, stableOriginalSegmentPreviewUrl, stableOriginalSegmentCompareUrl } = useSelectedSegmentPreview({
     selectedSegment,
     task,
   });
@@ -4509,6 +4509,7 @@ export default function App() {
       frameVariantImageUrl,
       segmentWindow,
       originalSegmentPreviewUrl: stableOriginalSegmentPreviewUrl,
+      originalSegmentCompareUrl: stableOriginalSegmentCompareUrl,
       uploadManualGeneratedVideo,
       selectedPreviewGeneration,
       task,
@@ -4587,6 +4588,7 @@ export default function App() {
       frameVariantImageUrl,
       segmentWindow,
       stableOriginalSegmentPreviewUrl,
+      stableOriginalSegmentCompareUrl,
       uploadManualGeneratedVideo,
       selectedPreviewGeneration,
       task,

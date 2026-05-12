@@ -46,9 +46,21 @@ export function useSelectedSegmentPreview({ selectedSegment, task }: UseSelected
     return `edit:${task.video.editSource.s3Key}:${segmentWindow.startSec.toFixed(3)}:${segmentWindow.endSec.toFixed(3)}`;
   }, [selectedSegment?.segmentClipKey, segmentWindow, task?.video?.editSource?.s3Key]);
 
+  const originalSegmentCompareUrl = useMemo(() => {
+    if (task?.video?.previewSource?.downloadUrl) return task.video.previewSource.downloadUrl;
+    return originalSegmentPreviewUrl;
+  }, [originalSegmentPreviewUrl, task?.video?.previewSource?.downloadUrl]);
+
+  const originalSegmentCompareIdentity = useMemo(() => {
+    if (task?.video?.previewSource?.s3Key) return `preview:${task.video.previewSource.s3Key}`;
+    return originalSegmentPreviewIdentity;
+  }, [originalSegmentPreviewIdentity, task?.video?.previewSource?.s3Key]);
+
   const originalPreviewIsSegmentClip = Boolean(selectedSegment?.segmentClipUrl);
   const [stableOriginalSegmentPreviewUrl, setStableOriginalSegmentPreviewUrl] = useState<string | null>(null);
   const stableOriginalSegmentPreviewIdentityRef = useRef<string | null>(null);
+  const [stableOriginalSegmentCompareUrl, setStableOriginalSegmentCompareUrl] = useState<string | null>(null);
+  const stableOriginalSegmentCompareIdentityRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!originalSegmentPreviewUrl || !originalSegmentPreviewIdentity) {
@@ -65,9 +77,25 @@ export function useSelectedSegmentPreview({ selectedSegment, task }: UseSelected
     }
   }, [originalSegmentPreviewIdentity, originalSegmentPreviewUrl, stableOriginalSegmentPreviewUrl]);
 
+  useEffect(() => {
+    if (!originalSegmentCompareUrl || !originalSegmentCompareIdentity) {
+      stableOriginalSegmentCompareIdentityRef.current = null;
+      setStableOriginalSegmentCompareUrl(null);
+      return;
+    }
+    if (
+      stableOriginalSegmentCompareIdentityRef.current !== originalSegmentCompareIdentity ||
+      !stableOriginalSegmentCompareUrl
+    ) {
+      stableOriginalSegmentCompareIdentityRef.current = originalSegmentCompareIdentity;
+      setStableOriginalSegmentCompareUrl(originalSegmentCompareUrl);
+    }
+  }, [originalSegmentCompareIdentity, originalSegmentCompareUrl, stableOriginalSegmentCompareUrl]);
+
   return {
     segmentWindow,
     originalPreviewIsSegmentClip,
     stableOriginalSegmentPreviewUrl,
+    stableOriginalSegmentCompareUrl,
   };
 }

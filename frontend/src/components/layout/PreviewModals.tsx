@@ -25,6 +25,19 @@ type PreviewModalsProps = {
   onMediaError?: () => void;
 };
 
+function hasBufferedAhead(video: HTMLVideoElement, minimumSeconds: number): boolean {
+  if (!Number.isFinite(video.duration) || video.duration <= 0) return false;
+  const targetTime = video.currentTime || 0;
+  for (let index = 0; index < video.buffered.length; index += 1) {
+    const start = video.buffered.start(index);
+    const end = video.buffered.end(index);
+    if (targetTime >= start && end - targetTime >= minimumSeconds) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export default function PreviewModals({
   imagePreview,
   videoPreview,
@@ -43,6 +56,7 @@ export default function PreviewModals({
   const compareVariantRef = useRef<HTMLVideoElement | null>(null);
   const syncTimerRef = useRef<number | null>(null);
   const [videoCompareReady, setVideoCompareReady] = useState({ original: false, generated: false });
+  const [videoCompareBuffered, setVideoCompareBuffered] = useState({ original: false, generated: false });
   const [videoCompareLoadTimedOut, setVideoCompareLoadTimedOut] = useState(false);
 
   useEffect(() => {
@@ -56,10 +70,12 @@ export default function PreviewModals({
   useEffect(() => {
     if (!videoCompare) {
       setVideoCompareReady({ original: false, generated: false });
+      setVideoCompareBuffered({ original: false, generated: false });
       setVideoCompareLoadTimedOut(false);
       return;
     }
     setVideoCompareReady({ original: false, generated: false });
+    setVideoCompareBuffered({ original: false, generated: false });
     setVideoCompareLoadTimedOut(false);
   }, [videoCompare, videoCompare?.originalUrl, videoCompare?.compareUrl]);
 
@@ -86,7 +102,11 @@ export default function PreviewModals({
   }, [videoCompare]);
 
   useEffect(() => {
-    if (!videoCompare || !videoCompareReady.generated) return;
+    const canBeginPlayback =
+      videoCompareReady.generated &&
+      videoCompareBuffered.generated &&
+      ((videoCompareReady.original && videoCompareBuffered.original) || videoCompareLoadTimedOut);
+    if (!videoCompare || !canBeginPlayback) return;
     const generated = compareVariantRef.current;
     const original = compareOriginalRef.current;
     if (!generated) return;
@@ -200,14 +220,18 @@ export default function PreviewModals({
       original?.pause();
       generated.pause();
     };
-  }, [videoCompare, videoCompareReady.generated]);
+  }, [videoCompare, videoCompareBuffered.generated, videoCompareBuffered.original, videoCompareLoadTimedOut, videoCompareReady.generated, videoCompareReady.original]);
 
   useEffect(() => {
-    if (!videoCompare || !videoCompareReady.generated) return;
+    const canBeginPlayback =
+      videoCompareReady.generated &&
+      videoCompareBuffered.generated &&
+      ((videoCompareReady.original && videoCompareBuffered.original) || videoCompareLoadTimedOut);
+    if (!videoCompare || !canBeginPlayback) return;
     const generated = compareVariantRef.current;
     if (!generated) return;
     generated.play().catch(() => undefined);
-  }, [videoCompare, videoCompareReady.generated]);
+  }, [videoCompare, videoCompareBuffered.generated, videoCompareBuffered.original, videoCompareLoadTimedOut, videoCompareReady.generated, videoCompareReady.original]);
 
   return (
     <>
@@ -272,7 +296,9 @@ export default function PreviewModals({
             <div className="relative overflow-hidden rounded bg-black">
               <div
                 className={
-                  !videoCompareReady.generated || (!videoCompareReady.original && !videoCompareLoadTimedOut)
+                  !videoCompareReady.generated ||
+                  !videoCompareBuffered.generated ||
+                  ((!videoCompareReady.original || !videoCompareBuffered.original) && !videoCompareLoadTimedOut)
                     ? "pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-black/85"
                     : "sr-only"
                 }
@@ -298,8 +324,24 @@ export default function PreviewModals({
                       preload="metadata"
                       className="h-full w-full object-contain"
                       onLoadedMetadata={() => setVideoCompareReady((previous) => ({ ...previous, original: true }))}
-                      onLoadedData={() => setVideoCompareReady((previous) => ({ ...previous, original: true }))}
-                      onCanPlay={() => setVideoCompareReady((previous) => ({ ...previous, original: true }))}
+                      onLoadedData={(event) => {
+                        setVideoCompareReady((previous) => ({ ...previous, original: true }));
+                        if (hasBufferedAhead(event.currentTarget, 0.35)) {
+                          setVideoCompareBuffered((previous) => ({ ...previous, original: true }));
+                        }
+                      }}
+                      onCanPlay={(event) => {
+                        setVideoCompareReady((previous) => ({ ...previous, original: true }));
+                        if (hasBufferedAhead(event.currentTarget, 0.35)) {
+                          setVideoCompareBuffered((previous) => ({ ...previous, original: true }));
+                        }
+                      }}
+                      onCanPlayThrough={() => setVideoCompareBuffered((previous) => ({ ...previous, original: true }))}
+                      onProgress={(event) => {
+                        if (hasBufferedAhead(event.currentTarget, 0.35)) {
+                          setVideoCompareBuffered((previous) => ({ ...previous, original: true }));
+                        }
+                      }}
                       onError={onMediaError}
                     />
                     <div className="pointer-events-none absolute left-3 top-3 rounded bg-black/65 px-2 py-1 text-xs font-medium tracking-wide text-white/90">
@@ -321,8 +363,24 @@ export default function PreviewModals({
                       poster={videoCompare.posterUrl ?? undefined}
                       className="h-full w-full object-contain"
                       onLoadedMetadata={() => setVideoCompareReady((previous) => ({ ...previous, generated: true }))}
-                      onLoadedData={() => setVideoCompareReady((previous) => ({ ...previous, generated: true }))}
-                      onCanPlay={() => setVideoCompareReady((previous) => ({ ...previous, generated: true }))}
+                      onLoadedData={(event) => {
+                        setVideoCompareReady((previous) => ({ ...previous, generated: true }));
+                        if (hasBufferedAhead(event.currentTarget, 0.35)) {
+                          setVideoCompareBuffered((previous) => ({ ...previous, generated: true }));
+                        }
+                      }}
+                      onCanPlay={(event) => {
+                        setVideoCompareReady((previous) => ({ ...previous, generated: true }));
+                        if (hasBufferedAhead(event.currentTarget, 0.35)) {
+                          setVideoCompareBuffered((previous) => ({ ...previous, generated: true }));
+                        }
+                      }}
+                      onCanPlayThrough={() => setVideoCompareBuffered((previous) => ({ ...previous, generated: true }))}
+                      onProgress={(event) => {
+                        if (hasBufferedAhead(event.currentTarget, 0.35)) {
+                          setVideoCompareBuffered((previous) => ({ ...previous, generated: true }));
+                        }
+                      }}
                       onError={onMediaError}
                     />
                     <div className="pointer-events-none absolute right-3 top-3 rounded bg-black/65 px-2 py-1 text-xs font-medium tracking-wide text-white/90">
