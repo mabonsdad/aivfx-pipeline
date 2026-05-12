@@ -33,6 +33,7 @@ The underlying storage is still task-based, but the UI now presents each task as
 3. **Generate**
    - Video generation controls and generated attempts are reviewed here for the current working range.
    - The chosen output is compared against the source and handed forward into Post Process.
+   - Video compare modal now uses synchronized auto-loop playback (no native browser control bar) with explicit `Source` and `Generated` labels and non-blocking source-load fallback.
    - Users can also download the current working-range source clip and manually upload a generated video, which is attached to the current working reference as a normal output.
    - Multiple overlapping generation jobs are supported. Jobs are tracked independently and completed results are added without overwriting earlier outputs.
    - For long-video source-motion runs, chunked/continuation drafts stay inside their session UI until a stitched draft is saved back to Generate.

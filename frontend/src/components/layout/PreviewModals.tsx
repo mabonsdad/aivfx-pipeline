@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 import { ReactCompareSlider, ReactCompareSliderImage } from "react-compare-slider";
-import { StatusNotice } from "./UiFeedback";
 
 type ImagePreviewState = { url: string; label: string } | null;
 type VideoPreviewState = { url: string; label: string } | null;
@@ -26,8 +25,6 @@ type PreviewModalsProps = {
   onMediaError?: () => void;
 };
 
-const VIDEO_COMPARE_OBJECT_URL_CACHE = new Map<string, Promise<string>>();
-
 export default function PreviewModals({
   imagePreview,
   videoPreview,
@@ -43,31 +40,7 @@ export default function PreviewModals({
   const compareVariantRef = useRef<HTMLVideoElement | null>(null);
   const syncTimerRef = useRef<number | null>(null);
   const [videoCompareReady, setVideoCompareReady] = useState({ original: false, generated: false });
-  const [videoCompareSources, setVideoCompareSources] = useState<{ original: string | null; generated: string | null }>({
-    original: null,
-    generated: null,
-  });
-  const [videoCompareLoading, setVideoCompareLoading] = useState(false);
-  const [videoCompareLoadError, setVideoCompareLoadError] = useState<string | null>(null);
-
-  async function loadVideoIntoObjectUrl(url: string, signal: AbortSignal): Promise<string> {
-    const existing = VIDEO_COMPARE_OBJECT_URL_CACHE.get(url);
-    if (existing) return existing;
-    const pending = fetch(url, { signal })
-      .then(async (response) => {
-        if (!response.ok) {
-          throw new Error(`Video preload failed: ${response.status}`);
-        }
-        const blob = await response.blob();
-        return URL.createObjectURL(blob);
-      })
-      .catch((error) => {
-        VIDEO_COMPARE_OBJECT_URL_CACHE.delete(url);
-        throw error;
-      });
-    VIDEO_COMPARE_OBJECT_URL_CACHE.set(url, pending);
-    return pending;
-  }
+  const [videoCompareLoadTimedOut, setVideoCompareLoadTimedOut] = useState(false);
 
   useEffect(() => {
     return () => {
@@ -78,47 +51,24 @@ export default function PreviewModals({
   }, []);
 
   useEffect(() => {
-    setVideoCompareReady({ original: false, generated: false });
-  }, [videoCompare?.originalUrl, videoCompare?.compareUrl]);
-
-  useEffect(() => {
     if (!videoCompare) {
-      setVideoCompareSources({ original: null, generated: null });
-      setVideoCompareLoading(false);
-      setVideoCompareLoadError(null);
+      setVideoCompareReady({ original: false, generated: false });
+      setVideoCompareLoadTimedOut(false);
       return;
     }
-    const controller = new AbortController();
-    let cancelled = false;
-    setVideoCompareLoading(true);
-    setVideoCompareLoadError(null);
-    setVideoCompareSources({ original: null, generated: null });
-    void Promise.all([
-      loadVideoIntoObjectUrl(videoCompare.originalUrl, controller.signal),
-      loadVideoIntoObjectUrl(videoCompare.compareUrl, controller.signal),
-    ])
-      .then(([original, generated]) => {
-        if (cancelled) return;
-        setVideoCompareSources({ original, generated });
-      })
-      .catch((error) => {
-        if (cancelled || controller.signal.aborted) return;
-        setVideoCompareLoadError(error instanceof Error ? error.message : "Failed to preload compare videos");
-        setVideoCompareSources({
-          original: videoCompare.originalUrl,
-          generated: videoCompare.compareUrl,
-        });
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setVideoCompareLoading(false);
-        }
-      });
+    setVideoCompareReady({ original: false, generated: false });
+    setVideoCompareLoadTimedOut(false);
+  }, [videoCompare, videoCompare?.originalUrl, videoCompare?.compareUrl]);
+
+  useEffect(() => {
+    if (!videoCompare) return;
+    const timeoutHandle = window.setTimeout(() => {
+      setVideoCompareLoadTimedOut(true);
+    }, 12000);
     return () => {
-      cancelled = true;
-      controller.abort();
+      window.clearTimeout(timeoutHandle);
     };
-  }, [videoCompare]);
+  }, [videoCompare, videoCompare?.originalUrl, videoCompare?.compareUrl]);
 
   useEffect(() => {
     if (!videoCompare) return;
@@ -133,10 +83,10 @@ export default function PreviewModals({
   }, [videoCompare]);
 
   useEffect(() => {
-    if (!videoCompare || !videoCompareReady.original || !videoCompareReady.generated) return;
+    if (!videoCompare || !videoCompareReady.generated) return;
     const generated = compareVariantRef.current;
     const original = compareOriginalRef.current;
-    if (!generated || !original) return;
+    if (!generated) return;
 
     const stopSyncLoop = () => {
       if (syncTimerRef.current !== null) {
@@ -146,6 +96,7 @@ export default function PreviewModals({
     };
 
     const syncOriginal = (forceSeek = false) => {
+      if (!original || original.readyState < 1) return;
       const baseTime = videoCompare.originalIsSegmentClip ? 0 : videoCompare.segmentStartSec ?? 0;
       const maxOriginalTime = Math.max(0, (original.duration || 0) - 0.001);
       const targetTime = Math.max(0, Math.min(maxOriginalTime, baseTime + generated.currentTime));
@@ -161,9 +112,11 @@ export default function PreviewModals({
 
     const startSync = () => {
       syncOriginal(true);
-      original.playbackRate = generated.playbackRate || 1;
-      if (original.paused) {
-        original.play().catch(() => undefined);
+      if (original && original.readyState >= 1) {
+        original.playbackRate = generated.playbackRate || 1;
+        if (original.paused) {
+          original.play().catch(() => undefined);
+        }
       }
       if (syncTimerRef.current === null) {
         syncTimerRef.current = window.setInterval(() => {
@@ -171,7 +124,9 @@ export default function PreviewModals({
             stopSyncLoop();
             return;
           }
-          original.playbackRate = generated.playbackRate || 1;
+          if (original && original.readyState >= 1) {
+            original.playbackRate = generated.playbackRate || 1;
+          }
           syncOriginal(false);
         }, 200);
       }
@@ -179,7 +134,7 @@ export default function PreviewModals({
 
     const pauseSync = () => {
       stopSyncLoop();
-      original.pause();
+      original?.pause();
     };
 
     const seekSync = () => {
@@ -187,20 +142,26 @@ export default function PreviewModals({
     };
 
     const onRateChange = () => {
-      original.playbackRate = generated.playbackRate || 1;
+      if (original && original.readyState >= 1) {
+        original.playbackRate = generated.playbackRate || 1;
+      }
       syncOriginal(true);
     };
 
     pauseSync();
     try {
       generated.currentTime = 0;
-      const originalStart = videoCompare.originalIsSegmentClip ? 0 : videoCompare.segmentStartSec ?? 0;
-      const maxOriginalStart = Math.max(0, (original.duration || 0) - 0.001);
-      original.currentTime = Math.max(0, Math.min(maxOriginalStart, originalStart));
+      if (original && original.readyState >= 1) {
+        const originalStart = videoCompare.originalIsSegmentClip ? 0 : videoCompare.segmentStartSec ?? 0;
+        const maxOriginalStart = Math.max(0, (original.duration || 0) - 0.001);
+        original.currentTime = Math.max(0, Math.min(maxOriginalStart, originalStart));
+      }
     } catch {
       // ignore early seeks
     }
-    original.playbackRate = generated.playbackRate || 1;
+    if (original && original.readyState >= 1) {
+      original.playbackRate = generated.playbackRate || 1;
+    }
 
     generated.addEventListener("play", startSync);
     generated.addEventListener("playing", startSync);
@@ -219,17 +180,17 @@ export default function PreviewModals({
       generated.removeEventListener("seeked", seekSync);
       generated.removeEventListener("ratechange", onRateChange);
       stopSyncLoop();
-      original.pause();
+      original?.pause();
       generated.pause();
     };
-  }, [videoCompare, videoCompareReady.generated, videoCompareReady.original, videoCompareSources.generated, videoCompareSources.original]);
+  }, [videoCompare, videoCompareReady.generated]);
 
   useEffect(() => {
-    if (!videoCompare || !videoCompareReady.original || !videoCompareReady.generated) return;
+    if (!videoCompare || !videoCompareReady.generated) return;
     const generated = compareVariantRef.current;
     if (!generated) return;
     generated.play().catch(() => undefined);
-  }, [videoCompare, videoCompareReady.generated, videoCompareReady.original]);
+  }, [videoCompare, videoCompareReady.generated]);
 
   return (
     <>
@@ -292,39 +253,54 @@ export default function PreviewModals({
               x
             </button>
             <div className="relative overflow-hidden rounded bg-black">
-              <div className={videoCompareLoading || !videoCompareReady.original || !videoCompareReady.generated ? "pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-black" : "sr-only"}>
-                <div className="w-full max-w-md px-6">
-                  <StatusNotice variant="loading" title="Preparing compare" className="border-white/10 bg-black/70 text-center text-white">
-                    <p>Loading both videos into local memory before synchronized playback starts.</p>
-                  </StatusNotice>
+              <div
+                className={
+                  !videoCompareReady.generated || (!videoCompareReady.original && !videoCompareLoadTimedOut)
+                    ? "pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-black/85"
+                    : "sr-only"
+                }
+              >
+                <div className="flex flex-col items-center gap-3 px-6 text-center text-white">
+                  <span className="inline-block h-7 w-7 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+                  <p className="text-sm font-medium">Preparing compare preview...</p>
+                  <p className="text-xs text-white/70">Source video can take longer to load on first open.</p>
                 </div>
               </div>
-              <div className={videoCompareLoading || !videoCompareReady.original || !videoCompareReady.generated ? "invisible" : "visible"}>
-                <ReactCompareSlider
-                  className="h-[80vh] w-full"
-                  itemOne={
+              <ReactCompareSlider
+                className="h-[80vh] w-full"
+                itemOne={
+                  <div className="relative h-full w-full bg-black">
                     <video
                       key={`compare-original:${videoCompare.originalUrl}`}
                       ref={compareOriginalRef}
-                      src={videoCompareSources.original ?? undefined}
+                      src={videoCompare.originalUrl}
+                      autoPlay
+                      loop
                       muted
                       playsInline
-                      preload="auto"
+                      preload="metadata"
                       className="h-full w-full object-contain"
                       onLoadedMetadata={() => setVideoCompareReady((previous) => ({ ...previous, original: true }))}
                       onLoadedData={() => setVideoCompareReady((previous) => ({ ...previous, original: true }))}
                       onCanPlay={() => setVideoCompareReady((previous) => ({ ...previous, original: true }))}
                       onError={onMediaError}
                     />
-                  }
-                  itemTwo={
+                    <div className="pointer-events-none absolute left-3 top-3 rounded bg-black/65 px-2 py-1 text-xs font-medium tracking-wide text-white/90">
+                      Source
+                    </div>
+                  </div>
+                }
+                itemTwo={
+                  <div className="relative h-full w-full bg-black">
                     <video
                       key={`compare-generated:${videoCompare.compareUrl}`}
                       ref={compareVariantRef}
-                      src={videoCompareSources.generated ?? undefined}
-                      controls
+                      src={videoCompare.compareUrl}
+                      autoPlay
+                      loop
+                      muted
                       playsInline
-                      preload="auto"
+                      preload="metadata"
                       poster={videoCompare.posterUrl ?? undefined}
                       className="h-full w-full object-contain"
                       onLoadedMetadata={() => setVideoCompareReady((previous) => ({ ...previous, generated: true }))}
@@ -332,15 +308,16 @@ export default function PreviewModals({
                       onCanPlay={() => setVideoCompareReady((previous) => ({ ...previous, generated: true }))}
                       onError={onMediaError}
                     />
-                  }
-                />
-              </div>
+                    <div className="pointer-events-none absolute right-3 top-3 rounded bg-black/65 px-2 py-1 text-xs font-medium tracking-wide text-white/90">
+                      Generated
+                    </div>
+                  </div>
+                }
+              />
             </div>
-            {videoCompareLoadError ? (
-              <div className="pointer-events-none absolute inset-x-6 bottom-6">
-                <StatusNotice variant="warning" title="Compare loaded without local cache">
-                  <p>{videoCompareLoadError}</p>
-                </StatusNotice>
+            {videoCompareLoadTimedOut && !videoCompareReady.original ? (
+              <div className="mt-3 rounded border border-amber-300/40 bg-amber-300/10 px-3 py-2 text-xs text-amber-100">
+                Source preview is still loading, but compare playback will continue and sync as soon as source metadata is ready.
               </div>
             ) : null}
           </div>
