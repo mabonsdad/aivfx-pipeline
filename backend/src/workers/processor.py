@@ -950,6 +950,7 @@ def _queue_chunk_generation_follow_on(
     extension_metadata: dict[str, Any],
     queue_url: str,
 ) -> str:
+    chunk_prompt = chunk.get("prompt") or run.get("continuationPrompt") or run.get("openingPrompt")
     gen_id = new_id("gen")
     job_id = _enqueue_follow_on_job(
         store=store,
@@ -962,7 +963,7 @@ def _queue_chunk_generation_follow_on(
             "genId": gen_id,
             "lumaModel": run.get("model"),
             "mode": run.get("mode"),
-            "prompt": chunk.get("prompt"),
+            "prompt": chunk_prompt,
             "firstFrameVariantId": first_frame_variant_id,
             "replicateKlingMode": run.get("replicateKlingMode"),
             "replicateKlingV3Mode": run.get("replicateKlingV3Mode"),
@@ -979,7 +980,7 @@ def _queue_chunk_generation_follow_on(
             "provider": _segment_generation_provider_name(str(run.get("model") or "")),
             "model": run.get("model"),
             "mode": run.get("mode"),
-            "prompt": chunk.get("prompt"),
+            "prompt": chunk_prompt,
             "lumaGenerationId": None,
         },
         "status": "queued",
@@ -1000,6 +1001,7 @@ def _queue_chunk_generation_follow_on(
     chunk["status"] = "queued"
     chunk["reviewStatus"] = "running"
     chunk.pop("error", None)
+    chunk["prompt"] = chunk_prompt
     chunk["updatedAt"] = now
     run["status"] = "running"
     run["activeChunkIndex"] = int(chunk.get("chunkIndex") or 0)
@@ -1059,6 +1061,18 @@ def _advance_chunked_generation_run_after_success(
         run["finishedAt"] = now
         run["updatedAt"] = now
         run["activeChunkIndex"] = current_index
+        if run.get("saveStatus") not in {"queued", "running", "complete"}:
+            save_job_id = _enqueue_follow_on_job(
+                store=store,
+                user_id=task["userId"],
+                task_id=task["taskId"],
+                queue_url=settings.jobs_queue_url,
+                job_type="chunked_generation_finalize",
+                payload={"runId": run.get("runId")},
+            )
+            run["saveStatus"] = "queued"
+            run["saveJobId"] = save_job_id
+            run["saveError"] = None
         store.save_task(task, merge_on_conflict=True)
         return
 
@@ -1295,8 +1309,16 @@ def _handle_chunked_generation_finalize(
         "chunkedRunId": run_id,
         "chunkRole": "draft_stitched",
         "isChunkInternal": False,
+        "parentGenerationId": run.get("parentGenerationId"),
+        "extension": {
+            "parentGenerationId": run.get("parentGenerationId"),
+            "chunkedRunId": run_id,
+            "continueToRangeEnd": True,
+            "createdAt": finished_at,
+        },
     }
     task.setdefault("segmentGenerations", {})[gen_id] = generation_record
+    source_segment["selectedGenerationId"] = gen_id
     run["saveStatus"] = "complete"
     run["savedGenerationId"] = gen_id
     run["updatedAt"] = finished_at

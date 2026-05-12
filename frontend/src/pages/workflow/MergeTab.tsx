@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType } from "react";
 
+import { CompareIcon, DeleteIcon, DownloadIcon, IconActionButton, PreviewIcon } from "../../components/layout/MediaActionButtons";
 import { HelpInfoButton, PendingButtonLabel, StatusNotice } from "../../components/layout/UiFeedback";
 import VideoCleanupModal from "../../components/cleanup/VideoCleanupModal";
 import { useVideoFrameStrip, type VideoFrameStripItem } from "../../hooks/useVideoFrameStrip";
@@ -145,6 +146,12 @@ export type MergeTabCtx = {
   humanizeFilename: (value: string) => string;
   keyBasenameFromS3Key: (key: string) => string;
   formatCompactTimestamp: (iso: string | undefined) => string;
+  generationThumbnailUrl: (generation: SegmentGeneration) => string | null;
+  openGenerationPreview: (generation: SegmentGeneration) => void;
+  openGenerationCompare: (generation: SegmentGeneration) => void;
+  canOpenGenerationCompare: boolean;
+  deleteGenerationOutput: (generation: SegmentGeneration) => Promise<void>;
+  onAssetError: () => void;
   openMotionSyncModal: (exportId: string) => void;
   queueTopazUpscale: (
     exportId: string,
@@ -590,6 +597,12 @@ export default function MergeTab({ ctx }: MergeTabProps) {
     humanizeFilename,
     keyBasenameFromS3Key,
     formatCompactTimestamp,
+    generationThumbnailUrl,
+    openGenerationPreview,
+    openGenerationCompare,
+    canOpenGenerationCompare,
+    deleteGenerationOutput,
+    onAssetError,
     openMotionSyncModal,
     queueTopazUpscale,
     isTopazUpscalePending,
@@ -609,6 +622,7 @@ export default function MergeTab({ ctx }: MergeTabProps) {
   const [showAdvancedAlignmentDetails, setShowAdvancedAlignmentDetails] = useState(false);
   const [boundaryZoomModal, setBoundaryZoomModal] = useState<BoundaryZoomModalState | null>(null);
   const [topazSettingsByExportId, setTopazSettingsByExportId] = useState<Record<string, TopazUpscaleSettings>>({});
+  const [deletingGenerationIds, setDeletingGenerationIds] = useState<Record<string, boolean>>({});
   const extendFormGenerationIdRef = useRef<string | null>(null);
   const allSegmentGenerations = useMemo(() => Object.values(task?.segmentGenerations ?? {}), [task?.segmentGenerations]);
   const selectedExtendGeneration = mergeTargetGeneration;
@@ -889,6 +903,22 @@ export default function MergeTab({ ctx }: MergeTabProps) {
   const topazSettingsForExport = useCallback(
     (exportId: string): TopazUpscaleSettings => topazSettingsByExportId[exportId] ?? DEFAULT_TOPAZ_SETTINGS,
     [topazSettingsByExportId],
+  );
+  const requestDeleteGeneration = useCallback(
+    async (generation: SegmentGeneration) => {
+      if (deletingGenerationIds[generation.genId]) return;
+      setDeletingGenerationIds((previous) => ({ ...previous, [generation.genId]: true }));
+      try {
+        await deleteGenerationOutput(generation);
+      } finally {
+        setDeletingGenerationIds((previous) => {
+          const next = { ...previous };
+          delete next[generation.genId];
+          return next;
+        });
+      }
+    },
+    [deleteGenerationOutput, deletingGenerationIds],
   );
 
   const updateTopazSettings = useCallback(
@@ -1345,19 +1375,6 @@ export default function MergeTab({ ctx }: MergeTabProps) {
                         <span className="uppercase text-ink/70">{status}</span>
                         <span className="text-[11px] text-ink/55">{isBaseGeneration ? "base" : "continuation"}</span>
                       </div>
-                      {generation.downloadUrl ? (
-                        <video
-                          className="aspect-video w-full rounded-md border border-ink/10 bg-black/80 object-cover"
-                          src={generation.downloadUrl}
-                          preload="metadata"
-                          muted
-                          playsInline
-                        />
-                      ) : (
-                        <div className="flex aspect-video w-full items-center justify-center rounded-md border border-dashed border-ink/25 bg-white text-xs text-ink/60">
-                          {isPending ? "Waiting for generated output..." : "Generated video unavailable"}
-                        </div>
-                      )}
                       <p className="mt-2 text-xs font-medium text-ink/85">{generation.luma.model}</p>
                       {generationSegment ? <p className="text-[11px] text-ink/60">{describeSegment(generationSegment)}</p> : null}
                       <p className="text-[11px] text-ink/60">{formatCompactTimestamp(generation.updatedAt ?? generation.createdAt)}</p>
@@ -1366,25 +1383,56 @@ export default function MergeTab({ ctx }: MergeTabProps) {
                           {generation.error}
                         </p>
                       ) : null}
-                      <div className="mt-2 flex flex-wrap items-center gap-2">
-                        {generation.downloadUrl ? (
-                          <a
-                            className="rounded border border-ink/20 bg-white px-2.5 py-1.5 text-[11px] text-ink"
-                            href={generation.downloadUrl}
-                            target="_blank"
-                            rel="noreferrer"
-                          >
-                            Open
-                          </a>
+                      <button
+                        type="button"
+                        className="mt-2 block w-full disabled:cursor-not-allowed disabled:opacity-60"
+                        disabled={!generation.downloadUrl}
+                        onClick={() => openGenerationPreview(generation)}
+                        title={generation.downloadUrl ? describeGeneration(generation) : "Video unavailable"}
+                      >
+                        {generationThumbnailUrl(generation) ? (
+                          <img
+                            src={generationThumbnailUrl(generation) as string}
+                            alt={describeGeneration(generation)}
+                            className="aspect-video w-full rounded-md bg-bg object-contain"
+                            loading="lazy"
+                            decoding="async"
+                            onError={onAssetError}
+                          />
                         ) : (
-                          <button
-                            type="button"
-                            className="rounded border border-ink/20 bg-white px-2.5 py-1.5 text-[11px] text-ink/50"
-                            disabled
-                          >
-                            Waiting...
-                          </button>
+                          <div className="flex aspect-video w-full items-center justify-center rounded-md border border-dashed border-ink/20 bg-bg text-xs text-ink/60">
+                            {isPending ? "Waiting for generated output..." : "Video thumbnail unavailable"}
+                          </div>
                         )}
+                      </button>
+                      <div className="mt-2 flex flex-wrap items-center gap-2">
+                        <IconActionButton
+                          title="Preview"
+                          disabled={!generation.downloadUrl}
+                          onClick={() => openGenerationPreview(generation)}
+                        >
+                          <PreviewIcon />
+                        </IconActionButton>
+                        <IconActionButton
+                          title={!canOpenGenerationCompare || !generation.downloadUrl ? "Compare unavailable until source preview is ready" : "Compare against source"}
+                          disabled={!canOpenGenerationCompare || !generation.downloadUrl}
+                          onClick={() => openGenerationCompare(generation)}
+                        >
+                          <CompareIcon />
+                        </IconActionButton>
+                        {generation.downloadUrl ? (
+                          <IconActionButton href={generation.downloadUrl} download title="Download full quality video">
+                            <DownloadIcon />
+                          </IconActionButton>
+                        ) : null}
+                        <IconActionButton
+                          title={deletingGenerationIds[generation.genId] ? "Deleting output..." : "Delete output"}
+                          tone="danger"
+                          disabled={deletingGenerationIds[generation.genId]}
+                          onClick={() => void requestDeleteGeneration(generation)}
+                        >
+                          <DeleteIcon />
+                        </IconActionButton>
                       </div>
                     </div>
                   );

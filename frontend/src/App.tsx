@@ -4692,6 +4692,38 @@ export default function App() {
       humanizeFilename,
       keyBasenameFromS3Key,
       formatCompactTimestamp,
+      generationThumbnailUrl,
+      openGenerationPreview: (generation) => {
+        if (!generation.downloadUrl) return;
+        setVideoPreviewModal({ url: generation.downloadUrl, label: describeGeneration(generation) });
+      },
+      openGenerationCompare: (generation) => {
+        if (!mergeOriginalVideoForPreview || !generation.downloadUrl) return;
+        setVideoCompareModal({
+          originalUrl: mergeOriginalVideoForPreview,
+          compareUrl: generation.downloadUrl,
+          label: describeGeneration(generation),
+          posterUrl: generationThumbnailUrl(generation),
+          segmentStartSec: segmentWindow?.startSec,
+          originalIsSegmentClip: originalPreviewIsSegmentClip,
+        });
+      },
+      canOpenGenerationCompare: Boolean(mergeOriginalVideoForPreview),
+      deleteGenerationOutput: async (generation) => {
+        if (!task?.taskId) return;
+        await handleDeleteAsset({
+          id: `generation:${task.taskId}:${generation.genId}`,
+          taskId: task.taskId,
+          title: describeGeneration(generation),
+          subtitle: `${generation.luma.model}/${generation.luma.mode}`,
+          createdAt: generation.createdAt,
+          previewUrl: generation.downloadUrl ?? "",
+          downloadUrl: generation.downloadUrl ?? "",
+          mediaType: "video",
+          deletePayload: { assetType: "segment_generation", genId: generation.genId },
+        });
+      },
+      onAssetError: () => refreshSignedUrlsForTask(selectedTaskId),
       openMotionSyncModal,
       queueTopazUpscale: (exportId, payload) => {
         runTopazUpscaleMutation.mutate({ exportId, payload });
@@ -4768,7 +4800,12 @@ export default function App() {
       cancelChunkedGenerationMutation.mutate,
       cancelChunkedGenerationMutation.isPending,
       sortedExports,
+      generationThumbnailUrl,
       openMotionSyncModal,
+      handleDeleteAsset,
+      mergeOriginalVideoForPreview,
+      segmentWindow?.startSec,
+      originalPreviewIsSegmentClip,
       runTopazUpscaleMutation.mutate,
       runTopazUpscaleMutation.isPending,
       topazUpscalePendingExportId,

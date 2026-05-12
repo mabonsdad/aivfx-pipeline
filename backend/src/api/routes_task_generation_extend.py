@@ -205,6 +205,7 @@ def handle_task_generation_extend_route(
             run = {
                 "runId": run_id,
                 "sourceSegmentId": chunk_source_segment.get("segmentId"),
+                "parentGenerationId": previous_gen_id,
                 "status": "created",
                 "model": model,
                 "mode": extension_mode,
