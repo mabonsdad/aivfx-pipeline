@@ -36,6 +36,9 @@ export default function PreviewModals({
   onCloseVideoCompare,
   onMediaError,
 }: PreviewModalsProps) {
+  const DRIFT_HARD_RESYNC_SECONDS = 0.45;
+  const DRIFT_RATE_ADJUST_SECONDS = 0.08;
+  const SYNC_CHECK_INTERVAL_MS = 500;
   const compareOriginalRef = useRef<HTMLVideoElement | null>(null);
   const compareVariantRef = useRef<HTMLVideoElement | null>(null);
   const syncTimerRef = useRef<number | null>(null);
@@ -100,13 +103,25 @@ export default function PreviewModals({
       const baseTime = videoCompare.originalIsSegmentClip ? 0 : videoCompare.segmentStartSec ?? 0;
       const maxOriginalTime = Math.max(0, (original.duration || 0) - 0.001);
       const targetTime = Math.max(0, Math.min(maxOriginalTime, baseTime + generated.currentTime));
-      const drift = Math.abs((original.currentTime || 0) - targetTime);
-      if (forceSeek || drift > 0.08) {
+      const currentOriginalTime = original.currentTime || 0;
+      const drift = targetTime - currentOriginalTime;
+      const driftAbs = Math.abs(drift);
+      if (forceSeek || driftAbs > DRIFT_HARD_RESYNC_SECONDS) {
         try {
           original.currentTime = targetTime;
+          original.playbackRate = generated.playbackRate || 1;
         } catch {
           // ignore seek failures before metadata is ready
         }
+        return;
+      }
+
+      if (driftAbs > DRIFT_RATE_ADJUST_SECONDS) {
+        const baseRate = generated.playbackRate || 1;
+        const driftBias = Math.max(-0.06, Math.min(0.06, drift * 0.2));
+        original.playbackRate = Math.max(0.9, Math.min(1.1, baseRate + driftBias));
+      } else {
+        original.playbackRate = generated.playbackRate || 1;
       }
     };
 
@@ -125,10 +140,12 @@ export default function PreviewModals({
             return;
           }
           if (original && original.readyState >= 1) {
-            original.playbackRate = generated.playbackRate || 1;
+            if (Math.abs(original.playbackRate - (generated.playbackRate || 1)) > 0.15) {
+              original.playbackRate = generated.playbackRate || 1;
+            }
           }
           syncOriginal(false);
-        }, 200);
+        }, SYNC_CHECK_INTERVAL_MS);
       }
     };
 
