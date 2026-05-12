@@ -658,6 +658,12 @@ export default function MergeTab({ ctx }: MergeTabProps) {
     return Array.from(lineageIds)
       .map((generationId) => byId.get(generationId))
       .filter((generation): generation is SegmentGeneration => Boolean(generation))
+      .filter((generation) => {
+        if (generation.genId === selectedExtendGeneration.genId) return true;
+        if (generation.isChunkInternal) return false;
+        if (generation.chunkRole === "internal_chunk") return false;
+        return true;
+      })
       .sort((left, right) => {
         const leftTs = new Date(left.createdAt || 0).getTime();
         const rightTs = new Date(right.createdAt || 0).getTime();
@@ -1351,7 +1357,7 @@ export default function MergeTab({ ctx }: MergeTabProps) {
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <p className="text-sm font-medium text-ink">Continuation chain outputs</p>
                 <p className="text-[11px] text-ink/60">
-                  Showing base generation plus continuations queued from this selected output.
+                  Showing base generation plus merged continuation outputs. Internal chunk clips are hidden.
                 </p>
               </div>
               {!extendChainGenerations.length ? <p className="text-xs text-ink/60">No continuation jobs or clips yet for this generation.</p> : null}
