@@ -43,7 +43,9 @@ def _find_root_source_segment(task: dict[str, Any], generation: dict[str, Any]) 
     current = generation
     visited: set[str] = set()
     while isinstance(current, dict):
-        parent_id = str(current.get("parentGenerationId") or current.get("extension", {}).get("parentGenerationId") or "")
+        extension = current.get("extension")
+        extension_parent_id = extension.get("parentGenerationId") if isinstance(extension, dict) else None
+        parent_id = str(current.get("parentGenerationId") or extension_parent_id or "")
         if not parent_id or parent_id in visited:
             break
         visited.add(parent_id)

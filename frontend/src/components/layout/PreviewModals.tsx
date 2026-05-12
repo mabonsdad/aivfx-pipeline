@@ -107,7 +107,6 @@ export default function PreviewModals({
   const [videoCompareBuffered, setVideoCompareBuffered] = useState({ original: false, generated: false });
   const [videoCompareLoadTimedOut, setVideoCompareLoadTimedOut] = useState(false);
   const [videoCompareOriginalSourceUrl, setVideoCompareOriginalSourceUrl] = useState<string | null>(null);
-  const [videoCompareOriginalCachePriming, setVideoCompareOriginalCachePriming] = useState(false);
 
   useEffect(() => {
     return () => {
@@ -123,12 +122,10 @@ export default function PreviewModals({
       setVideoCompareBuffered({ original: false, generated: false });
       setVideoCompareLoadTimedOut(false);
       setVideoCompareOriginalSourceUrl(null);
-      setVideoCompareOriginalCachePriming(false);
       return;
     }
     const cachedOriginal = getCachedVideoObjectUrl(videoCompare.originalUrl);
     setVideoCompareOriginalSourceUrl(cachedOriginal ?? videoCompare.originalUrl);
-    setVideoCompareOriginalCachePriming(!cachedOriginal);
     setVideoCompareReady({ original: false, generated: false });
     setVideoCompareBuffered({ original: false, generated: false });
     setVideoCompareLoadTimedOut(false);
@@ -139,14 +136,11 @@ export default function PreviewModals({
     const cachedOriginal = getCachedVideoObjectUrl(videoCompare.originalUrl);
     if (cachedOriginal) {
       setVideoCompareOriginalSourceUrl(cachedOriginal);
-      setVideoCompareOriginalCachePriming(false);
       return;
     }
     const controller = new AbortController();
-    setVideoCompareOriginalCachePriming(true);
     void preloadVideoObjectUrl(videoCompare.originalUrl, controller.signal)
       .then((objectUrl) => {
-        setVideoCompareOriginalCachePriming(false);
         // Only swap source before playback has started; next opens will use cache immediately.
         if (!videoCompareReady.generated) {
           setVideoCompareOriginalSourceUrl(objectUrl);
@@ -154,7 +148,6 @@ export default function PreviewModals({
       })
       .catch((error) => {
         if ((error as { name?: string }).name === "AbortError") return;
-        setVideoCompareOriginalCachePriming(false);
       });
     return () => {
       controller.abort();
@@ -475,11 +468,6 @@ export default function PreviewModals({
             {videoCompareLoadTimedOut && !videoCompareReady.original ? (
               <div className="mt-3 rounded border border-amber-300/40 bg-amber-300/10 px-3 py-2 text-xs text-amber-100">
                 Source preview is still loading, but compare playback will continue and sync as soon as source metadata is ready.
-              </div>
-            ) : null}
-            {videoCompareOriginalCachePriming ? (
-              <div className="mt-2 rounded border border-teal-300/30 bg-teal-300/10 px-3 py-2 text-xs text-teal-100">
-                Building local source cache for smoother replay on next open.
               </div>
             ) : null}
           </div>
