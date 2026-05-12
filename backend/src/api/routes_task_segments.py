@@ -216,6 +216,8 @@ def handle_task_segment_routes(
                 "replicateKlingV3Mode": req.replicateKlingV3Mode,
                 "wan27Resolution": req.wan27Resolution,
                 "happyHorseResolution": req.happyHorseResolution,
+                "sora2Resolution": req.sora2Resolution,
+                "selectedReferenceIds": list(req.selectedReferenceIds or []),
                 "preserveFrames": bool(req.preserveFrames),
             },
         )
@@ -230,7 +232,10 @@ def handle_task_segment_routes(
                 "negativePrompt": negative_prompt,
                 "lumaGenerationId": None,
             },
-            "generationSettings": {"preserveFrames": bool(req.preserveFrames)},
+            "generationSettings": {
+                "preserveFrames": bool(req.preserveFrames),
+                "selectedReferenceIds": list(req.selectedReferenceIds or []),
+            },
             "status": "queued",
             "outputKey": None,
             "jobId": job_id,
@@ -274,6 +279,18 @@ def handle_task_segment_routes(
                 edited_first_frame_url = asset_store.presign_get(first_frame_key, expires=900)
             except ValueError:
                 edited_first_frame_url = None
+        if req.mode == "edit_video" and req.selected_reference_ids:
+            reference_lookup = {
+                str(item.get("referenceId")): item
+                for item in task.get("editVideoReferences", [])
+                if isinstance(item, dict) and item.get("referenceId")
+            }
+            prefix = f"users/{task['userId']}/tasks/{task_id}/"
+            for reference_id in req.selected_reference_ids:
+                key = str((reference_lookup.get(str(reference_id)) or {}).get("key") or "").strip()
+                if key and key.startswith(prefix):
+                    edited_first_frame_url = asset_store.presign_get(key, expires=900)
+                    break
 
         request_payload = {
             "selected_model": req.selected_model,
@@ -292,6 +309,7 @@ def handle_task_segment_routes(
             "luma_mode": req.luma_mode,
             "user_visible_model_name": req.user_visible_model_name,
             "first_frame_variant_id": req.first_frame_variant_id,
+            "selected_reference_ids": req.selected_reference_ids,
         }
         admin_config = get_prompt_wizard_admin_config_fn()
         model_config = resolve_prompt_wizard_model_config(admin_config, req.selected_model, req.mode)

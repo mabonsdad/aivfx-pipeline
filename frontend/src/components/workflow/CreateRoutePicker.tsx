@@ -1,15 +1,18 @@
-import { GENERATION_MODE_CONFIGS, type GenerateInputMode } from "../../lib/generationModeRegistry";
+import { GENERATION_MODE_CONFIGS, enabledGenerationModes, type GenerateInputMode } from "../../lib/generationModeRegistry";
 
 type CreateRoutePickerProps = {
   activeMode: GenerateInputMode;
   onSelect: (mode: GenerateInputMode) => void;
 };
 
-const ROUTES = Object.values(GENERATION_MODE_CONFIGS).map((config) => ({
+const ROUTES = enabledGenerationModes().map((modeId) => {
+  const config = GENERATION_MODE_CONFIGS[modeId];
+  return {
   id: config.id,
   title: config.title,
   body: config.description,
-}));
+  };
+});
 
 export default function CreateRoutePicker({ activeMode, onSelect }: CreateRoutePickerProps) {
   return (
@@ -18,7 +21,7 @@ export default function CreateRoutePicker({ activeMode, onSelect }: CreateRouteP
         <p className="text-sm font-semibold text-ink">Select Creation Mode</p>
         <p className="text-xs text-ink/60">Choose the generation method for this working range. The rest of the flow will follow it.</p>
       </div>
-      <div className="grid gap-3 lg:grid-cols-3">
+      <div className="grid gap-3 lg:grid-cols-4">
         {ROUTES.map((route) => {
           const selected = activeMode === route.id;
           return (

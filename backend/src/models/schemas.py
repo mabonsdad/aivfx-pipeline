@@ -161,6 +161,22 @@ class ReferenceUploadRequest(BaseModel):
     files: list[ReferenceUploadItem] = Field(min_length=1, max_length=1)
 
 
+class EditVideoReferenceUploadRequest(BaseModel):
+    filename: str = Field(min_length=1, max_length=255)
+    contentType: str = Field(min_length=1, max_length=120)
+
+
+class EditVideoReferenceUploadCompleteRequest(BaseModel):
+    referenceId: str = Field(min_length=1, max_length=120)
+    uploadKey: str = Field(min_length=1)
+    filename: str = Field(min_length=1, max_length=255)
+
+
+class EditVideoReferenceGenerateRequest(BaseModel):
+    model: Literal["chatgpt", "chatgpt_latest", "nano_banana", "nano_banana_pro"]
+    prompt: str = Field(min_length=1, max_length=2000)
+
+
 class SegmentGenerateRequest(BaseModel):
     lumaModel: str = "ray-2"
     mode: str
@@ -173,6 +189,7 @@ class SegmentGenerateRequest(BaseModel):
     wan27Resolution: str | None = None
     happyHorseResolution: str | None = None
     sora2Resolution: str | None = None
+    selectedReferenceIds: list[str] = Field(default_factory=list, max_length=4)
     preserveFrames: bool = True
 
     @field_validator("lumaModel")
@@ -226,7 +243,7 @@ class SegmentPromptWizardRequest(BaseModel):
     provider: Literal["Luma", "fal.ai", "Runway", "Replicate", "Runware"]
     provider_model: str = Field(min_length=1, max_length=160)
     endpoint_used: str | None = Field(default=None, max_length=300)
-    mode: Literal["start_video", "start_end"]
+    mode: Literal["start_video", "start_end", "edit_video"]
     user_draft_prompt: str = Field(min_length=1, max_length=4000)
     has_source_video: bool
     has_edited_first_frame: bool
@@ -238,6 +255,7 @@ class SegmentPromptWizardRequest(BaseModel):
     luma_mode: Literal["adhere", "flex", "reimagine"] | None = None
     user_visible_model_name: str = Field(min_length=1, max_length=120)
     first_frame_variant_id: str | None = Field(default=None, max_length=120)
+    selected_reference_ids: list[str] = Field(default_factory=list, max_length=4)
 
     @field_validator("supports_negative_prompt")
     @classmethod
@@ -604,11 +622,12 @@ class VariantSelectRequest(BaseModel):
 
 
 class AssetDeleteRequest(BaseModel):
-    assetType: Literal["upload", "frame_capture", "frame_variant", "segment_generation", "export"]
+    assetType: Literal["upload", "frame_capture", "frame_variant", "segment_generation", "export", "edit_video_reference"]
     frameId: str | None = None
     variantId: str | None = None
     genId: str | None = None
     exportId: str | None = None
+    referenceId: str | None = None
 
 
 class CustomReportOutputRef(BaseModel):

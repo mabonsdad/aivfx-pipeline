@@ -36,6 +36,9 @@ export type GenerateTabCtx = {
   nextWarning: string | null;
   generationModelByInput: Record<GenerateInputMode, VideoModel>;
   generationInputMode: GenerateInputMode;
+  editVideoSelectedReferenceIds: string[];
+  editVideoReferenceWarning: string | null;
+  editVideoReferencePreview: Array<{ referenceId: string; imageUrl?: string; token: string }>;
   selectedSegment: SegmentRecord | null;
   isWholeVideoSelection: boolean;
   wholeVideoNeedsChunking: boolean;
@@ -99,6 +102,7 @@ export type GenerateTabCtx = {
   originalPreviewIsSegmentClip: boolean;
   selectedSegmentGenerations: SegmentGeneration[];
   pendingGenerations: PendingGenerationCard[];
+  dismissPendingGenerationJob: (jobId: string) => void;
   requestCancelPendingGenerationJob: (jobId: string) => Promise<void>;
   selectedReportOutputs: Record<string, { taskId: string; ref: CustomReportOutputRef }>;
   reportOutputRefKey: (ref: CustomReportOutputRef) => string;
@@ -144,6 +148,9 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
     nextDisabled,
     nextWarning,
     generationInputMode,
+    editVideoSelectedReferenceIds,
+    editVideoReferenceWarning,
+    editVideoReferencePreview,
     wholeVideoNeedsChunking,
     lumaModel,
     setGenerationModelByInput,
@@ -196,6 +203,7 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
     originalPreviewIsSegmentClip,
     selectedSegmentGenerations,
     pendingGenerations,
+    dismissPendingGenerationJob,
     requestCancelPendingGenerationJob,
     generationCardsVisible,
     truncateIdentifier,
@@ -303,7 +311,7 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
       return;
     }
     if (!promptWizardSupported) {
-      setPromptWizardError("Prompt Wizard is currently available for first frame + video and first frame + last frame modes.");
+      setPromptWizardError("Prompt Wizard is currently available for start-video, start/end, and edit-video modes.");
       return;
     }
     try {
@@ -513,6 +521,24 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
             {generationPromptError ? (
               <StatusNotice variant="error">
                 <p className="text-xs">{generationPromptError}</p>
+              </StatusNotice>
+            ) : null}
+            {generationInputMode === "edit_video" ? (
+              <StatusNotice variant={editVideoReferenceWarning ? "warning" : "info"}>
+                <p className="text-xs">
+                  Selected reference images: {editVideoSelectedReferenceIds.length}.{" "}
+                  {editVideoReferenceWarning ?? "Model allow different number of reference images: 3 Seedance / Happy Horse / Kling, 1 Wan2.7 / Runway Aleph."}
+                </p>
+                {editVideoReferencePreview.length ? (
+                  <div className="mt-2 grid gap-2 sm:grid-cols-3">
+                    {editVideoReferencePreview.map((item) => (
+                      <div key={item.referenceId} className="rounded border border-ink/20 bg-white p-1">
+                        {item.imageUrl ? <img src={item.imageUrl} alt={item.token} className="aspect-video w-full rounded object-contain" /> : null}
+                        <p className="mt-1 text-[11px] text-ink/70">{item.token}</p>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
               </StatusNotice>
             ) : null}
             {missingRouteInputsMessage ? (
@@ -940,10 +966,14 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
                   Waiting...
                 </button>
                 <IconActionButton
-                  title="Cancel job"
+                  title={job.status === "failed" ? "Remove failed placeholder" : "Cancel job"}
                   tone="danger"
                   disabled={Boolean(cancellingPendingJobIds[job.jobId])}
                   onClick={() => {
+                    if (job.status === "failed") {
+                      dismissPendingGenerationJob(job.jobId);
+                      return;
+                    }
                     setCancellingPendingJobIds((previous) => ({ ...previous, [job.jobId]: true }));
                     void requestCancelPendingGenerationJob(job.jobId).finally(() => {
                       setCancellingPendingJobIds((previous) => {

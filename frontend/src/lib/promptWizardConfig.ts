@@ -1,6 +1,6 @@
 import type { VideoModelId } from "./generated/videoContracts";
 
-export type PromptWizardMode = "start_video" | "start_end";
+export type PromptWizardMode = "start_video" | "start_end" | "edit_video";
 
 export type PromptWizardProvider = "Luma" | "fal.ai" | "Runway" | "Replicate" | "Runware";
 
@@ -138,6 +138,61 @@ const PROMPT_WIZARD_MODEL_CONFIGS: PromptWizardAdminModelConfig[] = [
     prompt_strategy: "wan_videoedit_focused_change",
   },
   {
+    selected_model: "happy-horse-video-edit",
+    dropdown_name: "Happy Horse 1.0 Video Edit",
+    mode: "edit_video",
+    provider: "fal.ai",
+    provider_model: "alibaba/happy-horse/video-edit",
+    endpoint_used: "POST https://queue.fal.run/alibaba/happy-horse/video-edit",
+    required_markers: ["@Video1", "@Image1"],
+    supports_negative_prompt: false,
+    prompt_strategy: "happy_horse_video_image_markers",
+  },
+  {
+    selected_model: "runway-gen4-aleph",
+    dropdown_name: "Runway Gen-4 Aleph",
+    mode: "edit_video",
+    provider: "Runway",
+    provider_model: "gen4_aleph",
+    endpoint_used: "POST https://api.dev.runwayml.com/v1/video_to_video",
+    required_markers: [],
+    supports_negative_prompt: false,
+    prompt_strategy: "runway_aleph_start_with_input_image",
+  },
+  {
+    selected_model: "kling-v3-omni-video",
+    dropdown_name: "Kling v3 Omni Video",
+    mode: "edit_video",
+    provider: "Replicate",
+    provider_model: "kwaivgi/kling-v3-omni-video",
+    endpoint_used: "POST https://api.replicate.com/v1/predictions",
+    required_markers: ["<<<video_1>>>", "<<<image_1>>>"],
+    supports_negative_prompt: false,
+    prompt_strategy: "kling_angle_marker_video_image",
+  },
+  {
+    selected_model: "seedance-2.0-reference-to-video",
+    dropdown_name: "Seedance 2.0 Reference to Video",
+    mode: "edit_video",
+    provider: "fal.ai",
+    provider_model: "bytedance/seedance-2.0/reference-to-video",
+    endpoint_used: "POST https://queue.fal.run/bytedance/seedance-2.0/reference-to-video",
+    required_markers: ["@Video1", "@Image1"],
+    supports_negative_prompt: false,
+    prompt_strategy: "seedance_reference_tags",
+  },
+  {
+    selected_model: "wan2.7-videoedit",
+    dropdown_name: "Wan 2.7 VideoEdit",
+    mode: "edit_video",
+    provider: "Replicate",
+    provider_model: "wan-video/wan-2.7-videoedit",
+    endpoint_used: "POST https://api.replicate.com/v1/models/wan-video/wan-2.7-videoedit/predictions",
+    required_markers: [],
+    supports_negative_prompt: false,
+    prompt_strategy: "wan_videoedit_focused_change",
+  },
+  {
     selected_model: "kling-2.6",
     dropdown_name: "Kling 2.6",
     mode: "start_end",
@@ -241,6 +296,7 @@ export type PromptWizardRequest = {
   luma_mode?: "adhere" | "flex" | "reimagine" | null;
   user_visible_model_name: string;
   first_frame_variant_id?: string | null;
+  selected_reference_ids?: string[];
 };
 
 export type PromptWizardResult = {

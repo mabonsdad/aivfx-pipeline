@@ -1,4 +1,6 @@
-export type GenerateInputMode = "start_video" | "start_end" | "start_only";
+import { config } from "./config";
+
+export type GenerateInputMode = "start_video" | "start_end" | "start_only" | "edit_video";
 
 export type PostProcessToolId = "extend" | "reconcileTiming" | "trackedCleanup" | "mergeIntoSource";
 
@@ -47,7 +49,26 @@ export const GENERATION_MODE_CONFIGS: Record<GenerateInputMode, GenerationModeCo
       mergeIntoSource: false,
     },
   },
+  edit_video: {
+    id: "edit_video",
+    title: "Edit source video",
+    description: "Use source video + prompt, with optional reference images for targeted edits.",
+    requiresEndFrame: false,
+    postProcessTools: {
+      extend: false,
+      reconcileTiming: false,
+      trackedCleanup: false,
+      mergeIntoSource: false,
+    },
+  },
 };
+
+export function enabledGenerationModes(): GenerateInputMode[] {
+  const modes: GenerateInputMode[] = ["start_video", "start_end"];
+  if (config.features.enableEditVideoMode) modes.push("edit_video");
+  if (config.features.enableStartOnlyMode) modes.push("start_only");
+  return modes;
+}
 
 export function getGenerationModeConfig(mode: GenerateInputMode): GenerationModeConfig {
   return GENERATION_MODE_CONFIGS[mode];

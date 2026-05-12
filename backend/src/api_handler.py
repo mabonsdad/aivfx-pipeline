@@ -63,6 +63,8 @@ from src.generation.maintenance import (
     reconcile_segment_generation_job_states,
 )
 from src.jobs.queue import JobQueue
+from src.integrations.gemini import generate_image_edit as generate_gemini_image_edit
+from src.integrations.openai_images import generate_image_edit as generate_openai_image_edit
 from src.integrations.openai_prompt_wizard import improve_video_prompt as improve_openai_video_prompt
 from src.models.schemas import (
     ChunkedSegmentGenerateRequest,
@@ -373,6 +375,13 @@ def _normalize_uploaded_refine_image(
 
     out = BytesIO()
     normalized.save(out, format="PNG")
+    return out.getvalue()
+
+
+def _solid_png_bytes(*, width: int = 1024, height: int = 1024, rgb: tuple[int, int, int] = (245, 245, 245)) -> bytes:
+    image = Image.new("RGB", (max(1, width), max(1, height)), rgb)
+    out = BytesIO()
+    image.save(out, format="PNG")
     return out.getvalue()
 
 
@@ -2246,6 +2255,118 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 origin=origin,
             )
 
+        if method == "POST" and len(parts) == 6 and parts[2] == "edit-video" and parts[3] == "references" and parts[4] == "upload" and parts[5] == "init":
+            req = _json_model(EditVideoReferenceUploadRequest, event)
+            if not req.contentType.lower().startswith("image/"):
+                return error_response(400, "Reference files must be images", origin=origin)
+            reference_id = new_id("evref")
+            paths = _asset_paths_for_task(task)
+            key = paths.edit_video_reference(reference_id, req.filename)
+            return response(
+                200,
+                {
+                    "referenceId": reference_id,
+                    "key": key,
+                    "uploadUrl": asset_store.presign_put(key, expires=900, content_type=req.contentType),
+                },
+                origin=origin,
+            )
+
+        if method == "POST" and len(parts) == 6 and parts[2] == "edit-video" and parts[3] == "references" and parts[4] == "upload" and parts[5] == "complete":
+            req = _json_model(EditVideoReferenceUploadCompleteRequest, event)
+            references = task.setdefault("editVideoReferences", [])
+            key = req.uploadKey
+            if not key.startswith(f"users/{task['userId']}/tasks/{task_id}/"):
+                return error_response(400, "Invalid upload key", origin=origin)
+            now = now_iso()
+            reference = {
+                "referenceId": req.referenceId,
+                "type": "uploaded",
+                "filename": req.filename,
+                "model": None,
+                "prompt": None,
+                "key": key,
+                "createdAt": now,
+                "updatedAt": now,
+            }
+            references.append(reference)
+            task.setdefault("history", []).append(
+                {
+                    "type": "EDIT_VIDEO_REFERENCE_UPLOADED",
+                    "timestamp": now,
+                    "userId": user_id,
+                    "details": {"referenceId": reference["referenceId"], "filename": req.filename},
+                }
+            )
+            store.save_task(task)
+            return response(
+                201,
+                {"reference": {**reference, "imageUrl": asset_store.presign_get(key, expires=PRESIGNED_GET_TTL_SECONDS)}},
+                origin=origin,
+            )
+
+        if method == "POST" and len(parts) == 5 and parts[2] == "edit-video" and parts[3] == "references" and parts[4] == "generate":
+            req = _json_model(EditVideoReferenceGenerateRequest, event)
+            secrets = load_secret(settings.secrets_arn)
+            prompt = _sanitize_prompt(req.prompt)
+            if not prompt:
+                return error_response(400, "Prompt is required", origin=origin)
+            input_image_bytes = _solid_png_bytes()
+            try:
+                if req.model in {"chatgpt", "chatgpt_latest"}:
+                    openai_key = str(secrets.get("OPENAI_API_KEY") or "")
+                    if not openai_key:
+                        return error_response(500, "OPENAI_API_KEY is required for ChatGPT image generation", origin=origin)
+                    out_bytes = generate_openai_image_edit(
+                        api_key=openai_key,
+                        model=req.model,
+                        prompt=prompt,
+                        input_image_bytes=input_image_bytes,
+                    )
+                else:
+                    gemini_key = str(secrets.get("GEMINI_API_KEY") or "")
+                    if not gemini_key:
+                        return error_response(500, "GEMINI_API_KEY is required for Gemini image generation", origin=origin)
+                    out_bytes = generate_gemini_image_edit(
+                        api_key=gemini_key,
+                        model=req.model,
+                        prompt=prompt,
+                        input_image_bytes=input_image_bytes,
+                    )
+            except Exception as exc:
+                return error_response(502, f"Reference generation failed: {exc}", origin=origin)
+
+            references = task.setdefault("editVideoReferences", [])
+            reference_id = new_id("evref")
+            key = _asset_paths_for_task(task).edit_video_reference(reference_id, f"{reference_id}.png")
+            asset_store.put_bytes(key, out_bytes, content_type="image/png")
+            now = now_iso()
+            reference = {
+                "referenceId": reference_id,
+                "type": "generated",
+                "filename": f"{reference_id}.png",
+                "model": req.model,
+                "prompt": prompt,
+                "key": key,
+                "createdAt": now,
+                "updatedAt": now,
+            }
+            references.append(reference)
+            task.setdefault("history", []).append(
+                {
+                    "type": "EDIT_VIDEO_REFERENCE_GENERATED",
+                    "timestamp": now,
+                    "userId": user_id,
+                    "details": {"referenceId": reference_id, "model": req.model},
+                }
+            )
+            store.save_task(task)
+            return response(
+                201,
+                {"reference": {**reference, "imageUrl": asset_store.presign_get(key, expires=PRESIGNED_GET_TTL_SECONDS)}},
+                origin=origin,
+            )
+
         if method == "POST" and len(parts) == 6 and parts[2] == "frames" and parts[4] == "references" and parts[5] == "uploads":
             frame_id = parts[3]
             if frame_id not in task.get("frames", {}):
@@ -2704,3 +2825,6 @@ def handler(event, context):
     except Exception as exc:
         logger.exception("Unhandled error", extra={"error": str(exc)})
         return error_response(500, "Internal server error", origin=_origin(event))
+    EditVideoReferenceGenerateRequest,
+    EditVideoReferenceUploadCompleteRequest,
+    EditVideoReferenceUploadRequest,

@@ -43,6 +43,7 @@ import { getGenerationModeConfig, type GenerateInputMode } from "./lib/generatio
 import { PRIMARY_WORKFLOW_TABS, type PrimaryWorkflowSection } from "./lib/workflowSections";
 import { currentUser, login, logout } from "./lib/auth";
 import type { EditFrameTabCtx } from "./pages/workflow/EditFrameTab";
+import type { EditVideoReferencesTabCtx } from "./pages/workflow/EditVideoReferencesTab";
 import type { GenerateTabCtx } from "./pages/workflow/GenerateTab";
 import type { MergeTabCtx } from "./pages/workflow/MergeTab";
 import type { PickFrameTabCtx } from "./pages/workflow/PickFrameTab";
@@ -180,6 +181,7 @@ const ApiLogsPage = lazy(() => import("./pages/ApiLogsPage"));
 const AdminPromptWizardPage = lazy(() => import("./pages/AdminPromptWizardPage"));
 const PickFrameTab = lazy(() => import("./pages/workflow/PickFrameTab"));
 const EditFrameTab = lazy(() => import("./pages/workflow/EditFrameTab"));
+const EditVideoReferencesTab = lazy(() => import("./pages/workflow/EditVideoReferencesTab"));
 const RefineFramesTab = lazy(() => import("./pages/workflow/RefineFramesTab"));
 const GenerateTab = lazy(() => import("./pages/workflow/GenerateTab"));
 const MergeTab = lazy(() => import("./pages/workflow/MergeTab"));
@@ -222,6 +224,7 @@ function formatFramesAndSeconds(frames: number, fps: number): string {
 function promptWizardModeForInput(inputMode: GenerateInputMode): PromptWizardMode | null {
   if (inputMode === "start_video") return "start_video";
   if (inputMode === "start_end") return "start_end";
+  if (inputMode === "edit_video") return "edit_video";
   return null;
 }
 
@@ -924,6 +927,7 @@ export default function App() {
   const [automationSelectionState, setAutomationSelectionState] = useState<AutomationSelectionState | null>(null);
   const [firstFrameId, setFirstFrameId] = useState<string | null>(null);
   const [lastFrameId, setLastFrameId] = useState<string | null>(null);
+  const [editVideoSelectedReferenceIds, setEditVideoSelectedReferenceIds] = useState<string[]>([]);
   const [videoWorkMode, setVideoWorkModeState] = useState<VideoWorkMode | null>(null);
   const [segmentDraftActive, setSegmentDraftActive] = useState(false);
   const [segmentDraftFallbackId, setSegmentDraftFallbackId] = useState<string | null>(null);
@@ -1157,7 +1161,6 @@ export default function App() {
     setMergeTrimStartFrames,
     mergeTrimEndFrames,
     setMergeTrimEndFrames,
-    segmentGenerations,
     selectedSegmentGenerations,
     selectedPreviewGeneration,
     sortedExports,
@@ -1173,6 +1176,57 @@ export default function App() {
   const assetsTabLoading = tab === "assets" && assetsLoading;
   const assetLibraryTabLoading = tab === "asset_library" && assetLibraryLoading;
   const selectedSegment = task?.segments.find((s) => s.segmentId === selectedSegmentId) ?? null;
+  const editVideoReferences = useMemo(() => task?.editVideoReferences ?? [], [task?.editVideoReferences]);
+  const editVideoReferenceLimitByModel = useMemo(() => {
+    if (lumaModel === "seedance-2.0-reference-to-video" || lumaModel === "happy-horse-video-edit" || lumaModel === "kling-v3-omni-video") {
+      return 3;
+    }
+    if (lumaModel === "wan2.7-videoedit" || lumaModel === "runway-gen4-aleph") {
+      return 1;
+    }
+    return 0;
+  }, [lumaModel]);
+  const editVideoReferenceWarning = useMemo(() => {
+    if (generationInputMode !== "edit_video") return null;
+    if (!editVideoReferenceLimitByModel) return null;
+    if (editVideoSelectedReferenceIds.length > editVideoReferenceLimitByModel) {
+      return `This model will use only the first ${editVideoReferenceLimitByModel} selected reference image${editVideoReferenceLimitByModel > 1 ? "s" : ""}.`;
+    }
+    return null;
+  }, [editVideoReferenceLimitByModel, editVideoSelectedReferenceIds.length, generationInputMode]);
+  const generationModelOptionsForInput = useMemo(() => {
+    if (generationInputMode !== "edit_video") return generationModelOptions;
+    const count = editVideoSelectedReferenceIds.length;
+    return generationModelOptions.filter((option) => {
+      if (option.value === "seedance-2.0-reference-to-video" || option.value === "happy-horse-video-edit" || option.value === "kling-v3-omni-video") {
+        return count <= 3;
+      }
+      if (option.value === "wan2.7-videoedit" || option.value === "runway-gen4-aleph") {
+        return count <= 1;
+      }
+      return true;
+    });
+  }, [editVideoSelectedReferenceIds.length, generationInputMode, generationModelOptions]);
+  const editVideoReferencePreview = useMemo(() => {
+    if (generationInputMode !== "edit_video") return [];
+    const tokenForIndex = (index: number): string => {
+      if (lumaModel === "seedance-2.0-reference-to-video" || lumaModel === "happy-horse-video-edit") return `@Image${index + 1}`;
+      if (lumaModel === "kling-v3-omni-video") return `<<<image_${index + 1}>>>`;
+      return `Reference ${index + 1}`;
+    };
+    const output: Array<{ referenceId: string; imageUrl?: string; token: string }> = [];
+    for (let index = 0; index < editVideoSelectedReferenceIds.length; index += 1) {
+      const id = editVideoSelectedReferenceIds[index];
+      const reference = editVideoReferences.find((item) => item.referenceId === id);
+      if (!reference) continue;
+      output.push({
+        referenceId: id,
+        imageUrl: reference.imageUrl,
+        token: tokenForIndex(index),
+      });
+    }
+    return output;
+  }, [editVideoReferences, editVideoSelectedReferenceIds, generationInputMode, lumaModel]);
   const totalVideoFrames = frameCount(task);
   const defaultVideoSegment = useMemo(
     () =>
@@ -1191,6 +1245,17 @@ export default function App() {
     isWholeVideoSelection && selectedSegment && selectedSegment.durationSec > WHOLE_VIDEO_SINGLE_PASS_LIMIT_SECONDS + 1e-6,
   );
   useEffect(() => {
+    const availableIds = new Set(editVideoReferences.map((item) => item.referenceId));
+    setEditVideoSelectedReferenceIds((previous) => previous.filter((id) => availableIds.has(id)));
+  }, [editVideoReferences]);
+  useEffect(() => {
+    if (generationInputMode !== "edit_video") return;
+    if (generationModelOptionsForInput.some((option) => option.value === lumaModel)) return;
+    const fallback = generationModelOptionsForInput[0]?.value;
+    if (!fallback) return;
+    setGenerationModelByInput((previous) => ({ ...previous, [generationInputMode]: fallback }));
+  }, [generationInputMode, generationModelOptionsForInput, lumaModel, setGenerationModelByInput]);
+  useEffect(() => {
     if (generationInputMode === "start_end") return;
     if (editFrameTab === "last") {
       setEditFrameTab("first");
@@ -1199,10 +1264,6 @@ export default function App() {
       setRefineFrameTab("first");
     }
   }, [editFrameTab, generationInputMode, refineFrameTab]);
-  const completeGenerations = useMemo(
-    () => segmentGenerations.filter((generation) => generation.status === "complete" && Boolean(generation.outputKey) && !generation.isChunkInternal),
-    [segmentGenerations],
-  );
   const selectedSegmentChunkedGenerationRuns = useMemo(
     () =>
       [...(task?.chunkedGenerationRuns ?? [])]
@@ -1648,11 +1709,12 @@ export default function App() {
     }: {
       taskId: string;
       payload: {
-        assetType: "upload" | "frame_capture" | "frame_variant" | "segment_generation" | "export";
+        assetType: "upload" | "frame_capture" | "frame_variant" | "segment_generation" | "export" | "edit_video_reference";
         frameId?: string;
         variantId?: string;
         genId?: string;
         exportId?: string;
+        referenceId?: string;
       };
     }) => apiClient.deleteAsset(taskId, payload),
     onSuccess: async (_result, variables) => {
@@ -1914,7 +1976,7 @@ export default function App() {
       if (!selectedTaskId || !selectedSegmentId) throw new Error("Select a segment");
       const promptWizardMode = promptWizardModeForInput(generationInputMode);
       if (!promptWizardMode) {
-        throw new Error("Prompt Wizard is only available for first frame + video and first frame + last frame modes.");
+        throw new Error("Prompt Wizard is not available for this mode.");
       }
       const config = getPromptWizardModelConfig(lumaModel, promptWizardMode);
       if (!config) {
@@ -1932,8 +1994,11 @@ export default function App() {
         endpoint_used: config.endpointUsed,
         mode: promptWizardMode,
         user_draft_prompt: trimmedPrompt,
-        has_source_video: generationInputMode === "start_video",
-        has_edited_first_frame: Boolean(firstFrameVariantId && firstFrameVariantId !== "original"),
+        has_source_video: generationInputMode === "start_video" || generationInputMode === "edit_video",
+        has_edited_first_frame:
+          generationInputMode === "edit_video"
+            ? editVideoSelectedReferenceIds.length > 0
+            : Boolean(firstFrameVariantId && firstFrameVariantId !== "original"),
         has_last_frame: generationInputMode === "start_end",
         app_required_markers: config.requiredMarkers,
         supports_negative_prompt: false as const,
@@ -1942,6 +2007,7 @@ export default function App() {
         luma_mode: lumaModel === "ray-2" || lumaModel === "ray-flash-2" ? lumaModeBucket(advancedMode) : null,
         user_visible_model_name: config.dropdownName,
         first_frame_variant_id: firstFrameVariantId,
+        selected_reference_ids: generationInputMode === "edit_video" ? editVideoSelectedReferenceIds.slice(0, 3) : [],
       };
       const response = await apiClient.improveSegmentPrompt(selectedTaskId, selectedSegmentId, requestPayload);
       return validatePromptWizardResult(response.result, config.requiredMarkers);
@@ -1960,6 +2026,10 @@ export default function App() {
         negativePrompt: lumaModel === "wan2.7-i2v" ? wan27NegativePrompt.trim() || undefined : undefined,
         firstFrameVariantId: refineSourceVariantIds.first || compareVariantIds.first || undefined,
         lastFrameVariantId: generationInputMode === "start_end" ? refineSourceVariantIds.last || compareVariantIds.last || undefined : undefined,
+        selectedReferenceIds:
+          generationInputMode === "edit_video"
+            ? editVideoSelectedReferenceIds.slice(0, editVideoReferenceLimitByModel || 3)
+            : undefined,
         replicateKlingMode: lumaModel === "kling-o1" ? replicateKlingMode : undefined,
         replicateKlingV3Mode: lumaModel === "kling-v3-omni-video" ? replicateKlingV3Mode : undefined,
         wan27Resolution: lumaModel === "wan2.7-videoedit" || lumaModel === "wan2.7-i2v" ? wan27Resolution : undefined,
@@ -2690,7 +2760,7 @@ export default function App() {
       lumaModel,
       advancedMode,
       generationInputMode,
-      hasEditedStartFrame: Boolean(editFirstFrame),
+      hasEditedStartFrame: generationInputMode === "edit_video" ? editVideoSelectedReferenceIds.length > 0 : Boolean(editFirstFrame),
       hasEditedEndFrame: Boolean(editLastFrame),
       requiresEndFrameForRoute,
       lumaPrompt,
@@ -3982,6 +4052,66 @@ export default function App() {
     throw new Error("Uploaded video did not return a generation id");
   }
 
+  async function uploadEditVideoReferenceImage(file: File): Promise<void> {
+    if (!selectedTaskId) throw new Error("No task selected");
+    const init = await apiClient.initEditVideoReferenceUpload(selectedTaskId, {
+      filename: file.name,
+      contentType: file.type || "image/png",
+    });
+    const uploadResponse = await fetch(init.uploadUrl, {
+      method: "PUT",
+      headers: {
+        "content-type": file.type || "application/octet-stream",
+      },
+      body: file,
+    });
+    if (!uploadResponse.ok) {
+      throw new Error(`Upload failed: ${uploadResponse.status}`);
+    }
+    await apiClient.completeEditVideoReferenceUpload(selectedTaskId, {
+      referenceId: init.referenceId,
+      uploadKey: init.key,
+      filename: file.name,
+    });
+    await queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
+    await queryClient.invalidateQueries({ queryKey: ["task", "assets", selectedTaskId] });
+  }
+
+  async function generateEditVideoReferenceImage(payload: {
+    model: "chatgpt" | "chatgpt_latest" | "nano_banana" | "nano_banana_pro";
+    prompt: string;
+  }): Promise<void> {
+    if (!selectedTaskId) throw new Error("No task selected");
+    await apiClient.generateEditVideoReference(selectedTaskId, payload);
+    await queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
+    await queryClient.invalidateQueries({ queryKey: ["task", "assets", selectedTaskId] });
+  }
+
+  async function deleteEditVideoReference(referenceId: string): Promise<void> {
+    if (!selectedTaskId) throw new Error("No task selected");
+    await deleteAssetMutation.mutateAsync({
+      taskId: selectedTaskId,
+      payload: {
+        assetType: "edit_video_reference",
+        referenceId,
+      },
+    });
+    setEditVideoSelectedReferenceIds((previous) => previous.filter((id) => id !== referenceId));
+  }
+
+  function toggleEditVideoReferenceSelection(referenceId: string): void {
+    setEditVideoSelectedReferenceIds((previous) => {
+      if (previous.includes(referenceId)) {
+        return previous.filter((id) => id !== referenceId);
+      }
+      if (previous.length >= 3) {
+        setAppUiError("Select up to 3 reference images.");
+        return previous;
+      }
+      return [...previous, referenceId];
+    });
+  }
+
   function openQualityMatchForVariant(frameRecord: typeof activeEditFrame, variantId: string) {
     if (!frameRecord) return;
     const fullFrameRecord = task?.frames?.[frameRecord.frameId];
@@ -4034,7 +4164,10 @@ export default function App() {
       setLastFrameId(result.frameId);
     }
   }
-  const primaryTabs = PRIMARY_WORKFLOW_TABS;
+  const primaryTabs = useMemo(
+    () => (generationInputMode === "edit_video" ? PRIMARY_WORKFLOW_TABS.filter((tabItem) => tabItem.id !== "post") : PRIMARY_WORKFLOW_TABS),
+    [generationInputMode],
+  );
   const {
     currentReferenceSegment,
     currentReferenceStartImageUrl,
@@ -4273,19 +4406,43 @@ export default function App() {
     ],
   );
 
+  const editVideoReferencesTabCtx = useMemo<EditVideoReferencesTabCtx>(
+    () => ({
+      references: editVideoReferences,
+      selectedReferenceIds: editVideoSelectedReferenceIds,
+      toggleReferenceSelection: toggleEditVideoReferenceSelection,
+      removeReference: deleteEditVideoReference,
+      uploadReferenceImage: uploadEditVideoReferenceImage,
+      generateReferenceImage: generateEditVideoReferenceImage,
+    }),
+    [
+      editVideoReferences,
+      editVideoSelectedReferenceIds,
+      toggleEditVideoReferenceSelection,
+      deleteEditVideoReference,
+      uploadEditVideoReferenceImage,
+      generateEditVideoReferenceImage,
+    ],
+  );
+
   const generateTabCtx = useMemo<GenerateTabCtx>(
     () => ({
       viewMode: "outputs",
       onNext: () => {
-        void handleTabChange("merge");
+        void handleTabChange(generationInputMode === "edit_video" ? "assets" : "merge");
       },
       nextDisabled: !selectedPreviewGeneration || selectedPreviewGeneration.status !== "complete" || !selectedPreviewGeneration.downloadUrl,
       nextWarning:
         !selectedPreviewGeneration || selectedPreviewGeneration.status !== "complete" || !selectedPreviewGeneration.downloadUrl
-          ? "Choose a completed output before continuing to Post Process."
+          ? generationInputMode === "edit_video"
+            ? "Choose a completed output before continuing to Assets."
+            : "Choose a completed output before continuing to Post Process."
           : null,
       generationModelByInput,
       generationInputMode,
+      editVideoSelectedReferenceIds,
+      editVideoReferenceWarning,
+      editVideoReferencePreview,
       selectedSegment,
       isWholeVideoSelection,
       wholeVideoNeedsChunking,
@@ -4298,7 +4455,7 @@ export default function App() {
           ? describeSelectedFrameSource(editLastFrame, refineSourceVariantIds.last || compareVariantIds.last)
           : null,
       setGenerationModelByInput,
-      generationModelOptions,
+      generationModelOptions: generationModelOptionsForInput,
       advancedMode,
       setAdvancedMode,
       replicateKlingMode,
@@ -4380,6 +4537,9 @@ export default function App() {
       handleTabChange,
       generationModelByInput,
       generationInputMode,
+      editVideoSelectedReferenceIds,
+      editVideoReferenceWarning,
+      editVideoReferencePreview,
       selectedSegment,
       isWholeVideoSelection,
       wholeVideoNeedsChunking,
@@ -4389,7 +4549,7 @@ export default function App() {
       editLastFrame,
       refineSourceVariantIds,
       compareVariantIds,
-      generationModelOptions,
+      generationModelOptionsForInput,
       advancedMode,
       replicateKlingMode,
       replicateKlingV3Mode,
@@ -4748,7 +4908,7 @@ export default function App() {
 
             {tab === "frames" && (
               <Suspense fallback={<p className="text-sm text-ink/60">Loading Edit frames...</p>}>
-                <EditFrameTab ctx={editFrameTabCtx} />
+                {generationInputMode === "edit_video" ? <EditVideoReferencesTab ctx={editVideoReferencesTabCtx} /> : <EditFrameTab ctx={editFrameTabCtx} />}
               </Suspense>
             )}
 

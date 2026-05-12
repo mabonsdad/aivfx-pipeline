@@ -53,6 +53,7 @@ def handle_tasks_root_routes(
             "externalQcPairs": [],
             "qualityMatchAnalyses": {},
             "videoCleanupTracks": [],
+            "editVideoReferences": [],
             "exports": [],
             "customReports": [],
             "history": [],

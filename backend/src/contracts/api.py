@@ -25,6 +25,7 @@ ASSET_DELETE_TYPE_IDS: tuple[str, ...] = (
     "frame_variant",
     "segment_generation",
     "export",
+    "edit_video_reference",
 )
 CUSTOM_REPORT_OUTPUT_ASSET_TYPE_IDS: tuple[str, ...] = (
     "frame_variant",
@@ -77,6 +78,7 @@ class SegmentGeneratePayload(TypedDict):
     wan27Resolution: NotRequired[str | None]
     happyHorseResolution: NotRequired[str | None]
     sora2Resolution: NotRequired[str | None]
+    selectedReferenceIds: NotRequired[list[str] | None]
 
 
 class ChunkedSegmentGeneratePayload(TypedDict):
@@ -96,7 +98,7 @@ class SegmentGenerationExtendPayload(TypedDict):
     anchorFramesFromEnd: int
     durationSeconds: NotRequired[int | None]
     prompt: NotRequired[str | None]
-    inputMode: NotRequired[Literal["start_video", "start_end", "start_only"] | None]
+    inputMode: NotRequired[Literal["start_video", "start_end", "start_only", "edit_video"] | None]
     continueToRangeEnd: NotRequired[bool]
     useSourceLastFrame: NotRequired[bool]
     lastFrameVariantId: NotRequired[str | None]
@@ -188,11 +190,12 @@ class ApiReferenceVideoGeneratePayload(TypedDict):
 
 
 class AssetDeletePayload(TypedDict):
-    assetType: Literal["upload", "frame_capture", "frame_variant", "segment_generation", "export"]
+    assetType: Literal["upload", "frame_capture", "frame_variant", "segment_generation", "export", "edit_video_reference"]
     frameId: NotRequired[str | None]
     variantId: NotRequired[str | None]
     genId: NotRequired[str | None]
     exportId: NotRequired[str | None]
+    referenceId: NotRequired[str | None]
 
 
 class CustomReportOutputRefPayload(TypedDict):

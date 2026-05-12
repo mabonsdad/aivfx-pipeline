@@ -23,7 +23,9 @@ function generationModelHelp(modelName: VideoModelId, modeValue: string, inputMo
     return {
       title: "Kling v3 Omni Video",
       lines: [
-        "Uses the working-range video plus the selected edited start frame.",
+        inputMode === "edit_video"
+          ? "Uses the working-range video plus up to 3 selected reference images."
+          : "Uses the working-range video plus the selected edited start frame.",
         "Prompt must include both <<<video_1>>> and <<<image_1>>>.",
         'Example: "Transform the horse in <<<video_1>>> into the unicorn in <<<image_1>>>. Keep motion and background the same."',
       ],
@@ -33,7 +35,9 @@ function generationModelHelp(modelName: VideoModelId, modeValue: string, inputMo
     return {
       title: "Seedance 2.0 Reference to Video",
       lines: [
-        "Uses the working-range video as @Video1 and the selected edited start frame as @Image1.",
+        inputMode === "edit_video"
+          ? "Uses the working-range video as @Video1 and up to 3 selected reference images as @Image1..@Image3."
+          : "Uses the working-range video as @Video1 and the selected edited start frame as @Image1.",
         "Prompt must include both @Video1 and @Image1.",
         "The app conforms the input to Seedance reference-video bounds, then scales the result back to the working range.",
         'Example: "Transform the horse in @Video1 into the unicorn in @Image1. Keep motion and background the same."',
@@ -44,7 +48,9 @@ function generationModelHelp(modelName: VideoModelId, modeValue: string, inputMo
     return {
       title: "Wan 2.7 VideoEdit",
       lines: [
-        "Uses the working-range video plus the selected edited start frame.",
+        inputMode === "edit_video"
+          ? "Uses the working-range video plus one selected reference image."
+          : "Uses the working-range video plus the selected edited start frame.",
         "Prompt should focus on the visual change, not restate motion or camera behavior.",
         "Resolution can be 720p or 1080p.",
       ],
@@ -54,7 +60,9 @@ function generationModelHelp(modelName: VideoModelId, modeValue: string, inputMo
     return {
       title: "Happy Horse 1.0 Video Edit",
       lines: [
-        "Uses the working-range video plus the selected edited start frame as @Image1.",
+        inputMode === "edit_video"
+          ? "Uses the working-range video plus up to 3 selected reference images as @Image1..@Image3."
+          : "Uses the working-range video plus the selected edited start frame as @Image1.",
         "Prompt must include @Image1.",
         'Example: "change the horse into the white unicorn in @Image1 and keep the background and motion exactly the same".',
       ],
@@ -132,7 +140,9 @@ function generationModelHelp(modelName: VideoModelId, modeValue: string, inputMo
     return {
       title: "Runway Gen-4 Aleph",
       lines: [
-        "Uses the working-range video plus the selected edited start frame as an image reference.",
+        inputMode === "edit_video"
+          ? "Uses the working-range video plus one selected reference image."
+          : "Uses the working-range video plus the selected edited start frame as an image reference.",
         "Prompts work best when they start with a clear verb and reference the first frame.",
         'Example: "edit the video to start on the input image as the first frame. add motion so that the car floats weightlessly, as if in zero gravity, throughout the video".',
         "Runway may center-crop to fit supported output ratios.",
@@ -222,16 +232,24 @@ export function useGenerationPromptGuidance({
       return "Uses the selected working-range video as <<<video_1>>> and the selected edited start frame as <<<image_1>>>. Prompt must reference both.";
     }
     if (lumaModel === "kling-v3-omni-video") {
-      return "Uses the selected working-range video as <<<video_1>>> and the selected edited start frame as <<<image_1>>> for base video editing. Prompt must reference both.";
+      return generationInputMode === "edit_video"
+        ? "Uses the selected working-range video as <<<video_1>>> and selected references as <<<image_1>>>..<<<image_3>>>. Prompt must reference <<<video_1>>> and at least <<<image_1>>>."
+        : "Uses the selected working-range video as <<<video_1>>> and the selected edited start frame as <<<image_1>>> for base video editing. Prompt must reference both.";
     }
     if (lumaModel === "seedance-2.0-reference-to-video") {
-      return "Uses the selected working-range video as @Video1 and the selected edited start frame as @Image1. Prompt must reference both. The working range is conformed to Seedance's smaller reference-video bounds, then the result is upscaled back to the working-range size.";
+      return generationInputMode === "edit_video"
+        ? "Uses the selected working-range video as @Video1 and selected references as @Image1..@Image3. Prompt must reference @Video1 and at least @Image1."
+        : "Uses the selected working-range video as @Video1 and the selected edited start frame as @Image1. Prompt must reference both. The working range is conformed to Seedance's smaller reference-video bounds, then the result is upscaled back to the working-range size.";
     }
     if (lumaModel === "wan2.7-videoedit") {
-      return "Uses the selected working-range video plus the selected edited start frame as reference_image. Prompt should describe only the intended edit.";
+      return generationInputMode === "edit_video"
+        ? "Uses the selected working-range video plus one selected reference image. Prompt should describe only the intended edit."
+        : "Uses the selected working-range video plus the selected edited start frame as reference_image. Prompt should describe only the intended edit.";
     }
     if (lumaModel === "happy-horse-video-edit") {
-      return "Uses the selected working-range video plus the selected edited start frame as @Image1. Prompt must reference @Image1.";
+      return generationInputMode === "edit_video"
+        ? "Uses the selected working-range video plus up to 3 selected references as @Image1..@Image3. Prompt must reference @Image1."
+        : "Uses the selected working-range video plus the selected edited start frame as @Image1. Prompt must reference @Image1.";
     }
     if (lumaModel === "happy-horse-image-to-video") {
       return "Uses only the selected edited start frame. No source working-range video is sent.";
@@ -245,7 +263,9 @@ export function useGenerationPromptGuidance({
       return "Uses the selected edited start and end frames only with Replicate LTX 2.3 Pro image_to_video. LTX retake is not image-referenced, so it is not used in this flow.";
     }
     if (lumaModel === "runway-gen4-aleph") {
-      return "Uses the selected working-range video plus the selected edited start frame as an image reference. Prompt should describe the intended transformation while preserving motion and camera continuity. Runway may center-crop to the chosen output ratio.";
+      return generationInputMode === "edit_video"
+        ? "Uses the selected working-range video plus one selected reference image. Prompt should describe the intended transformation while preserving motion and camera continuity."
+        : "Uses the selected working-range video plus the selected edited start frame as an image reference. Prompt should describe the intended transformation while preserving motion and camera continuity. Runway may center-crop to the chosen output ratio.";
     }
     if (lumaModel === "sora-2-image-to-video") {
       return "Uses only the selected edited start frame. No source working-range video is sent.";

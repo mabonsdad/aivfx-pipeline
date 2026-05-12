@@ -210,4 +210,15 @@ def handle_task_asset_routes(
         store.save_task(task)
         return response_fn(200, {"ok": True}, origin=origin)
 
+    if req.assetType == "edit_video_reference":
+        reference_id = req.referenceId
+        references = task.get("editVideoReferences", [])
+        reference = next((item for item in references if item.get("referenceId") == reference_id), None)
+        if not reference:
+            return error_response_fn(404, "Edit-video reference not found", origin=origin)
+        _delete_key_if_present(reference.get("key"))
+        task["editVideoReferences"] = [item for item in references if item.get("referenceId") != reference_id]
+        store.save_task(task)
+        return response_fn(200, {"ok": True}, origin=origin)
+
     return error_response_fn(400, "Unsupported asset type", origin=origin)

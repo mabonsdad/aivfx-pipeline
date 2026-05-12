@@ -30,6 +30,7 @@ export const ASSET_DELETE_TYPE_IDS = [
   "frame_variant",
   "segment_generation",
   "export",
+  "edit_video_reference",
 ] as const;
 
 export const CUSTOM_REPORT_OUTPUT_ASSET_TYPE_IDS = [
@@ -116,6 +117,7 @@ export type SegmentGeneratePayload = {
   wan27Resolution?: string | null;
   happyHorseResolution?: string | null;
   sora2Resolution?: string | null;
+  selectedReferenceIds?: string[] | null;
 };
 
 export type ChunkedSegmentGeneratePayload = {
@@ -135,7 +137,7 @@ export type SegmentGenerationExtendPayload = {
   anchorFramesFromEnd: number;
   durationSeconds?: number | null;
   prompt?: string | null;
-  inputMode?: "start_video" | "start_end" | "start_only" | null;
+  inputMode?: "start_video" | "start_end" | "start_only" | "edit_video" | null;
   continueToRangeEnd?: boolean;
   useSourceLastFrame?: boolean;
   lastFrameVariantId?: string | null;
@@ -218,11 +220,12 @@ export type ApiReferenceVideoGeneratePayload = {
 };
 
 export type AssetDeletePayload = {
-  assetType: "upload" | "frame_capture" | "frame_variant" | "segment_generation" | "export";
+  assetType: "upload" | "frame_capture" | "frame_variant" | "segment_generation" | "export" | "edit_video_reference";
   frameId?: string | null;
   variantId?: string | null;
   genId?: string | null;
   exportId?: string | null;
+  referenceId?: string | null;
 };
 
 export type ExportTopazUpscalePayload = {

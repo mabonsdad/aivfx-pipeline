@@ -1,5 +1,9 @@
 export const config = {
   apiBaseUrl: import.meta.env.VITE_API_BASE_URL as string,
+  features: {
+    enableEditVideoMode: (import.meta.env.VITE_ENABLE_EDIT_VIDEO_MODE as string | undefined) !== "false",
+    enableStartOnlyMode: (import.meta.env.VITE_ENABLE_START_ONLY_MODE as string | undefined) === "true",
+  },
   cognito: {
     region: (import.meta.env.VITE_COGNITO_REGION as string) || "eu-west-2",
     userPoolId: import.meta.env.VITE_COGNITO_USER_POOL_ID as string,

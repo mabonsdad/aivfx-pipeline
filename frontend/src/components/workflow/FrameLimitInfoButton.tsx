@@ -7,7 +7,7 @@ type FrameLimitRow = {
   maxFrameCount: number;
 };
 
-type GenerateInputMode = "start_video" | "start_end" | "start_only";
+type GenerateInputMode = "start_video" | "start_end" | "start_only" | "edit_video";
 
 const START_VIDEO_ROWS: FrameLimitRow[] = [
   { model: "Luma Ray 2 Flash", maxSeconds: 10, modelFps: 24, maxFrameCount: 240 },
@@ -70,13 +70,13 @@ function FrameLimitTable(props: { rows: FrameLimitRow[] }) {
 }
 
 function modeTitle(mode: GenerateInputMode): string {
-  if (mode === "start_video") return "First frame + video input to video";
+  if (mode === "start_video" || mode === "edit_video") return "Source video + prompt edit";
   if (mode === "start_end") return "First frame + last frame to video";
   return "First frame to video";
 }
 
 function rowsForMode(mode: GenerateInputMode): FrameLimitRow[] {
-  if (mode === "start_video") return START_VIDEO_ROWS;
+  if (mode === "start_video" || mode === "edit_video") return START_VIDEO_ROWS;
   if (mode === "start_end") return START_END_ROWS;
   return START_ONLY_ROWS;
 }

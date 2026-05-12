@@ -175,7 +175,7 @@ export type PickFrameTabCtx = {
     overLimit: boolean;
     limitMessage: string | null;
   } | null;
-  generationInputMode: "start_video" | "start_end" | "start_only";
+  generationInputMode: "start_video" | "start_end" | "start_only" | "edit_video";
   lumaModel: string;
   videoWorkMode: "whole_video" | "custom_segment" | null;
   defaultVideoSegment: SegmentRecord | null;

@@ -473,3 +473,20 @@ npm run build:infra
 Manual release smoke checklist:
 
 - `docs/manual-smoke-checklist.md`
+
+## Edit Video Trial Mode
+
+The app now includes a trial creation mode focused on source-video editing:
+
+- Mode id: `edit_video`
+- Inputs: source working-range video + prompt + optional reference images.
+- Reference limits (current simplified policy):
+1. Up to 3 references: Seedance 2.0 / Happy Horse 1.0 Video Edit / Kling v3 Omni Video
+2. Up to 1 reference: Wan 2.7 VideoEdit / Runway Gen-4 Aleph
+
+Reference images are managed in the Edit step (upload or generate via ChatGPT/Nano Banana models), then selected for use in Generate.
+
+Feature flags:
+
+- `VITE_ENABLE_EDIT_VIDEO_MODE` (default enabled unless explicitly set to `false`)
+- `VITE_ENABLE_START_ONLY_MODE` (default disabled; set to `true` to re-enable `start_only`)

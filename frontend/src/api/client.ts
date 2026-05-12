@@ -468,6 +468,30 @@ export const apiClient = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
+  initEditVideoReferenceUpload: (
+    taskId: string,
+    payload: { filename: string; contentType: string },
+  ) =>
+    api<{ referenceId: string; key: string; uploadUrl: string }>(`/tasks/${taskId}/edit-video/references/upload/init`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  completeEditVideoReferenceUpload: (
+    taskId: string,
+    payload: { referenceId: string; uploadKey: string; filename: string },
+  ) =>
+    api<{ reference: import("../types/api").EditVideoReference }>(`/tasks/${taskId}/edit-video/references/upload/complete`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  generateEditVideoReference: (
+    taskId: string,
+    payload: { model: "chatgpt" | "chatgpt_latest" | "nano_banana" | "nano_banana_pro"; prompt: string },
+  ) =>
+    api<{ reference: import("../types/api").EditVideoReference }>(`/tasks/${taskId}/edit-video/references/generate`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
   improveSegmentPrompt: (
     taskId: string,
     segmentId: string,

@@ -335,6 +335,18 @@ export type SegmentRecord = {
   } | null;
 };
 
+export type EditVideoReference = {
+  referenceId: string;
+  type: "uploaded" | "generated";
+  filename?: string;
+  model?: string | null;
+  prompt?: string | null;
+  key: string;
+  imageUrl?: string;
+  createdAt: string;
+  updatedAt?: string;
+};
+
 export type SegmentGeneration = {
   genId: string;
   segmentId: string;
@@ -739,6 +751,7 @@ export type TaskDetail = {
     updatedAt: string;
   }>;
   qualityMatchAnalyses?: Record<string, QualityMatchAnalysis>;
+  editVideoReferences?: EditVideoReference[];
   exports: ExportRecord[];
   customReports?: CustomReportRecord[];
 };

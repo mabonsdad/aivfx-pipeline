@@ -60,6 +60,11 @@ class AssetPaths:
         ext = Path(filename).suffix or ".png"
         return f"{self.task_prefix()}/frames/{frame_id}/references/{self._filename(f'ref{short_ref}', ext)}"
 
+    def edit_video_reference(self, reference_id: str, filename: str) -> str:
+        short_ref = re.sub(r"[^a-zA-Z0-9]+", "", reference_id)[-8:]
+        ext = Path(filename).suffix or ".png"
+        return f"{self.task_prefix()}/edit_video/references/{self._filename(f'ref{short_ref}', ext)}"
+
     def external_qc_original(self, pair_id: str, filename: str) -> str:
         ext = Path(filename).suffix or ".png"
         return f"{self.task_prefix()}/external_qc/{pair_id}/{self._filename('original', ext)}"

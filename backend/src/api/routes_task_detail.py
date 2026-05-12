@@ -91,6 +91,9 @@ def handle_task_detail_route(
         generation.pop("qc", None)
     if decorated.get("chunkedGenerationRuns"):
         helpers["decorate_embedded_s3_keys"](decorated["chunkedGenerationRuns"], asset_store)
+    for reference in decorated.get("editVideoReferences", []):
+        if isinstance(reference, dict) and reference.get("key"):
+            reference["imageUrl"] = asset_store.presign_get(reference["key"], expires=helpers["presigned_get_ttl_seconds"])
     for pair in decorated.get("externalQcPairs", []):
         if pair.get("originalKey"):
             pair["originalUrl"] = asset_store.presign_get(pair["originalKey"], expires=helpers["presigned_get_ttl_seconds"])

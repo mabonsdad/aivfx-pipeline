@@ -43,6 +43,13 @@ export const GENERATION_MODELS_BY_INPUT: Record<GenerateInputMode, GenerationMod
     { value: "veo-3.1-fast", label: "Veo 3.1 Fast" },
     { value: "kling-2.6", label: "Kling 2.6" },
   ],
+  edit_video: [
+    { value: "seedance-2.0-reference-to-video", label: "Seedance 2.0 Reference to Video" },
+    { value: "happy-horse-video-edit", label: "Happy Horse 1.0 Video Edit" },
+    { value: "kling-v3-omni-video", label: "Kling v3 Omni Video" },
+    { value: "wan2.7-videoedit", label: "Wan 2.7 VideoEdit" },
+    { value: "runway-gen4-aleph", label: "Runway Gen-4 Aleph" },
+  ],
 };
 
 export function useGenerationConfigState() {
@@ -51,6 +58,7 @@ export function useGenerationConfigState() {
     start_video: "ray-flash-2",
     start_end: "kling-2.6",
     start_only: "wan2.2-a14b",
+    edit_video: "seedance-2.0-reference-to-video",
   });
   const [lumaModel, setLumaModel] = useState<VideoModelId>("ray-flash-2");
   const [advancedMode, setAdvancedMode] = useState("flex_1");

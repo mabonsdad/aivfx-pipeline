@@ -22,7 +22,7 @@ def _remove_segments(task: dict[str, Any], segment_ids: list[str]) -> None:
 
 
 def _resolve_input_mode(requested_mode: str, capability: Any, requested_input_mode: str | None) -> str:
-    if requested_input_mode in {"start_video", "start_end", "start_only"}:
+    if requested_input_mode in {"start_video", "start_end", "start_only", "edit_video"}:
         return requested_input_mode
     if requested_mode in _START_END_MODES:
         return "start_end"

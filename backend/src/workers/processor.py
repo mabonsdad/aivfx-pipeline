@@ -3783,6 +3783,25 @@ def _handle_segment_generate(
     happy_horse_resolution = str(payload.get("happyHorseResolution") or "1080p")
     wan27_negative_prompt = str(payload.get("negativePrompt") or "").strip() or None
     preserve_frames = bool(payload.get("preserveFrames", True))
+    reference_prefix = f"users/{task['userId']}/tasks/{task['taskId']}/"
+    reference_lookup: dict[str, dict[str, Any]] = {
+        str(item.get("referenceId")): item
+        for item in task.get("editVideoReferences", [])
+        if isinstance(item, dict) and item.get("referenceId")
+    }
+    raw_selected_reference_ids = payload.get("selectedReferenceIds")
+    selected_reference_ids: list[str] = []
+    if isinstance(raw_selected_reference_ids, list):
+        for item in raw_selected_reference_ids:
+            ref_id = str(item or "").strip()
+            if ref_id and ref_id not in selected_reference_ids:
+                selected_reference_ids.append(ref_id)
+    selected_reference_keys: list[str] = []
+    for ref_id in selected_reference_ids:
+        reference = reference_lookup.get(ref_id)
+        key = str((reference or {}).get("key") or "").strip()
+        if key and key.startswith(reference_prefix):
+            selected_reference_keys.append(key)
     segment_key: str | None = None
     if capability.uses_source_video:
         segment_key = _ensure_segment_clip(
@@ -4132,15 +4151,26 @@ def _handle_segment_generate(
                 file_path=local_provider_segment or local_segment_source,
                 content_type="video/mp4",
             )
+            runway_frame_path = local_first_frame
+            runway_frame_content_type = first_frame_content_type
+            if selected_reference_keys:
+                selected_bytes = asset_store.read_bytes(selected_reference_keys[0])
+                selected_reference_image = ImageOps.exif_transpose(Image.open(BytesIO(selected_bytes))).convert("RGB")
+                runway_reference_file = td_path / "runway_reference.png"
+                selected_reference_image.save(runway_reference_file, format="PNG")
+                runway_frame_path = runway_reference_file
+                runway_frame_content_type = "image/png"
             runway_first_frame_uri = _upload_runway_ephemeral_asset(
                 api_key=runway_key,
-                file_path=local_first_frame,
-                content_type=first_frame_content_type,
+                file_path=runway_frame_path,
+                content_type=runway_frame_content_type,
             )
 
     media_url = asset_store.presign_get(media_key_for_provider, expires=3600) if media_key_for_provider else None
     first_frame_url = asset_store.presign_get(first_frame_input_key, expires=3600)
     last_frame_url = asset_store.presign_get(last_frame_input_key, expires=3600) if last_frame_input_key else None
+    selected_reference_urls = [asset_store.presign_get(key, expires=3600) for key in selected_reference_keys]
+    primary_reference_bytes = asset_store.read_bytes(selected_reference_keys[0]) if selected_reference_keys else frame_bytes
 
     secrets = load_secret(settings.secrets_arn)
 
@@ -4308,7 +4338,7 @@ def _handle_segment_generate(
             input={
                 "video_url": media_url,
                 "prompt": payload.get("prompt"),
-                "reference_image_urls": [first_frame_url],
+                "reference_image_urls": selected_reference_urls[:3] if selected_reference_urls else [first_frame_url],
                 "resolution": happy_horse_resolution if happy_horse_resolution in {"720p", "1080p"} else "1080p",
                 "audio_setting": "origin" if provider_media_has_audio else "auto",
                 "enable_safety_checker": True,
@@ -4503,7 +4533,7 @@ def _handle_segment_generate(
             input={
                 "prompt": payload.get("prompt"),
                 "reference_video": media_url,
-                "reference_images": [first_frame_url],
+                "reference_images": selected_reference_urls[:3] if selected_reference_urls else [first_frame_url],
                 "video_reference_type": "base",
                 "keep_original_sound": True,
                 "mode": replicate_kling_v3_mode if replicate_kling_v3_mode in {"standard", "pro"} else "pro",
@@ -4534,7 +4564,7 @@ def _handle_segment_generate(
             api_key=fal_api_key,
             input={
                 "prompt": payload.get("prompt"),
-                "image_urls": [first_frame_url],
+                "image_urls": selected_reference_urls[:3] if selected_reference_urls else [first_frame_url],
                 "video_urls": [media_url],
                 "resolution": "720p",
                 "duration": str(int(provider_duration_sec)),
@@ -4561,7 +4591,7 @@ def _handle_segment_generate(
             raise RuntimeError("Wan 2.7 VideoEdit requires a prepared reference image")
         provider_duration_sec = provider_input_duration_sec
         wan27_reference_data_url = _prepare_replicate_image_data_url(
-            frame_bytes,
+            primary_reference_bytes,
             target_width=first_target_w,
             target_height=first_target_h,
             fit_mode=first_frame_fit_mode,
@@ -4785,6 +4815,8 @@ def _handle_segment_generate(
                 "ltx23RequestedFps": ltx23_requested_fps if model_name == "ltx-2.3-pro" else None,
                 "sora2Resolution": sora2_resolution if model_name == "sora-2-image-to-video" else None,
                 "happyHorseResolution": happy_horse_resolution if model_name in {"happy-horse-video-edit", "happy-horse-image-to-video"} else None,
+                "selectedReferenceIds": selected_reference_ids,
+                "selectedReferenceCount": len(selected_reference_ids),
                 "sora2RequestedDurationSec": sora2_requested_duration_sec if model_name == "sora-2-image-to-video" else None,
                 "sora2ProviderDurationSec": sora2_provider_duration_sec if model_name == "sora-2-image-to-video" else None,
                 "preserveFrames": preserve_frames,
