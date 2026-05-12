@@ -38,6 +38,54 @@ function hasBufferedAhead(video: HTMLVideoElement, minimumSeconds: number): bool
   return false;
 }
 
+const VIDEO_OBJECT_URL_CACHE_LIMIT = 3;
+const VIDEO_OBJECT_URL_CACHE = new Map<string, string>();
+const VIDEO_OBJECT_URL_PENDING = new Map<string, Promise<string>>();
+
+function touchVideoCacheEntry(url: string, objectUrl: string): void {
+  VIDEO_OBJECT_URL_CACHE.delete(url);
+  VIDEO_OBJECT_URL_CACHE.set(url, objectUrl);
+}
+
+function trimVideoObjectUrlCache(): void {
+  while (VIDEO_OBJECT_URL_CACHE.size > VIDEO_OBJECT_URL_CACHE_LIMIT) {
+    const oldest = VIDEO_OBJECT_URL_CACHE.entries().next().value as [string, string] | undefined;
+    if (!oldest) break;
+    VIDEO_OBJECT_URL_CACHE.delete(oldest[0]);
+    URL.revokeObjectURL(oldest[1]);
+  }
+}
+
+function getCachedVideoObjectUrl(url: string): string | null {
+  const cached = VIDEO_OBJECT_URL_CACHE.get(url);
+  if (!cached) return null;
+  touchVideoCacheEntry(url, cached);
+  return cached;
+}
+
+function preloadVideoObjectUrl(url: string, signal: AbortSignal): Promise<string> {
+  const cached = getCachedVideoObjectUrl(url);
+  if (cached) return Promise.resolve(cached);
+  const pending = VIDEO_OBJECT_URL_PENDING.get(url);
+  if (pending) return pending;
+  const request = fetch(url, { signal })
+    .then(async (response) => {
+      if (!response.ok) {
+        throw new Error(`Preload failed (${response.status})`);
+      }
+      const blob = await response.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      touchVideoCacheEntry(url, objectUrl);
+      trimVideoObjectUrlCache();
+      return objectUrl;
+    })
+    .finally(() => {
+      VIDEO_OBJECT_URL_PENDING.delete(url);
+    });
+  VIDEO_OBJECT_URL_PENDING.set(url, request);
+  return request;
+}
+
 export default function PreviewModals({
   imagePreview,
   videoPreview,
@@ -58,6 +106,8 @@ export default function PreviewModals({
   const [videoCompareReady, setVideoCompareReady] = useState({ original: false, generated: false });
   const [videoCompareBuffered, setVideoCompareBuffered] = useState({ original: false, generated: false });
   const [videoCompareLoadTimedOut, setVideoCompareLoadTimedOut] = useState(false);
+  const [videoCompareOriginalSourceUrl, setVideoCompareOriginalSourceUrl] = useState<string | null>(null);
+  const [videoCompareOriginalCachePriming, setVideoCompareOriginalCachePriming] = useState(false);
 
   useEffect(() => {
     return () => {
@@ -72,12 +122,44 @@ export default function PreviewModals({
       setVideoCompareReady({ original: false, generated: false });
       setVideoCompareBuffered({ original: false, generated: false });
       setVideoCompareLoadTimedOut(false);
+      setVideoCompareOriginalSourceUrl(null);
+      setVideoCompareOriginalCachePriming(false);
       return;
     }
+    const cachedOriginal = getCachedVideoObjectUrl(videoCompare.originalUrl);
+    setVideoCompareOriginalSourceUrl(cachedOriginal ?? videoCompare.originalUrl);
+    setVideoCompareOriginalCachePriming(!cachedOriginal);
     setVideoCompareReady({ original: false, generated: false });
     setVideoCompareBuffered({ original: false, generated: false });
     setVideoCompareLoadTimedOut(false);
   }, [videoCompare, videoCompare?.originalUrl, videoCompare?.compareUrl]);
+
+  useEffect(() => {
+    if (!videoCompare) return;
+    const cachedOriginal = getCachedVideoObjectUrl(videoCompare.originalUrl);
+    if (cachedOriginal) {
+      setVideoCompareOriginalSourceUrl(cachedOriginal);
+      setVideoCompareOriginalCachePriming(false);
+      return;
+    }
+    const controller = new AbortController();
+    setVideoCompareOriginalCachePriming(true);
+    void preloadVideoObjectUrl(videoCompare.originalUrl, controller.signal)
+      .then((objectUrl) => {
+        setVideoCompareOriginalCachePriming(false);
+        // Only swap source before playback has started; next opens will use cache immediately.
+        if (!videoCompareReady.generated) {
+          setVideoCompareOriginalSourceUrl(objectUrl);
+        }
+      })
+      .catch((error) => {
+        if ((error as { name?: string }).name === "AbortError") return;
+        setVideoCompareOriginalCachePriming(false);
+      });
+    return () => {
+      controller.abort();
+    };
+  }, [videoCompare, videoCompareReady.generated]);
 
   useEffect(() => {
     if (!videoCompare) return;
@@ -314,9 +396,9 @@ export default function PreviewModals({
                 itemOne={
                   <div className="relative h-full w-full bg-black">
                     <video
-                      key={`compare-original:${videoCompare.originalUrl}`}
+                      key={`compare-original:${videoCompare.originalUrl}:${videoCompareOriginalSourceUrl ?? "none"}`}
                       ref={compareOriginalRef}
-                      src={videoCompare.originalUrl}
+                      src={videoCompareOriginalSourceUrl ?? videoCompare.originalUrl}
                       autoPlay
                       loop
                       muted
@@ -393,6 +475,11 @@ export default function PreviewModals({
             {videoCompareLoadTimedOut && !videoCompareReady.original ? (
               <div className="mt-3 rounded border border-amber-300/40 bg-amber-300/10 px-3 py-2 text-xs text-amber-100">
                 Source preview is still loading, but compare playback will continue and sync as soon as source metadata is ready.
+              </div>
+            ) : null}
+            {videoCompareOriginalCachePriming ? (
+              <div className="mt-2 rounded border border-teal-300/30 bg-teal-300/10 px-3 py-2 text-xs text-teal-100">
+                Building local source cache for smoother replay on next open.
               </div>
             ) : null}
           </div>

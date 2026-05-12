@@ -47,14 +47,23 @@ export function useSelectedSegmentPreview({ selectedSegment, task }: UseSelected
   }, [selectedSegment?.segmentClipKey, segmentWindow, task?.video?.editSource?.s3Key]);
 
   const originalSegmentCompareUrl = useMemo(() => {
+    if (selectedSegment?.segmentClipUrl) return selectedSegment.segmentClipUrl;
+    if (task?.video?.editSource?.downloadUrl) return task.video.editSource.downloadUrl;
     if (task?.video?.previewSource?.downloadUrl) return task.video.previewSource.downloadUrl;
     return originalSegmentPreviewUrl;
-  }, [originalSegmentPreviewUrl, task?.video?.previewSource?.downloadUrl]);
+  }, [
+    originalSegmentPreviewUrl,
+    selectedSegment?.segmentClipUrl,
+    task?.video?.editSource?.downloadUrl,
+    task?.video?.previewSource?.downloadUrl,
+  ]);
 
   const originalSegmentCompareIdentity = useMemo(() => {
+    if (selectedSegment?.segmentClipKey) return `segment:${selectedSegment.segmentClipKey}`;
+    if (task?.video?.editSource?.s3Key) return `edit:${task.video.editSource.s3Key}`;
     if (task?.video?.previewSource?.s3Key) return `preview:${task.video.previewSource.s3Key}`;
     return originalSegmentPreviewIdentity;
-  }, [originalSegmentPreviewIdentity, task?.video?.previewSource?.s3Key]);
+  }, [originalSegmentPreviewIdentity, selectedSegment?.segmentClipKey, task?.video?.editSource?.s3Key, task?.video?.previewSource?.s3Key]);
 
   const originalPreviewIsSegmentClip = Boolean(selectedSegment?.segmentClipUrl);
   const [stableOriginalSegmentPreviewUrl, setStableOriginalSegmentPreviewUrl] = useState<string | null>(null);
