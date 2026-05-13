@@ -22,7 +22,7 @@ type PreviewModalsProps = {
   onCloseVideo: () => void;
   onCloseImageCompare: () => void;
   onCloseVideoCompare: () => void;
-  onMediaError?: () => void;
+  onMediaError?: (url?: string) => void;
 };
 
 function hasBufferedAhead(video: HTMLVideoElement, minimumSeconds: number): boolean {
@@ -107,6 +107,9 @@ export default function PreviewModals({
   const [videoCompareBuffered, setVideoCompareBuffered] = useState({ original: false, generated: false });
   const [videoCompareLoadTimedOut, setVideoCompareLoadTimedOut] = useState(false);
   const [videoCompareOriginalSourceUrl, setVideoCompareOriginalSourceUrl] = useState<string | null>(null);
+  const notifyMediaError = (url?: string) => {
+    onMediaError?.(url);
+  };
 
   useEffect(() => {
     return () => {
@@ -321,7 +324,7 @@ export default function PreviewModals({
               alt={imagePreview.label}
               className="h-full w-full object-contain"
               onClick={onCloseImage}
-              onError={onMediaError}
+              onError={(event) => notifyMediaError(event.currentTarget.currentSrc || event.currentTarget.src)}
             />
           </div>
         </div>
@@ -339,7 +342,7 @@ export default function PreviewModals({
               autoPlay
               preload="metadata"
               className="h-[80vh] w-full rounded object-contain"
-              onError={onMediaError}
+              onError={(event) => notifyMediaError(event.currentTarget.currentSrc || event.currentTarget.src)}
             />
           </div>
         </div>
@@ -417,7 +420,7 @@ export default function PreviewModals({
                           setVideoCompareBuffered((previous) => ({ ...previous, original: true }));
                         }
                       }}
-                      onError={onMediaError}
+                      onError={(event) => notifyMediaError(event.currentTarget.currentSrc || event.currentTarget.src)}
                     />
                     <div className="pointer-events-none absolute left-3 top-3 rounded bg-black/65 px-2 py-1 text-xs font-medium tracking-wide text-white/90">
                       Source
@@ -456,7 +459,7 @@ export default function PreviewModals({
                           setVideoCompareBuffered((previous) => ({ ...previous, generated: true }));
                         }
                       }}
-                      onError={onMediaError}
+                      onError={(event) => notifyMediaError(event.currentTarget.currentSrc || event.currentTarget.src)}
                     />
                     <div className="pointer-events-none absolute right-3 top-3 rounded bg-black/65 px-2 py-1 text-xs font-medium tracking-wide text-white/90">
                       Generated

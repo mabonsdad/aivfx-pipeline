@@ -446,6 +446,30 @@ function formatFps(value: number): string {
   return Number.isInteger(rounded) ? rounded.toFixed(0) : rounded.toFixed(2).replace(/\.?0+$/, "");
 }
 
+function parsePresignedExpiryMs(url: string): number | null {
+  try {
+    const parsed = new URL(url);
+    const amzDate = parsed.searchParams.get("X-Amz-Date");
+    const amzExpires = parsed.searchParams.get("X-Amz-Expires");
+    if (!amzDate || !amzExpires) return null;
+    const expiresSeconds = Number(amzExpires);
+    if (!Number.isFinite(expiresSeconds) || expiresSeconds <= 0) return null;
+    const match = amzDate.match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/);
+    if (!match) return null;
+    const issuedAtMs = Date.UTC(
+      Number(match[1]),
+      Number(match[2]) - 1,
+      Number(match[3]),
+      Number(match[4]),
+      Number(match[5]),
+      Number(match[6]),
+    );
+    return issuedAtMs + Math.round(expiresSeconds * 1000);
+  } catch {
+    return null;
+  }
+}
+
 function videoModelDurationConstraints(model: VideoModel): {
   minSeconds?: number;
   maxSeconds: number;
@@ -3206,6 +3230,16 @@ export default function App() {
     [queryClient],
   );
 
+  const handleMediaAssetError = useCallback(
+    (url?: string) => {
+      if (!selectedTaskId) return;
+      const expiryMs = typeof url === "string" && url ? parsePresignedExpiryMs(url) : null;
+      const nearExpiry = typeof expiryMs === "number" && expiryMs - Date.now() <= 60_000;
+      refreshSignedUrlsForTask(selectedTaskId, { force: nearExpiry });
+    },
+    [refreshSignedUrlsForTask, selectedTaskId],
+  );
+
   useEffect(() => {
     if (!videoCompareModal || !task) return;
     const nextOriginalUrl = (() => {
@@ -5132,7 +5166,7 @@ export default function App() {
         onCloseVideo={() => setVideoPreviewModal(null)}
         onCloseImageCompare={() => setImageCompareModal(null)}
         onCloseVideoCompare={() => setVideoCompareModal(null)}
-        onMediaError={() => refreshSignedUrlsForTask(selectedTaskId, { force: true })}
+        onMediaError={handleMediaAssetError}
       />
       {automationRunState.isOpen ? (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/55 p-4">
