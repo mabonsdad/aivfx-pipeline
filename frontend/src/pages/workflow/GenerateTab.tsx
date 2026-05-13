@@ -103,7 +103,7 @@ export type GenerateTabCtx = {
   originalPreviewIsSegmentClip: boolean;
   selectedSegmentGenerations: SegmentGeneration[];
   pendingGenerations: PendingGenerationCard[];
-  dismissPendingGenerationJob: (jobId: string) => void;
+  removeFailedPendingGenerationJob: (payload: { jobId: string; genId?: string }) => Promise<void>;
   requestCancelPendingGenerationJob: (jobId: string) => Promise<void>;
   selectedReportOutputs: Record<string, { taskId: string; ref: CustomReportOutputRef }>;
   reportOutputRefKey: (ref: CustomReportOutputRef) => string;
@@ -205,7 +205,7 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
     originalPreviewIsSegmentClip,
     selectedSegmentGenerations,
     pendingGenerations,
-    dismissPendingGenerationJob,
+    removeFailedPendingGenerationJob,
     requestCancelPendingGenerationJob,
     generationCardsVisible,
     truncateIdentifier,
@@ -973,7 +973,7 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
                   disabled={Boolean(cancellingPendingJobIds[job.jobId])}
                   onClick={() => {
                     if (job.status === "failed") {
-                      dismissPendingGenerationJob(job.jobId);
+                      void removeFailedPendingGenerationJob({ jobId: job.jobId, genId: job.genId });
                       return;
                     }
                     setCancellingPendingJobIds((previous) => ({ ...previous, [job.jobId]: true }));

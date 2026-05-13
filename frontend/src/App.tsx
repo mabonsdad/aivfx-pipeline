@@ -880,6 +880,7 @@ export default function App() {
     generationId: null,
   });
   const [jobIds, setJobIds] = useState<string[]>([]);
+  const [dismissedPendingGenerationJobIds, setDismissedPendingGenerationJobIds] = useState<Record<string, true>>({});
   const [automationEnabled, setAutomationEnabled] = useState(false);
   const [automationStartPrompt, setAutomationStartPrompt] = useState("");
   const [automationEndPrompt, setAutomationEndPrompt] = useState("");
@@ -2482,6 +2483,7 @@ export default function App() {
 
   useEffect(() => {
     setJobIds([]);
+    setDismissedPendingGenerationJobIds({});
   }, [selectedTaskId]);
 
   const sortedJobs = useMemo(
@@ -2505,8 +2507,29 @@ export default function App() {
 
   const dismissPendingGenerationJob = useCallback((jobId: string) => {
     setJobIds((previous) => previous.filter((id) => id !== jobId));
+    setDismissedPendingGenerationJobIds((previous) => {
+      if (previous[jobId]) return previous;
+      return { ...previous, [jobId]: true };
+    });
     seenDoneRef.current.delete(jobId);
   }, []);
+
+  const removeFailedPendingGenerationJob = useCallback(
+    async ({ jobId, genId }: { jobId: string; genId?: string }) => {
+      if (selectedTaskId && genId) {
+        try {
+          await deleteAssetMutation.mutateAsync({
+            taskId: selectedTaskId,
+            payload: { assetType: "segment_generation", genId },
+          });
+        } catch (error) {
+          setAppUiError(error instanceof Error ? error.message : "Failed to remove failed output");
+        }
+      }
+      dismissPendingGenerationJob(jobId);
+    },
+    [deleteAssetMutation, dismissPendingGenerationJob, selectedTaskId, setAppUiError],
+  );
 
   const requestCancelPendingEditJob = useCallback(
     async (jobId: string) => {
@@ -2558,6 +2581,7 @@ export default function App() {
     if (!selectedSegmentId) return [];
     const cards: PendingGenerationCard[] = [];
     for (const job of sortedJobs) {
+      if (dismissedPendingGenerationJobIds[job.jobId]) continue;
       if (job.type !== "segment_generate") continue;
       if (job.status !== "queued" && job.status !== "running" && job.status !== "failed") continue;
       const segmentId = jobPayloadString(job, "segmentId");
@@ -2576,7 +2600,7 @@ export default function App() {
       });
     }
     return cards.sort((a, b) => new Date(b.updatedAt ?? b.createdAt ?? 0).getTime() - new Date(a.updatedAt ?? a.createdAt ?? 0).getTime());
-  }, [selectedSegmentId, sortedJobs]);
+  }, [dismissedPendingGenerationJobIds, selectedSegmentId, sortedJobs]);
 
   const mergeFps = fpsValue(task);
   const mergeOriginalStartFrame = mergeTargetSegment?.startFrame ?? 0;
@@ -4533,6 +4557,7 @@ export default function App() {
       selectedSegmentGenerations,
       pendingGenerations,
       dismissPendingGenerationJob,
+      removeFailedPendingGenerationJob,
       requestCancelPendingGenerationJob,
       selectedReportOutputs,
       reportOutputRefKey,
@@ -4612,6 +4637,7 @@ export default function App() {
       selectedSegmentGenerations,
       pendingGenerations,
       dismissPendingGenerationJob,
+      removeFailedPendingGenerationJob,
       selectedReportOutputs,
       generationCardsVisible,
       selectSegmentGeneration,
@@ -4621,6 +4647,7 @@ export default function App() {
       refreshSignedUrlsForTask,
       handleDeleteAsset,
       requestCancelPendingGenerationJob,
+      removeFailedPendingGenerationJob,
     ],
   );
 
