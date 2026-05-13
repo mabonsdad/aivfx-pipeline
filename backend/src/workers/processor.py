@@ -1339,6 +1339,236 @@ def _handle_chunked_generation_finalize(
     return job
 
 
+def _finalize_extension_chain_generation_after_success(
+    *,
+    store: S3JsonStore,
+    task: dict[str, Any],
+    settings: Any,
+    gen_id: str,
+) -> None:
+    generation = task.get("segmentGenerations", {}).get(gen_id)
+    if not isinstance(generation, dict):
+        return
+    if generation.get("status") != "complete":
+        return
+    if generation.get("isChunkInternal"):
+        return
+    if generation.get("chunkRole") == "draft_stitched":
+        return
+    extension = generation.get("extension") if isinstance(generation.get("extension"), dict) else None
+    if not isinstance(extension, dict):
+        return
+    parent_generation_id = str(generation.get("parentGenerationId") or extension.get("parentGenerationId") or "")
+    if not parent_generation_id or parent_generation_id == gen_id:
+        return
+    if generation.get("extensionStitchedFromGenerationId"):
+        return
+    if extension.get("stitchedGenerationId"):
+        return
+
+    existing_stitched = next(
+        (
+            item
+            for item in task.get("segmentGenerations", {}).values()
+            if isinstance(item, dict)
+            and item.get("extension", {}).get("stitchedFromGenerationId") == gen_id
+        ),
+        None,
+    )
+    if isinstance(existing_stitched, dict):
+        return
+
+    parent = task.get("segmentGenerations", {}).get(parent_generation_id)
+    if not isinstance(parent, dict) or parent.get("status") != "complete":
+        return
+    parent_output_key = parent.get("outputKey")
+    child_output_key = generation.get("outputKey")
+    if not isinstance(parent_output_key, str) or not parent_output_key:
+        return
+    if not isinstance(child_output_key, str) or not child_output_key:
+        return
+
+    output_width = int(task.get("video", {}).get("editSource", {}).get("width") or 0)
+    output_height = int(task.get("video", {}).get("editSource", {}).get("height") or 0)
+    if output_width <= 0 or output_height <= 0:
+        return
+    fps = _fps(task)
+    s3 = boto3.client("s3")
+    paths = _asset_paths(task)
+    with tempfile.TemporaryDirectory() as td:
+        td_path = Path(td)
+        parent_path = td_path / "extension_parent.mp4"
+        child_path = td_path / "extension_child.mp4"
+        stitched_path = td_path / "extension_stitched.mp4"
+        _download_s3(s3, settings.assets_bucket, parent_output_key, parent_path)
+        _download_s3(s3, settings.assets_bucket, child_output_key, child_path)
+        parent_probe = ffprobe_video(str(parent_path))
+        child_probe = ffprobe_video(str(child_path))
+        parent_frame_count = int(parent_probe.get("frame_count") or 0)
+        child_frame_count = int(child_probe.get("frame_count") or 0)
+        if parent_frame_count <= 0 or child_frame_count <= 0:
+            return
+
+        source_generated_frame_index = int(
+            extension.get("sourceGeneratedFrameIndex")
+            if extension.get("sourceGeneratedFrameIndex") is not None
+            else parent_frame_count - 1
+        )
+        source_generated_frame_index = max(0, min(parent_frame_count - 1, source_generated_frame_index))
+        parent_keep_frames = max(1, source_generated_frame_index + 1)
+        parent_trim_end_frames = max(0, parent_frame_count - parent_keep_frames)
+        child_trim_start_frames = 1 if child_frame_count > 1 else 0
+
+        stitch_video_segments(
+            [str(parent_path), str(child_path)],
+            str(stitched_path),
+            fps_num=fps.numerator,
+            fps_den=fps.denominator,
+            output_width=output_width,
+            output_height=output_height,
+            trim_start_frames=[0, child_trim_start_frames],
+            trim_end_frames=[parent_trim_end_frames, 0],
+        )
+        stitched_probe = ffprobe_video(str(stitched_path))
+        stitched_gen_id = new_id("gen")
+        display_segment_id = str(extension.get("previousSegmentId") or parent.get("segmentId") or generation.get("segmentId") or "")
+        if not display_segment_id:
+            return
+        output_key = paths.segment_generated(display_segment_id, stitched_gen_id)
+        s3.upload_file(
+            str(stitched_path),
+            settings.assets_bucket,
+            output_key,
+            ExtraArgs={"ContentType": "video/mp4"},
+        )
+
+    finished_at = now_iso()
+    parent_alignment = parent.get("alignment") if isinstance(parent.get("alignment"), dict) else {}
+    parent_timeline_alignment = (
+        parent.get("generationSettings", {}).get("timelineAlignment")
+        if isinstance(parent.get("generationSettings"), dict)
+        and isinstance(parent.get("generationSettings", {}).get("timelineAlignment"), dict)
+        else {}
+    )
+    source_frame_offset = int(
+        parent.get("sourceFrameOffset")
+        or parent_alignment.get("sourceFrameOffset")
+        or parent_timeline_alignment.get("sourceFrameOffset")
+        or 0
+    )
+    model_name = str(
+        generation.get("luma", {}).get("model")
+        or parent.get("luma", {}).get("model")
+        or generation.get("generationSettings", {}).get("model")
+        or parent.get("generationSettings", {}).get("model")
+        or ""
+    )
+    mode_name = str(
+        generation.get("luma", {}).get("mode")
+        or parent.get("luma", {}).get("mode")
+        or generation.get("generationSettings", {}).get("mode")
+        or parent.get("generationSettings", {}).get("mode")
+        or ""
+    )
+    prompt_value = (
+        generation.get("luma", {}).get("prompt")
+        or generation.get("generationSettings", {}).get("prompt")
+        or parent.get("luma", {}).get("prompt")
+        or parent.get("generationSettings", {}).get("prompt")
+    )
+    provider_name = _segment_generation_provider_name(model_name)
+    timeline_alignment = {
+        "sourceFrameOffset": source_frame_offset,
+        "matchedSourceFrame": int(parent_alignment.get("matchedSourceFrame") or 0),
+        "confidence": float(parent_alignment.get("confidence") or 1.0),
+        "strategy": str(parent_alignment.get("strategy") or "extension_chain_stitch"),
+    }
+    stitched_duration_sec = round(float(stitched_probe.get("duration_sec") or 0.0), 3)
+    stitched_frame_count = int(stitched_probe.get("frame_count") or 0)
+    source_segment = next(
+        (segment for segment in task.get("segments", []) if isinstance(segment, dict) and segment.get("segmentId") == display_segment_id),
+        None,
+    )
+    source_segment_duration_sec = float(source_segment.get("durationSec") or 0.0) if isinstance(source_segment, dict) else 0.0
+    source_segment_duration_frames = int(source_segment.get("durationFrames") or 0) if isinstance(source_segment, dict) else 0
+    stitched_generation = {
+        "genId": stitched_gen_id,
+        "segmentId": display_segment_id,
+        "luma": {
+            "provider": provider_name,
+            "model": model_name,
+            "mode": mode_name,
+            "prompt": prompt_value,
+            "negativePrompt": generation.get("luma", {}).get("negativePrompt"),
+            "lumaGenerationId": None,
+        },
+        "status": "complete",
+        "outputKey": output_key,
+        "sourceFirstFrameCaptureKey": parent.get("sourceFirstFrameCaptureKey") or generation.get("sourceFirstFrameCaptureKey"),
+        "requestedDurationSec": round(max(stitched_duration_sec, source_segment_duration_sec), 3),
+        "providerDurationSec": stitched_duration_sec,
+        "sourceFrameOffset": source_frame_offset,
+        "alignment": timeline_alignment,
+        "generationSettings": {
+            "provider": "extension_chain_stitch",
+            "requestedModel": model_name,
+            "model": model_name,
+            "mode": mode_name,
+            "prompt": prompt_value,
+            "parentGenerationId": parent_generation_id,
+            "stitchedFromGenerationId": gen_id,
+            "sourceGeneratedFrameIndex": source_generated_frame_index,
+            "trimStartChildFrames": child_trim_start_frames,
+            "trimEndParentFrames": parent_trim_end_frames,
+            "storedOutput": _video_timing_payload(stitched_probe),
+            "timelineAlignment": timeline_alignment,
+            "timelineConform": {
+                "policy": "source_cfr_resolution",
+                "applied": False,
+                "durationDeltaSec": round(stitched_duration_sec - source_segment_duration_sec, 4),
+                "frameDelta": stitched_frame_count - source_segment_duration_frames,
+            },
+        },
+        "createdAt": finished_at,
+        "updatedAt": finished_at,
+        "finishedAt": finished_at,
+        "processingDurationSec": None,
+        "error": None,
+        "parentGenerationId": parent_generation_id,
+        "extension": {
+            "parentGenerationId": parent_generation_id,
+            "stitchedFromGenerationId": gen_id,
+            "sourceGeneratedFrameIndex": source_generated_frame_index,
+            "continueToRangeEnd": bool(extension.get("continueToRangeEnd")),
+            "createdAt": finished_at,
+        },
+        "chunkRole": "extension_stitched",
+        "isChunkInternal": False,
+    }
+    task.setdefault("segmentGenerations", {})[stitched_gen_id] = stitched_generation
+    generation["isChunkInternal"] = True
+    generation["chunkRole"] = generation.get("chunkRole") or "internal_extension_chunk"
+    generation["extensionStitchedFromGenerationId"] = stitched_gen_id
+    generation["updatedAt"] = finished_at
+    if isinstance(generation.get("extension"), dict):
+        generation["extension"]["stitchedGenerationId"] = stitched_gen_id
+        generation["extension"]["updatedAt"] = finished_at
+    if isinstance(source_segment, dict):
+        source_segment["selectedGenerationId"] = stitched_gen_id
+    _append_task_history_event(
+        task,
+        {
+            "at": finished_at,
+            "event": "extension_generation.stitched",
+            "parentGenerationId": parent_generation_id,
+            "sourceGenerationId": gen_id,
+            "genId": stitched_gen_id,
+            "segmentId": display_segment_id,
+        },
+    )
+    store.save_task(task, merge_on_conflict=True)
+
+
 def _handle_ingest(
     *,
     job: dict[str, Any],
@@ -4907,6 +5137,12 @@ def _handle_segment_generate(
         _advance_chunked_generation_run_after_success(
             store=store,
             asset_store=asset_store,
+            task=latest_task,
+            settings=settings,
+            gen_id=gen_id,
+        )
+        _finalize_extension_chain_generation_after_success(
+            store=store,
             task=latest_task,
             settings=settings,
             gen_id=gen_id,

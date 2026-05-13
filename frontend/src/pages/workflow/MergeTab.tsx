@@ -670,17 +670,6 @@ export default function MergeTab({ ctx }: MergeTabProps) {
         return rightTs - leftTs;
       });
   }, [allSegmentGenerations, selectedExtendGeneration]);
-  const extendMergedExport = useMemo(() => {
-    if (!extendChainGenerations.length) return null;
-    const chainGenerationIds = new Set(extendChainGenerations.map((generation) => generation.genId));
-    return (
-      [...sortedExports]
-        .sort((left, right) => new Date(right.createdAt || 0).getTime() - new Date(left.createdAt || 0).getTime())
-        .find((exportRecord) =>
-          (exportRecord.selectedSegmentGenerationIds ?? []).some((generationId) => chainGenerationIds.has(generationId)),
-        ) ?? null
-    );
-  }, [extendChainGenerations, sortedExports]);
   const extendChainGenerationIds = useMemo(
     () => new Set(extendChainGenerations.map((generation) => generation.genId)),
     [extendChainGenerations],
@@ -1443,33 +1432,6 @@ export default function MergeTab({ ctx }: MergeTabProps) {
                     </div>
                   );
                 })}
-              </div>
-              <div className="rounded-md border border-ink/10 bg-bg p-2">
-                <p className="text-xs font-medium text-ink/75">Merged chain output</p>
-                {extendMergedExport ? (
-                  <div className="mt-1 flex flex-wrap items-center justify-between gap-2">
-                    <p className="text-xs text-ink/70">
-                      {humanizeFilename(keyBasenameFromS3Key(extendMergedExport.outputKey || `${extendMergedExport.exportId}.mp4`))}
-                    </p>
-                    <div className="flex items-center gap-2">
-                      <span className="text-[11px] text-ink/55">{formatCompactTimestamp(extendMergedExport.createdAt)}</span>
-                      {extendMergedExport.downloadUrl ? (
-                        <a
-                          className="rounded border border-ink/20 bg-white px-2.5 py-1.5 text-[11px] text-ink"
-                          href={extendMergedExport.downloadUrl}
-                          target="_blank"
-                          rel="noreferrer"
-                        >
-                          Download
-                        </a>
-                      ) : (
-                        <span className="text-[11px] text-ink/50">Export is still processing</span>
-                      )}
-                    </div>
-                  </div>
-                ) : (
-                  <p className="mt-1 text-xs text-ink/60">No merged export found for this continuation chain yet.</p>
-                )}
               </div>
             </div>
           </div>
