@@ -122,6 +122,8 @@ export type GenerateTabCtx = {
     posterUrl?: string | null;
     segmentStartSec?: number;
     originalIsSegmentClip?: boolean;
+    originalSegmentId?: string;
+    compareGenerationId?: string;
   } | null) => void;
   openVideoCleanupModal: (generation: SegmentGeneration) => void;
   onAssetError: () => void;
@@ -1073,6 +1075,8 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
                       posterUrl: generationThumbnailUrl(gen),
                       segmentStartSec: segmentWindow?.startSec,
                       originalIsSegmentClip: originalPreviewIsSegmentClip,
+                      originalSegmentId: selectedSegmentId ?? undefined,
+                      compareGenerationId: gen.genId,
                     });
                   }}
                 >

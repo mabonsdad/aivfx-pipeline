@@ -862,6 +862,8 @@ export default function App() {
     posterUrl?: string | null;
     segmentStartSec?: number;
     originalIsSegmentClip?: boolean;
+    originalSegmentId?: string;
+    compareGenerationId?: string;
   } | null>(null);
   const [, setReportGraphModal] = useState<{ url: string; label: string } | null>(null);
   const [motionSyncModalExportId, setMotionSyncModalExportId] = useState<string | null>(null);
@@ -3191,11 +3193,11 @@ export default function App() {
   }
 
   const refreshSignedUrlsForTask = useCallback(
-    (taskId: string | null | undefined) => {
+    (taskId: string | null | undefined, options?: { force?: boolean }) => {
       if (!taskId) return;
       const now = Date.now();
       const previous = signedUrlRefreshRef.current.get(taskId) ?? 0;
-      if (now - previous < 15_000) return;
+      if (!options?.force && now - previous < 15_000) return;
       signedUrlRefreshRef.current.set(taskId, now);
       void queryClient.invalidateQueries({ queryKey: ["task", taskId] });
       void queryClient.invalidateQueries({ queryKey: ["task", "report", taskId] });
@@ -3203,6 +3205,32 @@ export default function App() {
     },
     [queryClient],
   );
+
+  useEffect(() => {
+    if (!videoCompareModal || !task) return;
+    const nextOriginalUrl = (() => {
+      if (videoCompareModal.originalSegmentId) {
+        const segment = task.segments.find((item) => item.segmentId === videoCompareModal.originalSegmentId);
+        if (segment?.segmentClipUrl) return segment.segmentClipUrl;
+        return task.video?.editSource?.downloadUrl ?? task.video?.previewSource?.downloadUrl ?? videoCompareModal.originalUrl;
+      }
+      return videoCompareModal.originalUrl;
+    })();
+    const nextCompareUrl =
+      videoCompareModal.compareGenerationId && task.segmentGenerations?.[videoCompareModal.compareGenerationId]?.downloadUrl
+        ? task.segmentGenerations[videoCompareModal.compareGenerationId]?.downloadUrl ?? videoCompareModal.compareUrl
+        : videoCompareModal.compareUrl;
+    if (nextOriginalUrl === videoCompareModal.originalUrl && nextCompareUrl === videoCompareModal.compareUrl) return;
+    setVideoCompareModal((previous) => {
+      if (!previous) return previous;
+      if (previous.originalUrl === nextOriginalUrl && previous.compareUrl === nextCompareUrl) return previous;
+      return {
+        ...previous,
+        originalUrl: nextOriginalUrl,
+        compareUrl: nextCompareUrl,
+      };
+    });
+  }, [task, videoCompareModal]);
 
   useEffect(() => {
     if (!isPageVisible) return;
@@ -4749,6 +4777,8 @@ export default function App() {
           posterUrl: generationThumbnailUrl(generation),
           segmentStartSec: segmentWindow?.startSec,
           originalIsSegmentClip: originalPreviewIsSegmentClip,
+          originalSegmentId: mergeTargetSegment?.segmentId,
+          compareGenerationId: generation.genId,
         });
       },
       canOpenGenerationCompare: Boolean(mergeOriginalVideoForPreview),
@@ -5102,7 +5132,7 @@ export default function App() {
         onCloseVideo={() => setVideoPreviewModal(null)}
         onCloseImageCompare={() => setImageCompareModal(null)}
         onCloseVideoCompare={() => setVideoCompareModal(null)}
-        onMediaError={() => refreshSignedUrlsForTask(selectedTaskId)}
+        onMediaError={() => refreshSignedUrlsForTask(selectedTaskId, { force: true })}
       />
       {automationRunState.isOpen ? (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/55 p-4">
