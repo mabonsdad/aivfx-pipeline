@@ -1346,6 +1346,9 @@ def _finalize_extension_chain_generation_after_success(
     settings: Any,
     gen_id: str,
 ) -> None:
+    def _as_dict(value: Any) -> dict[str, Any]:
+        return value if isinstance(value, dict) else {}
+
     generation = task.get("segmentGenerations", {}).get(gen_id)
     if not isinstance(generation, dict):
         return
@@ -1355,8 +1358,8 @@ def _finalize_extension_chain_generation_after_success(
         return
     if generation.get("chunkRole") == "draft_stitched":
         return
-    extension = generation.get("extension") if isinstance(generation.get("extension"), dict) else None
-    if not isinstance(extension, dict):
+    extension = _as_dict(generation.get("extension"))
+    if not extension:
         return
     parent_generation_id = str(generation.get("parentGenerationId") or extension.get("parentGenerationId") or "")
     if not parent_generation_id or parent_generation_id == gen_id:
@@ -1371,7 +1374,7 @@ def _finalize_extension_chain_generation_after_success(
             item
             for item in task.get("segmentGenerations", {}).values()
             if isinstance(item, dict)
-            and item.get("extension", {}).get("stitchedFromGenerationId") == gen_id
+            and _as_dict(item.get("extension")).get("stitchedFromGenerationId") == gen_id
         ),
         None,
     )
@@ -1443,13 +1446,9 @@ def _finalize_extension_chain_generation_after_success(
         )
 
     finished_at = now_iso()
-    parent_alignment = parent.get("alignment") if isinstance(parent.get("alignment"), dict) else {}
-    parent_timeline_alignment = (
-        parent.get("generationSettings", {}).get("timelineAlignment")
-        if isinstance(parent.get("generationSettings"), dict)
-        and isinstance(parent.get("generationSettings", {}).get("timelineAlignment"), dict)
-        else {}
-    )
+    parent_alignment = _as_dict(parent.get("alignment"))
+    parent_settings = _as_dict(parent.get("generationSettings"))
+    parent_timeline_alignment = _as_dict(parent_settings.get("timelineAlignment"))
     source_frame_offset = int(
         parent.get("sourceFrameOffset")
         or parent_alignment.get("sourceFrameOffset")
@@ -1457,24 +1456,24 @@ def _finalize_extension_chain_generation_after_success(
         or 0
     )
     model_name = str(
-        generation.get("luma", {}).get("model")
-        or parent.get("luma", {}).get("model")
-        or generation.get("generationSettings", {}).get("model")
-        or parent.get("generationSettings", {}).get("model")
+        _as_dict(generation.get("luma")).get("model")
+        or _as_dict(parent.get("luma")).get("model")
+        or _as_dict(generation.get("generationSettings")).get("model")
+        or parent_settings.get("model")
         or ""
     )
     mode_name = str(
-        generation.get("luma", {}).get("mode")
-        or parent.get("luma", {}).get("mode")
-        or generation.get("generationSettings", {}).get("mode")
-        or parent.get("generationSettings", {}).get("mode")
+        _as_dict(generation.get("luma")).get("mode")
+        or _as_dict(parent.get("luma")).get("mode")
+        or _as_dict(generation.get("generationSettings")).get("mode")
+        or parent_settings.get("mode")
         or ""
     )
     prompt_value = (
-        generation.get("luma", {}).get("prompt")
-        or generation.get("generationSettings", {}).get("prompt")
-        or parent.get("luma", {}).get("prompt")
-        or parent.get("generationSettings", {}).get("prompt")
+        _as_dict(generation.get("luma")).get("prompt")
+        or _as_dict(generation.get("generationSettings")).get("prompt")
+        or _as_dict(parent.get("luma")).get("prompt")
+        or parent_settings.get("prompt")
     )
     provider_name = _segment_generation_provider_name(model_name)
     timeline_alignment = {
@@ -1499,7 +1498,7 @@ def _finalize_extension_chain_generation_after_success(
             "model": model_name,
             "mode": mode_name,
             "prompt": prompt_value,
-            "negativePrompt": generation.get("luma", {}).get("negativePrompt"),
+            "negativePrompt": _as_dict(generation.get("luma")).get("negativePrompt"),
             "lumaGenerationId": None,
         },
         "status": "complete",
@@ -1550,9 +1549,10 @@ def _finalize_extension_chain_generation_after_success(
     generation["chunkRole"] = generation.get("chunkRole") or "internal_extension_chunk"
     generation["extensionStitchedFromGenerationId"] = stitched_gen_id
     generation["updatedAt"] = finished_at
-    if isinstance(generation.get("extension"), dict):
-        generation["extension"]["stitchedGenerationId"] = stitched_gen_id
-        generation["extension"]["updatedAt"] = finished_at
+    if extension:
+        extension["stitchedGenerationId"] = stitched_gen_id
+        extension["updatedAt"] = finished_at
+        generation["extension"] = extension
     if isinstance(source_segment, dict):
         source_segment["selectedGenerationId"] = stitched_gen_id
     _append_task_history_event(
@@ -5141,12 +5141,15 @@ def _handle_segment_generate(
             settings=settings,
             gen_id=gen_id,
         )
-        _finalize_extension_chain_generation_after_success(
-            store=store,
-            task=latest_task,
-            settings=settings,
-            gen_id=gen_id,
-        )
+        try:
+            _finalize_extension_chain_generation_after_success(
+                store=store,
+                task=latest_task,
+                settings=settings,
+                gen_id=gen_id,
+            )
+        except Exception:
+            logger.exception("extension_chain_finalize_failed", extra={"taskId": task.get("taskId"), "genId": gen_id})
     store.save_job(job)
     return job
 
