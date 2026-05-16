@@ -189,6 +189,8 @@ const AssetsTab = lazy(() => import("./pages/workflow/AssetsTab"));
 
 const MAX_TRACKED_JOB_IDS = 40;
 const URL_REFRESH_IDLE_MS = 2 * 60 * 1000;
+const MEDIA_ERROR_FORCE_REFRESH_COOLDOWN_MS = 60 * 1000;
+const JOB_TERMINAL_REFRESH_COOLDOWN_MS = 1500;
 const AUTOMATION_CANCELLED = "__automation_cancelled__";
 const SEGMENT_SELECTION_STORAGE_KEY = "aivfx:lastSegmentByTask:v1";
 const VIDEO_WORK_MODE_STORAGE_KEY = "aivfx:videoWorkModeByTask:v1";
@@ -470,6 +472,22 @@ function parsePresignedExpiryMs(url: string): number | null {
   }
 }
 
+function isPresignedUrlNearExpiry(url: string | null | undefined, withinMs = 60_000): boolean {
+  if (!url) return false;
+  const expiryMs = parsePresignedExpiryMs(url);
+  return typeof expiryMs === "number" && expiryMs - Date.now() <= withinMs;
+}
+
+function isLikelyVideoAssetUrl(url: string | null | undefined): boolean {
+  if (!url) return false;
+  try {
+    const pathname = new URL(url).pathname.toLowerCase();
+    return /\.(mp4|mov|m4v|webm|ogv|avi|mkv)$/i.test(pathname);
+  } catch {
+    return false;
+  }
+}
+
 function videoModelDurationConstraints(model: VideoModel): {
   minSeconds?: number;
   maxSeconds: number;
@@ -666,6 +684,7 @@ function MergeTrackStrip({
           {slots.map((slot) => {
             const item = slot.item;
             const inOverlap = overlapMin != null && overlapMax != null && slot.frameIndex >= overlapMin && slot.frameIndex <= overlapMax;
+            const trackTintClass = prefix === "g" ? "bg-cyan-50/70" : "bg-bg";
             const labelFrameIndex =
               labelFrameSource === "source" && typeof item?.sourceFrameIndex === "number"
                 ? item.sourceFrameIndex
@@ -674,7 +693,7 @@ function MergeTrackStrip({
               <div
                 key={`${title}:${slot.frameIndex}`}
                 className={`shrink-0 border-r border-ink/15 ${
-                  inOverlap ? "bg-amber-50" : item ? "bg-bg" : "bg-ink/5"
+                  inOverlap ? "bg-amber-50" : item ? trackTintClass : prefix === "g" ? "bg-cyan-50/40" : "bg-ink/5"
                 } last:border-r-0`}
                 style={{ width: `${itemWidthPx}px` }}
               >
@@ -877,7 +896,13 @@ export default function App() {
     last: null,
   });
   const [imagePreviewModal, setImagePreviewModal] = useState<{ url: string; label: string } | null>(null);
-  const [videoPreviewModal, setVideoPreviewModal] = useState<{ url: string; label: string } | null>(null);
+  const [videoPreviewModal, setVideoPreviewModal] = useState<{
+    url: string;
+    label: string;
+    taskId?: string;
+    generationId?: string;
+  } | null>(null);
+  const [videoPreviewNeedsRefresh, setVideoPreviewNeedsRefresh] = useState(false);
   const [imageCompareModal, setImageCompareModal] = useState<{ originalUrl: string; compareUrl: string; label: string } | null>(null);
   const [videoCompareModal, setVideoCompareModal] = useState<{
     originalUrl: string;
@@ -888,6 +913,7 @@ export default function App() {
     originalIsSegmentClip?: boolean;
     originalSegmentId?: string;
     compareGenerationId?: string;
+    preferGenerationInputMediaAsOriginal?: boolean;
   } | null>(null);
   const [, setReportGraphModal] = useState<{ url: string; label: string } | null>(null);
   const [motionSyncModalExportId, setMotionSyncModalExportId] = useState<string | null>(null);
@@ -965,6 +991,7 @@ export default function App() {
   const patchMaskCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const patchDrawStateRef = useRef<{ tool: PatchToolMode; points: MaskPoint[]; last: MaskPoint | null } | null>(null);
   const signedUrlRefreshRef = useRef<Map<string, number>>(new Map());
+  const mediaErrorRefreshRef = useRef<Map<string, number>>(new Map());
   const pageHiddenAtRef = useRef<number | null>(null);
   const automationCancelRef = useRef(false);
   const defaultSegmentInitRef = useRef<Set<string>>(new Set());
@@ -1180,8 +1207,12 @@ export default function App() {
   );
   const {
     selectedGenIds,
-    temporalFeatherFrames,
-    setTemporalFeatherFrames,
+    mergeFadeInFrames,
+    setMergeFadeInFrames,
+    mergeFadeOutFrames,
+    setMergeFadeOutFrames,
+    mergeSourceRestartFrame,
+    setMergeSourceRestartFrame,
     mergeInsertStartFrame,
     setMergeInsertStartFrame,
     mergeTrimStartFrames,
@@ -1763,7 +1794,6 @@ export default function App() {
       };
     }) => apiClient.deleteAsset(taskId, payload),
     onSuccess: async (_result, variables) => {
-      await queryClient.invalidateQueries({ queryKey: ["tasks"] });
       await queryClient.invalidateQueries({ queryKey: ["task", variables.taskId] });
       await queryClient.invalidateQueries({ queryKey: ["task", "assets", variables.taskId] });
     },
@@ -1773,7 +1803,6 @@ export default function App() {
     onSuccess: async (_result, variables) => {
       setJobIds((previous) => appendTrackedJobId(previous, variables.jobId));
       await queryClient.invalidateQueries({ queryKey: ["job", variables.jobId] });
-      await queryClient.invalidateQueries({ queryKey: ["tasks"] });
       if (selectedTaskId) {
         await queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
         await queryClient.invalidateQueries({ queryKey: ["task", "report", selectedTaskId] });
@@ -2247,6 +2276,7 @@ export default function App() {
         mergeTargetGeneration && selectedGenIds.includes(mergeTargetGeneration.genId)
           ? {
               startFrameOverride: mergeInsertStartFrameEffective,
+              sourceRestartFrame: mergeSourceRestartFrameEffective,
               trimStartFrames: mergeTrimStartUserClamped,
               trimEndFrames: mergeTrimEndClamped,
               playbackRate: mergeApplyRetime ? mergePlaybackRate : undefined,
@@ -2261,7 +2291,8 @@ export default function App() {
           : undefined;
       return apiClient.merge(selectedTaskId, {
         selectedSegmentGenerationIds: selectedGenIds,
-        temporalFeatherFrames: mergeFeatherClamped,
+        temporalFeatherStartFrames: mergeFadeInClamped,
+        temporalFeatherEndFrames: mergeFadeOutClamped,
         generationAdjustments,
       });
     },
@@ -2386,27 +2417,31 @@ export default function App() {
   });
 
   const taskTrackedJobIds = useMemo(() => {
+    const isActiveStatus = (status: string | null | undefined) => status === "queued" || status === "running";
     const ids: string[] = [];
     for (const generation of Object.values(task?.segmentGenerations ?? {})) {
-      if (generation.jobId) ids.push(generation.jobId);
+      if (generation.jobId && isActiveStatus(generation.status)) ids.push(generation.jobId);
       const mergeSuggestionJobId = generation.mergeAlignmentSuggestion?.jobId;
-      if (mergeSuggestionJobId) ids.push(mergeSuggestionJobId);
+      if (mergeSuggestionJobId && isActiveStatus(generation.mergeAlignmentSuggestion?.status)) ids.push(mergeSuggestionJobId);
       const reconcileJobId = generation.timingReconcile?.jobId;
-      if (reconcileJobId) ids.push(reconcileJobId);
+      if (reconcileJobId && isActiveStatus(generation.timingReconcile?.status)) ids.push(reconcileJobId);
     }
     for (const run of task?.chunkedGenerationRuns ?? []) {
+      if (run.saveJobId && isActiveStatus(run.saveStatus)) {
+        ids.push(run.saveJobId);
+      }
       for (const chunk of run.chunks ?? []) {
-        if (chunk.jobId) ids.push(chunk.jobId);
+        if (chunk.jobId && isActiveStatus(chunk.status)) ids.push(chunk.jobId);
       }
     }
     for (const report of task?.customReports ?? []) {
-      if (report.jobId) ids.push(report.jobId);
+      if (report.jobId && isActiveStatus(report.status)) ids.push(report.jobId);
     }
     for (const exportItem of task?.exports ?? []) {
       const motionJobId = exportItem.motionSyncQc?.jobId;
-      if (motionJobId) ids.push(motionJobId);
+      if (motionJobId && isActiveStatus(exportItem.motionSyncQc?.status)) ids.push(motionJobId);
       const topazJobId = exportItem.topazUpscale?.jobId;
-      if (topazJobId) ids.push(topazJobId);
+      if (topazJobId && isActiveStatus(exportItem.topazUpscale?.status)) ids.push(topazJobId);
     }
     return ids;
   }, [task?.chunkedGenerationRuns, task?.customReports, task?.exports, task?.segmentGenerations]);
@@ -2416,6 +2451,13 @@ export default function App() {
     [jobIds, taskTrackedJobIds],
   );
 
+  const jobPollingIntervalMs = useMemo(() => {
+    const activeCount = trackedJobIds.length;
+    if (activeCount <= 3) return 3000;
+    if (activeCount <= 8) return 4500;
+    return 6000;
+  }, [trackedJobIds.length]);
+
   const jobQueries = useQueries({
     queries: trackedJobIds.map((jobId) => ({
       queryKey: ["job", jobId],
@@ -2423,7 +2465,7 @@ export default function App() {
       refetchInterval: (q: { state: { data?: { status?: string } } }) => {
         if (!isPageVisible) return false;
         const status = q?.state?.data?.status;
-        return status === "queued" || status === "running" ? 3000 : false;
+        return status === "queued" || status === "running" ? jobPollingIntervalMs : false;
       },
       staleTime: 10_000,
       refetchOnWindowFocus: false as const,
@@ -2458,6 +2500,19 @@ export default function App() {
     return statuses;
   }, [jobQueries]);
 
+  useEffect(() => {
+    setJobIds((previous) => {
+      const next = previous.filter((jobId) => {
+        const status = jobStatusById.get(jobId);
+        return status == null || status === "queued" || status === "running";
+      });
+      if (next.length === previous.length && next.every((jobId, index) => previous[index] === jobId)) {
+        return previous;
+      }
+      return next;
+    });
+  }, [jobStatusById]);
+
   const isSuggestingMergeAlignment = useMemo(() => {
     if (suggestMergeAlignmentMutation.isPending) return true;
     if (!mergeAlignmentSuggestionJobId) return false;
@@ -2473,6 +2528,7 @@ export default function App() {
   }, [jobStatusById, reconcileTimingJob?.status, reconcileTimingJobId, reconcileTimingMutation.isPending]);
 
   const seenDoneRef = useRef<Set<string>>(new Set());
+  const terminalRefreshAtRef = useRef(0);
   useEffect(() => {
     let foundFreshTerminal = false;
     for (const jq of jobQueries) {
@@ -2484,23 +2540,27 @@ export default function App() {
       }
     }
     if (!foundFreshTerminal) return;
-    void queryClient.invalidateQueries({ queryKey: ["tasks"] });
+    const now = Date.now();
+    if (now - terminalRefreshAtRef.current < JOB_TERMINAL_REFRESH_COOLDOWN_MS) return;
+    terminalRefreshAtRef.current = now;
     if (selectedTaskId) {
       void queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
-      void queryClient.invalidateQueries({ queryKey: ["task", "report", selectedTaskId] });
-      void queryClient.invalidateQueries({ queryKey: ["task", "assets", selectedTaskId] });
+      if (isReportTab) {
+        void queryClient.invalidateQueries({ queryKey: ["task", "report", selectedTaskId] });
+      }
     }
     if (reportTaskId && reportTaskId !== selectedTaskId) {
       void queryClient.invalidateQueries({ queryKey: ["task", reportTaskId] });
-      void queryClient.invalidateQueries({ queryKey: ["task", "report", reportTaskId] });
-      void queryClient.invalidateQueries({ queryKey: ["task", "assets", reportTaskId] });
+      if (isReportTab) {
+        void queryClient.invalidateQueries({ queryKey: ["task", "report", reportTaskId] });
+      }
     }
     while (seenDoneRef.current.size > MAX_TRACKED_JOB_IDS * 5) {
       const oldest = seenDoneRef.current.values().next().value as string | undefined;
       if (!oldest) break;
       seenDoneRef.current.delete(oldest);
     }
-  }, [jobQueries, queryClient, reportTaskId, selectedTaskId]);
+  }, [isReportTab, jobQueries, queryClient, reportTaskId, selectedTaskId]);
 
   useEffect(() => {
     if (jobIds.length <= MAX_TRACKED_JOB_IDS) return;
@@ -2671,9 +2731,21 @@ export default function App() {
   const mergeEffectiveEndFrameExclusive = mergeInsertStartFrameEffective + mergeEffectiveDurationFrames;
   const mergeEffectiveEndFrameInclusive = Math.max(mergeInsertStartFrameEffective, mergeEffectiveEndFrameExclusive - 1);
   const mergeEndOffsetFrames = mergeEffectiveEndFrameExclusive - mergeOriginalEndFrameExclusive;
+  const mergeSourceRestartFrameLowerBound = Math.max(0, mergeInsertStartFrameEffective + 1);
+  const mergeSourceRestartFrameUpperBound = mergeMaxFrameIndex + 1;
+  const mergeSourceRestartFrameEffective = clampInteger(
+    mergeSourceRestartFrame,
+    mergeSourceRestartFrameLowerBound,
+    mergeSourceRestartFrameUpperBound,
+  );
   const mergeGeneratedStartAnchor = 0;
   const mergeGeneratedEndAnchor = Math.max(0, mergeEffectiveDurationFrames - 1);
-  const mergeFeatherClamped = clampInteger(temporalFeatherFrames, 0, 30);
+  const mergeFadeInClamped = clampInteger(mergeFadeInFrames, 0, 30);
+  const mergeFadeOutClamped = clampInteger(
+    mergeFadeOutFrames,
+    0,
+    Math.min(30, mergeEffectiveDurationFrames, mergeSourceRestartFrameEffective),
+  );
   const mergeOriginalVideoForPreview = task?.video?.previewSource?.downloadUrl ?? task?.video?.editSource?.downloadUrl ?? null;
   const mergeGeneratedVideoForPreview = mergeTargetGeneration?.downloadUrl ?? null;
   const mergeSourceWidth = task?.video?.editSource?.width ?? task?.video?.previewSource?.width ?? 0;
@@ -2686,8 +2758,8 @@ export default function App() {
     [mergeInsertStartFrameEffective, mergeMaxFrameIndex],
   );
   const endBoundaryOriginalFrames = useMemo(
-    () => frameWindow(mergeEffectiveEndFrameExclusive, 3, 3, 0, mergeMaxFrameIndex),
-    [mergeEffectiveEndFrameExclusive, mergeMaxFrameIndex],
+    () => frameWindow(Math.min(mergeSourceRestartFrameEffective, mergeMaxFrameIndex), 3, 3, 0, mergeMaxFrameIndex),
+    [mergeMaxFrameIndex, mergeSourceRestartFrameEffective],
   );
   const generatedMaxFrameIndex = Math.max(0, mergeEffectiveDurationFrames - 1);
   const startBoundaryGeneratedFrames = useMemo(
@@ -3217,40 +3289,96 @@ export default function App() {
   }
 
   const refreshSignedUrlsForTask = useCallback(
-    (taskId: string | null | undefined, options?: { force?: boolean }) => {
+    (taskId: string | null | undefined, options?: { force?: boolean; includeReport?: boolean; includeAssets?: boolean }) => {
       if (!taskId) return;
       const now = Date.now();
       const previous = signedUrlRefreshRef.current.get(taskId) ?? 0;
       if (!options?.force && now - previous < 15_000) return;
       signedUrlRefreshRef.current.set(taskId, now);
       void queryClient.invalidateQueries({ queryKey: ["task", taskId] });
-      void queryClient.invalidateQueries({ queryKey: ["task", "report", taskId] });
-      void queryClient.invalidateQueries({ queryKey: ["task", "assets", taskId] });
+      if (options?.includeReport) {
+        void queryClient.invalidateQueries({ queryKey: ["task", "report", taskId] });
+      }
+      if (options?.includeAssets) {
+        void queryClient.invalidateQueries({ queryKey: ["task", "assets", taskId] });
+      }
     },
     [queryClient],
   );
 
   const handleMediaAssetError = useCallback(
     (url?: string) => {
-      if (!selectedTaskId) return;
+      if (!selectedTaskId || !url) return;
       const expiryMs = typeof url === "string" && url ? parsePresignedExpiryMs(url) : null;
       const nearExpiry = typeof expiryMs === "number" && expiryMs - Date.now() <= 60_000;
-      refreshSignedUrlsForTask(selectedTaskId, { force: nearExpiry });
+      const isPresigned = typeof url === "string" && /[?&]X-Amz-Algorithm=AWS4-HMAC-SHA256/i.test(url);
+      const shouldForce = nearExpiry || isPresigned;
+      if (!shouldForce) return;
+      if (shouldForce) {
+        const now = Date.now();
+        const throttleKey = `${selectedTaskId}:${url}`;
+        const previous = mediaErrorRefreshRef.current.get(throttleKey) ?? 0;
+        if (now - previous < MEDIA_ERROR_FORCE_REFRESH_COOLDOWN_MS) {
+          return;
+        }
+        mediaErrorRefreshRef.current.set(throttleKey, now);
+      }
+      refreshSignedUrlsForTask(selectedTaskId, { force: shouldForce, includeReport: isReportTab });
     },
-    [refreshSignedUrlsForTask, selectedTaskId],
+    [isReportTab, refreshSignedUrlsForTask, selectedTaskId],
+  );
+
+  const handlePreviewModalMediaError = useCallback(
+    (url?: string) => {
+      handleMediaAssetError(url);
+      if (!videoPreviewModal?.generationId) return;
+      if (url && url !== videoPreviewModal.url) return;
+      setVideoPreviewNeedsRefresh(true);
+    },
+    [handleMediaAssetError, videoPreviewModal],
   );
 
   useEffect(() => {
+    setVideoPreviewNeedsRefresh(false);
+  }, [videoPreviewModal?.url]);
+
+  useEffect(() => {
+    if (!videoPreviewNeedsRefresh) return;
+    if (!videoPreviewModal?.generationId || !task) return;
+    if (videoPreviewModal.taskId && task.taskId !== videoPreviewModal.taskId) return;
+    const refreshedUrl = task.segmentGenerations?.[videoPreviewModal.generationId]?.downloadUrl;
+    if (!refreshedUrl || refreshedUrl === videoPreviewModal.url) return;
+    setVideoPreviewModal((previous) => {
+      if (!previous || previous.generationId !== videoPreviewModal.generationId) return previous;
+      if (previous.url === refreshedUrl) return previous;
+      return { ...previous, url: refreshedUrl };
+    });
+    setVideoPreviewNeedsRefresh(false);
+  }, [task, videoPreviewModal, videoPreviewNeedsRefresh]);
+
+  useEffect(() => {
     if (!videoCompareModal || !task) return;
+    const shouldRefreshOriginal = isPresignedUrlNearExpiry(videoCompareModal.originalUrl);
+    const shouldRefreshCompare = isPresignedUrlNearExpiry(videoCompareModal.compareUrl);
+    if (!shouldRefreshOriginal && !shouldRefreshCompare) return;
+
     const nextOriginalUrl = (() => {
-      if (videoCompareModal.originalSegmentId) {
+      if (
+        shouldRefreshOriginal &&
+        videoCompareModal.preferGenerationInputMediaAsOriginal &&
+        videoCompareModal.compareGenerationId
+      ) {
+        const generation = task.segmentGenerations?.[videoCompareModal.compareGenerationId];
+        if (isLikelyVideoAssetUrl(generation?.inputMediaUrl)) return generation?.inputMediaUrl ?? videoCompareModal.originalUrl;
+      }
+      if (shouldRefreshOriginal && videoCompareModal.originalSegmentId) {
         const segment = task.segments.find((item) => item.segmentId === videoCompareModal.originalSegmentId);
         if (segment?.segmentClipUrl) return segment.segmentClipUrl;
         return task.video?.editSource?.downloadUrl ?? task.video?.previewSource?.downloadUrl ?? videoCompareModal.originalUrl;
       }
       return videoCompareModal.originalUrl;
     })();
-    const nextCompareUrl =
+    const nextCompareUrl = shouldRefreshCompare &&
       videoCompareModal.compareGenerationId && task.segmentGenerations?.[videoCompareModal.compareGenerationId]?.downloadUrl
         ? task.segmentGenerations[videoCompareModal.compareGenerationId]?.downloadUrl ?? videoCompareModal.compareUrl
         : videoCompareModal.compareUrl;
@@ -3267,21 +3395,19 @@ export default function App() {
   }, [task, videoCompareModal]);
 
   useEffect(() => {
-    if (!isPageVisible) return;
-    const hiddenAt = pageHiddenAtRef.current;
-    if (hiddenAt && Date.now() - hiddenAt < URL_REFRESH_IDLE_MS) return;
-    refreshSignedUrlsForTask(selectedTaskId);
-    if (reportTaskId && reportTaskId !== selectedTaskId) {
-      refreshSignedUrlsForTask(reportTaskId);
-    }
-  }, [isPageVisible, refreshSignedUrlsForTask, reportTaskId, selectedTaskId]);
-
-  useEffect(() => {
     if (isPageVisible) {
+      const hiddenAt = pageHiddenAtRef.current;
+      pageHiddenAtRef.current = null;
+      if (!hiddenAt) return;
+      if (Date.now() - hiddenAt < URL_REFRESH_IDLE_MS) return;
+      refreshSignedUrlsForTask(selectedTaskId, { includeReport: isReportTab });
+      if (reportTaskId && reportTaskId !== selectedTaskId) {
+        refreshSignedUrlsForTask(reportTaskId, { includeReport: isReportTab });
+      }
       return;
     }
     pageHiddenAtRef.current = Date.now();
-  }, [isPageVisible]);
+  }, [isPageVisible, isReportTab, refreshSignedUrlsForTask, reportTaskId, selectedTaskId]);
 
   const openNewTaskWithAutomationDefaults = useCallback(() => {
     setAutomationEnabled(false);
@@ -4633,7 +4759,7 @@ export default function App() {
       setVideoPreviewModal,
       setVideoCompareModal,
       openVideoCleanupModal: openVideoCleanupModalForGeneration,
-      onAssetError: () => refreshSignedUrlsForTask(selectedTaskId),
+      onAssetError: handleMediaAssetError,
       handleDeleteAsset,
       setGenerationCardsVisible,
     }),
@@ -4740,8 +4866,12 @@ export default function App() {
       setMergeTrimStartFrames,
       mergeTrimEndFrames,
       setMergeTrimEndFrames,
-      temporalFeatherFrames,
-      setTemporalFeatherFrames,
+      mergeFadeInFrames,
+      setMergeFadeInFrames,
+      mergeFadeOutFrames,
+      setMergeFadeOutFrames,
+      mergeSourceRestartFrame,
+      setMergeSourceRestartFrame,
       mergeOriginalStartFrame,
       mergeOriginalEndFrameExclusive,
       mergeOriginalDurationFrames,
@@ -4755,9 +4885,13 @@ export default function App() {
       mergeEffectiveEndFrameExclusive,
       mergeEffectiveEndFrameInclusive,
       mergeEndOffsetFrames,
+      mergeSourceRestartFrameLowerBound,
+      mergeSourceRestartFrameUpperBound,
+      mergeSourceRestartFrameEffective,
       mergeGeneratedStartAnchor,
       mergeGeneratedMaxFrameIndex: generatedMaxFrameIndex,
-      mergeFeatherClamped,
+      mergeFadeInClamped,
+      mergeFadeOutClamped,
       mergeTrimStartFramesEffective: mergeTrimStartClamped,
       mergeOriginalVideoForPreview,
       mergeGeneratedVideoForPreview,
@@ -4800,19 +4934,27 @@ export default function App() {
       generationThumbnailUrl,
       openGenerationPreview: (generation) => {
         if (!generation.downloadUrl) return;
-        setVideoPreviewModal({ url: generation.downloadUrl, label: describeGeneration(generation) });
+        setVideoPreviewModal({
+          url: generation.downloadUrl,
+          label: describeGeneration(generation),
+          taskId: task?.taskId,
+          generationId: generation.genId,
+        });
       },
       openGenerationCompare: (generation) => {
-        if (!mergeOriginalVideoForPreview || !generation.downloadUrl) return;
+        const shouldUseInputVideo = isLikelyVideoAssetUrl(generation.inputMediaUrl);
+        const originalUrl = shouldUseInputVideo ? generation.inputMediaUrl ?? mergeOriginalVideoForPreview : mergeOriginalVideoForPreview;
+        if (!originalUrl || !generation.downloadUrl) return;
         setVideoCompareModal({
-          originalUrl: mergeOriginalVideoForPreview,
+          originalUrl,
           compareUrl: generation.downloadUrl,
           label: describeGeneration(generation),
           posterUrl: generationThumbnailUrl(generation),
           segmentStartSec: segmentWindow?.startSec,
-          originalIsSegmentClip: originalPreviewIsSegmentClip,
-          originalSegmentId: mergeTargetSegment?.segmentId,
+          originalIsSegmentClip: shouldUseInputVideo || originalPreviewIsSegmentClip,
+          originalSegmentId: shouldUseInputVideo ? undefined : mergeTargetSegment?.segmentId,
           compareGenerationId: generation.genId,
+          preferGenerationInputMediaAsOriginal: shouldUseInputVideo,
         });
       },
       canOpenGenerationCompare: Boolean(mergeOriginalVideoForPreview),
@@ -4830,7 +4972,7 @@ export default function App() {
           deletePayload: { assetType: "segment_generation", genId: generation.genId },
         });
       },
-      onAssetError: () => refreshSignedUrlsForTask(selectedTaskId),
+      onAssetError: handleMediaAssetError,
       openMotionSyncModal,
       queueTopazUpscale: (exportId, payload) => {
         runTopazUpscaleMutation.mutate({ exportId, payload });
@@ -4862,7 +5004,9 @@ export default function App() {
       mergeGeneratedDurationFrames,
       mergeTrimStartFrames,
       mergeTrimEndFrames,
-      temporalFeatherFrames,
+      mergeFadeInFrames,
+      mergeFadeOutFrames,
+      mergeSourceRestartFrame,
       mergeOriginalStartFrame,
       mergeOriginalEndFrameExclusive,
       mergeOriginalDurationFrames,
@@ -4875,9 +5019,13 @@ export default function App() {
       mergeEffectiveEndFrameExclusive,
       mergeEffectiveEndFrameInclusive,
       mergeEndOffsetFrames,
+      mergeSourceRestartFrameLowerBound,
+      mergeSourceRestartFrameUpperBound,
+      mergeSourceRestartFrameEffective,
       mergeGeneratedStartAnchor,
       generatedMaxFrameIndex,
-      mergeFeatherClamped,
+      mergeFadeInClamped,
+      mergeFadeOutClamped,
       mergeTrimStartClamped,
       mergeOriginalVideoForPreview,
       mergeGeneratedVideoForPreview,
@@ -5166,7 +5314,7 @@ export default function App() {
         onCloseVideo={() => setVideoPreviewModal(null)}
         onCloseImageCompare={() => setImageCompareModal(null)}
         onCloseVideoCompare={() => setVideoCompareModal(null)}
-        onMediaError={handleMediaAssetError}
+        onMediaError={handlePreviewModalMediaError}
       />
       {automationRunState.isOpen ? (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/55 p-4">

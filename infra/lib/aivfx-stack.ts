@@ -265,8 +265,8 @@ export class AivfxStack extends cdk.Stack {
       stageName: "$default",
       autoDeploy: true,
       defaultRouteSettings: {
-        throttlingBurstLimit: 30,
-        throttlingRateLimit: 10,
+        throttlingBurstLimit: 100,
+        throttlingRateLimit: 50,
       },
     });
 

@@ -24,6 +24,8 @@ Use this checklist after deploys and before large refactors.
 5. **Generate**
    - Generate one segment video from edited start input.
    - Confirm job completes and generation appears in outputs.
+   - Open generation preview and compare once, then switch away and back to the step.
+   - Confirm preview playback still opens and output thumbnails do not visibly reload on each tab change.
 6. **Merge**
    - Confirm **Current Working References** has a completed generation selected.
    - Open **Extend generation** and confirm there is no "Previous output" dropdown.

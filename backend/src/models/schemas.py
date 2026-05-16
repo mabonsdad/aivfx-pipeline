@@ -392,6 +392,7 @@ class ApiReferenceVideoGenerateRequest(BaseModel):
 
 class MergeGenerationAdjustment(BaseModel):
     startFrameOverride: int | None = Field(default=None, ge=0)
+    sourceRestartFrame: int | None = Field(default=None, ge=0)
     trimStartFrames: int = Field(default=0, ge=0)
     trimEndFrames: int = Field(default=0, ge=0)
     playbackRate: float | None = Field(default=None, gt=0.05, le=20.0)
@@ -413,7 +414,9 @@ class CropEdgeFeatherRequest(BaseModel):
 
 class MergeRequest(BaseModel):
     selectedSegmentGenerationIds: list[str]
-    temporalFeatherFrames: int = Field(ge=0, le=30, default=0)
+    temporalFeatherFrames: int | None = Field(default=None, ge=0, le=30)
+    temporalFeatherStartFrames: int | None = Field(default=None, ge=0, le=30)
+    temporalFeatherEndFrames: int | None = Field(default=None, ge=0, le=30)
     generationAdjustments: dict[str, MergeGenerationAdjustment] | None = None
 
 

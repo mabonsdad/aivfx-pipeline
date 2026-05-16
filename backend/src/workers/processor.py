@@ -1183,7 +1183,10 @@ def _handle_chunked_generation_finalize(
     output_height = int(task.get("video", {}).get("editSource", {}).get("height") or 0)
     if output_width <= 0 or output_height <= 0:
         raise RuntimeError("Source video dimensions are unavailable for stitched draft")
-    fps = _fps(task)
+    source_fps = task.get("video", {}).get("editSource", {}).get("fps", {}) if isinstance(task.get("video"), dict) else {}
+    fps_num = int(source_fps.get("num") or 24)
+    fps_den = int(source_fps.get("den") or 1)
+    fps = Fraction(fps_num, fps_den)
     s3 = boto3.client("s3")
     paths = _asset_paths(task)
     with tempfile.TemporaryDirectory() as td:
@@ -1395,7 +1398,10 @@ def _finalize_extension_chain_generation_after_success(
     output_height = int(task.get("video", {}).get("editSource", {}).get("height") or 0)
     if output_width <= 0 or output_height <= 0:
         return
-    fps = _fps(task)
+    source_fps = task.get("video", {}).get("editSource", {}).get("fps", {}) if isinstance(task.get("video"), dict) else {}
+    fps_num = int(source_fps.get("num") or 24)
+    fps_den = int(source_fps.get("den") or 1)
+    fps = Fraction(fps_num, fps_den)
     s3 = boto3.client("s3")
     paths = _asset_paths(task)
     with tempfile.TemporaryDirectory() as td:
@@ -5120,7 +5126,6 @@ def _handle_segment_generate(
             "outputKey": out_key,
         },
     )
-    _job_progress(job, store, 100, "complete", "Segment generation complete")
     job["resultRefs"] = {
         "genId": gen_id,
         "segmentId": segment_id,
@@ -5132,6 +5137,14 @@ def _handle_segment_generate(
         "finishedAt": gen_meta.get("finishedAt"),
         "processingDurationSec": processing_duration_sec,
     }
+    final_generation_id = gen_id
+    final_output_key = out_key
+    final_segment_id = segment_id
+    final_provider = provider_name
+    final_model = model_name
+    final_mode = requested_mode
+
+    _job_progress(job, store, 96, "running", "Finalizing generated output")
     latest_task = store.load_task(task["userId"], task["taskId"])
     if isinstance(latest_task, dict):
         _advance_chunked_generation_run_after_success(
@@ -5150,6 +5163,34 @@ def _handle_segment_generate(
             )
         except Exception:
             logger.exception("extension_chain_finalize_failed", extra={"taskId": task.get("taskId"), "genId": gen_id})
+        latest_generation = latest_task.get("segmentGenerations", {}).get(gen_id)
+        if isinstance(latest_generation, dict):
+            stitched_generation_id = str(latest_generation.get("extensionStitchedFromGenerationId") or "")
+            if stitched_generation_id:
+                stitched_generation = latest_task.get("segmentGenerations", {}).get(stitched_generation_id)
+                if isinstance(stitched_generation, dict):
+                    final_generation_id = stitched_generation_id
+                    final_segment_id = str(stitched_generation.get("segmentId") or final_segment_id)
+                    final_output_key = str(stitched_generation.get("outputKey") or final_output_key)
+                    stitched_luma = stitched_generation.get("luma") if isinstance(stitched_generation.get("luma"), dict) else {}
+                    final_provider = str(stitched_luma.get("provider") or final_provider)
+                    final_model = str(stitched_luma.get("model") or final_model)
+                    final_mode = str(stitched_luma.get("mode") or final_mode)
+                    job["resultRefs"]["sourceGenId"] = gen_id
+                    job["resultRefs"]["stitchedGenId"] = stitched_generation_id
+                    job["resultRefs"]["stitchedOutputKey"] = final_output_key
+
+    job["resultRefs"].update(
+        {
+            "genId": final_generation_id,
+            "segmentId": final_segment_id,
+            "outputKey": final_output_key,
+            "provider": final_provider,
+            "model": final_model,
+            "mode": final_mode,
+        }
+    )
+    _job_progress(job, store, 100, "complete", "Segment generation complete")
     store.save_job(job)
     return job
 
@@ -5172,7 +5213,11 @@ def _handle_merge(
         selected = []
     if not selected:
         raise RuntimeError("No valid selectedSegmentGenerationIds provided for merge")
-    feather_frames = int(payload.get("temporalFeatherFrames", 0))
+    feather_frames_shared = int(payload.get("temporalFeatherFrames", 0) or 0)
+    feather_start_frames = int(payload.get("temporalFeatherStartFrames", feather_frames_shared) or 0)
+    feather_end_frames = int(payload.get("temporalFeatherEndFrames", feather_frames_shared) or 0)
+    feather_start_frames = max(0, min(30, feather_start_frames))
+    feather_end_frames = max(0, min(30, feather_end_frames))
     raw_adjustments = payload.get("generationAdjustments") or {}
     adjustments: dict[str, dict[str, Any]] = {}
     if isinstance(raw_adjustments, dict):
@@ -5267,6 +5312,11 @@ def _handle_merge(
                 if total_frames > 0:
                     start_frame_override = min(start_frame_override, total_frames - 1)
             merge_start_frame = int(start_frame_override)
+            source_restart_frame = raw_adjustment.get("sourceRestartFrame")
+            if source_restart_frame is not None:
+                source_restart_frame = max(0, int(source_restart_frame))
+                if total_frames > 0:
+                    source_restart_frame = min(source_restart_frame, total_frames)
             effective_trim_start = trim_start_frames
             effective_trim_end = trim_end_frames
             merge_segment_path = seg_path
@@ -5344,8 +5394,10 @@ def _handle_merge(
                 fps_den=task["video"]["editSource"]["fps"]["den"],
                 output_width=int(task["video"]["editSource"]["width"]),
                 output_height=int(task["video"]["editSource"]["height"]),
-                temporal_feather_frames=feather_frames,
+                temporal_feather_start_frames=feather_start_frames,
+                temporal_feather_end_frames=feather_end_frames,
                 insert_start_frame=start_frame_override,
+                source_restart_frame=source_restart_frame,
                 generated_trim_start_frames=effective_trim_start,
                 generated_trim_end_frames=effective_trim_end,
             )
@@ -5356,6 +5408,7 @@ def _handle_merge(
                     "sourceFrameOffset": source_frame_offset,
                     "startFrameOverride": start_frame_override,
                     "effectiveInsertStartFrame": merge_start_frame,
+                    "sourceRestartFrame": source_restart_frame,
                     "trimStartFrames": trim_start_frames,
                     "trimEndFrames": trim_end_frames,
                     "effectiveTrimStartFrames": effective_trim_start,
@@ -5384,7 +5437,9 @@ def _handle_merge(
             "exportId": export_id,
             "outputKey": export_key,
             "selectedSegmentGenerationIds": selected,
-            "temporalFeatherFrames": feather_frames,
+            "temporalFeatherFrames": max(feather_start_frames, feather_end_frames),
+            "temporalFeatherStartFrames": feather_start_frames,
+            "temporalFeatherEndFrames": feather_end_frames,
             "createdAt": now_iso(),
             "ffmpegCommands": applied,
         }

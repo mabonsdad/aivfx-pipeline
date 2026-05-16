@@ -9,21 +9,28 @@ const ACTIVE_TASK_POLL_MS = 3000;
 
 function hasActiveTaskWork(task: TaskDetail | undefined): boolean {
   if (!task) return false;
+  const isActiveJobStatus = (status: string | undefined | null) => status === "queued" || status === "running";
   for (const generation of Object.values(task.segmentGenerations ?? {})) {
-    if (generation.status === "queued" || generation.status === "running") return true;
+    if (isActiveJobStatus(generation.status)) return true;
   }
   for (const run of task.chunkedGenerationRuns ?? []) {
-    if (run.status === "created" || run.status === "running") return true;
+    if (run.status === "running") return true;
+    if (isActiveJobStatus(run.saveStatus)) return true;
+    for (const chunk of run.chunks ?? []) {
+      if (isActiveJobStatus(chunk.status)) return true;
+    }
   }
   for (const track of task.videoCleanupTracks ?? []) {
     if (["created", "preparing", "tracking", "applying"].includes(track.status)) return true;
   }
   for (const report of task.customReports ?? []) {
-    if (report.status === "queued" || report.status === "running") return true;
+    if (isActiveJobStatus(report.status)) return true;
   }
   for (const exportItem of task.exports ?? []) {
     const motionSyncStatus = exportItem.motionSyncQc?.status;
-    if (motionSyncStatus === "queued" || motionSyncStatus === "running") return true;
+    if (isActiveJobStatus(motionSyncStatus)) return true;
+    const topazStatus = exportItem.topazUpscale?.status;
+    if (isActiveJobStatus(topazStatus)) return true;
   }
   return false;
 }

@@ -89,6 +89,18 @@ function extractApiErrorMessage(payload: unknown, fallback: string): string {
   return fallback;
 }
 
+export class ApiError extends Error {
+  status: number;
+  path: string;
+
+  constructor(message: string, status: number, path: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.path = path;
+  }
+}
+
 async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const token = await getIdToken();
   if (!token) {
@@ -106,7 +118,11 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
 
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(extractApiErrorMessage(payload, `Request failed: ${response.status}`));
+    throw new ApiError(
+      extractApiErrorMessage(payload, `Request failed: ${response.status}`),
+      response.status,
+      path,
+    );
   }
   return payload as T;
 }

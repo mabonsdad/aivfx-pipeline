@@ -130,13 +130,16 @@ class MergeGenerationAdjustmentPayload(TypedDict):
     trimStartFrames: int
     trimEndFrames: int
     startFrameOverride: NotRequired[int | None]
+    sourceRestartFrame: NotRequired[int | None]
     playbackRate: NotRequired[float | None]
     cropEdgeFeather: NotRequired[CropEdgeFeatherPayload | None]
 
 
 class MergePayload(TypedDict):
     selectedSegmentGenerationIds: list[str]
-    temporalFeatherFrames: int
+    temporalFeatherFrames: NotRequired[int | None]
+    temporalFeatherStartFrames: NotRequired[int | None]
+    temporalFeatherEndFrames: NotRequired[int | None]
     generationAdjustments: NotRequired[dict[str, MergeGenerationAdjustmentPayload] | None]
 
 

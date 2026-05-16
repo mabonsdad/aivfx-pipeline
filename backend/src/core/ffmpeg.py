@@ -675,8 +675,10 @@ def merge_with_segment_replacement(
     fps_den: int,
     output_width: int,
     output_height: int,
-    temporal_feather_frames: int,
+    temporal_feather_start_frames: int,
+    temporal_feather_end_frames: int,
     insert_start_frame: int | None = None,
+    source_restart_frame: int | None = None,
     generated_trim_start_frames: int = 0,
     generated_trim_end_frames: int = 0,
 ) -> list[str]:
@@ -703,17 +705,24 @@ def merge_with_segment_replacement(
     start_frame_resolved = max(0, start_frame_resolved)
     start_sec = float(Fraction(start_frame_resolved, 1) / fps)
     start_sec = min(start_sec, original_duration_sec)
-    end_sec = start_sec + generated_effective_duration_sec
+    restart_frame_resolved = source_restart_frame
+    if restart_frame_resolved is None:
+        restart_sec = start_sec + generated_effective_duration_sec
+    else:
+        restart_frame_resolved = max(0, int(restart_frame_resolved))
+        restart_sec = float(Fraction(restart_frame_resolved, 1) / fps)
+    restart_sec = max(0.0, min(restart_sec, original_duration_sec))
 
     norm_original = f"fps={fps_str},scale={output_width}:{output_height}:flags=lanczos,setsar=1,format=yuv420p"
     norm_generated = f"fps={fps_str},scale={output_width}:{output_height}:flags=lanczos,setsar=1,format=yuv420p"
     filter_complex: list[str] = []
     video_parts: list[str] = []
 
-    if temporal_feather_frames > 0:
-        feather_sec = float(Fraction(temporal_feather_frames, 1) / fps)
-        blend_in_sec = min(feather_sec, generated_effective_duration_sec)
-        blend_out_sec = min(feather_sec, generated_effective_duration_sec, max(0.0, original_duration_sec - end_sec))
+    if temporal_feather_start_frames > 0 or temporal_feather_end_frames > 0:
+        feather_in_sec = float(Fraction(max(0, temporal_feather_start_frames), 1) / fps)
+        feather_out_sec = float(Fraction(max(0, temporal_feather_end_frames), 1) / fps)
+        blend_in_sec = min(feather_in_sec, generated_effective_duration_sec)
+        blend_out_sec = min(feather_out_sec, generated_effective_duration_sec, restart_sec)
 
         if start_sec > epsilon:
             filter_complex.append(
@@ -748,7 +757,7 @@ def merge_with_segment_replacement(
                 f"[1:v]trim={_format_seconds(generated_input_end_sec - blend_out_sec)}:{_format_seconds(generated_input_end_sec)},{norm_generated},setpts=PTS-STARTPTS[vgen_out]"
             )
             filter_complex.append(
-                f"[0:v]trim={_format_seconds(end_sec)}:{_format_seconds(end_sec + blend_out_sec)},{norm_original},setpts=PTS-STARTPTS[vpost_in]"
+                f"[0:v]trim={_format_seconds(max(0.0, restart_sec - blend_out_sec))}:{_format_seconds(restart_sec)},{norm_original},setpts=PTS-STARTPTS[vpost_in]"
             )
             filter_complex.append(
                 "[vgen_out][vpost_in]blend=all_expr='if(lte(T,{d}),A*(1-T/{d})+B*(T/{d}),B)'[vblend_out]".format(
@@ -757,7 +766,7 @@ def merge_with_segment_replacement(
             )
             video_parts.append("vblend_out")
 
-        post_tail_start_sec = end_sec + blend_out_sec
+        post_tail_start_sec = restart_sec
     else:
         if start_sec > epsilon:
             filter_complex.append(
@@ -768,7 +777,7 @@ def merge_with_segment_replacement(
             f"[1:v]trim={_format_seconds(generated_input_start_sec)}:{_format_seconds(generated_input_end_sec)},{norm_generated},setpts=PTS-STARTPTS[vgen]"
         )
         video_parts.append("vgen")
-        post_tail_start_sec = end_sec
+        post_tail_start_sec = restart_sec
 
     if original_duration_sec - post_tail_start_sec > epsilon:
         filter_complex.append(
@@ -792,7 +801,7 @@ def merge_with_segment_replacement(
             filter_complex.append(f"[0:a]atrim=0:{_format_seconds(start_sec)},asetpts=PTS-STARTPTS[apre]")
             audio_parts.append("apre")
 
-        segment_audio_end_sec = min(end_sec, original_duration_sec)
+        segment_audio_end_sec = min(restart_sec, original_duration_sec)
         if segment_audio_end_sec - start_sec > epsilon:
             filter_complex.append(
                 f"[0:a]atrim={_format_seconds(start_sec)}:{_format_seconds(segment_audio_end_sec)},asetpts=PTS-STARTPTS[aseg]"
@@ -810,8 +819,8 @@ def merge_with_segment_replacement(
             )
             audio_parts.append("aseg_adj")
 
-        if original_duration_sec - end_sec > epsilon:
-            filter_complex.append(f"[0:a]atrim={_format_seconds(end_sec)},asetpts=PTS-STARTPTS[apost]")
+        if original_duration_sec - restart_sec > epsilon:
+            filter_complex.append(f"[0:a]atrim={_format_seconds(restart_sec)},asetpts=PTS-STARTPTS[apost]")
             audio_parts.append("apost")
 
         if len(audio_parts) == 1:

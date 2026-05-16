@@ -160,13 +160,16 @@ export type MergeGenerationAdjustmentPayload = {
   trimStartFrames: number;
   trimEndFrames: number;
   startFrameOverride?: number | null;
+  sourceRestartFrame?: number | null;
   playbackRate?: number | null;
   cropEdgeFeather?: CropEdgeFeatherPayload | null;
 };
 
 export type MergePayload = {
   selectedSegmentGenerationIds: string[];
-  temporalFeatherFrames: number;
+  temporalFeatherFrames?: number | null;
+  temporalFeatherStartFrames?: number | null;
+  temporalFeatherEndFrames?: number | null;
   generationAdjustments?: Record<string, MergeGenerationAdjustmentPayload> | null;
 };
 

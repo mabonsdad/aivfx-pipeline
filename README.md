@@ -34,6 +34,7 @@ The underlying storage is still task-based, but the UI now presents each task as
    - Video generation controls and generated attempts are reviewed here for the current working range.
    - The chosen output is compared against the source and handed forward into Post Process.
    - Video compare modal now uses synchronized auto-loop playback (no native browser control bar) with explicit `Source` and `Generated` labels and non-blocking source-load fallback.
+   - Generation previews, compare playback, and output thumbnails now keep stable media URLs across normal step navigation. Signed URLs are refreshed only after real media failures or after returning from a longer idle period.
    - Users can also download the current working-range source clip and manually upload a generated video, which is attached to the current working reference as a normal output.
    - Multiple overlapping generation jobs are supported. Jobs are tracked independently and completed results are added without overwriting earlier outputs.
    - For long-video source-motion runs, chunked/continuation drafts stay inside their session UI until a stitched draft is saved back to Generate.
@@ -305,7 +306,7 @@ users/{userId}/tasks/{taskId}/cleanup_tracks/{trackId}/...
 
 ## HTTP API Summary
 
-The task API is Cognito-authenticated except `GET /health`. Long-running routes return `jobId`; the frontend polls `GET /jobs/{jobId}`.
+The task API is Cognito-authenticated except `GET /health`. Long-running routes return `jobId`; the frontend polls `GET /jobs/{jobId}` while there is active work and backs off once jobs settle, so normal step navigation should not trigger avoidable task/media reload churn.
 
 Key task routes:
 

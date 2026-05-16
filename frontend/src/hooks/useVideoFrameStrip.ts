@@ -54,10 +54,11 @@ export function useVideoFrameStrip({
     const frameCacheKey = (frameIndex: number) => `${cachePrefix}:${sourceKey}:${frameIndex}`;
     const initial = uniqueFrames.map((frameIndex) => {
       const key = frameCacheKey(frameIndex);
-      return { frameIndex, imageUrl: VIDEO_FRAME_THUMBNAIL_CACHE.get(key) ?? null };
+      const cached = VIDEO_FRAME_THUMBNAIL_CACHE.get(key);
+      return { frameIndex, imageUrl: typeof cached === "string" ? cached : null };
     });
     setItems(initial);
-    const allCached = uniqueFrames.every((frameIndex) => VIDEO_FRAME_THUMBNAIL_CACHE.has(frameCacheKey(frameIndex)));
+    const allCached = uniqueFrames.every((frameIndex) => typeof VIDEO_FRAME_THUMBNAIL_CACHE.get(frameCacheKey(frameIndex)) === "string");
     if (allCached) {
       return;
     }
@@ -119,8 +120,9 @@ export function useVideoFrameStrip({
       for (const frameIndex of uniqueFrames) {
         if (cancelled) break;
         const cacheKey = frameCacheKey(frameIndex);
-        if (VIDEO_FRAME_THUMBNAIL_CACHE.has(cacheKey)) {
-          results.push({ frameIndex, imageUrl: VIDEO_FRAME_THUMBNAIL_CACHE.get(cacheKey) ?? null });
+        const cached = VIDEO_FRAME_THUMBNAIL_CACHE.get(cacheKey);
+        if (typeof cached === "string") {
+          results.push({ frameIndex, imageUrl: cached });
           continue;
         }
 
@@ -154,7 +156,6 @@ export function useVideoFrameStrip({
           VIDEO_FRAME_THUMBNAIL_CACHE.set(cacheKey, dataUrl);
           results.push({ frameIndex, imageUrl: dataUrl });
         } catch {
-          VIDEO_FRAME_THUMBNAIL_CACHE.set(cacheKey, null);
           results.push({ frameIndex, imageUrl: null });
         }
       }

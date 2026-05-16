@@ -39,7 +39,9 @@ function generationStoredOutputFrameCount(generation: SegmentGeneration | null |
 export function useGenerationMergeState({ task, selectedSegmentId, segmentsById }: UseGenerationMergeStateParams) {
   const [selectedGenIds, setSelectedGenIds] = useState<string[]>([]);
   const [selectedPreviewGenId, setSelectedPreviewGenId] = useState<string>("");
-  const [temporalFeatherFrames, setTemporalFeatherFrames] = useState(0);
+  const [mergeFadeInFrames, setMergeFadeInFrames] = useState(0);
+  const [mergeFadeOutFrames, setMergeFadeOutFrames] = useState(0);
+  const [mergeSourceRestartFrame, setMergeSourceRestartFrame] = useState(0);
   const [mergeInsertStartFrame, setMergeInsertStartFrame] = useState(0);
   const [mergeTrimStartFrames, setMergeTrimStartFrames] = useState(0);
   const [mergeTrimEndFrames, setMergeTrimEndFrames] = useState(0);
@@ -141,6 +143,9 @@ export function useGenerationMergeState({ task, selectedSegmentId, segmentsById 
     setMergeInsertStartFrame(sourceFrameOffset);
     setMergeTrimStartFrames(0);
     setMergeTrimEndFrames(defaultTrimEndFrames);
+    setMergeFadeInFrames(0);
+    setMergeFadeOutFrames(0);
+    setMergeSourceRestartFrame(intOrFallback(mergeTargetSegment?.endFrameExclusive, intOrFallback(mergeTargetSegment?.startFrame, 0) + segmentDurationFrames));
   }, [mergeConfiguredGenId, mergeTargetGeneration, mergeTargetGeneration?.genId, mergeTargetSegment]);
 
   function selectSegmentGeneration(genId: string) {
@@ -170,8 +175,12 @@ export function useGenerationMergeState({ task, selectedSegmentId, segmentsById 
     setSelectedGenIds,
     selectedPreviewGenId,
     setSelectedPreviewGenId,
-    temporalFeatherFrames,
-    setTemporalFeatherFrames,
+    mergeFadeInFrames,
+    setMergeFadeInFrames,
+    mergeFadeOutFrames,
+    setMergeFadeOutFrames,
+    mergeSourceRestartFrame,
+    setMergeSourceRestartFrame,
     mergeInsertStartFrame,
     setMergeInsertStartFrame,
     mergeTrimStartFrames,
@@ -187,4 +196,10 @@ export function useGenerationMergeState({ task, selectedSegmentId, segmentsById 
     mergeTargetSegment,
     selectSegmentGeneration,
   };
+}
+
+function intOrFallback(value: unknown, fallback: number): number {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  return Math.round(numeric);
 }

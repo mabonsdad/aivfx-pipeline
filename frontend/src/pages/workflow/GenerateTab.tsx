@@ -16,6 +16,16 @@ import type { ChunkedGenerationRun, CustomReportOutputRef, SegmentGeneration, Se
 
 type VideoModel = VideoModelId;
 
+function isLikelyVideoAssetUrl(url: string | null | undefined): boolean {
+  if (!url) return false;
+  try {
+    const pathname = new URL(url).pathname.toLowerCase();
+    return /\.(mp4|mov|m4v|webm|ogv|avi|mkv)$/i.test(pathname);
+  } catch {
+    return false;
+  }
+}
+
 type PendingGenerationCard = {
   jobId: string;
   segmentId: string;
@@ -114,7 +124,7 @@ export type GenerateTabCtx = {
   describeGeneration: (generation: SegmentGeneration) => string;
   generationThumbnailUrl: (generation: SegmentGeneration) => string | null;
   formatCompactTimestamp: (iso: string | undefined) => string;
-  setVideoPreviewModal: (value: { url: string; label: string } | null) => void;
+  setVideoPreviewModal: (value: { url: string; label: string; taskId?: string; generationId?: string } | null) => void;
   setVideoCompareModal: (value: {
     originalUrl: string;
     compareUrl: string;
@@ -124,9 +134,10 @@ export type GenerateTabCtx = {
     originalIsSegmentClip?: boolean;
     originalSegmentId?: string;
     compareGenerationId?: string;
+    preferGenerationInputMediaAsOriginal?: boolean;
   } | null) => void;
   openVideoCleanupModal: (generation: SegmentGeneration) => void;
-  onAssetError: () => void;
+  onAssetError: (url?: string) => void;
   handleDeleteAsset: (item: {
     id: string;
     taskId: string;
@@ -818,7 +829,7 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
                                   className="mt-2 aspect-video w-full rounded-md bg-white object-contain"
                                   loading="lazy"
                                   decoding="async"
-                                  onError={onAssetError}
+                                  onError={(event) => onAssetError(event.currentTarget.currentSrc || event.currentTarget.src)}
                                 />
                               ) : null}
                               <div className="mt-2 space-y-1 text-[11px] text-ink/60">
@@ -836,7 +847,7 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
                                       className="aspect-video w-full rounded-md bg-white object-contain"
                                       loading="lazy"
                                       decoding="async"
-                                      onError={onAssetError}
+                                      onError={(event) => onAssetError(event.currentTarget.currentSrc || event.currentTarget.src)}
                                     />
                                   ) : (
                                     <div className="flex aspect-video items-center justify-center rounded-md border border-dashed border-ink/20 bg-white text-xs text-ink/55">
@@ -1026,7 +1037,7 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
                     className="aspect-video w-full rounded-md bg-bg object-contain"
                     loading="lazy"
                     decoding="async"
-                    onError={onAssetError}
+                    onError={(event) => onAssetError(event.currentTarget.currentSrc || event.currentTarget.src)}
                   />
                 ) : (
                   <div className="flex aspect-video w-full items-center justify-center rounded-md border border-dashed border-ink/20 bg-bg text-xs text-ink/60">
@@ -1058,7 +1069,12 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
                   disabled={!gen.downloadUrl}
                   onClick={() => {
                     if (!gen.downloadUrl) return;
-                    setVideoPreviewModal({ url: gen.downloadUrl, label: describeGeneration(gen) });
+                    setVideoPreviewModal({
+                      url: gen.downloadUrl,
+                      label: describeGeneration(gen),
+                      taskId: task?.taskId,
+                      generationId: gen.genId,
+                    });
                   }}
                 >
                   <PreviewIcon />
@@ -1068,15 +1084,18 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
                   disabled={!originalSegmentCompareUrl || !gen.downloadUrl}
                   onClick={() => {
                     if (!originalSegmentCompareUrl || !gen.downloadUrl) return;
+                    const shouldUseInputVideo = isLikelyVideoAssetUrl(gen.inputMediaUrl);
+                    const originalUrl = shouldUseInputVideo ? gen.inputMediaUrl ?? originalSegmentCompareUrl : originalSegmentCompareUrl;
                     setVideoCompareModal({
-                      originalUrl: originalSegmentCompareUrl,
+                      originalUrl,
                       compareUrl: gen.downloadUrl,
                       label: describeGeneration(gen),
                       posterUrl: generationThumbnailUrl(gen),
                       segmentStartSec: segmentWindow?.startSec,
-                      originalIsSegmentClip: originalPreviewIsSegmentClip,
-                      originalSegmentId: selectedSegmentId ?? undefined,
+                      originalIsSegmentClip: shouldUseInputVideo || originalPreviewIsSegmentClip,
+                      originalSegmentId: shouldUseInputVideo ? undefined : selectedSegmentId ?? undefined,
                       compareGenerationId: gen.genId,
+                      preferGenerationInputMediaAsOriginal: shouldUseInputVideo,
                     });
                   }}
                 >

@@ -26,8 +26,12 @@ export type MergeTabCtx = {
   setMergeTrimStartFrames: (value: number) => void;
   mergeTrimEndFrames: number;
   setMergeTrimEndFrames: (value: number) => void;
-  temporalFeatherFrames: number;
-  setTemporalFeatherFrames: (value: number) => void;
+  mergeFadeInFrames: number;
+  setMergeFadeInFrames: (value: number) => void;
+  mergeFadeOutFrames: number;
+  setMergeFadeOutFrames: (value: number) => void;
+  mergeSourceRestartFrame: number;
+  setMergeSourceRestartFrame: (value: number) => void;
   mergeOriginalStartFrame: number;
   mergeOriginalEndFrameExclusive: number;
   mergeOriginalDurationFrames: number;
@@ -41,9 +45,13 @@ export type MergeTabCtx = {
   mergeEffectiveEndFrameExclusive: number;
   mergeEffectiveEndFrameInclusive: number;
   mergeEndOffsetFrames: number;
+  mergeSourceRestartFrameLowerBound: number;
+  mergeSourceRestartFrameUpperBound: number;
+  mergeSourceRestartFrameEffective: number;
   mergeGeneratedStartAnchor: number;
   mergeGeneratedMaxFrameIndex: number;
-  mergeFeatherClamped: number;
+  mergeFadeInClamped: number;
+  mergeFadeOutClamped: number;
   mergeTrimStartFramesEffective: number;
   mergeOriginalVideoForPreview: string | null;
   mergeGeneratedVideoForPreview: string | null;
@@ -151,7 +159,7 @@ export type MergeTabCtx = {
   openGenerationCompare: (generation: SegmentGeneration) => void;
   canOpenGenerationCompare: boolean;
   deleteGenerationOutput: (generation: SegmentGeneration) => Promise<void>;
-  onAssetError: () => void;
+  onAssetError: (url?: string) => void;
   openMotionSyncModal: (exportId: string) => void;
   queueTopazUpscale: (
     exportId: string,
@@ -548,8 +556,12 @@ export default function MergeTab({ ctx }: MergeTabProps) {
     setMergeTrimStartFrames,
     mergeTrimEndFrames,
     setMergeTrimEndFrames,
-    temporalFeatherFrames,
-    setTemporalFeatherFrames,
+    mergeFadeInFrames,
+    setMergeFadeInFrames,
+    mergeFadeOutFrames,
+    setMergeFadeOutFrames,
+    mergeSourceRestartFrame,
+    setMergeSourceRestartFrame,
     mergeOriginalDurationFrames,
     mergeFps,
     mergeVisibleDurationFramesBeforeRetime,
@@ -560,9 +572,13 @@ export default function MergeTab({ ctx }: MergeTabProps) {
     mergeEffectiveEndFrameExclusive,
     mergeEffectiveEndFrameInclusive,
     mergeEndOffsetFrames,
+    mergeSourceRestartFrameLowerBound,
+    mergeSourceRestartFrameUpperBound,
+    mergeSourceRestartFrameEffective,
     mergeGeneratedStartAnchor,
     mergeGeneratedMaxFrameIndex,
-    mergeFeatherClamped,
+    mergeFadeInClamped,
+    mergeFadeOutClamped,
     mergeTrimStartFramesEffective,
     mergeOriginalVideoForPreview,
     mergeGeneratedVideoForPreview,
@@ -1076,9 +1092,14 @@ export default function MergeTab({ ctx }: MergeTabProps) {
   }, [boundaryZoomModal, mergeGeneratedEndAnchor, mergeGeneratedMaxFrameIndex, mergeGeneratedStartAnchor]);
   const boundaryZoomSourceAnchor = useMemo(() => {
     if (!boundaryZoomModal) return null;
-    const anchorBase = boundaryZoomModal.kind === "start" ? mergeInsertStartFrameEffective : mergeEffectiveEndFrameInclusive;
+    const anchorBase =
+      boundaryZoomModal.kind === "start"
+        ? mergeInsertStartFrameEffective
+        : selectedToolId === "merge"
+          ? Math.max(0, mergeSourceRestartFrameEffective - 1)
+          : mergeEffectiveEndFrameInclusive;
     return clampInteger(anchorBase + boundaryZoomModal.frameOffset, 0, Math.max(0, sourceFrameCount - 1));
-  }, [boundaryZoomModal, mergeEffectiveEndFrameInclusive, mergeInsertStartFrameEffective, sourceFrameCount]);
+  }, [boundaryZoomModal, mergeEffectiveEndFrameInclusive, mergeInsertStartFrameEffective, mergeSourceRestartFrameEffective, selectedToolId, sourceFrameCount]);
   const boundaryZoomDisplayFrames = useMemo(
     () =>
       boundaryZoomDisplayAnchor == null ? [] : frameWindow(boundaryZoomDisplayAnchor, 1, 1, 0, mergeGeneratedMaxFrameIndex),
@@ -1392,7 +1413,7 @@ export default function MergeTab({ ctx }: MergeTabProps) {
                             className="aspect-video w-full rounded-md bg-bg object-contain"
                             loading="lazy"
                             decoding="async"
-                            onError={onAssetError}
+                            onError={(event) => onAssetError(event.currentTarget.currentSrc || event.currentTarget.src)}
                           />
                         ) : (
                           <div className="flex aspect-video w-full items-center justify-center rounded-md border border-dashed border-ink/20 bg-bg text-xs text-ink/60">
@@ -1475,7 +1496,7 @@ export default function MergeTab({ ctx }: MergeTabProps) {
                   ]
                 : [
                     "Use this step to blend and place the generated segment back into the source clip.",
-                    "Temporal feather controls overlap blending at the merge boundaries.",
+                    "Fade in/out controls blend at the start and end merge boundaries.",
                     "When crop is active, crop-edge feather controls let you soften each edge independently before overlay.",
                     "Use the preview timelines and crop overlay preview to verify boundary quality.",
                 ]
@@ -1623,39 +1644,69 @@ export default function MergeTab({ ctx }: MergeTabProps) {
                 </>
               ) : null}
               {selectedToolId === "merge" ? (
-              <div className="grid gap-3">
-                <div className="space-y-3 rounded-lg border border-ink/10 bg-bg p-3">
-                  <p className="text-xs font-semibold uppercase tracking-wide text-ink/55">Start alignment</p>
-                  <div className="grid gap-3 md:grid-cols-2">
-                    <NumberAdjustField
-                      label="Source insert start"
-                      hint="Offset the generated insert relative to the original working-range start. Negative values move it earlier when source frames exist before the cut."
-                      value={mergeInsertStartFrame}
-                      min={mergeInsertStartFrameLowerBound}
-                      max={mergeInsertStartFrameUpperBound}
-                      onChange={setMergeInsertStartFrame}
-                    />
-                    <NumberAdjustField
-                      label="Trim generation start"
-                      hint="Hide inconsistent opening generated frames after the insert point is aligned."
-                      value={mergeTrimStartFrames}
-                      min={0}
-                      max={Math.max(0, mergeGeneratedDurationFrames - 1)}
-                      onChange={setMergeTrimStartFrames}
-                    />
+              <div className="space-y-3">
+                <div className="grid gap-3 lg:grid-cols-2">
+                  <div className="space-y-3 rounded-lg border border-ink/10 bg-bg p-3">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-ink/55">Start merge point</p>
+                    <div className="grid gap-3 md:grid-cols-2">
+                      <NumberAdjustField
+                        label="Source insert start"
+                        hint="Offset the generated insert relative to the original working-range start."
+                        value={mergeInsertStartFrame}
+                        min={mergeInsertStartFrameLowerBound}
+                        max={mergeInsertStartFrameUpperBound}
+                        onChange={setMergeInsertStartFrame}
+                      />
+                      <NumberAdjustField
+                        label="Trim generation start"
+                        hint="Hide inconsistent opening generated frames after the insert point is aligned."
+                        value={mergeTrimStartFrames}
+                        min={0}
+                        max={Math.max(0, mergeGeneratedDurationFrames - 1)}
+                        onChange={setMergeTrimStartFrames}
+                      />
+                      <div className="md:col-span-2">
+                        <NumberAdjustField
+                          label="Fade in frames"
+                          hint="Blend source into generated at the start boundary."
+                          value={mergeFadeInFrames}
+                          min={0}
+                          max={30}
+                          onChange={setMergeFadeInFrames}
+                        />
+                      </div>
+                    </div>
                   </div>
-                </div>
-                <div className="space-y-3 rounded-lg border border-ink/10 bg-bg p-3">
-                  <p className="text-xs font-semibold uppercase tracking-wide text-ink/55">Merge blend</p>
-                  <div className="grid gap-3">
-                    <NumberAdjustField
-                      label="Temporal feather"
-                      hint="Blend a small overlap at the start and end merge boundaries."
-                      value={temporalFeatherFrames}
-                      min={0}
-                      max={30}
-                      onChange={setTemporalFeatherFrames}
-                    />
+                  <div className="space-y-3 rounded-lg border border-ink/10 bg-bg p-3">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-ink/55">End merge point</p>
+                    <div className="grid gap-3 md:grid-cols-2">
+                      <NumberAdjustField
+                        label="Trim generation end"
+                        hint="Hide unstable ending generated frames before the cut point."
+                        value={mergeTrimEndFrames}
+                        min={0}
+                        max={Math.max(0, mergeGeneratedDurationFrames - 1)}
+                        onChange={setMergeTrimEndFrames}
+                      />
+                      <NumberAdjustField
+                        label="Source restart frame"
+                        hint="Frame where source resumes after generated output ends."
+                        value={mergeSourceRestartFrame}
+                        min={mergeSourceRestartFrameLowerBound}
+                        max={mergeSourceRestartFrameUpperBound}
+                        onChange={setMergeSourceRestartFrame}
+                      />
+                      <div className="md:col-span-2">
+                        <NumberAdjustField
+                          label="Fade out frames"
+                          hint="Blend generated into source before the restart frame."
+                          value={mergeFadeOutFrames}
+                          min={0}
+                          max={30}
+                          onChange={setMergeFadeOutFrames}
+                        />
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -1769,14 +1820,6 @@ export default function MergeTab({ ctx }: MergeTabProps) {
                   </div>
                 </div>
               ) : null}
-              {selectedToolId === "merge" && !mergeTargetCrop ? (
-                <StatusNotice variant="info">
-                  <p className="text-xs">
-                    Crop-edge feather preview is available when a segment crop is active. Set a crop in Select to enable
-                    per-edge feather controls.
-                  </p>
-                </StatusNotice>
-              ) : null}
             </div>
 
             <div className="space-y-2">
@@ -1790,8 +1833,8 @@ export default function MergeTab({ ctx }: MergeTabProps) {
                   anchorFrame: mergeInsertStartFrameEffective,
                   anchorEdge: "start",
                   anchorSlotIndex: 3,
-                  overlapStart: selectedToolId === "merge" && mergeFeatherClamped > 0 ? mergeInsertStartFrameEffective : undefined,
-                  overlapEnd: selectedToolId === "merge" && mergeFeatherClamped > 0 ? mergeInsertStartFrameEffective + mergeFeatherClamped - 1 : undefined,
+                  overlapStart: selectedToolId === "merge" && mergeFadeInClamped > 0 ? mergeInsertStartFrameEffective : undefined,
+                  overlapEnd: selectedToolId === "merge" && mergeFadeInClamped > 0 ? mergeInsertStartFrameEffective + mergeFadeInClamped - 1 : undefined,
                   prefix: "f",
                   frameLabelPosition: "top",
                 }}
@@ -1801,8 +1844,8 @@ export default function MergeTab({ ctx }: MergeTabProps) {
                   anchorFrame: mergeGeneratedStartAnchor,
                   anchorEdge: "start",
                   anchorSlotIndex: 3,
-                  overlapStart: selectedToolId === "merge" && mergeFeatherClamped > 0 ? mergeGeneratedStartAnchor : undefined,
-                  overlapEnd: selectedToolId === "merge" && mergeFeatherClamped > 0 ? mergeGeneratedStartAnchor + mergeFeatherClamped - 1 : undefined,
+                  overlapStart: selectedToolId === "merge" && mergeFadeInClamped > 0 ? mergeGeneratedStartAnchor : undefined,
+                  overlapEnd: selectedToolId === "merge" && mergeFadeInClamped > 0 ? mergeGeneratedStartAnchor + mergeFadeInClamped - 1 : undefined,
                   prefix: "g",
                   labelFrameSource: "source",
                 }}
@@ -1820,21 +1863,28 @@ export default function MergeTab({ ctx }: MergeTabProps) {
                   anchorFrame: mergeGeneratedEndAnchor,
                   anchorEdge: "end",
                   anchorSlotIndex: 2,
-                  overlapStart: selectedToolId === "merge" && mergeFeatherClamped > 0 ? mergeGeneratedEndAnchor - mergeFeatherClamped + 1 : undefined,
-                  overlapEnd: selectedToolId === "merge" && mergeFeatherClamped > 0 ? mergeGeneratedEndAnchor : undefined,
+                  overlapStart: selectedToolId === "merge" && mergeFadeOutClamped > 0 ? mergeGeneratedEndAnchor - mergeFadeOutClamped + 1 : undefined,
+                  overlapEnd: selectedToolId === "merge" && mergeFadeOutClamped > 0 ? mergeGeneratedEndAnchor : undefined,
                   prefix: "g",
+                  frameLabelPosition: "top",
                   labelFrameSource: "source",
                 }}
                 secondTrack={{
                   title: "Source track",
                   items: endBoundaryOriginalThumbs,
-                  anchorFrame: mergeEffectiveEndFrameExclusive,
+                  anchorFrame: selectedToolId === "merge" ? Math.min(mergeSourceRestartFrameEffective, Math.max(0, sourceFrameCount - 1)) : mergeEffectiveEndFrameExclusive,
                   anchorEdge: "start",
                   anchorSlotIndex: 3,
-                  overlapStart: selectedToolId === "merge" && mergeFeatherClamped > 0 ? mergeEffectiveEndFrameExclusive - mergeFeatherClamped : undefined,
-                  overlapEnd: selectedToolId === "merge" && mergeFeatherClamped > 0 ? mergeEffectiveEndFrameExclusive - 1 : undefined,
+                  overlapStart:
+                    selectedToolId === "merge" && mergeFadeOutClamped > 0
+                      ? Math.max(0, mergeSourceRestartFrameEffective - mergeFadeOutClamped)
+                      : undefined,
+                  overlapEnd:
+                    selectedToolId === "merge" && mergeFadeOutClamped > 0
+                      ? Math.max(0, mergeSourceRestartFrameEffective - 1)
+                      : undefined,
                   prefix: "f",
-                  frameLabelPosition: "top",
+                  frameLabelPosition: "bottom",
                 }}
               />
             </div>

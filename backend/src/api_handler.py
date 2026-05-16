@@ -2776,6 +2776,8 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 payload={
                     "selectedSegmentGenerationIds": req.selectedSegmentGenerationIds,
                     "temporalFeatherFrames": req.temporalFeatherFrames,
+                    "temporalFeatherStartFrames": req.temporalFeatherStartFrames,
+                    "temporalFeatherEndFrames": req.temporalFeatherEndFrames,
                     "generationAdjustments": generation_adjustments_payload,
                 },
             )
