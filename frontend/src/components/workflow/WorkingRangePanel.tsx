@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 
 import type { SegmentRecord } from "../../types/api";
+import WaveformPreview from "./WaveformPreview";
 
 type WorkingRangeNoticeTone = "neutral" | "warning";
 
@@ -84,22 +85,55 @@ export function segmentRangeLabel(segment: SegmentRecord) {
   return `${segment.startFrame} -> ${Math.max(segment.endFrameExclusive - 1, segment.startFrame)} (${segment.durationSec.toFixed(2)}s)`;
 }
 
+function formatAudioTime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return "00:00.00";
+  const minutes = Math.floor(seconds / 60);
+  const remaining = seconds - minutes * 60;
+  const wholeSeconds = Math.floor(remaining);
+  const hundredths = Math.round((remaining - wholeSeconds) * 100);
+  const normalizedHundredths = hundredths === 100 ? 0 : hundredths;
+  const normalizedWholeSeconds = hundredths === 100 ? wholeSeconds + 1 : wholeSeconds;
+  const finalMinutes = normalizedWholeSeconds === 60 ? minutes + 1 : minutes;
+  const finalSeconds = normalizedWholeSeconds === 60 ? 0 : normalizedWholeSeconds;
+  return `${String(finalMinutes).padStart(2, "0")}:${String(finalSeconds).padStart(2, "0")}.${String(normalizedHundredths).padStart(2, "0")}`;
+}
+
 type WorkingReferenceAsset = {
   label: string;
   imageUrl?: string | null;
   videoUrl?: string | null;
   posterUrl?: string | null;
+  audioUrl?: string | null;
+  waveformUrl?: string | null;
+  rangeStartRatio?: number | null;
+  rangeEndRatio?: number | null;
+  rangeStartLabel?: string | null;
+  rangeEndLabel?: string | null;
+  actionLabel?: string;
+  actionId?: string;
+  actions?: Array<{
+    label: string;
+    actionId: string;
+    disabled?: boolean;
+  }>;
+  selected?: boolean;
 };
 
 export function CurrentWorkingReferencePanel({
-  title = "Current Work References",
+  title = "Current working references",
   segment,
   startFrameImageUrl,
   endFrameImageUrl,
   warning,
   assets,
+  sourceMediaKind = "video",
+  sourceFrameCount,
+  sourceFps,
+  headerAction,
   onPreviewImage,
   onPreviewVideo,
+  onPreviewAudio,
+  onAssetAction,
 }: {
   title?: string;
   segment: SegmentRecord | null;
@@ -107,9 +141,87 @@ export function CurrentWorkingReferencePanel({
   endFrameImageUrl?: string | null;
   warning?: ReactNode;
   assets?: WorkingReferenceAsset[];
+  sourceMediaKind?: "video" | "audio" | "scene";
+  sourceFrameCount?: number | null;
+  sourceFps?: number | null;
+  headerAction?: ReactNode;
   onPreviewImage?: (payload: { url: string; label: string }) => void;
   onPreviewVideo?: (payload: { url: string; label: string }) => void;
+  onPreviewAudio?: (payload: { url: string; label: string; waveformUrl?: string | null }) => void;
+  onAssetAction?: (asset: WorkingReferenceAsset) => void;
 }) {
+  const isSceneOnly = sourceMediaKind === "scene";
+  const visibleAssets = (assets ?? []).filter((asset) => asset.imageUrl || asset.videoUrl || asset.audioUrl);
+
+  if (isSceneOnly && !segment) {
+    return (
+      <div className="rounded-lg border border-ink/10 bg-white p-3">
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex min-w-[4.4rem] flex-col pt-1 text-sm font-semibold leading-tight text-ink">
+            <span>Current</span>
+            <span>Working</span>
+            <span>References</span>
+          </div>
+          {headerAction ? <div className="shrink-0">{headerAction}</div> : null}
+        </div>
+        <div className="mt-2 flex flex-wrap items-start gap-2">
+          {visibleAssets.length ? (
+            visibleAssets.map((asset) => {
+              const thumbClass = "h-[4.5rem] w-[6.7rem] rounded border border-ink/10 bg-bg object-contain";
+              const cardClass = "min-w-[6.7rem]";
+              return (
+                <div key={asset.label} className={cardClass}>
+                  <div className="mb-1 flex items-center justify-between gap-2">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <p className="truncate text-xs font-medium text-ink/65">{asset.label}</p>
+                      {asset.selected ? <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wide text-teal-700">Current</span> : null}
+                    </div>
+                    {asset.actionLabel && onAssetAction ? (
+                      <button
+                        type="button"
+                        className="shrink-0 text-xs font-medium text-ink/65 underline decoration-ink/30 underline-offset-2 transition hover:text-ink"
+                        onClick={() => onAssetAction(asset)}
+                      >
+                        {asset.actionLabel}
+                      </button>
+                    ) : null}
+                  </div>
+                  {asset.imageUrl ? (
+                    <button type="button" className="block" onClick={() => onPreviewImage?.({ url: asset.imageUrl!, label: asset.label })}>
+                      <img src={asset.imageUrl} alt={asset.label} className={thumbClass} loading="lazy" decoding="async" />
+                    </button>
+                  ) : asset.videoUrl ? (
+                    <button type="button" className="block" onClick={() => onPreviewVideo?.({ url: asset.videoUrl!, label: asset.label })}>
+                      <video src={asset.videoUrl} poster={asset.posterUrl ?? undefined} className={`${thumbClass} bg-black`} preload="metadata" muted playsInline />
+                    </button>
+                  ) : null}
+                  {asset.actions?.length && onAssetAction ? (
+                    <div className="mt-2 flex flex-wrap gap-1">
+                      {asset.actions.map((action) => (
+                        <button
+                          key={action.actionId}
+                          type="button"
+                          disabled={Boolean(action.disabled)}
+                          className="rounded border border-ink/15 bg-white px-2 py-1 text-[11px] text-ink/70 disabled:cursor-not-allowed disabled:opacity-50"
+                          onClick={() => onAssetAction({ ...asset, actionId: action.actionId })}
+                        >
+                          {action.label}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })
+          ) : (
+            <p className="mt-2 text-sm text-ink/60">No working references selected.</p>
+          )}
+        </div>
+        {warning ? <div className="mt-3 text-xs text-amber-700">{warning}</div> : null}
+      </div>
+    );
+  }
+
   if (!segment) {
     return (
       <div className="rounded-lg border border-ink/10 bg-white p-3">
@@ -120,59 +232,135 @@ export function CurrentWorkingReferencePanel({
   }
 
   const endFrame = Math.max(segment.endFrameExclusive - 1, segment.startFrame);
-  const visibleAssets = (assets ?? []).filter((asset) => asset.imageUrl || asset.videoUrl);
-  const thumbClass = "h-20 w-32 rounded border border-ink/10 bg-bg object-contain";
-  const cardClass = "min-w-[8rem]";
+  const primaryAudioAsset = sourceMediaKind === "audio" ? visibleAssets.find((asset) => asset.audioUrl) ?? null : null;
+  const nonAudioAssets = sourceMediaKind === "audio" ? visibleAssets.filter((asset) => asset !== primaryAudioAsset) : visibleAssets;
+  const thumbClass = "h-[4.5rem] w-[6.7rem] rounded border border-ink/10 bg-bg object-contain";
+  const audioThumbClass = "h-[4.5rem] w-[16rem] rounded border border-ink/10 bg-bg object-contain";
+  const cardClass = "min-w-[6.7rem]";
+  const startLabel = sourceMediaKind === "audio" ? `Start ${segment.startTimecode}` : `Start f${segment.startFrame}`;
+  const endLabel = sourceMediaKind === "audio" ? `End ${segment.endTimecode}` : `End f${endFrame}`;
+  const startPreviewLabel = sourceMediaKind === "audio" ? `Start point ${segment.startTimecode}` : `Start frame f${segment.startFrame}`;
+  const endPreviewLabel = sourceMediaKind === "audio" ? `End point ${segment.endTimecode}` : `End frame f${endFrame}`;
+  const selectedRangeStartRatio =
+    sourceMediaKind === "audio" && sourceFrameCount && sourceFrameCount > 0 ? segment.startFrame / sourceFrameCount : null;
+  const selectedRangeEndRatio =
+    sourceMediaKind === "audio" && sourceFrameCount && sourceFrameCount > 0 ? segment.endFrameExclusive / sourceFrameCount : null;
+  const audioStartLabel =
+    sourceMediaKind === "audio" && sourceFps && sourceFps > 0 ? formatAudioTime(segment.startFrame / sourceFps) : segment.startTimecode;
+  const audioEndLabel =
+    sourceMediaKind === "audio" && sourceFps && sourceFps > 0 ? formatAudioTime(segment.endFrameExclusive / sourceFps) : segment.endTimecode;
 
   return (
     <div className="rounded-lg border border-ink/10 bg-white p-3">
-      <div className="flex flex-wrap items-start gap-3">
-        <div className="flex min-w-[4.25rem] flex-col pt-1 text-sm font-semibold leading-tight text-ink">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex min-w-[4.4rem] flex-col pt-1 text-sm font-semibold leading-tight text-ink">
           <span>Current</span>
-          <span>Work</span>
+          <span>Working</span>
           <span>References</span>
         </div>
-        <div className={cardClass}>
-          <p className="mb-1 text-xs font-medium text-ink/65">Start f{segment.startFrame}</p>
-          {startFrameImageUrl ? (
-            <button type="button" className="block" onClick={() => onPreviewImage?.({ url: startFrameImageUrl, label: `Start frame f${segment.startFrame}` })}>
-              <img
-                src={startFrameImageUrl}
-                alt={`Start frame ${segment.startFrame}`}
-                className={thumbClass}
-                loading="lazy"
-                decoding="async"
-              />
-            </button>
-          ) : (
-            <div className={`flex ${thumbClass} items-center justify-center text-xs text-ink/45`}>No preview</div>
-          )}
-        </div>
-        <div className="flex min-w-[6.5rem] flex-col items-center justify-center px-0 pt-6 text-center text-xs text-ink/65">
-          <p>{segment.durationFrames} frames</p>
-          <div className="my-2 text-sm text-ink/45">→</div>
-          <p>{segment.durationSec.toFixed(2)}s</p>
-        </div>
-        <div className={cardClass}>
-          <p className="mb-1 text-xs font-medium text-ink/65">End f{endFrame}</p>
-          {endFrameImageUrl ? (
-            <button type="button" className="block" onClick={() => onPreviewImage?.({ url: endFrameImageUrl, label: `End frame f${endFrame}` })}>
-              <img
-                src={endFrameImageUrl}
-                alt={`End frame ${endFrame}`}
-                className={thumbClass}
-                loading="lazy"
-                decoding="async"
-              />
-            </button>
-          ) : (
-            <div className={`flex ${thumbClass} items-center justify-center text-xs text-ink/45`}>No preview</div>
-          )}
-        </div>
-        {visibleAssets.length ? <div className="h-20 w-px self-end bg-ink/10" /> : null}
-        {visibleAssets.map((asset) => (
+        {headerAction ? <div className="shrink-0">{headerAction}</div> : null}
+      </div>
+      <div className="mt-2 flex flex-wrap items-start gap-2">
+        {isSceneOnly ? null : sourceMediaKind === "audio" ? (
+          <div className="w-[16rem] max-w-full">
+            <p className="mb-1 text-xs font-medium text-ink/65">Audio range</p>
+            {startFrameImageUrl ? (
+              <button
+                type="button"
+                className="block max-w-full"
+                onClick={() => {
+                  if (primaryAudioAsset?.audioUrl) {
+                    onPreviewAudio?.({
+                      url: primaryAudioAsset.audioUrl,
+                      label: "Audio range",
+                      waveformUrl: primaryAudioAsset.waveformUrl ?? startFrameImageUrl ?? endFrameImageUrl ?? null,
+                    });
+                    return;
+                  }
+                  onPreviewImage?.({ url: startFrameImageUrl, label: startPreviewLabel });
+                }}
+              >
+                <div className="relative">
+                  <WaveformPreview
+                    src={startFrameImageUrl}
+                    alt="Audio range"
+                    className={audioThumbClass}
+                    imageClassName={audioThumbClass}
+                    rangeStartRatio={primaryAudioAsset?.rangeStartRatio ?? selectedRangeStartRatio}
+                    rangeEndRatio={primaryAudioAsset?.rangeEndRatio ?? selectedRangeEndRatio}
+                    rangeStartLabel={primaryAudioAsset?.rangeStartLabel ?? audioStartLabel}
+                    rangeEndLabel={primaryAudioAsset?.rangeEndLabel ?? audioEndLabel}
+                  />
+                  <div className="pointer-events-none absolute inset-y-0 left-1/2 flex -translate-x-1/2 items-center">
+                    <span className="rounded border border-teal-200 bg-white px-2 py-1 text-xs font-semibold text-teal-700 shadow-sm">
+                      {segment.durationSec.toFixed(2)}s
+                    </span>
+                  </div>
+                </div>
+              </button>
+            ) : (
+              <div className={`flex ${audioThumbClass} items-center justify-center text-xs text-ink/45`}>No preview</div>
+            )}
+          </div>
+        ) : (
+          <>
+            <div className={cardClass}>
+              <p className="mb-1 text-xs font-medium text-ink/65">{startLabel}</p>
+              {startFrameImageUrl ? (
+                <button type="button" className="block" onClick={() => onPreviewImage?.({ url: startFrameImageUrl, label: startPreviewLabel })}>
+                  <img
+                    src={startFrameImageUrl}
+                    alt={startLabel}
+                    className={thumbClass}
+                    loading="lazy"
+                    decoding="async"
+                  />
+                </button>
+              ) : (
+                <div className={`flex ${thumbClass} items-center justify-center text-xs text-ink/45`}>No preview</div>
+              )}
+            </div>
+            <div className="flex min-w-[5.1rem] flex-col items-center justify-center px-0 pt-5 text-center text-xs text-ink/65">
+              <p>{`${segment.durationFrames} frames`}</p>
+              <div className="my-1.5 text-sm text-ink/45">→</div>
+              <p>{segment.durationSec.toFixed(2)}s</p>
+            </div>
+            <div className={cardClass}>
+              <p className="mb-1 text-xs font-medium text-ink/65">{endLabel}</p>
+              {endFrameImageUrl ? (
+                <button type="button" className="block" onClick={() => onPreviewImage?.({ url: endFrameImageUrl, label: endPreviewLabel })}>
+                  <img
+                    src={endFrameImageUrl}
+                    alt={endLabel}
+                    className={thumbClass}
+                    loading="lazy"
+                    decoding="async"
+                  />
+                </button>
+              ) : (
+                <div className={`flex ${thumbClass} items-center justify-center text-xs text-ink/45`}>No preview</div>
+              )}
+            </div>
+          </>
+        )}
+        {!isSceneOnly && nonAudioAssets.length ? <div className="h-[4.5rem] w-px self-end bg-ink/10" /> : null}
+        {nonAudioAssets.map((asset) => (
           <div key={asset.label} className={cardClass}>
-            <p className="mb-1 text-xs font-medium text-ink/65">{asset.label}</p>
+            <div className="mb-1 flex items-center justify-between gap-2">
+              <div className="flex min-w-0 items-center gap-2">
+                <p className="truncate text-xs font-medium text-ink/65">{asset.label}</p>
+                {asset.selected ? <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wide text-teal-700">Current</span> : null}
+              </div>
+              {asset.actionLabel && onAssetAction ? (
+                <button
+                  type="button"
+                  className="shrink-0 text-xs font-medium text-ink/65 underline decoration-ink/30 underline-offset-2 transition hover:text-ink"
+                  onClick={() => onAssetAction(asset)}
+                >
+                  {asset.actionLabel}
+                </button>
+              ) : null}
+            </div>
             {asset.videoUrl ? (
               <button type="button" className="block" onClick={() => onPreviewVideo?.({ url: asset.videoUrl!, label: asset.label })}>
                 <video
@@ -184,6 +372,27 @@ export function CurrentWorkingReferencePanel({
                   playsInline
                 />
               </button>
+            ) : asset.audioUrl ? (
+              <button
+                type="button"
+                className="block"
+                onClick={() => onPreviewAudio?.({ url: asset.audioUrl!, label: asset.label, waveformUrl: asset.waveformUrl ?? asset.imageUrl ?? null })}
+              >
+                {asset.waveformUrl || asset.imageUrl ? (
+                  <WaveformPreview
+                    src={(asset.waveformUrl ?? asset.imageUrl) as string}
+                    alt={asset.label}
+                    className={thumbClass}
+                    imageClassName={thumbClass}
+                    rangeStartRatio={asset.rangeStartRatio ?? selectedRangeStartRatio}
+                    rangeEndRatio={asset.rangeEndRatio ?? selectedRangeEndRatio}
+                    rangeStartLabel={asset.rangeStartLabel ?? segment.startTimecode}
+                    rangeEndLabel={asset.rangeEndLabel ?? segment.endTimecode}
+                  />
+                ) : (
+                  <div className={`flex ${thumbClass} items-center justify-center text-xs text-ink/45`}>Audio</div>
+                )}
+              </button>
             ) : asset.imageUrl ? (
               <button type="button" className="block" onClick={() => onPreviewImage?.({ url: asset.imageUrl!, label: asset.label })}>
                 <img
@@ -194,6 +403,21 @@ export function CurrentWorkingReferencePanel({
                   decoding="async"
                 />
               </button>
+            ) : null}
+            {asset.actions?.length && onAssetAction ? (
+              <div className="mt-2 flex flex-wrap gap-1">
+                {asset.actions.map((action) => (
+                  <button
+                    key={action.actionId}
+                    type="button"
+                    disabled={Boolean(action.disabled)}
+                    className="rounded border border-ink/15 bg-white px-2 py-1 text-[11px] text-ink/70 disabled:cursor-not-allowed disabled:opacity-50"
+                    onClick={() => onAssetAction({ ...asset, actionId: action.actionId })}
+                  >
+                    {action.label}
+                  </button>
+                ))}
+              </div>
             ) : null}
           </div>
         ))}

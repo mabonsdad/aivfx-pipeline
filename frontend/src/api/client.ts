@@ -1,5 +1,6 @@
 import { getIdToken } from "../lib/auth";
 import { config } from "../lib/config";
+import { DEFAULT_TASK_WORKFLOW_ID, type TaskWorkflowId } from "../lib/taskWorkflows";
 import type {
   PromptWizardAdminConfig,
   PromptWizardRequest,
@@ -19,6 +20,7 @@ import type {
   QcEdgeBiasId,
   QcEdgeSuppressionId,
   QcSamPromptTypeId,
+  SegmentGenerationLengthenPayload,
   ReconcileTimingPayload,
   SegmentGenerationExtendPayload,
   SegmentGeneratePayload,
@@ -72,6 +74,27 @@ type ChunkedSegmentGenerateApiPayload = Omit<ChunkedSegmentGeneratePayload, "lum
   wan27Resolution?: Wan27ResolutionId | null;
 };
 type SegmentPromptWizardApiPayload = PromptWizardRequest;
+type CharacterAnimateGenerateApiPayload = {
+  mode: "pose_video" | "audio_driven";
+  model: "runway_act_two" | "kling_v3_motion_control" | "seedance_2_0_reference_to_video" | "omnihuman_v1_5";
+  characterReferenceId: string;
+  prompt?: string | null;
+  outputAspectRatio?: "1280:720" | "720:1280" | "960:960" | "1104:832" | "832:1104" | "1584:672" | null;
+  bodyControl?: boolean;
+  expressionIntensity?: number;
+  omnihumanResolution?: "720p" | "1080p" | null;
+  klingMode?: "std" | "pro" | null;
+  klingCharacterOrientation?: "image" | "video" | null;
+  seedanceResolution?: "480p" | "720p" | "1080p" | null;
+  seedanceAspectRatio?: "auto" | "21:9" | "16:9" | "4:3" | "1:1" | "3:4" | "9:16" | null;
+};
+type PrevizGenerateApiPayload = {
+  model: "veo_3_1" | "happy_horse_1_0" | "seedance_2_0";
+  prompt: string;
+  durationSec: number;
+  sceneAspectRatio?: string | null;
+  selectedFrameIds: string[];
+};
 
 function extractApiErrorMessage(payload: unknown, fallback: string): string {
   if (payload && typeof payload === "object") {
@@ -147,11 +170,75 @@ export const apiClient = {
       body: JSON.stringify(payload),
     }),
   listTasks: () => api<{ tasks: TaskSummary[] }>("/tasks"),
-  createTask: (name: string) => api<{ taskId: string }>("/tasks", { method: "POST", body: JSON.stringify({ name }) }),
+  createTask: (
+    name: string,
+    workflowId: TaskWorkflowId = DEFAULT_TASK_WORKFLOW_ID,
+    options?: { scenePrompt?: string | null },
+  ) =>
+    api<{ taskId: string }>("/tasks", {
+      method: "POST",
+      body: JSON.stringify({ name, workflowId, scenePrompt: options?.scenePrompt ?? null }),
+    }),
   deleteTask: (taskId: string) => api<{ ok: true }>(`/tasks/${taskId}`, { method: "DELETE" }),
   getTask: (taskId: string) => api<TaskDetail>(`/tasks/${taskId}`),
+  updatePrevizTask: (
+    taskId: string,
+    payload: {
+      scenePrompt?: string | null;
+      sceneAspectRatio?: string | null;
+      selectedReferenceIds?: string[];
+      frameReferenceIds?: string[];
+      selectedFrameIds?: string[];
+    },
+  ) =>
+    api<{
+      previz: NonNullable<TaskDetail["previz"]>;
+    }>(`/tasks/${taskId}/previz`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  generatePrevizVideo: (taskId: string, segmentId: string, payload: PrevizGenerateApiPayload) =>
+    api<{ jobId: string; genId: string }>(`/tasks/${taskId}/segments/${segmentId}/previz-generate`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
   createVideoUpload: (taskId: string, payload: { filename: string; contentType: string; sizeBytes: number }) =>
     api<{ uploadUrl: string; s3Key: string }>(`/tasks/${taskId}/uploads/video`, { method: "POST", body: JSON.stringify(payload) }),
+  initGenerationAudioReferenceUpload: (taskId: string, payload: { filename: string; contentType: string; sizeBytes?: number }) =>
+    api<{ referenceId: string; key: string; uploadUrl: string }>(`/tasks/${taskId}/generation-audio-reference/upload/init`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  completeGenerationAudioReferenceUpload: (
+    taskId: string,
+    payload: { referenceId: string; uploadKey: string; filename: string },
+  ) =>
+    api<{
+      reference: {
+        referenceId: string;
+        filename: string;
+        originalKey: string;
+        editSourceKey: string;
+        previewKey: string;
+        waveformKey: string;
+        waveformWidth?: number;
+        waveformHeight?: number;
+        durationSec?: number;
+        sampleRate?: number;
+        channels?: number;
+        codec?: string;
+        bitRate?: number;
+        createdAt: string;
+        updatedAt?: string;
+        originalUrl?: string;
+        editSourceUrl?: string;
+        previewUrl?: string;
+        waveformUrl?: string;
+      };
+    }>(`/tasks/${taskId}/generation-audio-reference/upload/complete`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
   createExternalQcPairUpload: (
     taskId: string,
     payload: {
@@ -207,7 +294,7 @@ export const apiClient = {
     api<{ ok: true; segment: SegmentRecord }>(`/tasks/${taskId}/segments/${segmentId}`, { method: "PATCH", body: JSON.stringify(payload) }),
   deleteSegment: (taskId: string, segmentId: string) => api<{ ok: true }>(`/tasks/${taskId}/segments/${segmentId}`, { method: "DELETE" }),
   captureFrame: (taskId: string, frameIndex: number) =>
-    api<{ frameId: string; imageUrl: string; frameIndex: number; timecode: string }>(`/tasks/${taskId}/frames/capture`, {
+    api<{ frameId: string; captureKey: string; imageUrl: string; frameIndex: number; timecode: string }>(`/tasks/${taskId}/frames/capture`, {
       method: "POST",
       body: JSON.stringify({ frameIndex }),
     }),
@@ -474,6 +561,7 @@ export const apiClient = {
       filename: string;
       model: string;
       mode: string;
+      inputMode?: "start_video" | "start_end" | "start_only" | "edit_video" | null;
       prompt?: string | null;
       negativePrompt?: string | null;
       firstFrameVariantId?: string | null;
@@ -500,11 +588,31 @@ export const apiClient = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
+  importEditVideoReferences: (
+    taskId: string,
+    payload: {
+      sources: Array<{
+        sourceKey: string;
+        filename?: string | null;
+        sourceType: "uploaded" | "generated" | "frame_capture" | "frame_variant";
+        originTaskId?: string | null;
+      }>;
+    },
+  ) =>
+    api<{ references: import("../types/api").EditVideoReference[] }>(`/tasks/${taskId}/edit-video/references/import`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
   generateEditVideoReference: (
     taskId: string,
-    payload: { model: "chatgpt" | "chatgpt_latest" | "nano_banana" | "nano_banana_pro"; prompt: string },
+    payload: {
+      model: "chatgpt" | "chatgpt_latest" | "nano_banana" | "nano_banana_pro" | "luma_uni_1" | "luma_uni_1_max";
+      prompt: string;
+      aspectRatio?: string | null;
+      selectedReferenceIds?: string[];
+    },
   ) =>
-    api<{ reference: import("../types/api").EditVideoReference }>(`/tasks/${taskId}/edit-video/references/generate`, {
+    api<{ reference: import("../types/api").EditVideoReference; jobId?: string }>(`/tasks/${taskId}/edit-video/references/generate`, {
       method: "POST",
       body: JSON.stringify(payload),
     }),
@@ -573,6 +681,8 @@ export const apiClient = {
     }),
   getVideoCleanupTrack: (taskId: string, trackId: string) =>
     api<{ track: VideoCleanupTrack }>(`/tasks/${taskId}/cleanup-tracks/${trackId}`),
+  deleteVideoCleanupTrack: (taskId: string, trackId: string) =>
+    api<{ ok: true }>(`/tasks/${taskId}/cleanup-tracks/${trackId}`, { method: "DELETE" }),
   initVideoCleanupKeyframeUpload: (
     taskId: string,
     trackId: string,
@@ -635,6 +745,11 @@ export const apiClient = {
     api<{ ok: true }>(`/tasks/${taskId}/frames/${frameId}/variants/${variantId}/select`, { method: "POST", body: "{}" }),
   generateSegment: (taskId: string, segmentId: string, payload: SegmentGenerateApiPayload) =>
     api<{ jobId: string; genId: string }>(`/tasks/${taskId}/segments/${segmentId}/generate`, { method: "POST", body: JSON.stringify(payload) }),
+  generateCharacterAnimation: (taskId: string, segmentId: string, payload: CharacterAnimateGenerateApiPayload) =>
+    api<{ jobId: string; genId: string }>(`/tasks/${taskId}/segments/${segmentId}/character-generate`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
   generateSegmentChunked: (taskId: string, segmentId: string, payload: ChunkedSegmentGenerateApiPayload) =>
     api<{ runId: string; jobId?: string; genId?: string; chunkCount: number; chunkDurationSec: number; minimumOverlapFrames: number }>(
       `/tasks/${taskId}/segments/${segmentId}/chunked-generate`,
@@ -678,6 +793,18 @@ export const apiClient = {
       alignmentFrameIndex: number;
       sourceGeneratedFrameIndex: number;
     }>(`/tasks/${taskId}/segment-generations/${genId}/extend`, { method: "POST", body: JSON.stringify(payload) }),
+  lengthenSegmentGeneration: (
+    taskId: string,
+    genId: string,
+    payload: SegmentGenerationLengthenPayload,
+  ) =>
+    api<{
+      jobId: string;
+      genId: string;
+      segmentId: string;
+      model: string;
+      direction: "start" | "end";
+    }>(`/tasks/${taskId}/segment-generations/${genId}/lengthen`, { method: "POST", body: JSON.stringify(payload) }),
   merge: (
     taskId: string,
     payload: MergePayload,
@@ -707,6 +834,14 @@ export const apiClient = {
       method: "POST",
       body: JSON.stringify(payload ?? {}),
     }),
+  runTopazUpscaleForGeneration: (taskId: string, genId: string, payload?: ExportTopazUpscalePayload) =>
+    api<{ jobId: string; exportId?: string; sourceExportId?: string; generationId?: string; alreadyRunning?: boolean }>(
+      `/tasks/${taskId}/segment-generations/${genId}/topaz-upscale`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload ?? {}),
+      },
+    ),
   deleteAsset: (
     taskId: string,
     payload: AssetDeletePayload,

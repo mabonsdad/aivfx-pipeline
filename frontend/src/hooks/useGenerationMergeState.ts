@@ -1,11 +1,18 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
+import type { GenerateInputMode } from "../lib/generationModeRegistry";
+import type { TaskWorkflowId } from "../lib/taskWorkflows";
+import type { CharacterAnimateMode } from "../lib/characterAnimate/characterAnimateModeRegistry";
+import { getGenerationOrigin, isPostProcessDerivedGeneration, matchesGenerateStepGrid } from "../lib/generationOrigin";
 import type { SegmentGeneration, SegmentRecord, TaskDetail } from "../types/api";
 
 type UseGenerationMergeStateParams = {
   task: TaskDetail | undefined;
   selectedSegmentId: string | null;
   segmentsById: Map<string, SegmentRecord>;
+  workflowId: TaskWorkflowId;
+  activeInputMode: GenerateInputMode;
+  activeCharacterMode?: CharacterAnimateMode;
 };
 
 function safeTimestamp(iso: string | undefined): number {
@@ -36,9 +43,19 @@ function generationStoredOutputFrameCount(generation: SegmentGeneration | null |
   return Math.max(0, Number(generation.generationSettings?.storedOutput?.frameCount ?? 0) || 0);
 }
 
-export function useGenerationMergeState({ task, selectedSegmentId, segmentsById }: UseGenerationMergeStateParams) {
+function isCharacterPostProcessDerivedGeneration(generation: SegmentGeneration | null | undefined): boolean {
+  return isPostProcessDerivedGeneration(generation);
+}
+
+function isPrevizPostProcessDerivedGeneration(generation: SegmentGeneration | null | undefined): boolean {
+  return isPostProcessDerivedGeneration(generation);
+}
+
+export function useGenerationMergeState({ task, selectedSegmentId, segmentsById, workflowId, activeInputMode, activeCharacterMode }: UseGenerationMergeStateParams) {
   const [selectedGenIds, setSelectedGenIds] = useState<string[]>([]);
   const [selectedPreviewGenId, setSelectedPreviewGenId] = useState<string>("");
+  const [previewSelectionCleared, setPreviewSelectionCleared] = useState(false);
+  const latestKnownGenerationIdRef = useRef<string | null>(null);
   const [mergeFadeInFrames, setMergeFadeInFrames] = useState(0);
   const [mergeFadeOutFrames, setMergeFadeOutFrames] = useState(0);
   const [mergeSourceRestartFrame, setMergeSourceRestartFrame] = useState(0);
@@ -47,6 +64,7 @@ export function useGenerationMergeState({ task, selectedSegmentId, segmentsById 
   const [mergeTrimEndFrames, setMergeTrimEndFrames] = useState(0);
   const [mergeConfiguredGenId, setMergeConfiguredGenId] = useState("");
 
+  const filterBySelectedSegment = !(workflowId === "source_video_flow" && activeInputMode === "edit_video");
   const segmentGenerations = useMemo(
     () =>
       Object.values(task?.segmentGenerations ?? {})
@@ -59,16 +77,31 @@ export function useGenerationMergeState({ task, selectedSegmentId, segmentsById 
       segmentGenerations
         .filter(
           (gen) =>
-            (!selectedSegmentId || gen.segmentId === selectedSegmentId) &&
-            gen.status === "complete" &&
-            Boolean(gen.outputKey) &&
-            !gen.isChunkInternal,
+            (gen.status === "complete" ? Boolean(gen.outputKey) : gen.status === "failed") &&
+            matchesGenerateStepGrid(gen, {
+              task,
+              workflowId,
+              activeInputMode,
+              activeCharacterMode,
+              selectedSegmentId,
+              filterBySelectedSegment,
+            }) &&
+            !(
+              workflowId === "character_animate_workflow"
+                ? isCharacterPostProcessDerivedGeneration(gen)
+                : workflowId === "simple_generation_workflow"
+                  ? isPrevizPostProcessDerivedGeneration(gen)
+                  : getGenerationOrigin(gen, task)?.stepOrigin === "post_process"
+            ),
         )
         .sort((a, b) => generationSortTimestamp(b) - generationSortTimestamp(a)),
-    [segmentGenerations, selectedSegmentId],
+    [activeCharacterMode, activeInputMode, filterBySelectedSegment, segmentGenerations, selectedSegmentId, task, workflowId],
   );
 
-  const selectedSegmentCompleteGenerations = selectedSegmentGenerations;
+  const selectedSegmentCompleteGenerations = useMemo(
+    () => selectedSegmentGenerations.filter((generation) => generation.status === "complete" && Boolean(generation.outputKey)),
+    [selectedSegmentGenerations],
+  );
 
   const selectedMergeGenerations = useMemo(
     () =>
@@ -84,11 +117,13 @@ export function useGenerationMergeState({ task, selectedSegmentId, segmentsById 
 
   const selectedPreviewGeneration =
     selectedSegmentCompleteGenerations.find((gen) => gen.genId === selectedPreviewGenId) ??
-    selectedSegmentCompleteGenerations[0] ??
-    null;
+    (!previewSelectionCleared ? selectedSegmentCompleteGenerations[0] ?? null : null);
 
   const sortedExports = useMemo(
-    () => [...(task?.exports ?? [])].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
+    () =>
+      [...(task?.exports ?? [])]
+        .filter((item) => !item.internalOnlySource)
+        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
     [task?.exports],
   );
 
@@ -108,13 +143,26 @@ export function useGenerationMergeState({ task, selectedSegmentId, segmentsById 
   useEffect(() => {
     if (!selectedSegmentGenerations.length) {
       setSelectedPreviewGenId("");
+      setPreviewSelectionCleared(false);
+      latestKnownGenerationIdRef.current = null;
+      return;
+    }
+    const newestGenerationId = selectedSegmentCompleteGenerations[0]?.genId ?? "";
+    const newestGenerationChanged = Boolean(newestGenerationId && newestGenerationId !== latestKnownGenerationIdRef.current);
+    latestKnownGenerationIdRef.current = newestGenerationId || null;
+    if (newestGenerationChanged) {
+      setSelectedPreviewGenId(newestGenerationId);
+      setPreviewSelectionCleared(false);
+      return;
+    }
+    if (previewSelectionCleared) {
       return;
     }
     const stillValid = selectedSegmentCompleteGenerations.some((gen) => gen.genId === selectedPreviewGenId);
     if (!stillValid) {
       setSelectedPreviewGenId(selectedSegmentCompleteGenerations[0]?.genId ?? "");
     }
-  }, [selectedPreviewGenId, selectedSegmentCompleteGenerations, selectedSegmentGenerations]);
+  }, [previewSelectionCleared, selectedPreviewGenId, selectedSegmentCompleteGenerations, selectedSegmentGenerations]);
 
   useEffect(() => {
     const selectedId = selectedPreviewGeneration?.genId;
@@ -152,8 +200,15 @@ export function useGenerationMergeState({ task, selectedSegmentId, segmentsById 
     const selectedGeneration = task?.segmentGenerations?.[genId];
     if (!selectedGeneration || selectedGeneration.status === "failed") return;
     const canUseForMerge = selectedGeneration.status === "complete" && Boolean(selectedGeneration.outputKey);
+    if (canUseForMerge && selectedPreviewGenId === genId && !previewSelectionCleared) {
+      setSelectedPreviewGenId("");
+      setPreviewSelectionCleared(true);
+      setSelectedGenIds((previous) => previous.filter((existingGenId) => existingGenId !== genId));
+      return;
+    }
     if (canUseForMerge) {
       setSelectedPreviewGenId(genId);
+      setPreviewSelectionCleared(false);
     }
     setSelectedGenIds((previous) => {
       if (!canUseForMerge) {

@@ -38,6 +38,7 @@ from src.contracts.api import (  # noqa: E402
     MergePayload,
     PatchRectPayload,
     ReconcileTimingPayload,
+    SegmentGenerationLengthenPayload,
     SegmentGenerationExtendPayload,
     SegmentGeneratePayload,
 )
@@ -209,6 +210,7 @@ def _write_api_contracts() -> None:
         ("SegmentGeneratePayload", SegmentGeneratePayload),
         ("ChunkedSegmentGeneratePayload", ChunkedSegmentGeneratePayload),
         ("SegmentGenerationExtendPayload", SegmentGenerationExtendPayload),
+        ("SegmentGenerationLengthenPayload", SegmentGenerationLengthenPayload),
         ("ReconcileTimingPayload", ReconcileTimingPayload),
         ("CropEdgeFeatherPayload", CropEdgeFeatherPayload),
         ("MergeGenerationAdjustmentPayload", MergeGenerationAdjustmentPayload),

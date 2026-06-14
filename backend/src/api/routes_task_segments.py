@@ -190,9 +190,20 @@ def handle_task_segment_routes(
         except ValueError as exc:
             return error_response_fn(400, str(exc), origin=origin)
         try:
-            validate_video_model_prompt_fn(req.lumaModel, prompt)
+            if req.lumaModel == "seedance-2.0-reference-to-video" and req.inputMode == "edit_video":
+                if not prompt:
+                    raise ValueError("Seedance 2.0 Reference to Video requires a prompt that references @Video1.")
+                if "@Video1" not in prompt:
+                    raise ValueError("Seedance 2.0 Reference to Video prompt must include @Video1.")
+            else:
+                validate_video_model_prompt_fn(req.lumaModel, prompt)
         except ValueError as exc:
             return error_response_fn(400, str(exc), origin=origin)
+        generation_audio_reference = task.get("generationAudioReference") if isinstance(task.get("generationAudioReference"), dict) else None
+        if req.audioReferenceId:
+            reference_id = str(generation_audio_reference.get("referenceId") or "").strip() if generation_audio_reference else ""
+            if not generation_audio_reference or reference_id != req.audioReferenceId:
+                return error_response_fn(400, "Generation audio reference not found", origin=origin)
         if prompt:
             logger.info("Queueing segment generation", extra={**audit_prompt_fn(prompt), "taskId": task_id, "segmentId": segment_id})
 
@@ -217,7 +228,9 @@ def handle_task_segment_routes(
                 "wan27Resolution": req.wan27Resolution,
                 "happyHorseResolution": req.happyHorseResolution,
                 "sora2Resolution": req.sora2Resolution,
+                "inputMode": req.inputMode,
                 "selectedReferenceIds": list(req.selectedReferenceIds or []),
+                "audioReferenceId": req.audioReferenceId,
                 "preserveFrames": bool(req.preserveFrames),
             },
         )
@@ -233,8 +246,17 @@ def handle_task_segment_routes(
                 "lumaGenerationId": None,
             },
             "generationSettings": {
+                "workflowId": str(task.get("workflowId") or "source_video_flow"),
+                "inputMode": req.inputMode,
                 "preserveFrames": bool(req.preserveFrames),
                 "selectedReferenceIds": list(req.selectedReferenceIds or []),
+                "audioReferenceId": req.audioReferenceId,
+            },
+            "origin": {
+                "workflowId": str(task.get("workflowId") or "source_video_flow"),
+                "stepOrigin": "generate",
+                "toolOrigin": "segment_generate",
+                "creationMode": req.inputMode,
             },
             "status": "queued",
             "outputKey": None,
@@ -379,6 +401,7 @@ def handle_task_segment_routes(
             filename=req.filename,
             model=req.model,
             mode=req.mode,
+            input_mode=req.inputMode,
             prompt=sanitize_prompt_fn(req.prompt) if req.prompt else None,
             negative_prompt=sanitize_prompt_fn(req.negativePrompt) if req.negativePrompt else None,
             first_frame_variant_id=req.firstFrameVariantId,

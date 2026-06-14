@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import math
@@ -13,6 +14,7 @@ from typing import Any
 from urllib.parse import parse_qs
 
 import boto3
+import requests
 from botocore.exceptions import ClientError
 from pydantic import ValidationError
 
@@ -24,11 +26,16 @@ from src.api.routes_external_api import handle_external_api_routes
 from src.api.routes_jobs import handle_job_status
 from src.api.routes_public import handle_health, handle_options
 from src.api.routes_task_assets import handle_task_asset_routes
+from src.api.routes_task_character_generate import handle_task_character_generate_routes
 from src.api.routes_task_chunked_controls import handle_task_chunked_control_routes
 from src.api.routes_task_cleanup import handle_task_cleanup_routes
 from src.api.routes_task_detail import handle_task_detail_route
 from src.api.routes_task_generation_extend import handle_task_generation_extend_route
+from src.api.routes_task_generation_lengthen import handle_task_generation_lengthen_route
 from src.api.routes_task_generation_post import handle_task_generation_post_routes
+from src.api.routes_task_generation_topaz import handle_task_generation_topaz_route
+from src.api.routes_task_previz import handle_task_previz_route
+from src.api.routes_task_previz_generate import handle_task_previz_generate_routes
 from src.api.routes_task_reports import handle_task_report_routes
 from src.api.routes_task_segments import handle_task_segment_routes
 from src.api.routes_tasks_root import handle_tasks_root_routes
@@ -36,7 +43,15 @@ from src.api.routes_user import handle_me
 from src.core.assets import ApiAssetPaths, AssetPaths, AssetStore
 from src.core.auth import UnauthorizedError, get_user_claims, get_user_id
 from src.core.config import load_settings
-from src.core.ffmpeg import extract_frame_png, ffprobe_video, transcode_to_cfr
+from src.core.ffmpeg import (
+    extract_frame_png,
+    ffprobe_audio,
+    ffprobe_video,
+    generate_waveform_png,
+    transcode_audio_edit_source,
+    transcode_audio_preview,
+    transcode_to_cfr,
+)
 from src.core.http import error_response, parse_json_body, response
 from src.core.ids import deterministic_frame_id, new_id, prompt_hash
 from src.core.logger import Logger
@@ -60,15 +75,33 @@ from src.generation.maintenance import (
     backfill_segment_generation_preview_refs,
     maintain_segment_generations,
     prune_stale_segment_generations,
+    reconcile_edit_video_reference_job_states,
     reconcile_segment_generation_job_states,
 )
 from src.jobs.queue import JobQueue
-from src.integrations.gemini import generate_image_edit as generate_gemini_image_edit
-from src.integrations.openai_images import generate_image_edit as generate_openai_image_edit
+from src.integrations.gemini import (
+    generate_image_edit as generate_gemini_image_edit,
+    generate_image_from_references as generate_gemini_image_from_references,
+)
+from src.integrations.luma import (
+    create_uni_image_generation,
+    parse_uni_output_url,
+    wait_for_uni_generation_complete,
+)
+from src.integrations.openai_images import (
+    generate_image_edit as generate_openai_image_edit,
+    generate_image_from_references as generate_openai_image_from_references,
+)
 from src.integrations.openai_prompt_wizard import improve_video_prompt as improve_openai_video_prompt
 from src.models.schemas import (
     ChunkedSegmentGenerateRequest,
+    EditVideoReferenceGenerateRequest,
+    EditVideoReferenceImportRequest,
+    EditVideoReferenceUploadCompleteRequest,
+    EditVideoReferenceUploadRequest,
     FrameCaptureRequest,
+    GenerationAudioReferenceUploadCompleteRequest,
+    GenerationAudioReferenceUploadRequest,
     FullEditRequest,
     ManualFrameUploadCompleteRequest,
     ManualFrameUploadInitRequest,
@@ -92,10 +125,12 @@ from src.quality_match.service import QualityMatchSettings, analyse_quality_matc
 from src.video_cleanup.service import get_cleanup_track, resolve_first_mask_key_from_analysis
 logger = Logger()
 settings = load_settings()
+DEFAULT_TASK_WORKFLOW_ID = "source_video_flow"
 CHUNKED_CONSERVATIVE_DURATION_SECONDS = 6
 CHUNKED_MIN_OVERLAP_SECONDS = 0.5
 PRESIGNED_GET_TTL_SECONDS = 3600
 STALE_GENERATION_MAX_AGE_SECONDS = 30 * 60
+STALE_RUNNING_JOB_MAX_AGE_SECONDS = 16 * 60
 CROP_LANDSCAPE_TARGET = (1920, 1080)
 CROP_PORTRAIT_TARGET = (1080, 1920)
 FRAME_REPORT_TESTS = {
@@ -114,6 +149,10 @@ VIDEO_REPORT_TESTS = {
 }
 VIDEO_COMPARE_REPORT_TESTS = {
     "video_model_compare",
+}
+PREVIZ_REPORT_TESTS = {
+    "storyboard_overview",
+    "frame_continuity",
 }
 
 def _chunk_overlap_frames(fps: Fraction) -> int:
@@ -385,6 +424,53 @@ def _solid_png_bytes(*, width: int = 1024, height: int = 1024, rgb: tuple[int, i
     return out.getvalue()
 
 
+def _clean_optional_api_key(value: Any) -> str | None:
+    if value is None:
+        return None
+    key = str(value).strip()
+    if not key:
+        return None
+    if key.upper() in {"SET_ME", "CHANGEME", "CHANGE_ME", "REPLACE_ME"}:
+        return None
+    return key
+
+
+def _is_luma_agents_api_key(value: str) -> bool:
+    return value.startswith("luma-api-")
+
+
+def _resolve_luma_uni_api_key(secrets: dict[str, Any]) -> str | None:
+    luma_agents_key = _clean_optional_api_key(secrets.get("LUMA_AGENTS_API_KEY"))
+    if luma_agents_key and _is_luma_agents_api_key(luma_agents_key):
+        return luma_agents_key
+    luma_api_key = _clean_optional_api_key(secrets.get("LUMA_API_KEY"))
+    if luma_api_key and _is_luma_agents_api_key(luma_api_key):
+        return luma_api_key
+    return None
+
+
+def _resolve_luma_uni_model_name(model_name: str) -> str:
+    if model_name == "luma_uni_1_max":
+        return "uni-1-max"
+    return "uni-1"
+
+
+def _reference_content_type_from_key(key: str) -> str:
+    suffix = Path(key).suffix.lower()
+    if suffix in {".jpg", ".jpeg"}:
+        return "image/jpeg"
+    if suffix == ".webp":
+        return "image/webp"
+    return "image/png"
+
+
+def _normalize_generated_reference_png(image_bytes: bytes) -> bytes:
+    image = ImageOps.exif_transpose(Image.open(BytesIO(image_bytes))).convert("RGBA")
+    out = BytesIO()
+    image.save(out, format="PNG")
+    return out.getvalue()
+
+
 def _video_probe_payload(probe: dict[str, Any]) -> dict[str, Any]:
     fps = Fraction(int(probe.get("fps_num") or 0), int(probe.get("fps_den") or 1))
     if fps.numerator <= 0 or fps.denominator <= 0:
@@ -462,6 +548,7 @@ def _create_manual_uploaded_segment_generation(
     filename: str,
     model: str,
     mode: str,
+    input_mode: str | None,
     prompt: str | None,
     negative_prompt: str | None,
     first_frame_variant_id: str | None,
@@ -504,12 +591,20 @@ def _create_manual_uploaded_segment_generation(
             "uploadedAt": now,
         },
         "generationSettings": {
+            "workflowId": str(task.get("workflowId") or DEFAULT_TASK_WORKFLOW_ID),
             "provider": "manual",
             "requestedModel": model,
             "model": "manual_upload",
             "mode": mode,
+            "inputMode": input_mode,
             "requestedDurationSec": segment.get("durationSec"),
             "providerDurationSec": segment.get("durationSec"),
+        },
+        "origin": {
+            "workflowId": str(task.get("workflowId") or DEFAULT_TASK_WORKFLOW_ID),
+            "stepOrigin": "generate",
+            "toolOrigin": "manual_upload",
+            "creationMode": input_mode,
         },
     }
     if isinstance(start_frame, dict):
@@ -533,6 +628,7 @@ def _task_summary(task: dict[str, Any]) -> dict[str, Any]:
     return {
         "taskId": task["taskId"],
         "name": task["name"],
+        "workflowId": task.get("workflowId", DEFAULT_TASK_WORKFLOW_ID),
         "status": status,
         "createdAt": task["createdAt"],
         "updatedAt": task["updatedAt"],
@@ -541,7 +637,11 @@ def _task_summary(task: dict[str, Any]) -> dict[str, Any]:
 
 
 def _fps(task: dict[str, Any]) -> Fraction:
-    fps_info = task["video"]["editSource"]["fps"]
+    fps_info = (
+        task.get("video", {}).get("editSource", {}).get("fps")
+        or task.get("sourceMedia", {}).get("editSource", {}).get("fps")
+        or {"num": 30, "den": 1}
+    )
     return Fraction(int(fps_info["num"]), int(fps_info["den"]))
 
 
@@ -639,6 +739,7 @@ def _maintain_segment_generations(task: dict[str, Any], store: S3JsonStore) -> b
         now_iso_fn=now_iso,
         append_history_event_fn=_append_history_event,
         stale_generation_max_age_seconds=STALE_GENERATION_MAX_AGE_SECONDS,
+        stale_running_job_max_age_seconds=STALE_RUNNING_JOB_MAX_AGE_SECONDS,
     )
 
 
@@ -725,6 +826,8 @@ def _normalize_custom_report_tests(report_type: str, raw_tests: list[Any]) -> li
         if report_type == "qc_frame"
         else VIDEO_COMPARE_REPORT_TESTS
         if report_type == "video_compare"
+        else PREVIZ_REPORT_TESTS
+        if report_type == "previz_review"
         else VIDEO_REPORT_TESTS
     )
     normalized: list[str] = []
@@ -808,9 +911,11 @@ def _capture_frame_sync(
     asset_store: AssetStore,
     crop: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    edit_source_key = task["video"].get("editSource", {}).get("s3Key")
+    edit_source = task.get("video", {}).get("editSource", {})
+    edit_source_key = edit_source.get("s3Key")
     if not edit_source_key:
         raise ValueError("Edit source not ready")
+    media_type = str(edit_source.get("mediaType") or task.get("sourceMedia", {}).get("kind") or "video")
 
     normalized_crop = crop if crop and crop.get("enabled") else None
     if normalized_crop:
@@ -826,6 +931,7 @@ def _capture_frame_sync(
         frame = frames[frame_id]
         return {
             "frameId": frame_id,
+            "captureKey": frame["captureKey"],
             "imageUrl": asset_store.presign_get(frame["captureKey"], expires=PRESIGNED_GET_TTL_SECONDS),
             "timecode": frame["timecode"],
             "frameIndex": frame["frameIndex"],
@@ -835,6 +941,40 @@ def _capture_frame_sync(
 
     s3 = boto3.client("s3")
     paths = _asset_paths_for_task(task)
+
+    if media_type == "audio":
+        waveform_key = (
+            edit_source.get("waveformKey")
+            or task.get("sourceMedia", {}).get("waveform", {}).get("s3Key")
+            or task.get("sourceMedia", {}).get("editSource", {}).get("waveformKey")
+        )
+        if not waveform_key:
+            raise ValueError("Audio waveform not ready")
+        fps = _fps(task)
+        timecode = _timecode(frame_index, fps)
+        waveform_width = int(edit_source.get("waveformWidth") or task.get("sourceMedia", {}).get("waveform", {}).get("width") or 1280)
+        waveform_height = int(edit_source.get("waveformHeight") or task.get("sourceMedia", {}).get("waveform", {}).get("height") or 240)
+        frames[frame_id] = {
+            "frameId": frame_id,
+            "frameIndex": frame_index,
+            "timecode": timecode,
+            "createdAt": now_iso(),
+            "captureKey": waveform_key,
+            "width": waveform_width,
+            "height": waveform_height,
+            "variants": [],
+            "selectedVariantId": None,
+            "sourceCrop": None,
+        }
+        return {
+            "frameId": frame_id,
+            "captureKey": waveform_key,
+            "imageUrl": asset_store.presign_get(waveform_key, expires=PRESIGNED_GET_TTL_SECONDS),
+            "timecode": timecode,
+            "frameIndex": frame_index,
+            "width": waveform_width,
+            "height": waveform_height,
+        }
 
     with tempfile.TemporaryDirectory() as td:
         td_path = Path(td)
@@ -879,6 +1019,7 @@ def _capture_frame_sync(
 
     return {
         "frameId": frame_id,
+        "captureKey": key,
         "imageUrl": asset_store.presign_get(key, expires=PRESIGNED_GET_TTL_SECONDS),
         "timecode": timecode,
         "frameIndex": frame_index,
@@ -922,6 +1063,10 @@ def _sanitize_prompt(prompt: str) -> str:
     if len(prompt) > settings.max_prompt_chars:
         raise ValueError(f"Prompt exceeds max length ({settings.max_prompt_chars})")
     return prompt
+
+
+NANO_BANANA_PRO_SUPPORTED_ASPECT_RATIOS = {"16:9", "3:2", "4:3", "1:1", "5:4", "4:5", "2:3", "3:4", "9:16"}
+NANO_BANANA_MAX_REFERENCE_IMAGES = 3
 
 
 def _audit_prompt(prompt: str) -> dict[str, Any]:
@@ -1149,31 +1294,35 @@ def _queue_segment_generation_record(
     preserve_frames: bool = True,
     parent_generation_id: str | None = None,
     extension_metadata: dict[str, Any] | None = None,
+    extra_payload: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
     gen_id = new_id("gen")
+    payload = {
+        "segmentId": segment_id,
+        "genId": gen_id,
+        "lumaModel": model,
+        "mode": mode,
+        "prompt": prompt,
+        "negativePrompt": negative_prompt,
+        "firstFrameVariantId": first_frame_variant_id,
+        "lastFrameVariantId": last_frame_variant_id,
+        "replicateKlingMode": replicate_kling_mode,
+        "replicateKlingV3Mode": replicate_kling_v3_mode,
+        "wan27Resolution": wan27_resolution,
+        "happyHorseResolution": happy_horse_resolution,
+        "preserveFrames": bool(preserve_frames),
+        "parentGenerationId": parent_generation_id,
+        "extensionMetadata": extension_metadata,
+    }
+    if extra_payload:
+        payload.update(extra_payload)
     job_id = _queue_job(
         store=store,
         queue=queue,
         user_id=user_id,
         task_id=task_id,
         job_type="segment_generate",
-        payload={
-            "segmentId": segment_id,
-            "genId": gen_id,
-            "lumaModel": model,
-            "mode": mode,
-            "prompt": prompt,
-            "negativePrompt": negative_prompt,
-            "firstFrameVariantId": first_frame_variant_id,
-            "lastFrameVariantId": last_frame_variant_id,
-            "replicateKlingMode": replicate_kling_mode,
-            "replicateKlingV3Mode": replicate_kling_v3_mode,
-            "wan27Resolution": wan27_resolution,
-            "happyHorseResolution": happy_horse_resolution,
-            "preserveFrames": bool(preserve_frames),
-            "parentGenerationId": parent_generation_id,
-            "extensionMetadata": extension_metadata,
-        },
+        payload=payload,
     )
     now = now_iso()
     generation_record: dict[str, Any] = {
@@ -1187,7 +1336,15 @@ def _queue_segment_generation_record(
             "negativePrompt": negative_prompt,
             "lumaGenerationId": None,
         },
-        "generationSettings": {"preserveFrames": bool(preserve_frames)},
+        "generationSettings": {
+            "workflowId": str(task.get("workflowId") or DEFAULT_TASK_WORKFLOW_ID),
+            "preserveFrames": bool(preserve_frames),
+        },
+        "origin": {
+            "workflowId": str(task.get("workflowId") or DEFAULT_TASK_WORKFLOW_ID),
+            "stepOrigin": "post_process" if extension_metadata and extension_metadata.get("type") == "clip_lengthen" else "generate",
+            "toolOrigin": "clip_lengthen" if extension_metadata and extension_metadata.get("type") == "clip_lengthen" else "segment_generate",
+        },
         "status": "queued",
         "outputKey": None,
         "jobId": job_id,
@@ -1196,6 +1353,11 @@ def _queue_segment_generation_record(
         "createdAt": now,
         "updatedAt": now,
     }
+    if extra_payload:
+        input_mode = extra_payload.get("inputMode")
+        if isinstance(input_mode, str) and input_mode:
+            generation_record["generationSettings"]["inputMode"] = input_mode
+            generation_record["origin"]["creationMode"] = input_mode
     if parent_generation_id:
         generation_record["parentGenerationId"] = parent_generation_id
     if extension_metadata:
@@ -1441,6 +1603,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
         error_response_fn=error_response,
         new_id_fn=new_id,
         now_iso_fn=now_iso,
+        queue_job_fn=lambda **kwargs: _queue_job(queue=queue, **kwargs),
         normalize_task_name_fn=_normalize_task_name,
         unique_task_name_fn=_unique_task_name,
         build_file_prefix_fn=_build_file_prefix,
@@ -1449,6 +1612,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
         cleanup_legacy_generation_qc_fn=_cleanup_legacy_generation_qc,
         cleanup_custom_reports_fn=_cleanup_custom_reports,
         task_summary_fn=_task_summary,
+        default_task_workflow_id=DEFAULT_TASK_WORKFLOW_ID,
     )
     if tasks_root_response is not None:
         return tasks_root_response
@@ -1469,10 +1633,30 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             "cleanup_custom_reports": _cleanup_custom_reports,
             "decorate_embedded_s3_keys": _decorate_embedded_s3_keys,
             "presigned_get_ttl_seconds": PRESIGNED_GET_TTL_SECONDS,
+            "settings": settings,
+            "default_task_workflow_id": DEFAULT_TASK_WORKFLOW_ID,
+            "new_id": new_id,
         },
     )
     if task_detail_response is not None:
         return task_detail_response
+
+    task_previz_response = handle_task_previz_route(
+        method,
+        path,
+        event=event,
+        user_id=user_id,
+        store=store,
+        origin=origin,
+        json_model=_json_model,
+        response_fn=response,
+        error_response_fn=error_response,
+        load_task_or_404_fn=_load_task_or_404,
+        new_id_fn=new_id,
+        now_iso_fn=now_iso,
+    )
+    if task_previz_response is not None:
+        return task_previz_response
 
     task_path = parse_task_path(path)
     if task_path is not None:
@@ -1509,6 +1693,26 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
         if task_asset_response is not None:
             return task_asset_response
 
+        task_previz_generate_response = handle_task_previz_generate_routes(
+            method,
+            task_id=task_id,
+            parts=parts,
+            event=event,
+            origin=origin,
+            user_id=user_id,
+            task=task,
+            store=store,
+            json_model=_json_model,
+            response_fn=response,
+            error_response_fn=error_response,
+            new_id_fn=new_id,
+            now_iso_fn=now_iso,
+            queue_job_fn=_queue_job,
+            sanitize_prompt_fn=_sanitize_prompt,
+        )
+        if task_previz_generate_response is not None:
+            return task_previz_generate_response
+
         task_cleanup_response = handle_task_cleanup_routes(
             method,
             task_id=task_id,
@@ -1529,9 +1733,31 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             cleanup_track_response_fn=_cleanup_track_response,
             get_cleanup_track_fn=get_cleanup_track,
             resolve_first_mask_key_from_analysis_fn=resolve_first_mask_key_from_analysis,
+            cleanup_custom_reports_fn=_cleanup_custom_reports,
         )
         if task_cleanup_response is not None:
             return task_cleanup_response
+
+        task_character_generate_response = handle_task_character_generate_routes(
+            method,
+            task_id=task_id,
+            parts=parts,
+            event=event,
+            origin=origin,
+            user_id=user_id,
+            task=task,
+            store=store,
+            asset_store=asset_store,
+            json_model=_json_model,
+            response_fn=response,
+            error_response_fn=error_response,
+            new_id_fn=new_id,
+            now_iso_fn=now_iso,
+            queue_job_fn=lambda **kwargs: _queue_job(queue=queue, **kwargs),
+            sanitize_prompt_fn=_sanitize_prompt,
+        )
+        if task_character_generate_response is not None:
+            return task_character_generate_response
 
         task_segment_response = handle_task_segment_routes(
             method,
@@ -1598,10 +1824,30 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             cleanup_custom_reports_fn=_cleanup_custom_reports,
             decorate_embedded_s3_keys_fn=_decorate_embedded_s3_keys,
             report_result_key_fn=lambda owner_id, report_task_id, report_id: S3JsonStore.report_result_key(owner_id, report_task_id, report_id),
+            asset_paths_for_task_fn=_asset_paths_for_task,
             logger=logger,
         )
         if task_report_response is not None:
             return task_report_response
+
+        task_generation_topaz_response = handle_task_generation_topaz_route(
+            method,
+            task_id=task_id,
+            parts=parts,
+            event=event,
+            origin=origin,
+            user_id=user_id,
+            task=task,
+            store=store,
+            json_model=_json_model,
+            response_fn=response,
+            error_response_fn=error_response,
+            new_id_fn=new_id,
+            now_iso_fn=now_iso,
+            queue_job_fn=lambda **kwargs: _queue_job(queue=queue, **kwargs),
+        )
+        if task_generation_topaz_response is not None:
+            return task_generation_topaz_response
 
         if method == "POST" and len(parts) == 5 and parts[2] == "exports" and parts[4] == "motion-qc":
             export_id = parts[3]
@@ -1694,13 +1940,13 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             return response(202, {"jobId": job_id, "exportId": result_export_id}, origin=origin)
 
         if method == "POST" and len(parts) == 3 and parts[2] == "ingest":
-            original = task.get("video", {}).get("original")
+            original = task.get("sourceMedia", {}).get("original") or task.get("video", {}).get("original")
             if not original:
-                return error_response(400, "Upload a video first", origin=origin)
+                return error_response(400, "Upload source media first", origin=origin)
             try:
                 asset_store.head_object(original["s3Key"])
             except ClientError:
-                return error_response(400, "Uploaded video not found in S3", origin=origin)
+                return error_response(400, "Uploaded source media not found in S3", origin=origin)
             task["status"] = "ingesting"
             store.save_task(task)
             job_id = _queue_job(
@@ -2305,67 +2551,266 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 origin=origin,
             )
 
+        if method == "POST" and len(parts) == 5 and parts[2] == "generation-audio-reference" and parts[3] == "upload" and parts[4] == "init":
+            if str(task.get("workflowId") or DEFAULT_TASK_WORKFLOW_ID) != "source_video_flow":
+                return error_response(400, "Generation audio references are only available in the source video workflow", origin=origin)
+            req = _json_model(GenerationAudioReferenceUploadRequest, event)
+            if not req.contentType.lower().startswith("audio/"):
+                return error_response(400, "Generation audio references must be audio files", origin=origin)
+            reference_id = new_id("gaud")
+            paths = _asset_paths_for_task(task)
+            key = paths.generation_audio_reference_original(reference_id, req.filename)
+            return response(
+                200,
+                {
+                    "referenceId": reference_id,
+                    "key": key,
+                    "uploadUrl": asset_store.presign_put(key, expires=900, content_type=req.contentType),
+                },
+                origin=origin,
+            )
+
+        if method == "POST" and len(parts) == 5 and parts[2] == "generation-audio-reference" and parts[3] == "upload" and parts[4] == "complete":
+            if str(task.get("workflowId") or DEFAULT_TASK_WORKFLOW_ID) != "source_video_flow":
+                return error_response(400, "Generation audio references are only available in the source video workflow", origin=origin)
+            req = _json_model(GenerationAudioReferenceUploadCompleteRequest, event)
+            key = req.uploadKey
+            if not key.startswith(f"users/{task['userId']}/tasks/{task_id}/"):
+                return error_response(400, "Invalid upload key", origin=origin)
+            previous_reference = task.get("generationAudioReference") if isinstance(task.get("generationAudioReference"), dict) else None
+            previous_keys = [
+                str(previous_reference.get(field) or "").strip()
+                for field in ("originalKey", "editSourceKey", "previewKey", "waveformKey")
+            ] if previous_reference else []
+            now = now_iso()
+            paths = _asset_paths_for_task(task)
+            edit_source_key = paths.generation_audio_reference_edit_source(req.referenceId)
+            preview_key = paths.generation_audio_reference_preview(req.referenceId)
+            waveform_key = paths.generation_audio_reference_waveform(req.referenceId)
+            waveform_width = 1280
+            waveform_height = 240
+            try:
+                original_bytes = asset_store.read_bytes(key)
+            except ClientError:
+                return error_response(400, "Uploaded audio file not found", origin=origin)
+            with tempfile.TemporaryDirectory() as td:
+                td_path = Path(td)
+                original_path = td_path / req.filename
+                original_path.write_bytes(original_bytes)
+                edit_source_path = td_path / "audio_edit_source.wav"
+                preview_path = td_path / "audio_preview.m4a"
+                waveform_path = td_path / "audio_waveform.png"
+                transcode_audio_edit_source(str(original_path), str(edit_source_path))
+                transcode_audio_preview(str(original_path), str(preview_path))
+                generate_waveform_png(str(edit_source_path), str(waveform_path), width=waveform_width, height=waveform_height)
+                edit_probe = ffprobe_audio(str(edit_source_path))
+                asset_store.put_bytes(edit_source_key, edit_source_path.read_bytes(), content_type="audio/wav")
+                asset_store.put_bytes(preview_key, preview_path.read_bytes(), content_type="audio/mp4")
+                asset_store.put_bytes(waveform_key, waveform_path.read_bytes(), content_type="image/png")
+            task["generationAudioReference"] = {
+                "referenceId": req.referenceId,
+                "filename": req.filename,
+                "originalKey": key,
+                "editSourceKey": edit_source_key,
+                "previewKey": preview_key,
+                "waveformKey": waveform_key,
+                "waveformWidth": waveform_width,
+                "waveformHeight": waveform_height,
+                "durationSec": round(float(edit_probe.get("duration_sec") or 0.0), 4),
+                "sampleRate": int(edit_probe.get("sample_rate") or 48000),
+                "channels": int(edit_probe.get("channels") or 2),
+                "codec": str(edit_probe.get("codec") or "pcm_s16le"),
+                "bitRate": int(edit_probe.get("bit_rate") or 0),
+                "createdAt": str(previous_reference.get("createdAt") or now) if previous_reference else now,
+                "updatedAt": now,
+            }
+            task.setdefault("history", []).append(
+                {
+                    "type": "GENERATION_AUDIO_REFERENCE_UPLOADED",
+                    "timestamp": now,
+                    "userId": user_id,
+                    "details": {"referenceId": req.referenceId, "filename": req.filename},
+                }
+            )
+            store.save_task(task)
+            for previous_key in previous_keys:
+                if previous_key and previous_key != key and previous_key not in {edit_source_key, preview_key, waveform_key}:
+                    try:
+                        asset_store.delete_object(previous_key)
+                    except ClientError:
+                        logger.warning("Generation audio reference delete failed", extra={"taskId": task_id, "key": previous_key})
+            generation_audio_reference = task["generationAudioReference"]
+            return response(
+                201,
+                {
+                    "reference": {
+                        **generation_audio_reference,
+                        "originalUrl": asset_store.presign_get(key, expires=PRESIGNED_GET_TTL_SECONDS),
+                        "editSourceUrl": asset_store.presign_get(edit_source_key, expires=PRESIGNED_GET_TTL_SECONDS),
+                        "previewUrl": asset_store.presign_get(preview_key, expires=PRESIGNED_GET_TTL_SECONDS),
+                        "waveformUrl": asset_store.presign_get(waveform_key, expires=PRESIGNED_GET_TTL_SECONDS),
+                    }
+                },
+                origin=origin,
+            )
+
+        if method == "POST" and len(parts) == 5 and parts[2] == "edit-video" and parts[3] == "references" and parts[4] == "import":
+            req = _json_model(EditVideoReferenceImportRequest, event)
+            references = task.setdefault("editVideoReferences", [])
+            current_task_prefix = f"users/{task['userId']}/tasks/{task_id}/"
+            user_prefix = f"users/{task['userId']}/"
+            existing_by_source_key: dict[str, dict[str, Any]] = {}
+            for item in references:
+                if not isinstance(item, dict):
+                    continue
+                existing_key = str(item.get("key") or "").strip()
+                origin_key = str(item.get("originSourceKey") or "").strip()
+                if existing_key:
+                    existing_by_source_key.setdefault(existing_key, item)
+                if origin_key:
+                    existing_by_source_key.setdefault(origin_key, item)
+
+            now = now_iso()
+            imported_references: list[dict[str, Any]] = []
+            for source in req.sources:
+                source_key = str(source.sourceKey or "").strip()
+                if not source_key.startswith(user_prefix):
+                    return error_response(400, "Reference imports must come from the same user library", origin=origin)
+
+                existing_reference = existing_by_source_key.get(source_key)
+                if existing_reference:
+                    existing_key = str(existing_reference.get("key") or "").strip()
+                    imported_references.append(
+                        {
+                            **existing_reference,
+                            "imageUrl": asset_store.presign_get(existing_key, expires=PRESIGNED_GET_TTL_SECONDS),
+                        }
+                    )
+                    continue
+
+                reference_id = new_id("evref")
+                requested_filename = str(source.filename or "").strip()
+                source_filename = requested_filename or Path(source_key).name or f"{reference_id}.png"
+                target_key = _asset_paths_for_task(task).edit_video_reference(reference_id, source_filename)
+                content_type = {
+                    ".jpg": "image/jpeg",
+                    ".jpeg": "image/jpeg",
+                    ".webp": "image/webp",
+                }.get(Path(source_filename).suffix.lower(), "image/png")
+                asset_store.copy_object(source_key, target_key, content_type=content_type)
+
+                source_type = str(source.sourceType or "uploaded")
+                reference_type = "uploaded" if source_type == "uploaded" else "generated"
+                reference = {
+                    "referenceId": reference_id,
+                    "type": reference_type,
+                    "filename": source_filename,
+                    "model": None,
+                    "prompt": None,
+                    "key": target_key,
+                    "originSourceKey": source_key,
+                    "originTaskId": source.originTaskId,
+                    "originSourceType": source_type,
+                    "createdAt": now,
+                    "updatedAt": now,
+                }
+                references.append(reference)
+                existing_by_source_key[source_key] = reference
+                existing_by_source_key[target_key] = reference
+                imported_references.append(
+                    {
+                        **reference,
+                        "imageUrl": asset_store.presign_get(target_key, expires=PRESIGNED_GET_TTL_SECONDS),
+                    }
+                )
+
+            if imported_references:
+                task.setdefault("history", []).append(
+                    {
+                        "type": "EDIT_VIDEO_REFERENCES_IMPORTED",
+                        "timestamp": now,
+                        "userId": user_id,
+                        "details": {"count": len(imported_references)},
+                    }
+                )
+                store.save_task(task)
+            return response(201, {"references": imported_references}, origin=origin)
+
         if method == "POST" and len(parts) == 5 and parts[2] == "edit-video" and parts[3] == "references" and parts[4] == "generate":
             req = _json_model(EditVideoReferenceGenerateRequest, event)
-            secrets = load_secret(settings.secrets_arn)
             prompt = _sanitize_prompt(req.prompt)
             if not prompt:
                 return error_response(400, "Prompt is required", origin=origin)
-            input_image_bytes = _solid_png_bytes()
-            try:
-                if req.model in {"chatgpt", "chatgpt_latest"}:
-                    openai_key = str(secrets.get("OPENAI_API_KEY") or "")
-                    if not openai_key:
-                        return error_response(500, "OPENAI_API_KEY is required for ChatGPT image generation", origin=origin)
-                    out_bytes = generate_openai_image_edit(
-                        api_key=openai_key,
-                        model=req.model,
-                        prompt=prompt,
-                        input_image_bytes=input_image_bytes,
-                    )
-                else:
-                    gemini_key = str(secrets.get("GEMINI_API_KEY") or "")
-                    if not gemini_key:
-                        return error_response(500, "GEMINI_API_KEY is required for Gemini image generation", origin=origin)
-                    out_bytes = generate_gemini_image_edit(
-                        api_key=gemini_key,
-                        model=req.model,
-                        prompt=prompt,
-                        input_image_bytes=input_image_bytes,
-                    )
-            except Exception as exc:
-                return error_response(502, f"Reference generation failed: {exc}", origin=origin)
-
+            if req.model == "nano_banana_pro" and req.aspectRatio and req.aspectRatio not in NANO_BANANA_PRO_SUPPORTED_ASPECT_RATIOS:
+                allowed = ", ".join(sorted(NANO_BANANA_PRO_SUPPORTED_ASPECT_RATIOS))
+                return error_response(
+                    400,
+                    f"Nano Banana Pro does not support aspect ratio {req.aspectRatio}. Allowed ratios: {allowed}",
+                    origin=origin,
+                )
+            if req.model == "nano_banana" and len(req.selectedReferenceIds or []) > NANO_BANANA_MAX_REFERENCE_IMAGES:
+                return error_response(
+                    400,
+                    f"Nano Banana supports up to {NANO_BANANA_MAX_REFERENCE_IMAGES} reference images in this tool. Remove some references or use Nano Banana Pro.",
+                    origin=origin,
+                )
             references = task.setdefault("editVideoReferences", [])
+            if req.selectedReferenceIds:
+                reference_by_id = {
+                    str(item.get("referenceId") or ""): item
+                    for item in references
+                    if isinstance(item, dict) and item.get("referenceId")
+                }
+                for reference_id in req.selectedReferenceIds:
+                    reference = reference_by_id.get(reference_id)
+                    if not reference:
+                        return error_response(400, f"Reference image not found: {reference_id}", origin=origin)
+                    key = str(reference.get("key") or "").strip()
+                    status = str(reference.get("status") or "complete").lower()
+                    if status in {"queued", "running"} or not key:
+                        return error_response(400, f"Reference image is not ready yet: {reference_id}", origin=origin)
+                    if not key.startswith(f"users/{task['userId']}/tasks/{task_id}/"):
+                        return error_response(400, f"Invalid reference image key: {reference_id}", origin=origin)
             reference_id = new_id("evref")
-            key = _asset_paths_for_task(task).edit_video_reference(reference_id, f"{reference_id}.png")
-            asset_store.put_bytes(key, out_bytes, content_type="image/png")
             now = now_iso()
+            job_id = _queue_job(
+                store=store,
+                queue=queue,
+                user_id=user_id,
+                task_id=task_id,
+                job_type="edit_video_reference_generate",
+                payload={
+                    "referenceId": reference_id,
+                    "model": req.model,
+                    "prompt": prompt,
+                    "aspectRatio": req.aspectRatio,
+                    "selectedReferenceIds": list(req.selectedReferenceIds or []),
+                },
+            )
             reference = {
                 "referenceId": reference_id,
                 "type": "generated",
                 "filename": f"{reference_id}.png",
                 "model": req.model,
                 "prompt": prompt,
-                "key": key,
+                "aspectRatio": req.aspectRatio,
+                "key": "",
+                "status": "queued",
+                "jobId": job_id,
                 "createdAt": now,
                 "updatedAt": now,
             }
             references.append(reference)
             task.setdefault("history", []).append(
                 {
-                    "type": "EDIT_VIDEO_REFERENCE_GENERATED",
+                    "type": "EDIT_VIDEO_REFERENCE_GENERATION_QUEUED",
                     "timestamp": now,
                     "userId": user_id,
-                    "details": {"referenceId": reference_id, "model": req.model},
+                    "details": {"referenceId": reference_id, "jobId": job_id, "model": req.model},
                 }
             )
             store.save_task(task)
-            return response(
-                201,
-                {"reference": {**reference, "imageUrl": asset_store.presign_get(key, expires=PRESIGNED_GET_TTL_SECONDS)}},
-                origin=origin,
-            )
+            return response(202, {"reference": reference, "jobId": job_id}, origin=origin)
 
         if method == "POST" and len(parts) == 6 and parts[2] == "frames" and parts[4] == "references" and parts[5] == "uploads":
             frame_id = parts[3]
@@ -2731,6 +3176,24 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
         if task_generation_extend_response is not None:
             return task_generation_extend_response
 
+        task_generation_lengthen_response = handle_task_generation_lengthen_route(
+            method,
+            task_id=task_id,
+            parts=parts,
+            event=event,
+            origin=origin,
+            user_id=user_id,
+            task=task,
+            store=store,
+            json_model=_json_model,
+            response_fn=response,
+            error_response_fn=error_response,
+            now_iso_fn=now_iso,
+            queue_segment_generation_record_fn=lambda **kwargs: _queue_segment_generation_record(queue=queue, **kwargs),
+        )
+        if task_generation_lengthen_response is not None:
+            return task_generation_lengthen_response
+
         task_chunked_control_response = handle_task_chunked_control_routes(
             method,
             task_id=task_id,
@@ -2827,6 +3290,3 @@ def handler(event, context):
     except Exception as exc:
         logger.exception("Unhandled error", extra={"error": str(exc)})
         return error_response(500, "Internal server error", origin=_origin(event))
-    EditVideoReferenceGenerateRequest,
-    EditVideoReferenceUploadCompleteRequest,
-    EditVideoReferenceUploadRequest,

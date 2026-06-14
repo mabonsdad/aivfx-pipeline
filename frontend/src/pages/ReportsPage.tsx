@@ -4,6 +4,9 @@ import type { UseMutationResult, UseQueryResult } from "@tanstack/react-query";
 
 import { apiClient } from "../api/client";
 import { StatusNotice } from "../components/layout/UiFeedback";
+import WaveformPreview from "../components/workflow/WaveformPreview";
+import { classifyGenerationAssetRole } from "../lib/generationOrigin";
+import { resolveExportThumbnailUrl, resolveGenerationThumbnailUrl } from "../lib/taskPreview";
 import {
   FRAME_TEST_OPTIONS,
   HeatmapLegend,
@@ -27,7 +30,7 @@ import type {
 } from "../types/api";
 
 type ReportView = "frames" | "videos" | "reports";
-type CustomReportType = "qc_frame" | "qc_video" | "video_compare";
+type CustomReportType = "qc_frame" | "qc_video" | "video_compare" | "previz_review";
 
 type ReportsPageCtx = {
   reportTask: TaskDetail | undefined;
@@ -57,6 +60,7 @@ type ReportsPageCtx = {
   deleteCustomReportMutation: UseMutationResult<{ ok: true }, Error, { taskId: string; reportId: string }, unknown>;
   toggleCustomReportOutput: (taskId: string, ref: CustomReportOutputRef) => void;
   setVideoPreviewModal: (value: { url: string; label: string } | null) => void;
+  setAudioPreviewModal: (value: { url: string; label: string; waveformUrl?: string | null } | null) => void;
   setImagePreviewModal: (value: { url: string; label: string } | null) => void;
   formatCompactTimestamp: (iso: string | undefined) => string;
   asNumber: (value: unknown) => number | null;
@@ -86,6 +90,49 @@ type VideoOutputRow = {
   startVariant: FrameVariant | null;
   endVariant: FrameVariant | null;
 };
+
+type PrevizFrameOutputRow = {
+  referenceId: string;
+  imageUrl: string;
+  createdAt: string;
+  title: string;
+  subtitle: string;
+};
+
+type PrevizGenerationFrame = {
+  referenceId: string;
+  imageUrl: string;
+  title: string;
+  subtitle: string;
+};
+
+function generationPreviewImageUrl(task: TaskDetail, row: VideoOutputRow, previzFrames: PrevizGenerationFrame[]): string {
+  const generationThumbnailUrl = resolveGenerationThumbnailUrl(task, row.generation);
+  if (generationThumbnailUrl) return generationThumbnailUrl;
+  if (task.workflowId === "simple_generation_workflow") {
+    return previzFrames[0]?.imageUrl ?? "";
+  }
+  return row.startVariant?.imageUrl ?? row.startFrame?.imageUrl ?? "";
+}
+
+function reportVideoPreviewImageUrl(task: TaskDetail, row: VideoReportRow): string {
+  if (row.assetType === "export") {
+    const exportItem = (task.exports ?? []).find((item) => item.exportId === row.exportId);
+    return exportItem ? resolveExportThumbnailUrl(task, exportItem) ?? "" : "";
+  }
+
+  const generation = row.genId ? task.segmentGenerations?.[row.genId] : null;
+  if (generation) {
+    const generationThumbnailUrl = resolveGenerationThumbnailUrl(task, generation);
+    if (generationThumbnailUrl) return generationThumbnailUrl;
+  }
+
+  if (task.workflowId === "simple_generation_workflow") {
+    return row.previzFrames?.[0]?.imageUrl ?? "";
+  }
+
+  return row.editedStartFrameUrl ?? row.originalFrameUrl ?? "";
+}
 
 type FrameReportRow = {
   assetType: "frame_variant" | "external_frame_pair";
@@ -145,6 +192,18 @@ type VideoReportRow = {
   maskUrl?: string;
   endFrameUrl?: string;
   generatedVideoUrl?: string;
+  sceneAspectRatio?: string;
+  previzFrames?: Array<{
+    referenceId?: string;
+    label?: string;
+    imageKey?: string;
+    imageUrl?: string;
+    filename?: string;
+    model?: string;
+    referenceType?: string;
+  }>;
+  selectedFrameCount?: number;
+  reportKind?: string;
   standard?: {
     selectedTests?: string[];
     aggregates?: Record<string, unknown>;
@@ -225,6 +284,7 @@ type ReportScope = "current_range" | "all_ranges";
 function reportTypeLabel(reportType: CustomReportType): string {
   if (reportType === "qc_frame") return "Frame QC";
   if (reportType === "video_compare") return "Video Compare";
+  if (reportType === "previz_review") return "Previz Review";
   return "Video QC";
 }
 
@@ -316,6 +376,9 @@ function summarizeReport(report: CustomReportRecord, task: TaskDetail | undefine
   if (!task || !asset_refs.length) {
     return `${asset_refs.length} selected asset${asset_refs.length === 1 ? "" : "s"}`;
   }
+  if (report.reportType === "previz_review") {
+    return `${asset_refs.length} selected previz video${asset_refs.length === 1 ? "" : "s"}`;
+  }
   if (report.reportType === "qc_frame") {
     const external_pairs = asset_refs.filter(
       (ref): ref is Extract<CustomReportOutputRef, { assetType: "external_frame_pair" }> => ref.assetType === "external_frame_pair",
@@ -387,6 +450,7 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
     deleteCustomReportMutation,
     toggleCustomReportOutput,
     setVideoPreviewModal,
+    setAudioPreviewModal,
     setImagePreviewModal,
     formatCompactTimestamp,
     asNumber,
@@ -436,7 +500,7 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
   const videoOutputRows = useMemo(() => {
     if (!reportTask) return [] as VideoOutputRow[];
     return Object.values(reportTask.segmentGenerations ?? {})
-      .filter((generation) => generation.status === "complete" && generation.outputKey)
+      .filter((generation) => classifyGenerationAssetRole(generation, reportTask) === "generated_video")
       .map((generation) => {
         const segment = reportTask.segments.find((item) => item.segmentId === generation.segmentId) ?? null;
         const startFrame = segment ? reportTask.frames[segment.startFrameId] ?? null : null;
@@ -462,6 +526,65 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
       })
       .sort((a, b) => safeTimestamp(b.generation.createdAt) - safeTimestamp(a.generation.createdAt));
   }, [reportTask]);
+
+  const isPrevizWorkflow = reportTask?.workflowId === "simple_generation_workflow";
+  const previzReferenceLookup = useMemo(() => {
+    const mapping = new Map<string, { imageUrl: string; createdAt?: string; title: string; subtitle: string }>();
+    for (const reference of reportTask?.editVideoReferences ?? []) {
+      if (!reference.imageUrl) continue;
+      mapping.set(reference.referenceId, {
+        imageUrl: reference.imageUrl,
+        createdAt: reference.createdAt,
+        title: reference.filename || reference.referenceId,
+        subtitle: reference.type === "generated" ? `${reference.model ?? "generated"} frame` : "uploaded reference",
+      });
+    }
+    return mapping;
+  }, [reportTask?.editVideoReferences]);
+  const previzFrameOutputRows = useMemo(() => {
+    if (!reportTask || !isPrevizWorkflow) return [] as PrevizFrameOutputRow[];
+    const frameIds = Array.isArray(reportTask.previz?.frameReferenceIds) ? reportTask.previz.frameReferenceIds : [];
+    const rows: PrevizFrameOutputRow[] = [];
+    for (const referenceId of frameIds) {
+      const reference = previzReferenceLookup.get(referenceId);
+      if (!reference) continue;
+      rows.push({
+        referenceId,
+        imageUrl: reference.imageUrl,
+        createdAt: reference.createdAt ?? "",
+        title: reference.title,
+        subtitle: reference.subtitle,
+      });
+    }
+    return rows.sort((a, b) => safeTimestamp(b.createdAt) - safeTimestamp(a.createdAt));
+  }, [isPrevizWorkflow, previzReferenceLookup, reportTask]);
+  const previzGenerationFramesByGenId = useMemo(() => {
+    const mapping = new Map<string, PrevizGenerationFrame[]>();
+    if (!reportTask || !isPrevizWorkflow) return mapping;
+    for (const generation of Object.values(reportTask.segmentGenerations ?? {})) {
+      const selectedFrameIds = Array.isArray(generation.generationSettings?.selectedFrameIds)
+        ? generation.generationSettings?.selectedFrameIds
+        : [];
+      const frames = selectedFrameIds
+        .map((referenceId, index, array) => {
+          const reference = previzReferenceLookup.get(String(referenceId));
+          if (!reference) return null;
+          let title = `Frame ${index + 1}`;
+          if (array.length > 1 && index === 0) title = "Start";
+          else if (array.length > 1 && index === array.length - 1) title = "End";
+          else if (array.length > 2) title = `Key ${index}`;
+          return {
+            referenceId: String(referenceId),
+            imageUrl: reference.imageUrl,
+            title,
+            subtitle: reference.subtitle,
+          };
+        })
+        .filter((item): item is PrevizGenerationFrame => Boolean(item));
+      mapping.set(generation.genId, frames);
+    }
+    return mapping;
+  }, [isPrevizWorkflow, previzReferenceLookup, reportTask]);
 
   const scopedVideoOutputRows = useMemo(() => {
     if (reportScope !== "current_range" || !currentWorkingRangeSegment) return videoOutputRows;
@@ -509,6 +632,7 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
     }
     return keys.size === 1;
   }, [reportTask, selectedVideoRefs]);
+  const canCreatePrevizReview = isPrevizWorkflow && selectedVideoRefs.length > 0;
 
   useEffect(() => {
     if (!activeCustomReportId || reportScope !== "current_range") return;
@@ -553,6 +677,8 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
         ? ["frame_diff", "frame_composite"]
         : mode === "video_compare"
           ? ["video_model_compare"]
+          : mode === "previz_review"
+            ? ["storyboard_overview"]
           : ["video_diff", "video_frame_evidence"],
     );
   }
@@ -614,13 +740,22 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
   const videoReportRows = ((activeResult?.rows as Array<Record<string, unknown>> | undefined) ?? []).filter(
     (row): row is VideoReportRow => row.assetType === "segment_generation" || row.assetType === "export",
   );
+  const reportSourceMediaLabel = isPrevizWorkflow
+    ? "Scene"
+    : reportTask?.workflowId === "character_animate_workflow" && reportTask?.sourceMedia?.kind === "audio"
+      ? "Source audio"
+      : "Source video";
+  const isAudioSourceTask = reportTask?.workflowId === "character_animate_workflow" && reportTask?.sourceMedia?.kind === "audio";
+  const reportSourceAudioUrl = reportTask?.sourceMedia?.previewSource?.downloadUrl ?? reportTask?.sourceMedia?.editSource?.downloadUrl ?? null;
+  const reportSourceWaveformUrl = reportTask?.sourceMedia?.waveform?.downloadUrl ?? reportTask?.video?.editSource?.waveformUrl ?? null;
+  const reportSourceFrameCount = reportTask?.sourceMedia?.editSource?.frameCount ?? reportTask?.video?.editSource?.frameCount ?? 0;
 
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-start justify-between gap-3 rounded-2xl border border-ink/10 bg-card p-4">
         <div>
           <p className="text-sm font-semibold text-ink">
-            {reportTask?.name ?? reportTaskId ?? "Source video"} · Working range: {currentWorkingRangeLabel}
+            {reportTask?.name ?? reportTaskId ?? reportSourceMediaLabel} · Working range: {currentWorkingRangeLabel}
           </p>
           {reportTask ? <p className="text-xs text-ink/50">Updated {formatAssetDate(reportTask.updatedAt)}</p> : null}
         </div>
@@ -647,17 +782,21 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
       <div className="rounded-2xl border border-ink/10 bg-card p-4">
         <div className="grid gap-3 md:grid-cols-3">
           <div className="rounded-lg border border-ink/10 bg-bg p-3">
-            <p className="text-xs font-semibold uppercase tracking-wide text-ink/50">Frame Edits</p>
-            <p className="mt-1 text-2xl font-semibold text-ink">{scopedFrameOutputRows.length}</p>
+            <p className="text-xs font-semibold uppercase tracking-wide text-ink/50">{isPrevizWorkflow ? "Scene Frames" : "Frame Edits"}</p>
+            <p className="mt-1 text-2xl font-semibold text-ink">{isPrevizWorkflow ? previzFrameOutputRows.length : scopedFrameOutputRows.length}</p>
             <p className="text-xs text-ink/60">
-              {reportScope === "current_range" ? "Edited and refined frames in the current working range." : "Edited and refined frames available for frame QC."}
+              {isPrevizWorkflow
+                ? "Generated storyboard frames available to drive previz shots."
+                : reportScope === "current_range"
+                  ? "Edited and refined frames in the current working range."
+                  : "Edited and refined frames available for frame QC."}
             </p>
           </div>
           <div className="rounded-lg border border-ink/10 bg-bg p-3">
             <p className="text-xs font-semibold uppercase tracking-wide text-ink/50">Video Outputs</p>
             <p className="mt-1 text-2xl font-semibold text-ink">{scopedVideoOutputRows.length}</p>
             <p className="text-xs text-ink/60">
-              {reportScope === "current_range" ? "Completed generated outputs for the current working range." : "Completed generated outputs attached to this source video."}
+              {reportScope === "current_range" ? "Completed generated outputs for the current working range." : `Completed generated outputs attached to this ${reportSourceMediaLabel.toLowerCase()}.`}
             </p>
           </div>
           <div className="rounded-lg border border-ink/10 bg-bg p-3">
@@ -699,7 +838,7 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
             </button>
           </>
         ) : null}
-          {reportView === "frames" ? (
+          {reportView === "frames" && !isPrevizWorkflow ? (
             <button
               type="button"
               className="rounded border border-ink/20 bg-white px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50"
@@ -709,7 +848,7 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
               Create Frame QC Report
             </button>
           ) : null}
-          {reportView === "videos" ? (
+          {reportView === "videos" && !isPrevizWorkflow ? (
             <button
               type="button"
               className="rounded border border-ink/20 bg-white px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50"
@@ -719,7 +858,7 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
               Create Video QC Report
             </button>
           ) : null}
-          {reportView === "videos" ? (
+          {reportView === "videos" && !isPrevizWorkflow ? (
             <button
               type="button"
               className="rounded border border-ink/20 bg-white px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50"
@@ -734,6 +873,17 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
               }
             >
               Create Video Comparison Report
+            </button>
+          ) : null}
+          {reportView === "videos" && isPrevizWorkflow ? (
+            <button
+              type="button"
+              className="rounded border border-ink/20 bg-white px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={!reportTaskId || !canCreatePrevizReview || createCustomReportMutation.isPending}
+              onClick={() => openCreateModal("previz_review")}
+              title={selectedVideoRefs.length < 1 ? "Select at least one previz video" : "Create a saved previz review report"}
+            >
+              Create Previz Review Report
             </button>
           ) : null}
           <button type="button" className="rounded border border-ink/20 bg-white px-3 py-2 text-sm" onClick={() => void reportTaskQuery.refetch()}>
@@ -784,10 +934,40 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
         {reportView === "frames" ? (
           <section className="space-y-3 rounded-2xl border border-ink/10 bg-card p-4">
             <div className="flex items-center justify-between gap-2">
-              <h3 className="text-lg font-semibold">Frame Outputs</h3>
-              <p className="text-xs text-ink/60">Selected for report: {selectedFrameRefs.length}</p>
+              <h3 className="text-lg font-semibold">{isPrevizWorkflow ? "Scene Frames" : "Frame Outputs"}</h3>
+              <p className="text-xs text-ink/60">
+                {isPrevizWorkflow ? `${previzFrameOutputRows.length} generated frame${previzFrameOutputRows.length === 1 ? "" : "s"}` : `Selected for report: ${selectedFrameRefs.length}`}
+              </p>
             </div>
-            {scopedFrameOutputRows.length === 0 ? (
+            {isPrevizWorkflow ? (
+              previzFrameOutputRows.length === 0 ? (
+                <p className="text-sm text-ink/60">No generated frames available yet.</p>
+              ) : (
+                <div className="space-y-3">
+                  {previzFrameOutputRows.map((row) => (
+                    <article key={row.referenceId} className="space-y-2 rounded-lg border border-ink/10 bg-white p-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <p className="text-sm font-semibold">{row.title}</p>
+                        <p className="text-xs text-ink/60">{row.subtitle}</p>
+                      </div>
+                      <div className="grid gap-3 md:grid-cols-[minmax(0,240px)_minmax(0,1fr)]">
+                        <PreviewableImage
+                          url={row.imageUrl}
+                          alt={row.title}
+                          label={row.title}
+                          onPreview={setImagePreviewModal}
+                          className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain"
+                        />
+                        <div className="rounded border border-ink/10 bg-bg/20 p-3 text-xs text-ink/70">
+                          <p>These generated frames are used as storyboard anchors for Previz video generation.</p>
+                          <p className="mt-1">{formatCompactTimestamp(row.createdAt)}</p>
+                        </div>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              )
+            ) : scopedFrameOutputRows.length === 0 ? (
               <p className="text-sm text-ink/60">No edited frames available.</p>
             ) : (
               <div className="space-y-3">
@@ -883,7 +1063,9 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
           <section className="space-y-3 rounded-2xl border border-ink/10 bg-card p-4">
             <div className="flex items-center justify-between gap-2">
               <h3 className="text-lg font-semibold">Video Outputs</h3>
-              <p className="text-xs text-ink/60">Selected for report: {selectedVideoRefs.length}</p>
+              <p className="text-xs text-ink/60">
+                {isPrevizWorkflow ? "Compare generated previz videos against the storyboard frames that drove them." : `Selected for report: ${selectedVideoRefs.length}`}
+              </p>
             </div>
             {scopedVideoOutputRows.length === 0 ? (
               <p className="text-sm text-ink/60">No generated videos available.</p>
@@ -894,6 +1076,13 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                   const checked = selectedVideoRefs.some(
                     (selected_ref) => reportOutputRefKey(selected_ref) === reportOutputRefKey(ref),
                   );
+                  const previzFrames = isPrevizWorkflow ? previzGenerationFramesByGenId.get(row.generation.genId) ?? [] : [];
+                  const previzStartFrame = previzFrames[0] ?? null;
+                  const previzEndFrame = previzFrames.length > 1 ? previzFrames[previzFrames.length - 1] ?? null : previzStartFrame;
+                  const rowRangeStartRatio =
+                    isAudioSourceTask && reportSourceFrameCount > 0 && row.segment ? row.segment.startFrame / reportSourceFrameCount : null;
+                  const rowRangeEndRatio =
+                    isAudioSourceTask && reportSourceFrameCount > 0 && row.segment ? row.segment.endFrameExclusive / reportSourceFrameCount : null;
                   return (
                     <article
                       key={row.generation.genId}
@@ -918,19 +1107,91 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                             checked={checked}
                             onChange={() => reportTaskId && toggleCustomReportOutput(reportTaskId, ref)}
                           />
-                          Include in report
+                          {isPrevizWorkflow ? "Include in previz review" : "Include in report"}
                         </label>
                       </div>
-                      <div className="grid gap-3 md:grid-cols-5">
+                      {isPrevizWorkflow ? (
+                        <div className="grid gap-3 md:grid-cols-4">
+                          <div>
+                            <p className="text-xs font-medium text-ink/70">Start frame</p>
+                            <PreviewableImage
+                              url={previzStartFrame?.imageUrl}
+                              alt="Start frame"
+                              label={previzStartFrame?.title ?? "Start frame"}
+                              onPreview={setImagePreviewModal}
+                              className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain"
+                            />
+                          </div>
+                          <div>
+                            <p className="text-xs font-medium text-ink/70">Storyboard frames</p>
+                            {previzFrames.length > 0 ? (
+                              <div className="grid grid-cols-2 gap-2 rounded border border-ink/10 bg-bg p-2">
+                                {previzFrames.slice(0, 4).map((frame) => (
+                                  <button key={frame.referenceId} type="button" className="block w-full text-left" onClick={() => setImagePreviewModal({ url: frame.imageUrl, label: frame.title })}>
+                                    <img src={frame.imageUrl} alt={frame.title} className="aspect-video w-full rounded border border-ink/10 bg-white object-contain" loading="lazy" decoding="async" />
+                                    <p className="mt-1 text-[11px] text-ink/60">{frame.title}</p>
+                                  </button>
+                                ))}
+                              </div>
+                            ) : (
+                              <p className="text-xs text-ink/50">No storyboard frames recorded.</p>
+                            )}
+                          </div>
+                          <div>
+                            <p className="text-xs font-medium text-ink/70">End frame</p>
+                            <PreviewableImage
+                              url={previzEndFrame?.imageUrl}
+                              alt="End frame"
+                              label={previzEndFrame?.title ?? "End frame"}
+                              onPreview={setImagePreviewModal}
+                              className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain"
+                            />
+                          </div>
+                          <div>
+                            <p className="text-xs font-medium text-ink/70">Generated video</p>
+                            {row.generation.downloadUrl ? (
+                              <button type="button" className="block w-full" onClick={() => setVideoPreviewModal({ url: row.generation.downloadUrl as string, label: row.generation.genId })}>
+                                <img
+                                  src={generationPreviewImageUrl(reportTask, row, previzFrames)}
+                                  alt="Generated video preview"
+                                  className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain"
+                                />
+                              </button>
+                            ) : null}
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="grid gap-3 md:grid-cols-5">
                         <div>
-                          <p className="text-xs font-medium text-ink/70">Original start frame</p>
-                          <PreviewableImage
-                            url={row.startFrame?.imageUrl}
-                            alt="Original start frame"
-                            label="Original start frame"
-                            onPreview={setImagePreviewModal}
-                            className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain"
-                          />
+                          <p className="text-xs font-medium text-ink/70">{isAudioSourceTask ? "Source audio" : "Original start frame"}</p>
+                          {isAudioSourceTask ? (
+                            <button
+                              type="button"
+                              className="block w-full"
+                              onClick={() => reportSourceAudioUrl && setAudioPreviewModal({ url: reportSourceAudioUrl, label: "Source audio", waveformUrl: reportSourceWaveformUrl })}
+                            >
+                              {reportSourceWaveformUrl ? (
+                                <WaveformPreview
+                                  src={reportSourceWaveformUrl}
+                                  alt="Source audio waveform"
+                                  className="aspect-video w-full rounded border border-ink/10 bg-bg"
+                                  imageClassName="aspect-video w-full rounded object-contain"
+                                  rangeStartRatio={rowRangeStartRatio}
+                                  rangeEndRatio={rowRangeEndRatio}
+                                />
+                              ) : (
+                                <div className="flex aspect-video w-full items-center justify-center rounded border border-ink/10 bg-bg text-xs text-ink/55">Audio source</div>
+                              )}
+                            </button>
+                          ) : (
+                            <PreviewableImage
+                              url={row.startFrame?.imageUrl}
+                              alt="Original start frame"
+                              label="Original start frame"
+                              onPreview={setImagePreviewModal}
+                              className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain"
+                            />
+                          )}
                         </div>
                         <div>
                           <p className="text-xs font-medium text-ink/70">Mask edit</p>
@@ -947,18 +1208,37 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                           )}
                         </div>
                         <div>
-                          <p className="text-xs font-medium text-ink/70">Edited start frame</p>
+                          <p className="text-xs font-medium text-ink/70">{isAudioSourceTask ? "Character image" : "Edited start frame"}</p>
                           <PreviewableImage
                             url={row.startVariant?.imageUrl}
-                            alt="Edited start frame"
-                            label="Edited start frame"
+                            alt={isAudioSourceTask ? "Character image" : "Edited start frame"}
+                            label={isAudioSourceTask ? "Character image" : "Edited start frame"}
                             onPreview={setImagePreviewModal}
                             className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain"
                           />
                         </div>
                         <div>
-                          <p className="text-xs font-medium text-ink/70">End frame</p>
-                          {row.endVariant?.imageUrl || row.endFrame?.imageUrl ? (
+                          <p className="text-xs font-medium text-ink/70">{isAudioSourceTask ? "Audio range" : "End frame"}</p>
+                          {isAudioSourceTask ? (
+                            reportSourceWaveformUrl ? (
+                              <button
+                                type="button"
+                                className="block w-full"
+                                onClick={() => reportSourceAudioUrl && setAudioPreviewModal({ url: reportSourceAudioUrl, label: "Audio range", waveformUrl: reportSourceWaveformUrl })}
+                              >
+                                <WaveformPreview
+                                  src={reportSourceWaveformUrl}
+                                  alt="Audio range waveform"
+                                  className="aspect-video w-full rounded border border-ink/10 bg-bg"
+                                  imageClassName="aspect-video w-full rounded object-contain"
+                                  rangeStartRatio={rowRangeStartRatio}
+                                  rangeEndRatio={rowRangeEndRatio}
+                                  rangeStartLabel={row.segment?.startTimecode ?? null}
+                                  rangeEndLabel={row.segment?.endTimecode ?? null}
+                                />
+                              </button>
+                            ) : <p className="text-xs text-ink/50">No audio waveform</p>
+                          ) : row.endVariant?.imageUrl || row.endFrame?.imageUrl ? (
                             <PreviewableImage
                               url={(row.endVariant?.imageUrl ?? row.endFrame?.imageUrl) as string}
                               alt="End frame"
@@ -966,21 +1246,22 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                               onPreview={setImagePreviewModal}
                               className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain"
                             />
-                          ) : null}
+                              ) : null}
                         </div>
                         <div>
                           <p className="text-xs font-medium text-ink/70">Generated video</p>
                           {row.generation.downloadUrl ? (
                             <button type="button" className="block w-full" onClick={() => setVideoPreviewModal({ url: row.generation.downloadUrl as string, label: row.generation.genId })}>
                               <img
-                                src={row.startVariant?.imageUrl ?? row.startFrame?.imageUrl ?? row.generation.inputFirstFrameUrl ?? ""}
+                                src={reportTask ? generationPreviewImageUrl(reportTask, row, []) : ""}
                                 alt="Generated video preview"
                                 className="aspect-video w-full rounded border border-ink/10 bg-bg object-contain"
                               />
                             </button>
-                          ) : null}
+                            ) : null}
                         </div>
                       </div>
+                      )}
                       <div className="rounded border border-ink/10 bg-bg/20 p-2 text-xs text-ink/70">
                         <p>
                           Model: {row.generation.luma.model} - {row.generation.luma.mode}
@@ -1003,7 +1284,11 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
           <section className="space-y-4 rounded-2xl border border-ink/10 bg-card p-4">
             <div className="space-y-1">
               <h3 className="text-lg font-semibold">Saved Reports</h3>
-              <p className="text-xs text-ink/60">Create new reports from the Assets step. Older reports remain available here.</p>
+              <p className="text-xs text-ink/60">
+                {isPrevizWorkflow
+                  ? "Previz uses the Frames and Video Outputs views to compare storyboard frames and generated shots. Custom QC report generation is not enabled for this workflow yet."
+                  : "Create new reports from the Assets step. Older reports remain available here."}
+              </p>
             </div>
             {!activeReportMeta ? (
               !scopedReports.length ? (
@@ -1435,6 +1720,89 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                   </div>
                 ) : null}
 
+                {activeResult && activeReportMeta.reportType === "previz_review" ? (
+                  <div className="space-y-3">
+                    {videoReportRows.map((row) => {
+                      const rowLabel = row.genId ?? "generation";
+                      const previzFrames = row.previzFrames ?? [];
+                      const startFrame = previzFrames[0];
+                      const endFrame = previzFrames.length > 1 ? previzFrames[previzFrames.length - 1] : startFrame;
+                      return (
+                        <article key={row.genId ?? rowLabel} className="space-y-3 rounded-lg border border-ink/10 bg-bg/20 p-3">
+                          <div className="grid gap-3 overflow-x-auto xl:grid-cols-4">
+                            <div>
+                              <p className="text-xs font-medium text-ink/70">Start frame</p>
+                              <PreviewableImage
+                                url={startFrame?.imageUrl}
+                                alt="Start frame"
+                                label={startFrame?.label ?? "Start frame"}
+                                onPreview={setImagePreviewModal}
+                                className="aspect-video w-full rounded border border-ink/10 bg-white object-contain"
+                              />
+                            </div>
+                            <div>
+                              <p className="text-xs font-medium text-ink/70">Storyboard frames</p>
+                              {previzFrames.length > 0 ? (
+                                <div className="grid grid-cols-2 gap-2 rounded border border-ink/10 bg-white p-2">
+                                  {previzFrames.slice(0, 4).map((frame, index) => (
+                                    <button
+                                      key={`${row.genId ?? rowLabel}:${frame.referenceId ?? index}`}
+                                      type="button"
+                                      className="block w-full text-left"
+                                      onClick={() => frame.imageUrl && setImagePreviewModal({ url: frame.imageUrl, label: frame.label ?? `Frame ${index + 1}` })}
+                                    >
+                                      <img
+                                        src={frame.imageUrl ?? ""}
+                                        alt={frame.label ?? `Frame ${index + 1}`}
+                                        className="aspect-video w-full rounded border border-ink/10 bg-white object-contain"
+                                      />
+                                      <p className="mt-1 text-[11px] text-ink/60">{frame.label ?? `Frame ${index + 1}`}</p>
+                                    </button>
+                                  ))}
+                                </div>
+                              ) : (
+                                <p className="text-xs text-ink/50">No storyboard frames recorded.</p>
+                              )}
+                            </div>
+                            <div>
+                              <p className="text-xs font-medium text-ink/70">End frame</p>
+                              <PreviewableImage
+                                url={endFrame?.imageUrl}
+                                alt="End frame"
+                                label={endFrame?.label ?? "End frame"}
+                                onPreview={setImagePreviewModal}
+                                className="aspect-video w-full rounded border border-ink/10 bg-white object-contain"
+                              />
+                            </div>
+                            <div>
+                              <p className="text-xs font-medium text-ink/70">Generated video</p>
+                              {row.generatedVideoUrl ? (
+                                <button type="button" className="block w-full" onClick={() => setVideoPreviewModal({ url: row.generatedVideoUrl as string, label: rowLabel })}>
+                                  <img src={reportTask ? reportVideoPreviewImageUrl(reportTask, row) : ""} alt="Generated video" className="aspect-video w-full rounded border border-ink/10 bg-white object-contain" />
+                                </button>
+                              ) : null}
+                            </div>
+                          </div>
+                          <div className="rounded border border-ink/10 bg-white p-3 text-xs text-ink/70">
+                            <p>
+                              Model: {row.model ?? "n/a"}{row.mode ? ` · ${row.mode}` : ""}{row.sceneAspectRatio ? ` · ${row.sceneAspectRatio}` : ""}
+                              {formatProcessingDuration(row.processingDurationSec) ? ` · ${formatProcessingDuration(row.processingDurationSec)}` : ""}
+                            </p>
+                            <p>Prompt: {row.prompt ?? "No prompt provided"}</p>
+                            <p>Storyboard frames used: {row.selectedFrameCount ?? previzFrames.length}</p>
+                            <p>{formatCompactTimestamp(row.createdAt)}</p>
+                          </div>
+                        </article>
+                      );
+                    })}
+                    {activeResult.failures?.length ? (
+                      <div className="rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                        {activeResult.failures.length} previz video(s) failed during report build.
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+
                 {activeResult && activeReportMeta.reportType === "qc_video" ? (
                   <div className="space-y-3">
                     {videoReportRows.map((row) => {
@@ -1446,18 +1814,97 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                       const diffVideoUrl = videoArtifacts?.diffVideoUrl as string | undefined;
                       const diffVideoPosterUrl = videoArtifacts?.diffVideoPosterUrl as string | undefined;
                       const selectedFrames = (row.standard?.selectedFrames ?? []) as Array<Record<string, unknown>>;
+                      const rowSegment = row.segmentId ? reportTask?.segments.find((segment) => segment.segmentId === row.segmentId) ?? null : null;
+                      const rowRangeStartRatio =
+                        isAudioSourceTask && reportSourceFrameCount > 0 && rowSegment ? rowSegment.startFrame / reportSourceFrameCount : null;
+                      const rowRangeEndRatio =
+                        isAudioSourceTask && reportSourceFrameCount > 0 && rowSegment ? rowSegment.endFrameExclusive / reportSourceFrameCount : null;
+                      const previzFrames = isPrevizWorkflow && row.genId ? previzGenerationFramesByGenId.get(row.genId) ?? [] : [];
+                      const previzStartFrame = previzFrames[0] ?? null;
+                      const previzEndFrame = previzFrames.length > 1 ? previzFrames[previzFrames.length - 1] ?? null : previzStartFrame;
                       return (
                         <article key={row.assetType === "export" ? `export:${row.exportId}` : `generation:${row.genId}`} className="space-y-3 rounded-lg border border-ink/10 bg-bg/20 p-3">
-                          <div className="grid gap-3 overflow-x-auto xl:grid-cols-5">
+                          <div className={`grid gap-3 overflow-x-auto ${isPrevizWorkflow ? "xl:grid-cols-4" : "xl:grid-cols-5"}`}>
+                            {isPrevizWorkflow ? (
+                              <>
+                                <div>
+                                  <p className="text-xs font-medium text-ink/70">Start frame</p>
+                                  <PreviewableImage
+                                    url={previzStartFrame?.imageUrl}
+                                    alt="Start frame"
+                                    label={previzStartFrame?.title ?? "Start frame"}
+                                    onPreview={setImagePreviewModal}
+                                    className="aspect-video w-full rounded border border-ink/10 bg-white object-contain"
+                                  />
+                                </div>
+                                <div>
+                                  <p className="text-xs font-medium text-ink/70">Storyboard frames</p>
+                                  {previzFrames.length > 0 ? (
+                                    <div className="grid grid-cols-2 gap-2 rounded border border-ink/10 bg-white p-2">
+                                      {previzFrames.slice(0, 4).map((frame) => (
+                                        <button key={frame.referenceId} type="button" className="block w-full text-left" onClick={() => setImagePreviewModal({ url: frame.imageUrl, label: frame.title })}>
+                                          <img src={frame.imageUrl} alt={frame.title} className="aspect-video w-full rounded border border-ink/10 bg-white object-contain" loading="lazy" decoding="async" />
+                                          <p className="mt-1 text-[11px] text-ink/60">{frame.title}</p>
+                                        </button>
+                                      ))}
+                                    </div>
+                                  ) : (
+                                    <p className="text-xs text-ink/50">No storyboard frames recorded.</p>
+                                  )}
+                                </div>
+                                <div>
+                                  <p className="text-xs font-medium text-ink/70">End frame</p>
+                                  <PreviewableImage
+                                    url={previzEndFrame?.imageUrl}
+                                    alt="End frame"
+                                    label={previzEndFrame?.title ?? "End frame"}
+                                    onPreview={setImagePreviewModal}
+                                    className="aspect-video w-full rounded border border-ink/10 bg-white object-contain"
+                                  />
+                                </div>
+                                <div>
+                                  <p className="text-xs font-medium text-ink/70">Generated video</p>
+                                  {row.generatedVideoUrl ? (
+                                    <button type="button" className="block w-full" onClick={() => setVideoPreviewModal({ url: row.generatedVideoUrl as string, label: rowLabel })}>
+                                      <img src={reportTask ? reportVideoPreviewImageUrl(reportTask, row) : ""} alt="Generated video" className="aspect-video w-full rounded border border-ink/10 bg-white object-contain" />
+                                    </button>
+                                  ) : null}
+                                </div>
+                              </>
+                            ) : (
+                              <>
                             <div>
-                              <p className="text-xs font-medium text-ink/70">Original start frame</p>
-                              <PreviewableImage
-                                url={row.originalFrameUrl}
-                                alt="Original start frame"
-                                label="Original start frame"
-                                onPreview={setImagePreviewModal}
-                                className="aspect-video w-full rounded border border-ink/10 bg-white object-contain"
-                              />
+                              <p className="text-xs font-medium text-ink/70">{isAudioSourceTask ? "Source audio" : "Original start frame"}</p>
+                              {isAudioSourceTask ? (
+                                <button
+                                  type="button"
+                                  className="block w-full"
+                                  onClick={() => reportSourceAudioUrl && setAudioPreviewModal({ url: reportSourceAudioUrl, label: "Source audio", waveformUrl: reportSourceWaveformUrl })}
+                                >
+                                  {reportSourceWaveformUrl ? (
+                                    <WaveformPreview
+                                      src={reportSourceWaveformUrl}
+                                      alt="Source audio waveform"
+                                      className="aspect-video w-full rounded border border-ink/10 bg-white"
+                                      imageClassName="aspect-video w-full rounded object-contain"
+                                      rangeStartRatio={rowRangeStartRatio}
+                                      rangeEndRatio={rowRangeEndRatio}
+                                      rangeStartLabel={rowSegment?.startTimecode ?? null}
+                                      rangeEndLabel={rowSegment?.endTimecode ?? null}
+                                    />
+                                  ) : (
+                                    <div className="flex aspect-video w-full items-center justify-center rounded border border-ink/10 bg-bg text-xs text-ink/55">Audio source</div>
+                                  )}
+                                </button>
+                              ) : (
+                                <PreviewableImage
+                                  url={row.originalFrameUrl}
+                                  alt="Original start frame"
+                                  label="Original start frame"
+                                  onPreview={setImagePreviewModal}
+                                  className="aspect-video w-full rounded border border-ink/10 bg-white object-contain"
+                                />
+                              )}
                             </div>
                             <div>
                               <p className="text-xs font-medium text-ink/70">Mask edit</p>
@@ -1478,18 +1925,37 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                               ) : null}
                             </div>
                             <div>
-                              <p className="text-xs font-medium text-ink/70">Edited start frame</p>
+                              <p className="text-xs font-medium text-ink/70">{isAudioSourceTask ? "Character image" : "Edited start frame"}</p>
                               <PreviewableImage
                                 url={row.editedStartFrameUrl}
-                                alt="Edited start frame"
-                                label="Edited start frame"
+                                alt={isAudioSourceTask ? "Character image" : "Edited start frame"}
+                                label={isAudioSourceTask ? "Character image" : "Edited start frame"}
                                 onPreview={setImagePreviewModal}
                                 className="aspect-video w-full rounded border border-ink/10 bg-white object-contain"
                               />
                             </div>
                             <div>
-                              <p className="text-xs font-medium text-ink/70">End frame</p>
-                              {row.endFrameUrl ? (
+                              <p className="text-xs font-medium text-ink/70">{isAudioSourceTask ? "Audio range" : "End frame"}</p>
+                              {isAudioSourceTask ? (
+                                reportSourceWaveformUrl ? (
+                                  <button
+                                    type="button"
+                                    className="block w-full"
+                                    onClick={() => reportSourceAudioUrl && setAudioPreviewModal({ url: reportSourceAudioUrl, label: "Audio range", waveformUrl: reportSourceWaveformUrl })}
+                                  >
+                                    <WaveformPreview
+                                      src={reportSourceWaveformUrl}
+                                      alt="Audio range waveform"
+                                      className="aspect-video w-full rounded border border-ink/10 bg-white"
+                                      imageClassName="aspect-video w-full rounded object-contain"
+                                      rangeStartRatio={rowRangeStartRatio}
+                                      rangeEndRatio={rowRangeEndRatio}
+                                      rangeStartLabel={rowSegment?.startTimecode ?? null}
+                                      rangeEndLabel={rowSegment?.endTimecode ?? null}
+                                    />
+                                  </button>
+                                ) : <p className="text-xs text-ink/50">No audio waveform</p>
+                              ) : row.endFrameUrl ? (
                                 <PreviewableImage
                                   url={row.endFrameUrl}
                                   alt="End frame"
@@ -1503,10 +1969,12 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
                               <p className="text-xs font-medium text-ink/70">Generated video</p>
                               {row.generatedVideoUrl ? (
                                 <button type="button" className="block w-full" onClick={() => setVideoPreviewModal({ url: row.generatedVideoUrl as string, label: rowLabel })}>
-                                  <img src={row.editedStartFrameUrl ?? row.originalFrameUrl ?? ""} alt="Generated video" className="aspect-video w-full rounded border border-ink/10 bg-white object-contain" />
+                                  <img src={reportTask ? reportVideoPreviewImageUrl(reportTask, row) : ""} alt="Generated video" className="aspect-video w-full rounded border border-ink/10 bg-white object-contain" />
                                 </button>
                               ) : null}
                             </div>
+                              </>
+                            )}
                           </div>
                           <div className="grid gap-3 md:grid-cols-5">
                             <div className="rounded border border-ink/10 bg-white p-2 text-xs text-ink/70">
@@ -1838,6 +2306,8 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
             ? "Create Frame QC Report"
             : createModalMode === "video_compare"
               ? "Create Video Comparison Report"
+              : createModalMode === "previz_review"
+                ? "Create Previz Review Report"
               : "Create Video QC Report"
         }
         selectedCount={createModalMode === "qc_frame" ? selectedFrameRefs.length : selectedVideoRefs.length}
@@ -1848,6 +2318,19 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
             ? FRAME_TEST_OPTIONS
             : createModalMode === "video_compare"
               ? VIDEO_COMPARE_TEST_OPTIONS
+              : createModalMode === "previz_review"
+                ? [
+                    {
+                      id: "storyboard_overview",
+                      label: "Storyboard overview",
+                      description: "Include the storyboard frames used for each selected previz video.",
+                    },
+                    {
+                      id: "frame_continuity",
+                      label: "Frame continuity",
+                      description: "Group start, key, and end frames so continuity can be reviewed alongside the generated video.",
+                    },
+                  ]
               : VIDEO_TEST_OPTIONS
         }
         selectedTests={selectedTests}

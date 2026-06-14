@@ -18,6 +18,13 @@ OPENAI_SUPPORTED_SIZES: tuple[tuple[int, int], ...] = (
     (1024, 1536),
     (1024, 1024),
 )
+OPENAI_ASPECT_RATIO_SIZE_MAP: dict[str, tuple[int, int]] = {
+    "16:9": (1536, 1024),
+    "3:2": (1536, 1024),
+    "1:1": (1024, 1024),
+    "2:3": (1024, 1536),
+    "9:16": (1024, 1536),
+}
 
 
 class OpenAIImageError(RuntimeError):
@@ -32,6 +39,7 @@ def _post(
     prompt: str,
     input_image_bytes: bytes,
     mask_image_bytes: bytes | None = None,
+    reference_images: list[tuple[bytes, str]] | None = None,
     input_mime_type: str = "image/png",
     target_size: tuple[int, int] | None = None,
 ) -> dict[str, Any]:
@@ -45,9 +53,18 @@ def _post(
         "size": f"{target_size[0]}x{target_size[1]}" if target_size else "auto",
         "quality": "auto",
     }
-    files: list[tuple[str, tuple[str, bytes, str]]] = [
-        ("image", ("source.png", input_image_bytes, input_mime_type)),
-    ]
+    files: list[tuple[str, tuple[str, bytes, str]]] = []
+    if reference_images:
+        files.append(("image[]", ("source.png", input_image_bytes, input_mime_type)))
+        for index, (image_bytes, mime_type) in enumerate(reference_images):
+            ext = "png"
+            if mime_type == "image/jpeg":
+                ext = "jpg"
+            elif mime_type == "image/webp":
+                ext = "webp"
+            files.append(("image[]", (f"reference_{index + 1}.{ext}", image_bytes, mime_type)))
+    else:
+        files.append(("image", ("source.png", input_image_bytes, input_mime_type)))
     if mask_image_bytes:
         files.append(("mask", ("mask.png", mask_image_bytes, "image/png")))
 
@@ -87,6 +104,12 @@ def _select_supported_size(width: int, height: int) -> tuple[int, int]:
             best_delta = delta
             best_size = candidate
     return best_size
+
+
+def _target_size_for_aspect_ratio(aspect_ratio: str | None) -> tuple[int, int] | None:
+    if not aspect_ratio:
+        return None
+    return OPENAI_ASPECT_RATIO_SIZE_MAP.get(str(aspect_ratio).strip())
 
 
 def _prepare_input_image(
@@ -140,20 +163,86 @@ def generate_image_edit(
     prompt: str,
     input_image_bytes: bytes,
     mask_image_bytes: bytes | None = None,
+    reference_images: list[tuple[bytes, str]] | None = None,
     input_mime_type: str = "image/png",
+    aspect_ratio: str | None = None,
 ) -> bytes:
     prepared_image, prepared_mask, original_size, target_size, fit_box = _prepare_input_image(
         input_image_bytes=input_image_bytes,
         mask_image_bytes=mask_image_bytes,
     )
+    target_size = _target_size_for_aspect_ratio(aspect_ratio) or target_size
     payload = _post(
         api_key=api_key,
         model=model,
         prompt=prompt,
         input_image_bytes=prepared_image,
         mask_image_bytes=prepared_mask,
+        reference_images=reference_images,
         input_mime_type="image/png",
         target_size=target_size,
     )
     output = _extract_image_bytes(payload)
     return _restore_output_size(output, original_size, fit_box)
+
+
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=8), reraise=True)
+def _post_reference_generation(
+    *,
+    api_key: str,
+    model: str,
+    prompt: str,
+    reference_images: list[tuple[bytes, str]],
+    target_size: tuple[int, int] | None = None,
+) -> dict[str, Any]:
+    model_id = OPENAI_IMAGE_MODEL_MAP[model]
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+    }
+    data: dict[str, str] = {
+        "model": model_id,
+        "prompt": prompt,
+        "size": f"{target_size[0]}x{target_size[1]}" if target_size else "auto",
+        "quality": "auto",
+    }
+    files: list[tuple[str, tuple[str, bytes, str]]] = []
+    for index, (image_bytes, mime_type) in enumerate(reference_images):
+        ext = "png"
+        if mime_type == "image/jpeg":
+            ext = "jpg"
+        elif mime_type == "image/webp":
+            ext = "webp"
+        files.append(("image[]", (f"reference_{index + 1}.{ext}", image_bytes, mime_type)))
+
+    response = requests.post(
+        "https://api.openai.com/v1/images/edits",
+        headers=headers,
+        data=data,
+        files=files,
+        timeout=120,
+    )
+    if response.status_code >= 400:
+        detail = response.text[:1000]
+        raise OpenAIImageError(f"OpenAI image reference generation failed ({response.status_code}): {detail}")
+    return response.json()
+
+
+def generate_image_from_references(
+    *,
+    api_key: str,
+    model: str,
+    prompt: str,
+    reference_images: list[tuple[bytes, str]],
+    aspect_ratio: str | None = None,
+) -> bytes:
+    if not reference_images:
+        raise OpenAIImageError("At least one reference image is required")
+    target_size = _target_size_for_aspect_ratio(aspect_ratio)
+    payload = _post_reference_generation(
+        api_key=api_key,
+        model=model,
+        prompt=prompt,
+        reference_images=reference_images,
+        target_size=target_size,
+    )
+    return _extract_image_bytes(payload)

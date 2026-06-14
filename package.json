@@ -5,11 +5,19 @@
   "scripts": {
     "dev:frontend": "cd frontend && npm run dev",
     "build:frontend": "cd frontend && npm run build",
+    "build:frontend:dev": "cd frontend && npm run build:devhosted",
+    "build:frontend:prod": "cd frontend && npm run build:prod",
+    "deploy:frontend:dev": "node scripts/deploy_frontend.mjs dev",
+    "deploy:frontend:prod": "node scripts/deploy_frontend.mjs prod",
     "lint:frontend": "cd frontend && npm run lint",
     "sync:contracts": "python3 scripts/sync_video_contracts.py",
     "check:backend": "python3 -m py_compile $(find backend/src -name '*.py')",
     "test:backend": "python3 -m pytest backend/tests",
     "build:infra": "cd infra && npm run build",
-    "synth:infra": "cd infra && npm run synth"
+    "synth:infra": "cd infra && npm run synth",
+    "deploy:infra:shared": "node scripts/deploy_infra_environment.mjs shared",
+    "deploy:infra:prod": "node scripts/deploy_infra_environment.mjs prod",
+    "deploy:infra:prod-hosting": "node scripts/deploy_infra_environment.mjs prod",
+    "deploy:infra:dev": "node scripts/deploy_infra_environment.mjs dev"
   }
 }

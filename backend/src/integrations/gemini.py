@@ -20,7 +20,13 @@ class GeminiError(RuntimeError):
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=8), reraise=True)
 def _post(url: str, headers: dict[str, str], payload: dict[str, Any]) -> dict[str, Any]:
     response = requests.post(url, headers=headers, json=payload, timeout=90)
-    response.raise_for_status()
+    if response.status_code >= 400:
+        body = ""
+        try:
+            body = response.text.strip()
+        except Exception:
+            body = ""
+        raise GeminiError(f"{response.status_code} Client Error: {response.reason} for url: {url}{f' | {body}' if body else ''}")
     return response.json()
 
 
@@ -67,7 +73,9 @@ def generate_image_edit(
     prompt: str,
     input_image_bytes: bytes,
     mask_image_bytes: bytes | None = None,
+    reference_images: list[tuple[bytes, str]] | None = None,
     input_mime_type: str = "image/png",
+    aspect_ratio: str | None = None,
 ) -> bytes:
     model_id = GEMINI_MODEL_MAP[model]
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent"
@@ -103,9 +111,26 @@ def generate_image_edit(
                     "mime_type": "image/png",
                     "data": base64.b64encode(mask_image_bytes).decode("utf-8"),
                 }
+        }
+    )
+    for image_bytes, mime_type in reference_images or []:
+        parts.append(
+            {
+                "inline_data": {
+                    "mime_type": mime_type,
+                    "data": base64.b64encode(image_bytes).decode("utf-8"),
+                }
             }
         )
     parts.append({"text": prompt})
+
+    generation_config: dict[str, Any] = {
+        "responseModalities": ["TEXT", "IMAGE"],
+    }
+    if aspect_ratio:
+        generation_config["imageConfig"] = {
+            "aspectRatio": aspect_ratio,
+        }
 
     payload: dict[str, Any] = {
         "contents": [
@@ -114,9 +139,7 @@ def generate_image_edit(
                 "parts": parts,
             }
         ],
-        "generationConfig": {
-            "responseModalities": ["TEXT", "IMAGE"],
-        },
+        "generationConfig": generation_config,
     }
     last_error: GeminiError | None = None
     for attempt in range(2):
@@ -132,3 +155,49 @@ def generate_image_edit(
     if last_error is not None:
         raise last_error
     raise GeminiError("Gemini did not return an image")
+
+
+def generate_image_from_references(
+    *,
+    api_key: str,
+    model: str,
+    prompt: str,
+    reference_images: list[tuple[bytes, str]],
+    aspect_ratio: str | None = None,
+) -> bytes:
+    model_id = GEMINI_MODEL_MAP[model]
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent"
+    headers = {
+        "x-goog-api-key": api_key,
+        "content-type": "application/json",
+    }
+    parts: list[dict[str, Any]] = [{"text": prompt}]
+    for image_bytes, mime_type in reference_images:
+        parts.append(
+            {
+                "inline_data": {
+                    "mime_type": mime_type,
+                    "data": base64.b64encode(image_bytes).decode("utf-8"),
+                }
+            }
+        )
+
+    generation_config: dict[str, Any] = {
+        "responseModalities": ["TEXT", "IMAGE"],
+    }
+    if aspect_ratio:
+        generation_config["imageConfig"] = {
+            "aspectRatio": aspect_ratio,
+        }
+
+    payload: dict[str, Any] = {
+        "contents": [
+            {
+                "role": "user",
+                "parts": parts,
+            }
+        ],
+        "generationConfig": generation_config,
+    }
+    data = _post(url, headers, payload)
+    return _extract_image_bytes(data)

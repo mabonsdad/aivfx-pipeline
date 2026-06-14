@@ -18,6 +18,7 @@ _KEYED_LIST_IDS: dict[str, str] = {
     "chunkedGenerationRuns": "runId",
     "videoCleanupTracks": "trackId",
     "customReports": "reportId",
+    "editVideoReferences": "referenceId",
     "externalQcPairs": "pairId",
     "variants": "variantId",
     "references": "referenceId",
@@ -154,8 +155,52 @@ class S3JsonStore:
             ServerSideEncryption="AES256",
         )
 
-    def delete_json(self, key: str) -> None:
-        self.s3.delete_object(Bucket=self.metadata_bucket, Key=key)
+    def delete_json(self, key: str, *, purge_versions: bool = False) -> None:
+        if not purge_versions:
+            self.s3.delete_object(Bucket=self.metadata_bucket, Key=key)
+            return
+        self.delete_prefix(key, purge_versions=True, exact_key=True)
+
+    def delete_prefix(self, prefix: str, *, purge_versions: bool = False, exact_key: bool = False) -> None:
+        if not prefix:
+            return
+        if not purge_versions:
+            paginator = self.s3.get_paginator("list_objects_v2")
+            for page in paginator.paginate(Bucket=self.metadata_bucket, Prefix=prefix):
+                contents = page.get("Contents") or []
+                if not contents:
+                    continue
+                delete_batch = {
+                    "Objects": [{"Key": item["Key"]} for item in contents if isinstance(item, dict) and item.get("Key")],
+                    "Quiet": True,
+                }
+                if delete_batch["Objects"]:
+                    self.s3.delete_objects(Bucket=self.metadata_bucket, Delete=delete_batch)
+            if exact_key:
+                self.s3.delete_object(Bucket=self.metadata_bucket, Key=prefix)
+            return
+
+        paginator = self.s3.get_paginator("list_object_versions")
+        for page in paginator.paginate(Bucket=self.metadata_bucket, Prefix=prefix):
+            objects: list[dict[str, str]] = []
+            for field in ("Versions", "DeleteMarkers"):
+                for item in page.get(field) or []:
+                    if not isinstance(item, dict):
+                        continue
+                    key = item.get("Key")
+                    version_id = item.get("VersionId")
+                    if not key or not version_id:
+                        continue
+                    if exact_key and key != prefix:
+                        continue
+                    objects.append({"Key": key, "VersionId": version_id})
+            for start in range(0, len(objects), 1000):
+                chunk = objects[start : start + 1000]
+                if chunk:
+                    self.s3.delete_objects(
+                        Bucket=self.metadata_bucket,
+                        Delete={"Objects": chunk, "Quiet": True},
+                    )
 
     def load_task(self, user_id: str, task_id: str) -> dict[str, Any] | None:
         return self.get_json(self.task_key(user_id, task_id))

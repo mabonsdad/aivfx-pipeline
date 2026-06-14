@@ -11,10 +11,14 @@ import WorkflowTabs from "./components/layout/WorkflowTabs";
 import MotionSyncModal from "./components/quality/MotionSyncModal";
 import QualityMatchModal from "./components/quality/QualityMatchModal";
 import NewTaskModal from "./components/tasks/NewTaskModal";
+import WorkflowTaskPickerModal from "./components/tasks/WorkflowTaskPickerModal";
+import CharacterAnimateModePicker from "./components/workflow/CharacterAnimateModePicker";
 import CreateRoutePicker from "./components/workflow/CreateRoutePicker";
+import ReferenceImagePickerModal from "./components/workflow/ReferenceImagePickerModal";
 import { CurrentWorkingReferencePanel } from "./components/workflow/WorkingRangePanel";
 import {
   taskRoute,
+  workflowRoute,
   type ReportView,
   type TabId,
   type WorkflowRouteState,
@@ -28,11 +32,16 @@ import { useAssetLibraryState } from "./hooks/useAssetLibraryState";
 import { useAssetsTabContexts } from "./hooks/useAssetsTabContexts";
 import { useCurrentWorkingReferenceState } from "./hooks/useCurrentWorkingReferenceState";
 import { useGenerationConfigState } from "./hooks/useGenerationConfigState";
+import { useCharacterAnimateConfigState } from "./hooks/useCharacterAnimateConfigState";
 import { useGenerationPromptGuidance } from "./hooks/useGenerationPromptGuidance";
 import { useGenerationMergeState } from "./hooks/useGenerationMergeState";
 import { useSelectedSegmentPreview } from "./hooks/useSelectedSegmentPreview";
 import { useTaskDataQueries } from "./hooks/useTaskDataQueries";
 import { useReportOutputSelection } from "./hooks/useReportOutputSelection";
+import {
+  editVideoReferenceLimitForModel,
+  prepareReferenceImageUpload,
+} from "./lib/referenceImages";
 import { getPromptWizardModelConfig, type PromptWizardMode, type PromptWizardResult } from "./lib/promptWizardConfig";
 import type {
   PatchEditModelId,
@@ -40,7 +49,10 @@ import type {
   VideoModelId,
 } from "./lib/generated/videoContracts";
 import { getGenerationModeConfig, type GenerateInputMode } from "./lib/generationModeRegistry";
-import { PRIMARY_WORKFLOW_TABS, type PrimaryWorkflowSection } from "./lib/workflowSections";
+import { getGenerationOrigin, isPostProcessDerivedGeneration, matchesGenerateStepGrid } from "./lib/generationOrigin";
+import { DEFAULT_TASK_WORKFLOW_ID, getTaskWorkflowConfig, normalizeTaskWorkflowId, type TaskWorkflowId } from "./lib/taskWorkflows";
+import { resolveLatestTaskThumbnailUrl } from "./lib/taskPreview";
+import { type PrimaryWorkflowSection } from "./lib/workflowSections";
 import { currentUser, login, logout } from "./lib/auth";
 import type { EditFrameTabCtx } from "./pages/workflow/EditFrameTab";
 import type { EditVideoReferencesTabCtx } from "./pages/workflow/EditVideoReferencesTab";
@@ -48,17 +60,28 @@ import type { GenerateTabCtx } from "./pages/workflow/GenerateTab";
 import type { MergeTabCtx } from "./pages/workflow/MergeTab";
 import type { PickFrameTabCtx } from "./pages/workflow/PickFrameTab";
 import type { RefineFramesTabCtx } from "./pages/workflow/RefineFramesTab";
+import HomePage from "./pages/HomePage";
+import WorkflowLandingPage from "./pages/WorkflowLandingPage";
+import CharacterAnimateGenerateTab from "./pages/characterAnimate/CharacterAnimateGenerateTab";
+import CharacterAnimatePostProcessTab from "./pages/characterAnimate/CharacterAnimatePostProcessTab";
+import CharacterAnimatePlaceholderTab from "./pages/characterAnimate/CharacterAnimatePlaceholderTab";
+import PrevizEditTab, { type PrevizEditTabCtx } from "./pages/previz/PrevizEditTab";
+import PrevizGenerateTab, { type PrevizGenerateTabCtx } from "./pages/previz/PrevizGenerateTab";
+import PrevizSelectTab, { type PrevizSelectTabCtx } from "./pages/previz/PrevizSelectTab";
 import { useUiStore } from "./store/uiStore";
 import type {
   CustomReportOutputRef,
+  EditVideoReference,
   ExportRecord,
   FrameVariant,
   JobStatus,
   SegmentGeneration,
   SegmentRecord,
   TaskDetail,
+  TaskSummary,
 } from "./types/api";
-import type { LibraryAsset } from "./types/libraryAsset";
+import type { LibraryAsset, LibraryAssetDeletePayload } from "./types/libraryAsset";
+import type { ReferencePickerItem, ReferencePickerVideoItem, WorkingReferencePreviewItem } from "./types/referencePicker";
 
 type VideoModel = VideoModelId;
 
@@ -286,9 +309,8 @@ function remapGeneratedStripItems(
 
 function generationThumbnailUrl(generation: SegmentGeneration): string | null {
   return (
-    generation.inputFirstFrameUrl ??
+    generation.posterUrl ??
     generation.sourceFirstFrameCaptureUrl ??
-    generation.inputLastFrameUrl ??
     generation.sourceLastFrameCaptureUrl ??
     null
   );
@@ -376,9 +398,32 @@ function humanizeFilename(value: string): string {
   return withoutExt.replace(/[_-]+/g, " ").trim();
 }
 
+function aspectRatioHintFromDimensions(width: number | undefined, height: number | undefined): string | null {
+  if (!width || !height || width <= 0 || height <= 0) return null;
+  return `${width}:${height}`;
+}
+
 function keyBasenameFromS3Key(key: string): string {
   const parts = key.split("/");
   return parts[parts.length - 1] || key;
+}
+
+function mergeEditVideoReferences(
+  existing: EditVideoReference[] | undefined,
+  incoming: EditVideoReference[],
+): EditVideoReference[] {
+  const output = [...(existing ?? [])];
+  const byId = new Map(output.map((item, index) => [item.referenceId, index]));
+  for (const reference of incoming) {
+    const existingIndex = byId.get(reference.referenceId);
+    if (existingIndex == null) {
+      byId.set(reference.referenceId, output.length);
+      output.push(reference);
+      continue;
+    }
+    output[existingIndex] = { ...output[existingIndex], ...reference };
+  }
+  return output;
 }
 
 function truncateIdentifier(value: string, maxLength = 12): string {
@@ -410,11 +455,11 @@ function formatAutomationLogEntry(message: string): string {
 }
 
 function frameCount(task: TaskDetail | undefined): number {
-  return task?.video?.editSource?.frameCount ?? 0;
+  return task?.video?.editSource?.frameCount ?? task?.sourceMedia?.editSource?.frameCount ?? 0;
 }
 
 function fpsValue(task: TaskDetail | undefined): number {
-  const fps = task?.video?.editSource?.fps;
+  const fps = task?.video?.editSource?.fps ?? task?.sourceMedia?.editSource?.fps;
   if (!fps || !fps.den) return 30;
   return fps.num / fps.den;
 }
@@ -476,16 +521,6 @@ function isPresignedUrlNearExpiry(url: string | null | undefined, withinMs = 60_
   if (!url) return false;
   const expiryMs = parsePresignedExpiryMs(url);
   return typeof expiryMs === "number" && expiryMs - Date.now() <= withinMs;
-}
-
-function isLikelyVideoAssetUrl(url: string | null | undefined): boolean {
-  if (!url) return false;
-  try {
-    const pathname = new URL(url).pathname.toLowerCase();
-    return /\.(mp4|mov|m4v|webm|ogv|avi|mkv)$/i.test(pathname);
-  } catch {
-    return false;
-  }
 }
 
 function videoModelDurationConstraints(model: VideoModel): {
@@ -589,12 +624,14 @@ function FrameSelectCard({
   selectLabel,
   onSelect,
   onClear,
+  selectionKind = "frame",
 }: {
   title: string;
   frame: { frameId: string; frameIndex: number; timecode: string; imageUrl?: string } | null;
   selectLabel: string;
   onSelect: () => void;
   onClear: () => void;
+  selectionKind?: "frame" | "point";
 }) {
   return (
     <div className="rounded-lg border border-ink/10 bg-white p-3">
@@ -604,15 +641,15 @@ function FrameSelectCard({
           <img src={frame.imageUrl} alt={`${title} preview`} className="max-h-28 w-full rounded-md bg-bg object-contain" loading="lazy" decoding="async" />
           <div className="mt-2 flex items-center justify-between gap-2">
             <p className="text-xs text-ink/70">
-              frame {frame.frameIndex} ({frame.timecode})
+              {selectionKind === "point" ? `point ${frame.timecode}` : `frame ${frame.frameIndex} (${frame.timecode})`}
             </p>
             <button
               type="button"
               onClick={onClear}
               className="rounded border border-ink/20 bg-white px-2 py-1 text-xs"
-              title="Clear selected frame"
+              title={selectionKind === "point" ? "Clear selected point" : "Clear selected frame"}
             >
-              Clear Frame selection
+              {selectionKind === "point" ? "Clear point selection" : "Clear Frame selection"}
             </button>
           </div>
         </div>
@@ -831,10 +868,18 @@ export default function App() {
   } = useReportOutputSelection();
   const [mergedAssetsVisible, setMergedAssetsVisible] = useState(6);
   const [editedFrameAssetsVisible, setEditedFrameAssetsVisible] = useState(6);
+  const [referenceImageAssetsVisible, setReferenceImageAssetsVisible] = useState(6);
   const [generatedAssetsVisible, setGeneratedAssetsVisible] = useState(6);
+  const [postProcessAssetsVisible, setPostProcessAssetsVisible] = useState(6);
+  const [orphanedAssetsVisible, setOrphanedAssetsVisible] = useState(6);
+  const [audioAssetsVisible, setAudioAssetsVisible] = useState(6);
   const [libraryMergedAssetsVisible, setLibraryMergedAssetsVisible] = useState(6);
   const [libraryEditedFrameAssetsVisible, setLibraryEditedFrameAssetsVisible] = useState(6);
+  const [libraryReferenceImageAssetsVisible, setLibraryReferenceImageAssetsVisible] = useState(6);
   const [libraryGeneratedAssetsVisible, setLibraryGeneratedAssetsVisible] = useState(6);
+  const [libraryPostProcessAssetsVisible, setLibraryPostProcessAssetsVisible] = useState(6);
+  const [libraryOrphanedAssetsVisible, setLibraryOrphanedAssetsVisible] = useState(6);
+  const [libraryAudioAssetsVisible, setLibraryAudioAssetsVisible] = useState(6);
   const [generationCardsVisible, setGenerationCardsVisible] = useState(6);
   const [prompt, setPrompt] = useState("");
   const [model, setModel] = useState<
@@ -883,6 +928,22 @@ export default function App() {
     setSora2Resolution,
     generationModelOptions,
   } = useGenerationConfigState();
+  const {
+    characterAnimateMode,
+    setCharacterAnimateMode,
+    setCharacterAnimateModelByMode,
+    characterAnimateModelOptions,
+    selectedCharacterAnimateModel,
+  } = useCharacterAnimateConfigState();
+  const [characterAnimatePrompt, setCharacterAnimatePrompt] = useState("");
+  const [characterAnimateOutputAspectRatio, setCharacterAnimateOutputAspectRatio] = useState("1280:720");
+  const [characterAnimateBodyControl, setCharacterAnimateBodyControl] = useState(true);
+  const [characterAnimateExpressionIntensity, setCharacterAnimateExpressionIntensity] = useState(3);
+  const [characterAnimateKlingMode, setCharacterAnimateKlingMode] = useState<"std" | "pro">("pro");
+  const [characterAnimateKlingCharacterOrientation, setCharacterAnimateKlingCharacterOrientation] = useState<"image" | "video">("image");
+  const [characterAnimateOmnihumanResolution, setCharacterAnimateOmnihumanResolution] = useState<"720p" | "1080p">("720p");
+  const [characterAnimateSeedanceResolution, setCharacterAnimateSeedanceResolution] = useState<"480p" | "720p" | "1080p">("720p");
+  const [characterAnimateSeedanceAspectRatio, setCharacterAnimateSeedanceAspectRatio] = useState<"auto" | "21:9" | "16:9" | "4:3" | "1:1" | "3:4" | "9:16">("auto");
   const [editSourceVariantIds, setEditSourceVariantIds] = useState<{ first: string | null; last: string | null }>({
     first: null,
     last: null,
@@ -902,6 +963,7 @@ export default function App() {
     taskId?: string;
     generationId?: string;
   } | null>(null);
+  const [audioPreviewModal, setAudioPreviewModal] = useState<{ url: string; label: string; waveformUrl?: string | null } | null>(null);
   const [videoPreviewNeedsRefresh, setVideoPreviewNeedsRefresh] = useState(false);
   const [imageCompareModal, setImageCompareModal] = useState<{ originalUrl: string; compareUrl: string; label: string } | null>(null);
   const [videoCompareModal, setVideoCompareModal] = useState<{
@@ -909,6 +971,10 @@ export default function App() {
     compareUrl: string;
     label: string;
     posterUrl?: string | null;
+    originalPosterUrl?: string | null;
+    originalMediaType?: "video" | "audio";
+    originalAudioUrl?: string | null;
+    originalWaveformUrl?: string | null;
     segmentStartSec?: number;
     originalIsSegmentClip?: boolean;
     originalSegmentId?: string;
@@ -918,6 +984,7 @@ export default function App() {
   const [, setReportGraphModal] = useState<{ url: string; label: string } | null>(null);
   const [motionSyncModalExportId, setMotionSyncModalExportId] = useState<string | null>(null);
   const [topazUpscalePendingExportId, setTopazUpscalePendingExportId] = useState<string | null>(null);
+  const [topazUpscalePendingGenerationId, setTopazUpscalePendingGenerationId] = useState<string | null>(null);
   const [qualityMatchModal, setQualityMatchModal] = useState<QualityMatchModalState>({
     isOpen: false,
     frameId: null,
@@ -968,6 +1035,7 @@ export default function App() {
   const [mergeAlignmentSuggestionError, setMergeAlignmentSuggestionError] = useState<string | null>(null);
   const [reconcileTimingJobId, setReconcileTimingJobId] = useState<string | null>(null);
   const [reconcileTimingError, setReconcileTimingError] = useState<string | null>(null);
+  const [lengthenPendingGenId, setLengthenPendingGenId] = useState<string | null>(null);
   const [automationRunState, setAutomationRunState] = useState<AutomationRunState>({
     isOpen: false,
     taskId: null,
@@ -981,6 +1049,27 @@ export default function App() {
   const [firstFrameId, setFirstFrameId] = useState<string | null>(null);
   const [lastFrameId, setLastFrameId] = useState<string | null>(null);
   const [editVideoSelectedReferenceIds, setEditVideoSelectedReferenceIds] = useState<string[]>([]);
+  const [editVideoToolSelectedReferenceIds, setEditVideoToolSelectedReferenceIds] = useState<string[]>([]);
+  const [editVideoReferencePromptDraft, setEditVideoReferencePromptDraft] = useState("");
+  const [isReferenceImagePickerOpen, setIsReferenceImagePickerOpen] = useState(false);
+  const [taskPickerWorkflowId, setTaskPickerWorkflowId] = useState<TaskWorkflowId | null>(null);
+  const [isReferenceImagePickerSaving, setIsReferenceImagePickerSaving] = useState(false);
+  const [isToolReferenceImagePickerOpen, setIsToolReferenceImagePickerOpen] = useState(false);
+  const [isToolReferenceImagePickerSaving, setIsToolReferenceImagePickerSaving] = useState(false);
+  const [previzToolSelectedReferenceIds, setPrevizToolSelectedReferenceIds] = useState<string[]>([]);
+  const [isPrevizReferenceImagePickerOpen, setIsPrevizReferenceImagePickerOpen] = useState(false);
+  const [isPrevizReferenceImagePickerSaving, setIsPrevizReferenceImagePickerSaving] = useState(false);
+  const [isPrevizEditReferenceImagePickerOpen, setIsPrevizEditReferenceImagePickerOpen] = useState(false);
+  const [isPrevizEditReferenceImagePickerSaving, setIsPrevizEditReferenceImagePickerSaving] = useState(false);
+  const [isPrevizGenerateReferenceImagePickerOpen, setIsPrevizGenerateReferenceImagePickerOpen] = useState(false);
+  const [isPrevizGenerateReferenceImagePickerSaving, setIsPrevizGenerateReferenceImagePickerSaving] = useState(false);
+  const [isPrevizToolReferenceImagePickerOpen, setIsPrevizToolReferenceImagePickerOpen] = useState(false);
+  const [isPrevizToolReferenceImagePickerSaving, setIsPrevizToolReferenceImagePickerSaving] = useState(false);
+  const [previzReferencePromptDraft, setPrevizReferencePromptDraft] = useState("");
+  const [previzFramePromptDraft, setPrevizFramePromptDraft] = useState("");
+  const [previzGenerateModel, setPrevizGenerateModel] = useState<"veo_3_1" | "happy_horse_1_0" | "seedance_2_0">("veo_3_1");
+  const [previzGeneratePrompt, setPrevizGeneratePrompt] = useState("");
+  const [previzGenerateDurationSec, setPrevizGenerateDurationSec] = useState(8);
   const [videoWorkMode, setVideoWorkModeState] = useState<VideoWorkMode | null>(null);
   const [segmentDraftActive, setSegmentDraftActive] = useState(false);
   const [segmentDraftFallbackId, setSegmentDraftFallbackId] = useState<string | null>(null);
@@ -1021,37 +1110,58 @@ export default function App() {
   });
 
   const effectiveRouteState = routeOverride ?? routeState;
+  const isHomeRoute = effectiveRouteState.kind === "home";
+  const isWorkflowLandingRoute = effectiveRouteState.kind === "workflow";
   const tab: TabId = effectiveRouteState.tab ?? "timeline";
   const activeWorkflowSection = workflowSectionForTab(tab);
   const activePostTab: TabId = tab === "merge" ? tab : "merge";
   const isReportTab = tab === "report";
-  const selectedTaskId = effectiveRouteState.taskId ?? storeSelectedTaskId;
+  const selectedTaskId =
+    isHomeRoute || isWorkflowLandingRoute ? null : effectiveRouteState.taskId ?? storeSelectedTaskId;
   const reportTaskId = selectedTaskId;
 
   useEffect(() => {
     if (!routeOverride) return;
     const routeSettled =
+      routeState.kind === routeOverride.kind &&
       routeState.taskId === routeOverride.taskId &&
-      routeState.tab === routeOverride.tab;
+      routeState.tab === routeOverride.tab &&
+      routeState.workflowId === routeOverride.workflowId;
     if (routeSettled) {
       setRouteOverride(null);
     }
-  }, [routeOverride, routeState.tab, routeState.taskId]);
+  }, [routeOverride, routeState.kind, routeState.tab, routeState.taskId, routeState.workflowId]);
 
   const setTab = useCallback(
     (nextTab: TabId, taskIdOverride?: string | null, replace = false) => {
       const targetTaskId = taskIdOverride ?? selectedTaskId ?? tasksQuery.data?.[0]?.taskId ?? null;
       if (!targetTaskId) {
         if (nextTab === "admin") {
-          setRouteOverride({ taskId: null, tab: "admin" });
+          setRouteOverride({ kind: "direct", taskId: null, tab: "admin", workflowId: null });
           navigate("/admin", { replace });
         }
         return;
       }
-      setRouteOverride({ taskId: targetTaskId, tab: nextTab });
+      setRouteOverride({ kind: "task", taskId: targetTaskId, tab: nextTab, workflowId: null });
       navigate(taskRoute(targetTaskId, nextTab), { replace });
     },
     [navigate, selectedTaskId, tasksQuery.data],
+  );
+
+  const goHome = useCallback(
+    (replace = false) => {
+      setRouteOverride({ kind: "home", taskId: null, tab: null, workflowId: null });
+      navigate("/", { replace });
+    },
+    [navigate],
+  );
+
+  const openWorkflowLanding = useCallback(
+    (workflowId: TaskWorkflowId, replace = false) => {
+      setRouteOverride({ kind: "workflow", taskId: null, tab: null, workflowId });
+      navigate(workflowRoute(workflowId), { replace });
+    },
+    [navigate],
   );
 
   const setVideoWorkMode = useCallback(
@@ -1085,7 +1195,7 @@ export default function App() {
       const nextPath = taskRoute(taskId, "report");
       const nextSearch = `?${params.toString()}`;
       if (location.pathname === nextPath && location.search === nextSearch) return;
-      setRouteOverride({ taskId, tab: "report" });
+      setRouteOverride({ kind: "task", taskId, tab: "report", workflowId: null });
       navigate({ pathname: nextPath, search: nextSearch }, { replace });
     },
     [location.pathname, location.search, navigate],
@@ -1153,6 +1263,9 @@ export default function App() {
     newTaskName,
     setNewTaskName,
     newTaskFile,
+    newTaskScenePrompt,
+    newTaskWorkflowId,
+    setNewTaskScenePrompt,
     newTaskStage,
     newTaskError,
     newTaskUploadPercent,
@@ -1194,9 +1307,143 @@ export default function App() {
       reportTaskId,
       isReportTab,
       isAssetLibraryTab: tab === "asset_library",
+      enableAssetTaskQueries:
+        isReferenceImagePickerOpen ||
+        isToolReferenceImagePickerOpen ||
+        isPrevizReferenceImagePickerOpen ||
+        isPrevizEditReferenceImagePickerOpen ||
+        isPrevizGenerateReferenceImagePickerOpen ||
+        isPrevizToolReferenceImagePickerOpen,
       isPageVisible,
       tasks: tasksQuery.data ?? [],
     });
+  const selectedTaskSummary = useMemo(
+    () => (tasksQuery.data ?? []).find((taskItem) => taskItem.taskId === selectedTaskId) ?? null,
+    [selectedTaskId, tasksQuery.data],
+  );
+  const resolvedTaskWorkflowId =
+    effectiveRouteState.workflowId ?? task?.workflowId ?? selectedTaskSummary?.workflowId ?? null;
+  const currentTaskWorkflowId = normalizeTaskWorkflowId(
+    resolvedTaskWorkflowId ?? DEFAULT_TASK_WORKFLOW_ID,
+  );
+  const currentTaskWorkflow = useMemo(() => getTaskWorkflowConfig(currentTaskWorkflowId), [currentTaskWorkflowId]);
+  const isCurrentWorkflowImplemented = currentTaskWorkflow.implemented;
+  const isSourceVideoWorkflow = currentTaskWorkflowId === "source_video_flow";
+  const isCharacterAnimateWorkflow = currentTaskWorkflowId === "character_animate_workflow";
+  const isPrevizWorkflow = currentTaskWorkflowId === "simple_generation_workflow";
+  const isGlobalUtilityTab = tab === "asset_library" || tab === "custom_qc" || tab === "api_logs" || tab === "admin";
+  const isResolvingWorkflowShell = Boolean(
+    selectedTaskId &&
+      !resolvedTaskWorkflowId &&
+      !isGlobalUtilityTab &&
+      (taskQuery.isLoading || tasksQuery.isLoading),
+  );
+  const showPrevizSelectTab = isPrevizWorkflow && tab === "timeline";
+  const showPrevizEditTab = isPrevizWorkflow && tab === "frames";
+  const showPrevizGenerateTab = isPrevizWorkflow && (tab === "generate" || tab === "outputs");
+  const showPrevizPostTab = isPrevizWorkflow && tab === "merge";
+  const showSourceVideoSelectTab = isSourceVideoWorkflow && tab === "timeline";
+  const showSourceVideoEditTab = isSourceVideoWorkflow && tab === "frames";
+  const showSourceVideoRefineTab = isSourceVideoWorkflow && tab === "refine";
+  const showSourceVideoGenerateTab = isSourceVideoWorkflow && (tab === "generate" || tab === "outputs");
+  const showSourceVideoPostTab = isSourceVideoWorkflow && tab === "merge";
+  const showCharacterSelectTab = isCharacterAnimateWorkflow && tab === "timeline";
+  const showCharacterEditTab = isCharacterAnimateWorkflow && tab === "frames";
+  const showCharacterRefineTab = isCharacterAnimateWorkflow && tab === "refine";
+  const showCharacterGenerateTab = isCharacterAnimateWorkflow && (tab === "generate" || tab === "outputs");
+  const showCharacterPostTab = isCharacterAnimateWorkflow && tab === "merge";
+  const showWorkflowCurrentReferences = !isResolvingWorkflowShell && (
+    ((isSourceVideoWorkflow || isCharacterAnimateWorkflow) &&
+      isCurrentWorkflowImplemented &&
+      (activeWorkflowSection === "create" || activeWorkflowSection === "outputs" || activeWorkflowSection === "post")) ||
+    showPrevizEditTab ||
+    showPrevizGenerateTab
+  );
+  const showWorkflowSourceControls = !isResolvingWorkflowShell && isCurrentWorkflowImplemented && activeWorkflowSection === "source" && (isSourceVideoWorkflow || isCharacterAnimateWorkflow);
+  useEffect(() => {
+    if (currentTaskWorkflowId !== "simple_generation_workflow") return;
+    setPrevizGenerateModel("veo_3_1");
+    setPrevizGenerateDurationSec(8);
+    setPrevizGeneratePrompt(typeof task?.previz?.scenePrompt === "string" ? task.previz.scenePrompt : "");
+  }, [currentTaskWorkflowId, selectedTaskId]);
+  const latestTaskByWorkflow = useMemo(() => {
+    const latest = new Map<TaskWorkflowId, { taskId: string; name: string; updatedAtMs: number }>();
+    for (const taskItem of tasksQuery.data ?? []) {
+      const workflowId = normalizeTaskWorkflowId(taskItem.workflowId);
+      const updatedAtMs = new Date(taskItem.updatedAt).getTime();
+      const existing = latest.get(workflowId);
+      if (!existing || updatedAtMs > existing.updatedAtMs) {
+        latest.set(workflowId, { taskId: taskItem.taskId, name: taskItem.name, updatedAtMs });
+      }
+    }
+    return latest;
+  }, [tasksQuery.data]);
+  const workflowHomeCards = useMemo(
+    () =>
+      (["simple_generation_workflow", "character_animate_workflow", "source_video_flow"] as TaskWorkflowId[]).map((workflowId) => {
+        const latestTask = latestTaskByWorkflow.get(workflowId) ?? null;
+        return {
+          workflowId,
+          latestTaskId: latestTask?.taskId ?? null,
+          latestTaskName: latestTask?.name ?? null,
+          latestTaskThumbnailUrl: null,
+        };
+      }),
+    [latestTaskByWorkflow],
+  );
+  const workflowLandingLatestTask = useMemo(
+    () => latestTaskByWorkflow.get(currentTaskWorkflowId) ?? null,
+    [currentTaskWorkflowId, latestTaskByWorkflow],
+  );
+  const workflowPreviewTaskIds = useMemo(
+    () => workflowHomeCards.map((card) => card.latestTaskId).filter((taskId): taskId is string => Boolean(taskId)),
+    [workflowHomeCards],
+  );
+  const workflowPreviewQueries = useQueries({
+    queries: workflowPreviewTaskIds.map((taskId) => ({
+      queryKey: ["workflow-preview-task", taskId],
+      queryFn: () => apiClient.getTask(taskId),
+      enabled: isAuthed && (isHomeRoute || isWorkflowLandingRoute),
+      staleTime: 60_000,
+      refetchOnWindowFocus: false as const,
+      refetchOnReconnect: false as const,
+    })),
+  });
+  const workflowPreviewTasksById = useMemo(() => {
+    const result = new Map<string, TaskDetail>();
+    for (const query of workflowPreviewQueries) {
+      if (query.data?.taskId) result.set(query.data.taskId, query.data);
+    }
+    return result;
+  }, [workflowPreviewQueries]);
+  const workflowHomeCardsWithPreview = useMemo(
+    () =>
+      workflowHomeCards.map((card) => ({
+        ...card,
+        latestTaskThumbnailUrl: card.latestTaskId ? resolveLatestTaskThumbnailUrl(workflowPreviewTasksById.get(card.latestTaskId)) : null,
+      })),
+    [workflowHomeCards, workflowPreviewTasksById],
+  );
+  const workflowLandingLatestTaskThumbnailUrl = useMemo(
+    () =>
+      workflowLandingLatestTask?.taskId
+        ? resolveLatestTaskThumbnailUrl(workflowPreviewTasksById.get(workflowLandingLatestTask.taskId))
+        : null,
+    [workflowLandingLatestTask, workflowPreviewTasksById],
+  );
+  const workflowTasksById = useMemo(() => {
+    const groups = new Map<TaskWorkflowId, TaskSummary[]>();
+    for (const taskItem of tasksQuery.data ?? []) {
+      const workflowId = normalizeTaskWorkflowId(taskItem.workflowId);
+      const existing = groups.get(workflowId) ?? [];
+      existing.push(taskItem);
+      groups.set(workflowId, existing);
+    }
+    for (const tasks of groups.values()) {
+      tasks.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+    }
+    return groups;
+  }, [tasksQuery.data]);
   const selectedMotionSyncExport = useMemo<ExportRecord | null>(() => {
     if (!motionSyncModalExportId) return null;
     return (task?.exports ?? []).find((item) => item.exportId === motionSyncModalExportId) ?? null;
@@ -1229,62 +1476,737 @@ export default function App() {
     task,
     selectedSegmentId,
     segmentsById,
+    workflowId: currentTaskWorkflowId,
+    activeInputMode: generationInputMode,
+    activeCharacterMode: characterAnimateMode,
   });
+  const characterAnimateVisibleGenerations = useMemo(
+    () =>
+      Object.values(task?.segmentGenerations ?? {})
+        .filter((generation) => {
+          return matchesGenerateStepGrid(generation, {
+            task,
+            workflowId: "character_animate_workflow",
+            activeInputMode: generationInputMode,
+            activeCharacterMode: characterAnimateMode,
+            selectedSegmentId,
+            filterBySelectedSegment: true,
+          });
+        })
+        .sort(
+          (a, b) =>
+            new Date(b.finishedAt ?? b.updatedAt ?? b.createdAt).getTime() -
+            new Date(a.finishedAt ?? a.updatedAt ?? a.createdAt).getTime(),
+        ),
+    [characterAnimateMode, generationInputMode, selectedSegmentId, task],
+  );
+  const characterAnimatePostProcessGenerations = useMemo(
+    () =>
+      Object.values(task?.segmentGenerations ?? {})
+        .filter((generation) => {
+          if (generation.isChunkInternal) return false;
+          const origin = getGenerationOrigin(generation, task);
+          if (origin?.workflowId !== "character_animate_workflow") return false;
+          const isLengthenDerived = isPostProcessDerivedGeneration(generation, task);
+          if (isLengthenDerived) return true;
+          return generation.status === "complete" && Boolean(generation.downloadUrl);
+        })
+        .sort(
+          (a, b) =>
+            new Date(b.finishedAt ?? b.updatedAt ?? b.createdAt).getTime() -
+            new Date(a.finishedAt ?? a.updatedAt ?? a.createdAt).getTime(),
+        ),
+    [task],
+  );
+  const characterTopazStateByGenerationId = useMemo(() => {
+    const mapping: Record<string, ExportRecord["topazUpscale"] | undefined> = {};
+    for (const exportItem of task?.exports ?? []) {
+      if (!exportItem.internalOnlySource || !exportItem.sourceGenerationId) continue;
+      mapping[exportItem.sourceGenerationId] = exportItem.topazUpscale;
+    }
+    return mapping;
+  }, [task?.exports]);
+  const characterAnimatePostProcessTopazItems = useMemo(
+    () =>
+      (task?.exports ?? [])
+        .flatMap((exportItem) => {
+          if (!exportItem.internalOnlySource || !exportItem.sourceGenerationId) return [];
+          const sourceGeneration = task?.segmentGenerations?.[exportItem.sourceGenerationId];
+          if (!sourceGeneration || sourceGeneration.isChunkInternal) return [];
+          const origin = getGenerationOrigin(sourceGeneration, task);
+          if (origin?.workflowId !== "character_animate_workflow") return [];
+          const topazState = exportItem.topazUpscale;
+          if (!topazState?.status) return [];
+          const resultExport =
+            topazState.resultExportId != null
+              ? (task?.exports ?? []).find(
+                  (candidate) => !candidate.internalOnlySource && candidate.exportId === topazState.resultExportId,
+                ) ?? null
+              : null;
+          if (topazState.status === "complete" && !resultExport) return [];
+          return [
+            {
+              sourceGeneration,
+              sourceExport: exportItem,
+              topazState,
+              resultExport,
+            },
+          ];
+        })
+        .sort(
+          (left, right) =>
+            new Date(
+              right.resultExport?.createdAt ??
+                right.topazState.updatedAt ??
+                right.sourceGeneration.finishedAt ??
+                right.sourceGeneration.updatedAt ??
+                right.sourceGeneration.createdAt,
+            ).getTime() -
+            new Date(
+              left.resultExport?.createdAt ??
+                left.topazState.updatedAt ??
+                left.sourceGeneration.finishedAt ??
+                left.sourceGeneration.updatedAt ??
+                left.sourceGeneration.createdAt,
+            ).getTime(),
+        ),
+    [task],
+  );
+  const previzPostProcessGenerations = useMemo(
+    () =>
+      Object.values(task?.segmentGenerations ?? {})
+        .filter((generation) => {
+          if (generation.isChunkInternal) return false;
+          const origin = getGenerationOrigin(generation, task);
+          if (origin?.workflowId !== "simple_generation_workflow") return false;
+          const isLengthenDerived = isPostProcessDerivedGeneration(generation, task);
+          if (isLengthenDerived) return true;
+          return generation.status === "complete" && Boolean(generation.downloadUrl);
+        })
+        .sort(
+          (a, b) =>
+            new Date(b.finishedAt ?? b.updatedAt ?? b.createdAt).getTime() -
+            new Date(a.finishedAt ?? a.updatedAt ?? a.createdAt).getTime(),
+        ),
+    [task],
+  );
+  const previzPostProcessTopazItems = useMemo(
+    () =>
+      (task?.exports ?? [])
+        .flatMap((exportItem) => {
+          if (!exportItem.internalOnlySource || !exportItem.sourceGenerationId) return [];
+          const sourceGeneration = task?.segmentGenerations?.[exportItem.sourceGenerationId];
+          if (!sourceGeneration || sourceGeneration.isChunkInternal) return [];
+          const origin = getGenerationOrigin(sourceGeneration, task);
+          if (origin?.workflowId !== "simple_generation_workflow") return [];
+          const topazState = exportItem.topazUpscale;
+          if (!topazState?.status) return [];
+          const resultExport =
+            topazState.resultExportId != null
+              ? (task?.exports ?? []).find(
+                  (candidate) => !candidate.internalOnlySource && candidate.exportId === topazState.resultExportId,
+                ) ?? null
+              : null;
+          if (topazState.status === "complete" && !resultExport) return [];
+          return [
+            {
+              sourceGeneration,
+              sourceExport: exportItem,
+              topazState,
+              resultExport,
+            },
+          ];
+        })
+        .sort(
+          (left, right) =>
+            new Date(
+              right.resultExport?.createdAt ??
+                right.topazState.updatedAt ??
+                right.sourceGeneration.finishedAt ??
+                right.sourceGeneration.updatedAt ??
+                right.sourceGeneration.createdAt,
+            ).getTime() -
+            new Date(
+              left.resultExport?.createdAt ??
+                left.topazState.updatedAt ??
+                left.sourceGeneration.finishedAt ??
+                left.sourceGeneration.updatedAt ??
+                left.sourceGeneration.createdAt,
+            ).getTime(),
+        ),
+    [task],
+  );
 
   const assetsTabLoading = tab === "assets" && assetsLoading;
   const assetLibraryTabLoading = tab === "asset_library" && assetLibraryLoading;
+  const sourceMediaKind = (task?.sourceMedia?.kind ?? task?.video?.editSource?.mediaType ?? "video") as "video" | "audio";
+  const isCharacterAudioSource = currentTaskWorkflowId === "character_animate_workflow" && sourceMediaKind === "audio";
+  const sourceWaveformUrl = task?.sourceMedia?.waveform?.downloadUrl ?? task?.video?.editSource?.waveformUrl ?? null;
+  const generationAudioReference = task?.generationAudioReference ?? null;
   const selectedSegment = task?.segments.find((s) => s.segmentId === selectedSegmentId) ?? null;
   const editVideoReferences = useMemo(() => task?.editVideoReferences ?? [], [task?.editVideoReferences]);
-  const editVideoReferenceLimitByModel = useMemo(() => {
-    if (lumaModel === "seedance-2.0-reference-to-video" || lumaModel === "happy-horse-video-edit" || lumaModel === "kling-v3-omni-video") {
-      return 3;
-    }
-    if (lumaModel === "wan2.7-videoedit" || lumaModel === "runway-gen4-aleph") {
-      return 1;
-    }
-    return 0;
-  }, [lumaModel]);
+  const sortedEditVideoReferences = useMemo(
+    () =>
+      [...editVideoReferences].sort(
+        (left, right) => new Date(right.createdAt ?? 0).getTime() - new Date(left.createdAt ?? 0).getTime(),
+      ),
+    [editVideoReferences],
+  );
+  const editVideoReferenceLimitByModel = useMemo(() => editVideoReferenceLimitForModel(lumaModel), [lumaModel]);
   const editVideoReferenceWarning = useMemo(() => {
+    if (currentTaskWorkflowId === "character_animate_workflow") return null;
     if (generationInputMode !== "edit_video") return null;
     if (!editVideoReferenceLimitByModel) return null;
     if (editVideoSelectedReferenceIds.length > editVideoReferenceLimitByModel) {
       return `This model will use only the first ${editVideoReferenceLimitByModel} selected reference image${editVideoReferenceLimitByModel > 1 ? "s" : ""}.`;
     }
     return null;
-  }, [editVideoReferenceLimitByModel, editVideoSelectedReferenceIds.length, generationInputMode]);
-  const generationModelOptionsForInput = useMemo(() => {
-    if (generationInputMode !== "edit_video") return generationModelOptions;
-    const count = editVideoSelectedReferenceIds.length;
-    return generationModelOptions.filter((option) => {
-      if (option.value === "seedance-2.0-reference-to-video" || option.value === "happy-horse-video-edit" || option.value === "kling-v3-omni-video") {
-        return count <= 3;
-      }
-      if (option.value === "wan2.7-videoedit" || option.value === "runway-gen4-aleph") {
-        return count <= 1;
-      }
-      return true;
-    });
-  }, [editVideoSelectedReferenceIds.length, generationInputMode, generationModelOptions]);
-  const editVideoReferencePreview = useMemo(() => {
-    if (generationInputMode !== "edit_video") return [];
-    const tokenForIndex = (index: number): string => {
-      if (lumaModel === "seedance-2.0-reference-to-video" || lumaModel === "happy-horse-video-edit") return `@Image${index + 1}`;
-      if (lumaModel === "kling-v3-omni-video") return `<<<image_${index + 1}>>>`;
-      return `Reference ${index + 1}`;
-    };
-    const output: Array<{ referenceId: string; imageUrl?: string; token: string }> = [];
+  }, [currentTaskWorkflowId, editVideoReferenceLimitByModel, editVideoSelectedReferenceIds.length, generationInputMode]);
+  const generationModelOptionsForInput = useMemo(() => generationModelOptions, [generationModelOptions]);
+  const editVideoReferencePreview = useMemo<WorkingReferencePreviewItem[]>(() => {
+    const useReferencePreview =
+      generationInputMode === "edit_video" || currentTaskWorkflowId === "character_animate_workflow";
+    if (!useReferencePreview) return [];
+    const output: WorkingReferencePreviewItem[] = [];
     for (let index = 0; index < editVideoSelectedReferenceIds.length; index += 1) {
       const id = editVideoSelectedReferenceIds[index];
       const reference = editVideoReferences.find((item) => item.referenceId === id);
       if (!reference) continue;
+      const title = humanizeFilename(reference.filename || keyBasenameFromS3Key(reference.key || reference.referenceId));
       output.push({
         referenceId: id,
         imageUrl: reference.imageUrl,
-        token: tokenForIndex(index),
+        token: currentTaskWorkflowId === "character_animate_workflow" ? `Character ${index + 1}` : `Ref Img ${index + 1}`,
+        title,
+        subtitle: reference.type === "generated" ? "generated reference" : "uploaded reference",
       });
     }
     return output;
-  }, [editVideoReferences, editVideoSelectedReferenceIds, generationInputMode, lumaModel]);
+  }, [currentTaskWorkflowId, editVideoReferences, editVideoSelectedReferenceIds, generationInputMode]);
+  const editVideoToolReferencePreview = useMemo<WorkingReferencePreviewItem[]>(
+    () =>
+      editVideoToolSelectedReferenceIds.flatMap((id, index) => {
+        const reference = editVideoReferences.find((item) => item.referenceId === id);
+        if (!reference) return [];
+        const title = humanizeFilename(reference.filename || keyBasenameFromS3Key(reference.key || reference.referenceId));
+        return [
+          {
+            referenceId: id,
+            imageUrl: reference.imageUrl,
+            token: `Reference ${index + 1}`,
+            title,
+            subtitle: reference.type === "generated" ? "generated reference" : "uploaded reference",
+          },
+        ];
+      }),
+    [editVideoReferences, editVideoToolSelectedReferenceIds],
+  );
+  const selectedCharacterReferenceId = editVideoSelectedReferenceIds[0] ?? null;
+  const [characterReferenceDimensionsById, setCharacterReferenceDimensionsById] = useState<Record<string, { width: number; height: number }>>({});
+  const selectedCharacterReference = useMemo(
+    () => editVideoReferences.find((reference) => reference.referenceId === selectedCharacterReferenceId) ?? null,
+    [editVideoReferences, selectedCharacterReferenceId],
+  );
+  useEffect(() => {
+    if (!selectedCharacterReferenceId || !selectedCharacterReference?.imageUrl) return;
+    if (characterReferenceDimensionsById[selectedCharacterReferenceId]) return;
+    if (
+      typeof selectedCharacterReference.width === "number" &&
+      selectedCharacterReference.width > 0 &&
+      typeof selectedCharacterReference.height === "number" &&
+      selectedCharacterReference.height > 0
+    ) {
+      const width = selectedCharacterReference.width;
+      const height = selectedCharacterReference.height;
+      setCharacterReferenceDimensionsById((previous) => ({
+        ...previous,
+        [selectedCharacterReferenceId]: {
+          width,
+          height,
+        },
+      }));
+      return;
+    }
+    let cancelled = false;
+    const image = new Image();
+    image.onload = () => {
+      if (cancelled) return;
+      const width = image.naturalWidth || image.width;
+      const height = image.naturalHeight || image.height;
+      if (!width || !height) return;
+      setCharacterReferenceDimensionsById((previous) => ({
+        ...previous,
+        [selectedCharacterReferenceId]: { width, height },
+      }));
+    };
+    image.src = selectedCharacterReference.imageUrl;
+    return () => {
+      cancelled = true;
+    };
+  }, [characterReferenceDimensionsById, selectedCharacterReference, selectedCharacterReferenceId]);
+  const selectedCharacterReferenceDimensions = selectedCharacterReferenceId
+    ? characterReferenceDimensionsById[selectedCharacterReferenceId] ?? null
+    : null;
+  const runwayCharacterImageValidationError = useMemo(() => {
+    if (!isCharacterAnimateWorkflow || selectedCharacterAnimateModel !== "runway_act_two") return null;
+    if (!selectedCharacterReferenceDimensions?.width || !selectedCharacterReferenceDimensions?.height) return null;
+    const ratio = selectedCharacterReferenceDimensions.width / selectedCharacterReferenceDimensions.height;
+    if (ratio >= 0.5) return null;
+    return `Runway Act-Two does not support this character image shape. The selected image is ${selectedCharacterReferenceDimensions.width}×${selectedCharacterReferenceDimensions.height} (${ratio.toFixed(3)} width/height), but Runway requires at least 0.5. Choose a wider character image.`;
+  }, [isCharacterAnimateWorkflow, selectedCharacterAnimateModel, selectedCharacterReferenceDimensions]);
+  const characterImagePreferredAspectRatio = useMemo(
+    () => aspectRatioHintFromDimensions(task?.video?.editSource?.width, task?.video?.editSource?.height),
+    [task?.video?.editSource?.height, task?.video?.editSource?.width],
+  );
+  const editVideoReferenceLibraryItems = useMemo(
+    () =>
+      sortedEditVideoReferences.map((reference) => ({
+        referenceId: reference.referenceId,
+        imageUrl: reference.imageUrl,
+        title: humanizeFilename(reference.filename || keyBasenameFromS3Key(reference.key || reference.referenceId)),
+        subtitle:
+          reference.type === "generated"
+            ? `${reference.model ?? "generated"}${reference.status && reference.status !== "complete" ? ` • ${reference.status}` : ""}`
+            : "uploaded",
+        selectedForVideo: editVideoSelectedReferenceIds.includes(reference.referenceId),
+        status: reference.status,
+        error: reference.error ?? null,
+        prompt: reference.prompt ?? null,
+      })),
+    [editVideoSelectedReferenceIds, sortedEditVideoReferences],
+  );
+  const previzState = task?.previz;
+  const previzSceneAspectRatio = typeof previzState?.sceneAspectRatio === "string" && previzState.sceneAspectRatio.trim()
+    ? previzState.sceneAspectRatio
+    : null;
+  const previzSelectedReferenceIds = useMemo(
+    () =>
+      Array.isArray(previzState?.selectedReferenceIds)
+        ? previzState.selectedReferenceIds
+            .map((value) => String(value || "").trim())
+            .filter((value, index, array) => value.length > 0 && array.indexOf(value) === index)
+        : [],
+    [previzState?.selectedReferenceIds],
+  );
+  const previzFrameReferenceIds = useMemo(
+    () =>
+      Array.isArray(previzState?.frameReferenceIds)
+        ? previzState.frameReferenceIds
+            .map((value) => String(value || "").trim())
+            .filter((value, index, array) => value.length > 0 && array.indexOf(value) === index)
+        : [],
+    [previzState?.frameReferenceIds],
+  );
+  const previzSelectedFrameIds = useMemo(
+    () =>
+      Array.isArray(previzState?.selectedFrameIds)
+        ? previzState.selectedFrameIds
+            .map((value) => String(value || "").trim())
+            .filter((value, index, array) => value.length > 0 && array.indexOf(value) === index)
+        : [],
+    [previzState?.selectedFrameIds],
+  );
+  const previzToolReferencePreview = useMemo<WorkingReferencePreviewItem[]>(
+    () =>
+      previzToolSelectedReferenceIds.flatMap((id, index) => {
+        const reference = editVideoReferences.find((item) => item.referenceId === id);
+        if (!reference) return [];
+        const title = humanizeFilename(reference.filename || keyBasenameFromS3Key(reference.key || reference.referenceId));
+        return [
+          {
+            referenceId: id,
+            imageUrl: reference.imageUrl,
+            token: `@Image${index + 1}`,
+            title,
+            subtitle: reference.type === "generated" ? "generated reference" : "uploaded reference",
+          },
+        ];
+      }),
+    [editVideoReferences, previzToolSelectedReferenceIds],
+  );
+  const previzReferencePreview = useMemo<WorkingReferencePreviewItem[]>(
+    () =>
+      previzSelectedReferenceIds.flatMap((id, index) => {
+        const reference = editVideoReferences.find((item) => item.referenceId === id);
+        if (!reference) return [];
+        const title = humanizeFilename(reference.filename || keyBasenameFromS3Key(reference.key || reference.referenceId));
+        return [
+          {
+            referenceId: id,
+            imageUrl: reference.imageUrl,
+            token: `Image ${index + 1}`,
+            title,
+            subtitle: reference.type === "generated" ? "generated reference" : "uploaded reference",
+          },
+        ];
+      }),
+    [editVideoReferences, previzSelectedReferenceIds],
+  );
+  const previzSelectedFramePreview = useMemo<WorkingReferencePreviewItem[]>(
+    () =>
+      previzSelectedFrameIds.flatMap((id, index) => {
+        const reference = editVideoReferences.find((item) => item.referenceId === id);
+        if (!reference) return [];
+        const title = humanizeFilename(reference.filename || keyBasenameFromS3Key(reference.key || reference.referenceId));
+        return [
+          {
+            referenceId: id,
+            imageUrl: reference.imageUrl,
+            token: `Image ${index + 1}`,
+            title,
+            subtitle: reference.type === "generated" ? "generated frame" : "selected frame",
+          },
+        ];
+      }),
+    [editVideoReferences, previzSelectedFrameIds],
+  );
+  const previzSceneReferenceLibraryItems = useMemo(
+    () =>
+      sortedEditVideoReferences
+        .filter((reference) => !previzFrameReferenceIds.includes(reference.referenceId))
+        .map((reference) => {
+          const isCreatedReference = Boolean((reference.model && String(reference.model).trim()) || (reference.prompt && String(reference.prompt).trim()));
+          return {
+            referenceId: reference.referenceId,
+            imageUrl: reference.imageUrl,
+            title: humanizeFilename(reference.filename || keyBasenameFromS3Key(reference.key || reference.referenceId)),
+            subtitle:
+              reference.type === "generated"
+                ? `${reference.model ?? "generated"}${reference.status && reference.status !== "complete" ? ` • ${reference.status}` : ""}`
+                : "uploaded",
+            selected: previzSelectedReferenceIds.includes(reference.referenceId),
+            status: reference.status,
+            error: reference.error ?? null,
+            prompt: reference.prompt ?? null,
+            isCreatedReference,
+          };
+        }),
+    [previzFrameReferenceIds, previzSelectedReferenceIds, sortedEditVideoReferences],
+  );
+  const previzUploadReferenceLibraryItems = useMemo(
+    () => previzSceneReferenceLibraryItems.filter((reference) => !reference.isCreatedReference),
+    [previzSceneReferenceLibraryItems],
+  );
+  const previzCreatedReferenceLibraryItems = useMemo(
+    () => previzSceneReferenceLibraryItems.filter((reference) => reference.isCreatedReference),
+    [previzSceneReferenceLibraryItems],
+  );
+  const previzFrameLibraryItems = useMemo(
+    () =>
+      previzFrameReferenceIds.flatMap((referenceId) => {
+        const reference = sortedEditVideoReferences.find((item) => item.referenceId === referenceId);
+        if (!reference) return [];
+        return [
+          {
+            referenceId: reference.referenceId,
+            imageUrl: reference.imageUrl,
+            title: humanizeFilename(reference.filename || keyBasenameFromS3Key(reference.key || reference.referenceId)),
+            subtitle:
+              reference.type === "generated"
+                ? `${reference.model ?? "generated"}${reference.status && reference.status !== "complete" ? ` • ${reference.status}` : ""}`
+                : "uploaded",
+            selected: previzSelectedFrameIds.includes(reference.referenceId),
+            status: reference.status,
+            prompt: reference.prompt ?? null,
+          },
+        ];
+      }),
+    [previzFrameReferenceIds, previzSelectedFrameIds, sortedEditVideoReferences],
+  );
+  const previzVisibleGenerations = useMemo(
+    () =>
+      Object.values(task?.segmentGenerations ?? {})
+        .filter((generation) => {
+          return matchesGenerateStepGrid(generation, {
+            task,
+            workflowId: "simple_generation_workflow",
+            activeInputMode: generationInputMode,
+            selectedSegmentId,
+            filterBySelectedSegment: true,
+          });
+        })
+        .sort(
+          (a, b) =>
+            new Date(b.finishedAt ?? b.updatedAt ?? b.createdAt).getTime() -
+            new Date(a.finishedAt ?? a.updatedAt ?? a.createdAt).getTime(),
+        ),
+    [generationInputMode, selectedSegmentId, task],
+  );
+  const referencePickerItems = useMemo<ReferencePickerItem[]>(() => {
+    if (!selectedTaskId) return [];
+    const output: ReferencePickerItem[] = [];
+    const seenSourceKeys = new Set<string>();
+    const currentTaskId = task?.taskId ?? selectedTaskId;
+    const addItem = (item: ReferencePickerItem) => {
+      if (!item.imageUrl || seenSourceKeys.has(item.sourceKey)) return;
+      seenSourceKeys.add(item.sourceKey);
+      output.push(item);
+    };
+
+    for (const reference of editVideoReferences) {
+      if (!reference.imageUrl) continue;
+      addItem({
+        id: `reference:${reference.referenceId}`,
+        taskId: currentTaskId,
+        imageUrl: reference.imageUrl,
+        createdAt: reference.createdAt,
+        title: humanizeFilename(reference.filename || keyBasenameFromS3Key(reference.key || reference.referenceId)),
+        subtitle: reference.type === "generated" ? "Current task generated reference" : "Current task upload",
+        sourceGroup: reference.type === "generated" ? "generated" : "upload",
+        sourceType: "task_reference",
+        sourceKey: reference.key,
+        referenceId: reference.referenceId,
+        referenceType: reference.type,
+        isCurrentTaskAsset: true,
+        matchesCurrentContext: true,
+        assetKind: reference.type === "generated" ? "generated_image" : "uploaded",
+      });
+      if (reference.originSourceKey) {
+        seenSourceKeys.add(reference.originSourceKey);
+      }
+    }
+
+    for (const assetTask of assetTasks) {
+      const isCurrentTask = assetTask.taskId === currentTaskId;
+      for (const reference of assetTask.editVideoReferences ?? []) {
+        if (!reference.imageUrl) continue;
+        if (isCurrentTask) continue;
+        addItem({
+          id: `library-reference:${assetTask.taskId}:${reference.referenceId}`,
+          taskId: assetTask.taskId,
+          imageUrl: reference.imageUrl,
+          createdAt: reference.createdAt,
+          title: humanizeFilename(reference.filename || keyBasenameFromS3Key(reference.key || reference.referenceId)),
+          subtitle: `${assetTask.name} · ${reference.type === "generated" ? "generated reference" : "uploaded reference"}`,
+          sourceGroup: reference.type === "generated" ? "generated" : "upload",
+          sourceType: "task_reference",
+          sourceKey: reference.key,
+          referenceId: reference.referenceId,
+          referenceType: reference.type,
+          isCurrentTaskAsset: false,
+          matchesCurrentContext: false,
+          assetKind: reference.type === "generated" ? "generated_image" : "uploaded",
+        });
+      }
+      for (const frame of Object.values(assetTask.frames ?? {})) {
+        for (const variant of frame.variants ?? []) {
+          if (!variant.imageUrl) continue;
+          addItem({
+            id: `frame-variant:${assetTask.taskId}:${frame.frameId}:${variant.variantId}`,
+            taskId: assetTask.taskId,
+            imageUrl: variant.imageUrl,
+            createdAt: variant.createdAt,
+            title: humanizeFilename(keyBasenameFromS3Key(variant.outputKey)),
+            subtitle: `${assetTask.name} · frame ${frame.frameIndex} · ${variant.model}`,
+            sourceGroup: "generated",
+            sourceType: "frame_variant",
+            sourceKey: variant.outputKey,
+            isCurrentTaskAsset: isCurrentTask,
+            matchesCurrentContext: isCurrentTask,
+            assetKind: "generated_image",
+          });
+        }
+      }
+    }
+
+    for (const frame of Object.values(task?.frames ?? {})) {
+      if (!frame.imageUrl) continue;
+      addItem({
+        id: `frame-capture:${currentTaskId}:${frame.frameId}`,
+        taskId: currentTaskId,
+        imageUrl: frame.imageUrl,
+        createdAt: task?.updatedAt ?? new Date(0).toISOString(),
+        title: `Frame ${frame.frameIndex}`,
+        subtitle: `${task?.name ?? "Current task"} · captured frame`,
+        sourceGroup: "generated",
+        sourceType: "frame_capture",
+        sourceKey: frame.captureKey,
+        isCurrentTaskAsset: true,
+        matchesCurrentContext: true,
+        assetKind: "captured_frame",
+      });
+    }
+
+    return output.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }, [assetTasks, editVideoReferences, selectedTaskId, task]);
+  const referencePickerVideoItems = useMemo<ReferencePickerVideoItem[]>(() => {
+    if (!selectedTaskId) return [];
+    const output: ReferencePickerVideoItem[] = [];
+    const seenIds = new Set<string>();
+    const currentTaskId = task?.taskId ?? selectedTaskId;
+
+    const matchesCurrentVideoContext = (assetTask: TaskDetail, generation?: SegmentGeneration | null): boolean => {
+      if (assetTask.taskId !== currentTaskId) return false;
+      if (!generation) return true;
+      const origin = getGenerationOrigin(generation, assetTask);
+      if (!origin || origin.workflowId !== currentTaskWorkflowId) return false;
+      if (currentTaskWorkflowId === "character_animate_workflow") {
+        return origin.creationMode === characterAnimateMode;
+      }
+      if (currentTaskWorkflowId === "simple_generation_workflow") {
+        return true;
+      }
+      return origin.creationMode === generationInputMode;
+    };
+
+    const firstFrameThumbnailUrl = (assetTask: TaskDetail): string | undefined => {
+      const firstFrame = Object.values(assetTask.frames ?? {})
+        .sort((left, right) => left.frameIndex - right.frameIndex)[0];
+      return firstFrame?.imageUrl ?? undefined;
+    };
+
+    const addVideoItem = (item: ReferencePickerVideoItem) => {
+      if (!item.previewUrl || seenIds.has(item.id)) return;
+      seenIds.add(item.id);
+      output.push(item);
+    };
+
+    const addTaskSourceVideo = (assetTask: TaskDetail) => {
+      const sourceKind = assetTask.sourceMedia?.kind ?? assetTask.video?.editSource?.mediaType ?? "video";
+      if (sourceKind !== "video") return;
+      const previewUrl =
+        assetTask.sourceMedia?.previewSource?.downloadUrl ??
+        assetTask.sourceMedia?.editSource?.downloadUrl ??
+        assetTask.video?.previewSource?.downloadUrl ??
+        assetTask.video?.editSource?.downloadUrl ??
+        null;
+      if (!previewUrl) return;
+      const sourceKey =
+        assetTask.sourceMedia?.previewSource?.s3Key ??
+        assetTask.sourceMedia?.editSource?.s3Key ??
+        assetTask.video?.previewSource?.s3Key ??
+        assetTask.video?.editSource?.s3Key ??
+        assetTask.sourceMedia?.original?.s3Key ??
+        assetTask.video?.original?.s3Key ??
+        `${assetTask.taskId}:source-video`;
+      const filename =
+        assetTask.sourceMedia?.original?.filename ??
+        assetTask.video?.original?.filename ??
+        keyBasenameFromS3Key(sourceKey);
+      addVideoItem({
+        id: `source-video:${assetTask.taskId}:${sourceKey}`,
+        taskId: assetTask.taskId,
+        title: humanizeFilename(filename),
+        subtitle: `${assetTask.name} · uploaded source video`,
+        previewUrl,
+        thumbnailUrl: firstFrameThumbnailUrl(assetTask),
+        createdAt: assetTask.updatedAt,
+        sourceKind: "uploaded",
+        isCurrentTaskAsset: assetTask.taskId === currentTaskId,
+        matchesCurrentContext: assetTask.taskId === currentTaskId,
+        canCaptureFrame: true,
+        frameCount: assetTask.sourceMedia?.editSource?.frameCount ?? assetTask.video?.editSource?.frameCount ?? null,
+        durationSec: assetTask.sourceMedia?.editSource?.durationSec ?? assetTask.video?.editSource?.durationSec ?? null,
+        width: assetTask.sourceMedia?.editSource?.width ?? assetTask.video?.editSource?.width ?? null,
+        height: assetTask.sourceMedia?.editSource?.height ?? assetTask.video?.editSource?.height ?? null,
+      });
+    };
+
+    const addGeneratedVideos = (assetTask: TaskDetail) => {
+      for (const generation of Object.values(assetTask.segmentGenerations ?? {})) {
+        if (generation.isChunkInternal || generation.status !== "complete" || !generation.downloadUrl) continue;
+        const origin = getGenerationOrigin(generation, assetTask);
+        const toolLabel =
+          origin?.stepOrigin === "post_process"
+            ? origin?.toolOrigin === "clip_lengthen"
+              ? "extended video"
+              : "post-process video"
+            : "generated video";
+        addVideoItem({
+          id: `generation-video:${assetTask.taskId}:${generation.genId}`,
+          taskId: assetTask.taskId,
+          title: describeGeneration(generation),
+          subtitle: `${assetTask.name} · ${toolLabel} · ${generation.luma.model}`,
+          previewUrl: generation.downloadUrl,
+          thumbnailUrl: generationThumbnailUrl(generation) ?? undefined,
+          createdAt: generation.createdAt,
+          sourceKind: "generated",
+          isCurrentTaskAsset: assetTask.taskId === currentTaskId,
+          matchesCurrentContext: matchesCurrentVideoContext(assetTask, generation),
+          canCaptureFrame: false,
+          durationSec: generation.providerDurationSec ?? generation.requestedDurationSec ?? null,
+        });
+      }
+      for (const exportItem of assetTask.exports ?? []) {
+        if (exportItem.internalOnlySource || !exportItem.downloadUrl) continue;
+        addVideoItem({
+          id: `export-video:${assetTask.taskId}:${exportItem.exportId}`,
+          taskId: assetTask.taskId,
+          title: humanizeFilename(keyBasenameFromS3Key(exportItem.outputKey || `${exportItem.exportId}.mp4`)),
+          subtitle: `${assetTask.name} · merged export`,
+          previewUrl: exportItem.downloadUrl,
+          createdAt: exportItem.createdAt,
+          sourceKind: "generated",
+          isCurrentTaskAsset: assetTask.taskId === currentTaskId,
+          matchesCurrentContext: assetTask.taskId === currentTaskId,
+          canCaptureFrame: false,
+        });
+      }
+    };
+
+    if (task) {
+      addTaskSourceVideo(task);
+      addGeneratedVideos(task);
+    }
+    for (const assetTask of assetTasks) {
+      if (assetTask.taskId === currentTaskId) continue;
+      addTaskSourceVideo(assetTask);
+      addGeneratedVideos(assetTask);
+    }
+
+    return output.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }, [
+    assetTasks,
+    characterAnimateMode,
+    currentTaskWorkflowId,
+    describeGeneration,
+    generationInputMode,
+    selectedTaskId,
+    task,
+  ]);
+  const referencePickerItemById = useMemo(() => new Map(referencePickerItems.map((item) => [item.id, item])), [referencePickerItems]);
+  const selectedReferencePickerItemIds = useMemo(
+    () =>
+      editVideoSelectedReferenceIds
+        .map((referenceId) => `reference:${referenceId}`)
+        .filter((itemId) => referencePickerItemById.has(itemId)),
+    [editVideoSelectedReferenceIds, referencePickerItemById],
+  );
+  const selectedToolReferencePickerItemIds = useMemo(
+    () =>
+      editVideoToolSelectedReferenceIds
+        .map((referenceId) => `reference:${referenceId}`)
+        .filter((itemId) => referencePickerItemById.has(itemId)),
+    [editVideoToolSelectedReferenceIds, referencePickerItemById],
+  );
+  const selectedPrevizReferencePickerItemIds = useMemo(
+    () =>
+      previzSelectedReferenceIds
+        .map((referenceId) => `reference:${referenceId}`)
+        .filter((itemId) => referencePickerItemById.has(itemId)),
+    [previzSelectedReferenceIds, referencePickerItemById],
+  );
+  const selectedPrevizToolReferencePickerItemIds = useMemo(
+    () =>
+      previzToolSelectedReferenceIds
+        .map((referenceId) => `reference:${referenceId}`)
+        .filter((itemId) => referencePickerItemById.has(itemId)),
+    [previzToolSelectedReferenceIds, referencePickerItemById],
+  );
+  const selectedPrevizFramePickerItemIds = useMemo(
+    () =>
+      previzSelectedFrameIds
+        .map((referenceId) => `reference:${referenceId}`)
+        .filter((itemId) => referencePickerItemById.has(itemId)),
+    [previzSelectedFrameIds, referencePickerItemById],
+  );
+  const previzFrameReferencePickerItems = useMemo(
+    () =>
+      referencePickerItems.filter(
+        (item) => item.taskId === selectedTaskId && Boolean(item.referenceId) && previzFrameReferenceIds.includes(item.referenceId as string),
+      ),
+    [previzFrameReferenceIds, referencePickerItems, selectedTaskId],
+  );
   const totalVideoFrames = frameCount(task);
   const defaultVideoSegment = useMemo(
     () =>
@@ -1305,6 +2227,7 @@ export default function App() {
   useEffect(() => {
     const availableIds = new Set(editVideoReferences.map((item) => item.referenceId));
     setEditVideoSelectedReferenceIds((previous) => previous.filter((id) => availableIds.has(id)));
+    setEditVideoToolSelectedReferenceIds((previous) => previous.filter((id) => availableIds.has(id)));
   }, [editVideoReferences]);
   useEffect(() => {
     if (generationInputMode !== "edit_video") return;
@@ -1695,11 +2618,13 @@ export default function App() {
     if (tab === "assets") {
       setMergedAssetsVisible(6);
       setEditedFrameAssetsVisible(6);
+      setReferenceImageAssetsVisible(6);
       setGeneratedAssetsVisible(6);
     }
     if (tab === "asset_library") {
       setLibraryMergedAssetsVisible(6);
       setLibraryEditedFrameAssetsVisible(6);
+      setLibraryReferenceImageAssetsVisible(6);
       setLibraryGeneratedAssetsVisible(6);
     }
   }, [tab]);
@@ -1784,14 +2709,7 @@ export default function App() {
       payload,
     }: {
       taskId: string;
-      payload: {
-        assetType: "upload" | "frame_capture" | "frame_variant" | "segment_generation" | "export" | "edit_video_reference";
-        frameId?: string;
-        variantId?: string;
-        genId?: string;
-        exportId?: string;
-        referenceId?: string;
-      };
+      payload: LibraryAssetDeletePayload;
     }) => apiClient.deleteAsset(taskId, payload),
     onSuccess: async (_result, variables) => {
       await queryClient.invalidateQueries({ queryKey: ["task", variables.taskId] });
@@ -2060,7 +2978,8 @@ export default function App() {
       if (!trimmedPrompt) {
         throw new Error("Prompt is required");
       }
-      const firstFrameVariantId = refineSourceVariantIds.first || compareVariantIds.first || null;
+      const firstFrameVariantId =
+        generationInputMode === "edit_video" ? null : refineSourceVariantIds.first || compareVariantIds.first || null;
       const requestPayload = {
         selected_model: lumaModel,
         provider: config.provider,
@@ -2081,7 +3000,8 @@ export default function App() {
         luma_mode: lumaModel === "ray-2" || lumaModel === "ray-flash-2" ? lumaModeBucket(advancedMode) : null,
         user_visible_model_name: config.dropdownName,
         first_frame_variant_id: firstFrameVariantId,
-        selected_reference_ids: generationInputMode === "edit_video" ? editVideoSelectedReferenceIds.slice(0, 3) : [],
+        selected_reference_ids:
+          generationInputMode === "edit_video" ? editVideoSelectedReferenceIds.slice(0, editVideoReferenceLimitByModel || 3) : [],
       };
       const response = await apiClient.improveSegmentPrompt(selectedTaskId, selectedSegmentId, requestPayload);
       return validatePromptWizardResult(response.result, config.requiredMarkers);
@@ -2096,20 +3016,80 @@ export default function App() {
       return apiClient.generateSegment(selectedTaskId, selectedSegmentId, {
         lumaModel,
         mode: selectedMode as VideoModeId,
+        inputMode: generationInputMode,
         prompt: lumaModel === "wan2.2-animate" ? undefined : trimmedPrompt || undefined,
         negativePrompt: lumaModel === "wan2.7-i2v" ? wan27NegativePrompt.trim() || undefined : undefined,
-        firstFrameVariantId: refineSourceVariantIds.first || compareVariantIds.first || undefined,
+        firstFrameVariantId:
+          generationInputMode === "edit_video" ? undefined : refineSourceVariantIds.first || compareVariantIds.first || undefined,
         lastFrameVariantId: generationInputMode === "start_end" ? refineSourceVariantIds.last || compareVariantIds.last || undefined : undefined,
         selectedReferenceIds:
           generationInputMode === "edit_video"
             ? editVideoSelectedReferenceIds.slice(0, editVideoReferenceLimitByModel || 3)
             : undefined,
+        audioReferenceId:
+          generationInputMode === "edit_video" && lumaModel === "seedance-2.0-reference-to-video" ? generationAudioReference?.referenceId ?? undefined : undefined,
         replicateKlingMode: lumaModel === "kling-o1" ? replicateKlingMode : undefined,
         replicateKlingV3Mode: lumaModel === "kling-v3-omni-video" ? replicateKlingV3Mode : undefined,
         wan27Resolution: lumaModel === "wan2.7-videoedit" || lumaModel === "wan2.7-i2v" ? wan27Resolution : undefined,
         sora2Resolution: lumaModel === "sora-2-image-to-video" ? sora2Resolution : undefined,
         happyHorseResolution: lumaModel === "happy-horse-video-edit" || lumaModel === "happy-horse-image-to-video" ? happyHorseResolution : undefined,
         preserveFrames,
+      });
+    },
+    onSuccess: async (result) => {
+      setJobIds((prev) => appendTrackedJobId(prev, result.jobId));
+      await queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
+      await queryClient.invalidateQueries({ queryKey: ["task", "report", selectedTaskId] });
+      await queryClient.invalidateQueries({ queryKey: ["task", "assets", selectedTaskId] });
+      setTab("outputs");
+    },
+  });
+
+  const generateCharacterAnimationMutation = useMutation({
+    mutationFn: async () => {
+      if (!selectedTaskId || !selectedSegmentId) throw new Error("Select a segment");
+      if (!selectedCharacterReferenceId) throw new Error("Select a character image");
+      if (runwayCharacterImageValidationError) throw new Error(runwayCharacterImageValidationError);
+      const trimmedPrompt = characterAnimatePrompt.trim();
+      return apiClient.generateCharacterAnimation(selectedTaskId, selectedSegmentId, {
+        mode: characterAnimateMode,
+        model: selectedCharacterAnimateModel as "runway_act_two" | "kling_v3_motion_control" | "seedance_2_0_reference_to_video" | "omnihuman_v1_5",
+        characterReferenceId: selectedCharacterReferenceId,
+        prompt: selectedCharacterAnimateModel !== "runway_act_two" ? trimmedPrompt || undefined : undefined,
+        outputAspectRatio: characterAnimateMode === "pose_video" ? (characterAnimateOutputAspectRatio as "1280:720" | "720:1280" | "960:960" | "1104:832" | "832:1104" | "1584:672") : undefined,
+        bodyControl: characterAnimateMode === "pose_video" ? characterAnimateBodyControl : undefined,
+        expressionIntensity: characterAnimateMode === "pose_video" ? characterAnimateExpressionIntensity : undefined,
+        omnihumanResolution: characterAnimateMode === "audio_driven" ? characterAnimateOmnihumanResolution : undefined,
+        klingMode: selectedCharacterAnimateModel === "kling_v3_motion_control" ? characterAnimateKlingMode : undefined,
+        klingCharacterOrientation:
+          selectedCharacterAnimateModel === "kling_v3_motion_control" ? characterAnimateKlingCharacterOrientation : undefined,
+        seedanceResolution:
+          selectedCharacterAnimateModel === "seedance_2_0_reference_to_video" ? characterAnimateSeedanceResolution : undefined,
+        seedanceAspectRatio:
+          selectedCharacterAnimateModel === "seedance_2_0_reference_to_video" ? characterAnimateSeedanceAspectRatio : undefined,
+      });
+    },
+    onSuccess: async (result) => {
+      setJobIds((prev) => appendTrackedJobId(prev, result.jobId));
+      await queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
+      await queryClient.invalidateQueries({ queryKey: ["task", "report", selectedTaskId] });
+      await queryClient.invalidateQueries({ queryKey: ["task", "assets", selectedTaskId] });
+      setTab("outputs");
+    },
+  });
+
+  const generatePrevizVideoMutation = useMutation({
+    mutationFn: async () => {
+      if (!selectedTaskId || !selectedSegmentId) throw new Error("Select the scene segment");
+      const trimmedPrompt = previzGeneratePrompt.trim();
+      if (!trimmedPrompt) throw new Error("Write a prompt before generating");
+      if (!previzSelectedFrameIds.length) throw new Error("Select one or more frames in the Edit step");
+      return apiClient.generatePrevizVideo(selectedTaskId, selectedSegmentId, {
+        model: previzGenerateModel,
+        prompt: trimmedPrompt,
+        durationSec: previzGenerateDurationSec,
+        sceneAspectRatio: previzSceneAspectRatio ?? "16:9",
+        selectedFrameIds: previzSelectedFrameIds.slice(0, 9),
       });
     },
     onSuccess: async (result) => {
@@ -2149,7 +3129,8 @@ export default function App() {
             : lumaContinuationPrompt.trim()
               ? lumaContinuationPrompt.trim()
               : undefined,
-        firstFrameVariantId: refineSourceVariantIds.first || compareVariantIds.first || undefined,
+        firstFrameVariantId:
+          generationInputMode === "edit_video" ? undefined : refineSourceVariantIds.first || compareVariantIds.first || undefined,
         replicateKlingMode: lumaModel === "kling-o1" ? replicateKlingMode : undefined,
         replicateKlingV3Mode: lumaModel === "kling-v3-omni-video" ? replicateKlingV3Mode : undefined,
         wan27Resolution: lumaModel === "wan2.7-videoedit" ? wan27Resolution : undefined,
@@ -2263,6 +3244,43 @@ export default function App() {
     },
     onSuccess: async (result) => {
       setJobIds((prev) => appendTrackedJobId(prev, result.jobId));
+      await queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
+      await queryClient.invalidateQueries({ queryKey: ["task", "report", selectedTaskId] });
+      await queryClient.invalidateQueries({ queryKey: ["task", "assets", selectedTaskId] });
+    },
+  });
+
+  const lengthenSegmentGenerationMutation = useMutation({
+    mutationFn: async ({
+      generationId,
+      model,
+      direction,
+      durationSeconds,
+      prompt,
+      inputMode,
+      selectedReferenceIds,
+    }: {
+      generationId: string;
+      model: string;
+      direction: "start" | "end";
+      durationSeconds: number;
+      prompt: string;
+      inputMode: "start_end" | "edit_video";
+      selectedReferenceIds?: string[];
+    }) => {
+      if (!selectedTaskId) throw new Error("Select a task");
+      return apiClient.lengthenSegmentGeneration(selectedTaskId, generationId, {
+        model,
+        direction,
+        durationSeconds,
+        prompt,
+        inputMode,
+        selectedReferenceIds: selectedReferenceIds ?? [],
+      });
+    },
+    onSuccess: async (result) => {
+      setJobIds((prev) => appendTrackedJobId(prev, result.jobId));
+      setLengthenPendingGenId(result.genId);
       await queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
       await queryClient.invalidateQueries({ queryKey: ["task", "report", selectedTaskId] });
       await queryClient.invalidateQueries({ queryKey: ["task", "assets", selectedTaskId] });
@@ -2386,6 +3404,41 @@ export default function App() {
     },
   });
 
+  const runTopazUpscaleForGenerationMutation = useMutation({
+    mutationFn: async ({
+      generationId,
+      payload,
+    }: {
+      generationId: string;
+      payload: {
+        preset: "balanced" | "recover_detail" | "fast_sharpen";
+        model: string;
+        upscaleFactor: number;
+        h264Output: boolean;
+        force?: boolean;
+      };
+    }) => {
+      if (!selectedTaskId) throw new Error("Select a task");
+      return apiClient.runTopazUpscaleForGeneration(selectedTaskId, generationId, payload);
+    },
+    onMutate: async ({ generationId }) => {
+      setTopazUpscalePendingGenerationId(generationId);
+    },
+    onSuccess: async (result) => {
+      if (result.jobId) {
+        setJobIds((prev) => appendTrackedJobId(prev, result.jobId));
+      }
+      if (selectedTaskId) {
+        await queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
+        await queryClient.invalidateQueries({ queryKey: ["task", "report", selectedTaskId] });
+        await queryClient.invalidateQueries({ queryKey: ["task", "assets", selectedTaskId] });
+      }
+    },
+    onSettled: () => {
+      setTopazUpscalePendingGenerationId(null);
+    },
+  });
+
   const createCustomReportMutation = useMutation({
     mutationFn: ({
       taskId,
@@ -2395,7 +3448,7 @@ export default function App() {
       name,
     }: {
       taskId: string;
-      reportType: "qc_frame" | "qc_video" | "video_compare";
+      reportType: "qc_frame" | "qc_video" | "video_compare" | "previz_review";
       tests: string[];
       outputRefs: CustomReportOutputRef[];
       name?: string;
@@ -2419,6 +3472,9 @@ export default function App() {
   const taskTrackedJobIds = useMemo(() => {
     const isActiveStatus = (status: string | null | undefined) => status === "queued" || status === "running";
     const ids: string[] = [];
+    for (const reference of task?.editVideoReferences ?? []) {
+      if (reference.jobId && isActiveStatus(reference.status)) ids.push(reference.jobId);
+    }
     for (const generation of Object.values(task?.segmentGenerations ?? {})) {
       if (generation.jobId && isActiveStatus(generation.status)) ids.push(generation.jobId);
       const mergeSuggestionJobId = generation.mergeAlignmentSuggestion?.jobId;
@@ -2444,7 +3500,7 @@ export default function App() {
       if (topazJobId && isActiveStatus(exportItem.topazUpscale?.status)) ids.push(topazJobId);
     }
     return ids;
-  }, [task?.chunkedGenerationRuns, task?.customReports, task?.exports, task?.segmentGenerations]);
+  }, [task?.chunkedGenerationRuns, task?.customReports, task?.editVideoReferences, task?.exports, task?.segmentGenerations]);
 
   const trackedJobIds = useMemo(
     () => [...new Set([...jobIds, ...taskTrackedJobIds])],
@@ -2570,6 +3626,9 @@ export default function App() {
   useEffect(() => {
     setJobIds([]);
     setDismissedPendingGenerationJobIds({});
+    setEditVideoReferencePromptDraft("");
+    setPrevizReferencePromptDraft("");
+    setPrevizFramePromptDraft("");
   }, [selectedTaskId]);
 
   const sortedJobs = useMemo(
@@ -2664,14 +3723,20 @@ export default function App() {
   }, [activeEditFrame?.frameId, sortedJobs]);
 
   const pendingGenerations = useMemo<PendingGenerationCard[]>(() => {
-    if (!selectedSegmentId) return [];
+    const showTaskWideEditVideoGenerations = currentTaskWorkflowId === "source_video_flow" && generationInputMode === "edit_video";
+    if (!selectedSegmentId && !showTaskWideEditVideoGenerations) return [];
     const cards: PendingGenerationCard[] = [];
     for (const job of sortedJobs) {
       if (dismissedPendingGenerationJobIds[job.jobId]) continue;
       if (job.type !== "segment_generate") continue;
       if (job.status !== "queued" && job.status !== "running" && job.status !== "failed") continue;
       const segmentId = jobPayloadString(job, "segmentId");
-      if (segmentId !== selectedSegmentId) continue;
+      if (!segmentId) continue;
+      if (!showTaskWideEditVideoGenerations && segmentId !== selectedSegmentId) continue;
+      if (showTaskWideEditVideoGenerations) {
+        const inputMode = jobPayloadString(job, "inputMode");
+        if (inputMode !== "edit_video") continue;
+      }
       cards.push({
         jobId: job.jobId,
         segmentId,
@@ -2686,7 +3751,7 @@ export default function App() {
       });
     }
     return cards.sort((a, b) => new Date(b.updatedAt ?? b.createdAt ?? 0).getTime() - new Date(a.updatedAt ?? a.createdAt ?? 0).getTime());
-  }, [dismissedPendingGenerationJobIds, selectedSegmentId, sortedJobs]);
+  }, [currentTaskWorkflowId, dismissedPendingGenerationJobIds, generationInputMode, selectedSegmentId, sortedJobs]);
 
   const mergeFps = fpsValue(task);
   const mergeOriginalStartFrame = mergeTargetSegment?.startFrame ?? 0;
@@ -2906,11 +3971,19 @@ export default function App() {
 
   const {
     editedFrameAssets,
+    referenceImageAssets,
     generatedVideoAssets,
+    postProcessVideoAssets,
     mergedVideoAssets,
+    orphanedAssets,
+    audioAssets,
     libraryEditedFrameAssets,
+    libraryReferenceImageAssets,
     libraryGeneratedVideoAssets,
+    libraryPostProcessVideoAssets,
     libraryMergedVideoAssets,
+    libraryOrphanedAssets,
+    libraryAudioAssets,
   } = useAssetLibraryState({
     selectedTaskId,
     selectedTask: task,
@@ -2921,7 +3994,12 @@ export default function App() {
     selectedSegment,
     task,
   });
-  const timelinePlaybackUrl = task?.video?.previewSource?.downloadUrl ?? task?.video?.editSource?.downloadUrl ?? "";
+  const timelinePlaybackUrl =
+    task?.sourceMedia?.previewSource?.downloadUrl ??
+    task?.sourceMedia?.editSource?.downloadUrl ??
+    task?.video?.previewSource?.downloadUrl ??
+    task?.video?.editSource?.downloadUrl ??
+    "";
 
   useEffect(() => {
     if (mergeInsertStartFrame !== mergeInsertStartFrameClamped) {
@@ -3050,6 +4128,20 @@ export default function App() {
     setReconcileTimingJobId(null);
     setReconcileTimingError(null);
   }, [reconcileTimingJob, reconcileTimingJobId, selectSegmentGeneration]);
+
+  useEffect(() => {
+    if (!lengthenPendingGenId) return;
+    const pendingGeneration = task?.segmentGenerations?.[lengthenPendingGenId];
+    if (!pendingGeneration) return;
+    if (pendingGeneration.status === "complete" && pendingGeneration.outputKey) {
+      selectSegmentGeneration(lengthenPendingGenId);
+      setLengthenPendingGenId(null);
+      return;
+    }
+    if (pendingGeneration.status === "failed") {
+      setLengthenPendingGenId(null);
+    }
+  }, [lengthenPendingGenId, selectSegmentGeneration, task?.segmentGenerations]);
 
   function mapPointerToMaskCoordinates(event: PointerEvent<HTMLCanvasElement>, canvas: HTMLCanvasElement) {
     const maskCanvas = patchMaskCanvasRef.current;
@@ -3261,7 +4353,13 @@ export default function App() {
   }
 
   function describeSegment(segment: SegmentRecord): string {
+    if (segment.kind === "scene") {
+      return segment.label?.trim() ? segment.label : "Scene";
+    }
     const endFrameInclusive = Math.max(segment.endFrameExclusive - 1, segment.startFrame);
+    if (isCharacterAudioSource) {
+      return `${segment.startTimecode}→${segment.endTimecode} · ${segment.durationSec.toFixed(2)}s`;
+    }
     return `f${segment.startFrame}-f${endFrameInclusive} · ${segment.durationSec.toFixed(2)}s · ${segment.startTimecode}→${segment.endTimecode}`;
   }
 
@@ -3311,19 +4409,15 @@ export default function App() {
       if (!selectedTaskId || !url) return;
       const expiryMs = typeof url === "string" && url ? parsePresignedExpiryMs(url) : null;
       const nearExpiry = typeof expiryMs === "number" && expiryMs - Date.now() <= 60_000;
-      const isPresigned = typeof url === "string" && /[?&]X-Amz-Algorithm=AWS4-HMAC-SHA256/i.test(url);
-      const shouldForce = nearExpiry || isPresigned;
-      if (!shouldForce) return;
-      if (shouldForce) {
-        const now = Date.now();
-        const throttleKey = `${selectedTaskId}:${url}`;
-        const previous = mediaErrorRefreshRef.current.get(throttleKey) ?? 0;
-        if (now - previous < MEDIA_ERROR_FORCE_REFRESH_COOLDOWN_MS) {
-          return;
-        }
-        mediaErrorRefreshRef.current.set(throttleKey, now);
+      if (!nearExpiry) return;
+      const now = Date.now();
+      const throttleKey = `${selectedTaskId}:${url}`;
+      const previous = mediaErrorRefreshRef.current.get(throttleKey) ?? 0;
+      if (now - previous < MEDIA_ERROR_FORCE_REFRESH_COOLDOWN_MS) {
+        return;
       }
-      refreshSignedUrlsForTask(selectedTaskId, { force: shouldForce, includeReport: isReportTab });
+      mediaErrorRefreshRef.current.set(throttleKey, now);
+      refreshSignedUrlsForTask(selectedTaskId, { force: true, includeReport: isReportTab });
     },
     [isReportTab, refreshSignedUrlsForTask, selectedTaskId],
   );
@@ -3363,13 +4457,8 @@ export default function App() {
     if (!shouldRefreshOriginal && !shouldRefreshCompare) return;
 
     const nextOriginalUrl = (() => {
-      if (
-        shouldRefreshOriginal &&
-        videoCompareModal.preferGenerationInputMediaAsOriginal &&
-        videoCompareModal.compareGenerationId
-      ) {
-        const generation = task.segmentGenerations?.[videoCompareModal.compareGenerationId];
-        if (isLikelyVideoAssetUrl(generation?.inputMediaUrl)) return generation?.inputMediaUrl ?? videoCompareModal.originalUrl;
+      if (shouldRefreshOriginal && videoCompareModal.originalMediaType === "audio") {
+        return task.sourceMedia?.previewSource?.downloadUrl ?? task.sourceMedia?.editSource?.downloadUrl ?? videoCompareModal.originalUrl;
       }
       if (shouldRefreshOriginal && videoCompareModal.originalSegmentId) {
         const segment = task.segments.find((item) => item.segmentId === videoCompareModal.originalSegmentId);
@@ -3409,15 +4498,38 @@ export default function App() {
     pageHiddenAtRef.current = Date.now();
   }, [isPageVisible, isReportTab, refreshSignedUrlsForTask, reportTaskId, selectedTaskId]);
 
-  const openNewTaskWithAutomationDefaults = useCallback(() => {
+  const openNewTaskWithAutomationDefaults = useCallback((workflowId: TaskWorkflowId = "source_video_flow") => {
     setAutomationEnabled(false);
     setAutomationStartPrompt("");
     setAutomationEndPrompt("");
     setAutomationVideoPrompt("");
     setAutomationSelectedVideoOptionIds(AUTOMATION_VIDEO_OPTIONS.map((option) => option.id));
     setAutomationUiError(null);
-    openNewTaskModal();
-  }, [openNewTaskModal]);
+    if (
+      workflowId === "source_video_flow" ||
+      workflowId === "character_animate_workflow" ||
+      workflowId === "simple_generation_workflow"
+    ) {
+      goHome();
+      setTaskPickerWorkflowId(null);
+      openNewTaskModal(workflowId);
+      return;
+    }
+    setTaskPickerWorkflowId(null);
+    openWorkflowLanding(workflowId);
+  }, [goHome, openNewTaskModal, openWorkflowLanding]);
+
+  const openTaskPickerForWorkflow = useCallback((workflowId: TaskWorkflowId) => {
+    setTaskPickerWorkflowId(workflowId);
+  }, []);
+
+  const openTaskFromPicker = useCallback(
+    (taskId: string) => {
+      setTaskPickerWorkflowId(null);
+      setTab("timeline", taskId);
+    },
+    [setTab],
+  );
 
   const cancelAutomationRun = useCallback(() => {
     automationCancelRef.current = true;
@@ -4264,6 +5376,7 @@ export default function App() {
       filename: file.name,
       model: lumaModel,
       mode: resolveSelectedGenerationMode(),
+      inputMode: generationInputMode,
       prompt: lumaModel === "wan2.2-animate" ? undefined : trimmedPrompt || undefined,
       negativePrompt: lumaModel === "wan2.7-i2v" ? wan27NegativePrompt.trim() || undefined : undefined,
       firstFrameVariantId: refineSourceVariantIds.first || compareVariantIds.first || undefined,
@@ -4280,11 +5393,12 @@ export default function App() {
     throw new Error("Uploaded video did not return a generation id");
   }
 
-  async function uploadEditVideoReferenceImage(file: File): Promise<void> {
+  async function uploadGenerationAudioReference(file: File): Promise<void> {
     if (!selectedTaskId) throw new Error("No task selected");
-    const init = await apiClient.initEditVideoReferenceUpload(selectedTaskId, {
+    const init = await apiClient.initGenerationAudioReferenceUpload(selectedTaskId, {
       filename: file.name,
-      contentType: file.type || "image/png",
+      contentType: file.type || "audio/mpeg",
+      sizeBytes: file.size,
     });
     const uploadResponse = await fetch(init.uploadUrl, {
       method: "PUT",
@@ -4296,49 +5410,472 @@ export default function App() {
     if (!uploadResponse.ok) {
       throw new Error(`Upload failed: ${uploadResponse.status}`);
     }
-    await apiClient.completeEditVideoReferenceUpload(selectedTaskId, {
+    await apiClient.completeGenerationAudioReferenceUpload(selectedTaskId, {
       referenceId: init.referenceId,
       uploadKey: init.key,
       filename: file.name,
     });
     await queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
+    await queryClient.invalidateQueries({ queryKey: ["task", "report", selectedTaskId] });
     await queryClient.invalidateQueries({ queryKey: ["task", "assets", selectedTaskId] });
   }
 
-  async function generateEditVideoReferenceImage(payload: {
-    model: "chatgpt" | "chatgpt_latest" | "nano_banana" | "nano_banana_pro";
-    prompt: string;
-  }): Promise<void> {
-    if (!selectedTaskId) throw new Error("No task selected");
-    await apiClient.generateEditVideoReference(selectedTaskId, payload);
-    await queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
-    await queryClient.invalidateQueries({ queryKey: ["task", "assets", selectedTaskId] });
-  }
+  const appendEditVideoReferencesToTaskCache = useCallback((taskId: string, references: EditVideoReference[]): void => {
+    queryClient.setQueryData<TaskDetail | undefined>(["task", taskId], (previous) =>
+      previous ? { ...previous, editVideoReferences: mergeEditVideoReferences(previous.editVideoReferences, references) } : previous,
+    );
+    queryClient.setQueryData<TaskDetail | undefined>(["task", "assets", taskId], (previous) =>
+      previous ? { ...previous, editVideoReferences: mergeEditVideoReferences(previous.editVideoReferences, references) } : previous,
+    );
+  }, [queryClient]);
 
-  async function deleteEditVideoReference(referenceId: string): Promise<void> {
-    if (!selectedTaskId) throw new Error("No task selected");
-    await deleteAssetMutation.mutateAsync({
-      taskId: selectedTaskId,
-      payload: {
-        assetType: "edit_video_reference",
-        referenceId,
-      },
-    });
-    setEditVideoSelectedReferenceIds((previous) => previous.filter((id) => id !== referenceId));
-  }
+  const setPrevizStateInTaskCache = useCallback((taskId: string, nextPreviz: NonNullable<TaskDetail["previz"]>): void => {
+    queryClient.setQueryData<TaskDetail | undefined>(["task", taskId], (previous) =>
+      previous ? { ...previous, previz: nextPreviz } : previous,
+    );
+    queryClient.setQueryData<TaskDetail | undefined>(["task", "assets", taskId], (previous) =>
+      previous ? { ...previous, previz: nextPreviz } : previous,
+    );
+  }, [queryClient]);
 
-  function toggleEditVideoReferenceSelection(referenceId: string): void {
+  const updatePrevizTask = useCallback(
+    async (patch: {
+      scenePrompt?: string | null;
+      sceneAspectRatio?: string | null;
+      selectedReferenceIds?: string[];
+      frameReferenceIds?: string[];
+      selectedFrameIds?: string[];
+    }): Promise<void> => {
+      if (!selectedTaskId) throw new Error("No task selected");
+      const previousPreviz: NonNullable<TaskDetail["previz"]> = {
+        scenePrompt: previzState?.scenePrompt ?? "",
+        sceneAspectRatio: previzState?.sceneAspectRatio ?? null,
+        selectedReferenceIds: Array.isArray(previzState?.selectedReferenceIds) ? [...previzState.selectedReferenceIds] : [],
+        frameReferenceIds: Array.isArray(previzState?.frameReferenceIds) ? [...previzState.frameReferenceIds] : [],
+        selectedFrameIds: Array.isArray(previzState?.selectedFrameIds) ? [...previzState.selectedFrameIds] : [],
+        syntheticSegmentId: previzState?.syntheticSegmentId ?? null,
+      };
+      const optimisticPreviz: NonNullable<TaskDetail["previz"]> = {
+        ...previousPreviz,
+        ...patch,
+        selectedReferenceIds: patch.selectedReferenceIds ?? previousPreviz.selectedReferenceIds ?? [],
+        frameReferenceIds: patch.frameReferenceIds ?? previousPreviz.frameReferenceIds ?? [],
+        selectedFrameIds: patch.selectedFrameIds ?? previousPreviz.selectedFrameIds ?? [],
+      };
+      setPrevizStateInTaskCache(selectedTaskId, optimisticPreviz);
+      try {
+        const result = await apiClient.updatePrevizTask(selectedTaskId, patch);
+        setPrevizStateInTaskCache(selectedTaskId, result.previz);
+      } catch (error) {
+        setPrevizStateInTaskCache(selectedTaskId, previousPreviz);
+        throw error;
+      }
+    },
+    [previzState, selectedTaskId, setPrevizStateInTaskCache],
+  );
+
+  const toggleSelectedEditVideoReferenceId = useCallback((referenceId: string): void => {
     setEditVideoSelectedReferenceIds((previous) => {
+      if (currentTaskWorkflowId === "character_animate_workflow") {
+        return previous.includes(referenceId) ? [] : [referenceId];
+      }
       if (previous.includes(referenceId)) {
         return previous.filter((id) => id !== referenceId);
       }
-      if (previous.length >= 3) {
-        setAppUiError("Select up to 3 reference images.");
-        return previous;
+      if (!editVideoReferenceLimitByModel) {
+        return [...previous, referenceId];
+      }
+      if (previous.length >= editVideoReferenceLimitByModel) {
+        return [...previous.slice(1), referenceId];
       }
       return [...previous, referenceId];
     });
+  }, [currentTaskWorkflowId, editVideoReferenceLimitByModel]);
+
+  const moveToolSelectedPrevizReference = useCallback((referenceId: string, direction: -1 | 1): void => {
+    setPrevizToolSelectedReferenceIds((previous) => {
+      const index = previous.indexOf(referenceId);
+      if (index < 0) return previous;
+      const nextIndex = index + direction;
+      if (nextIndex < 0 || nextIndex >= previous.length) return previous;
+      const updated = [...previous];
+      const [moved] = updated.splice(index, 1);
+      updated.splice(nextIndex, 0, moved);
+      return updated;
+    });
+  }, []);
+
+  const removeToolSelectedPrevizReference = useCallback((referenceId: string): void => {
+    setPrevizToolSelectedReferenceIds((previous) => previous.filter((id) => id !== referenceId));
+  }, []);
+
+  const moveToolSelectedEditVideoReference = useCallback((referenceId: string, direction: -1 | 1): void => {
+    setEditVideoToolSelectedReferenceIds((previous) => {
+      const index = previous.indexOf(referenceId);
+      if (index < 0) return previous;
+      const nextIndex = index + direction;
+      if (nextIndex < 0 || nextIndex >= previous.length) return previous;
+      const updated = [...previous];
+      const [moved] = updated.splice(index, 1);
+      updated.splice(nextIndex, 0, moved);
+      return updated;
+    });
+  }, []);
+
+  const removeToolSelectedEditVideoReference = useCallback((referenceId: string): void => {
+    setEditVideoToolSelectedReferenceIds((previous) => previous.filter((id) => id !== referenceId));
+  }, []);
+
+  async function uploadEditVideoReferenceImages(files: File[]): Promise<string[]> {
+    if (!selectedTaskId) throw new Error("No task selected");
+    const uploadedReferences: EditVideoReference[] = [];
+    for (const originalFile of files) {
+      const preparedFile = await prepareReferenceImageUpload(originalFile);
+      const init = await apiClient.initEditVideoReferenceUpload(selectedTaskId, {
+        filename: preparedFile.name,
+        contentType: preparedFile.type || "image/png",
+      });
+      const uploadResponse = await fetch(init.uploadUrl, {
+        method: "PUT",
+        headers: {
+          "content-type": preparedFile.type || "application/octet-stream",
+        },
+        body: preparedFile,
+      });
+      if (!uploadResponse.ok) {
+        throw new Error(`Upload failed: ${uploadResponse.status}`);
+      }
+      const completed = await apiClient.completeEditVideoReferenceUpload(selectedTaskId, {
+        referenceId: init.referenceId,
+        uploadKey: init.key,
+        filename: preparedFile.name,
+      });
+      uploadedReferences.push(completed.reference);
+    }
+    appendEditVideoReferencesToTaskCache(selectedTaskId, uploadedReferences);
+    await queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
+    await queryClient.invalidateQueries({ queryKey: ["task", "assets", selectedTaskId] });
+    return uploadedReferences.map((reference) => `reference:${reference.referenceId}`);
   }
+
+  const generateEditVideoReferenceImage = useCallback(
+    async (payload: {
+      model: "chatgpt" | "chatgpt_latest" | "nano_banana" | "nano_banana_pro" | "luma_uni_1" | "luma_uni_1_max";
+      prompt: string;
+      aspectRatio?: string | null;
+    }): Promise<void> => {
+      if (!selectedTaskId) throw new Error("No task selected");
+      const created = await apiClient.generateEditVideoReference(selectedTaskId, {
+        ...payload,
+        selectedReferenceIds: editVideoToolSelectedReferenceIds.slice(0, 9),
+      });
+      if (created.jobId) {
+        setJobIds((previous) => (previous.includes(created.jobId as string) ? previous : [...previous, created.jobId as string]));
+      }
+      appendEditVideoReferencesToTaskCache(selectedTaskId, [created.reference]);
+      await queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
+      await queryClient.invalidateQueries({ queryKey: ["task", "assets", selectedTaskId] });
+    },
+    [appendEditVideoReferencesToTaskCache, editVideoToolSelectedReferenceIds, queryClient, selectedTaskId],
+  );
+
+  const generatePrevizReferenceImage = useCallback(
+    async (payload: {
+      model: "chatgpt" | "chatgpt_latest" | "nano_banana" | "nano_banana_pro" | "luma_uni_1" | "luma_uni_1_max";
+      prompt: string;
+      aspectRatio?: string | null;
+    }): Promise<void> => {
+      if (!selectedTaskId) throw new Error("No task selected");
+      const created = await apiClient.generateEditVideoReference(selectedTaskId, {
+        ...payload,
+        selectedReferenceIds: previzToolSelectedReferenceIds.slice(0, 9),
+      });
+      if (created.jobId) {
+        setJobIds((previous) => (previous.includes(created.jobId as string) ? previous : [...previous, created.jobId as string]));
+      }
+      appendEditVideoReferencesToTaskCache(selectedTaskId, [created.reference]);
+      const nextSelectedReferenceIds = previzSelectedReferenceIds.includes(created.reference.referenceId)
+        ? previzSelectedReferenceIds
+        : [...previzSelectedReferenceIds, created.reference.referenceId];
+      await updatePrevizTask({
+        selectedReferenceIds: nextSelectedReferenceIds,
+      });
+      await queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
+      await queryClient.invalidateQueries({ queryKey: ["task", "assets", selectedTaskId] });
+    },
+    [
+      appendEditVideoReferencesToTaskCache,
+      previzSelectedReferenceIds,
+      previzToolSelectedReferenceIds,
+      queryClient,
+      selectedTaskId,
+      updatePrevizTask,
+    ],
+  );
+
+  const generatePrevizFrameImage = useCallback(
+    async (payload: {
+      model: "chatgpt" | "chatgpt_latest" | "nano_banana" | "nano_banana_pro" | "luma_uni_1" | "luma_uni_1_max";
+      prompt: string;
+      aspectRatio?: string | null;
+    }): Promise<void> => {
+      if (!selectedTaskId) throw new Error("No task selected");
+      const created = await apiClient.generateEditVideoReference(selectedTaskId, {
+        ...payload,
+        selectedReferenceIds: previzSelectedReferenceIds.slice(0, 9),
+      });
+      if (created.jobId) {
+        setJobIds((previous) => (previous.includes(created.jobId as string) ? previous : [...previous, created.jobId as string]));
+      }
+      appendEditVideoReferencesToTaskCache(selectedTaskId, [created.reference]);
+      await updatePrevizTask({
+        frameReferenceIds: [...previzFrameReferenceIds, created.reference.referenceId],
+      });
+      await queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
+      await queryClient.invalidateQueries({ queryKey: ["task", "assets", selectedTaskId] });
+    },
+    [
+      appendEditVideoReferencesToTaskCache,
+      previzFrameReferenceIds,
+      previzSelectedReferenceIds,
+      queryClient,
+      selectedTaskId,
+      updatePrevizTask,
+    ],
+  );
+
+  const removeEditVideoReference = useCallback(
+    async (referenceId: string): Promise<void> => {
+      if (!selectedTaskId) throw new Error("No task selected");
+      await deleteAssetMutation.mutateAsync({
+        taskId: selectedTaskId,
+        payload: { assetType: "edit_video_reference", referenceId },
+      });
+      setEditVideoSelectedReferenceIds((previous) => previous.filter((id) => id !== referenceId));
+    },
+    [deleteAssetMutation, selectedTaskId],
+  );
+
+  const removePrevizReference = useCallback(
+    async (referenceId: string): Promise<void> => {
+      if (!selectedTaskId) throw new Error("No task selected");
+      await deleteAssetMutation.mutateAsync({
+        taskId: selectedTaskId,
+        payload: { assetType: "edit_video_reference", referenceId },
+      });
+      if (previzSelectedReferenceIds.includes(referenceId)) {
+        await updatePrevizTask({
+          selectedReferenceIds: previzSelectedReferenceIds.filter((id) => id !== referenceId),
+        });
+      }
+    },
+    [deleteAssetMutation, previzSelectedReferenceIds, selectedTaskId, updatePrevizTask],
+  );
+
+  const removePrevizFrameReference = useCallback(
+    async (referenceId: string): Promise<void> => {
+      if (!selectedTaskId) throw new Error("No task selected");
+      await deleteAssetMutation.mutateAsync({
+        taskId: selectedTaskId,
+        payload: { assetType: "edit_video_reference", referenceId },
+      });
+      await updatePrevizTask({
+        frameReferenceIds: previzFrameReferenceIds.filter((id) => id !== referenceId),
+        selectedFrameIds: previzSelectedFrameIds.filter((id) => id !== referenceId),
+      });
+    },
+    [deleteAssetMutation, previzFrameReferenceIds, previzSelectedFrameIds, selectedTaskId, updatePrevizTask],
+  );
+
+  async function resolveReferencePickerSelection(selectedItemIds: string[]): Promise<string[]> {
+    if (!selectedTaskId) throw new Error("No task selected");
+    const resolvedSelection: Array<{ referenceId?: string; sourceKey?: string }> = [];
+    const importPayload: Array<{
+      sourceKey: string;
+      filename?: string | null;
+      sourceType: "uploaded" | "generated" | "frame_capture" | "frame_variant";
+      originTaskId?: string | null;
+    }> = [];
+
+    for (const itemId of selectedItemIds) {
+      const item = referencePickerItemById.get(itemId);
+      if (!item) continue;
+      if (item.referenceId && item.taskId === selectedTaskId) {
+        resolvedSelection.push({ referenceId: item.referenceId });
+        continue;
+      }
+      const existingImportedReference = editVideoReferences.find(
+        (reference) => reference.originSourceKey === item.sourceKey || reference.key === item.sourceKey,
+      );
+      if (existingImportedReference) {
+        resolvedSelection.push({ referenceId: existingImportedReference.referenceId });
+        continue;
+      }
+      resolvedSelection.push({ sourceKey: item.sourceKey });
+      importPayload.push({
+        sourceKey: item.sourceKey,
+        filename: keyBasenameFromS3Key(item.sourceKey),
+        sourceType:
+          item.sourceType === "frame_capture" || item.sourceType === "frame_variant"
+            ? item.sourceType
+            : item.sourceGroup === "upload"
+              ? "uploaded"
+              : "generated",
+        originTaskId: item.taskId,
+      });
+    }
+
+    if (importPayload.length) {
+      const imported = await apiClient.importEditVideoReferences(selectedTaskId, { sources: importPayload });
+      appendEditVideoReferencesToTaskCache(selectedTaskId, imported.references);
+      await queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
+      await queryClient.invalidateQueries({ queryKey: ["task", "assets", selectedTaskId] });
+      for (const item of resolvedSelection) {
+        if (item.referenceId || !item.sourceKey) continue;
+        const matched = imported.references.find((reference) => reference.originSourceKey === item.sourceKey);
+        if (matched) {
+          item.referenceId = matched.referenceId;
+        }
+      }
+    }
+
+    return resolvedSelection.map((item) => item.referenceId).filter((referenceId): referenceId is string => Boolean(referenceId));
+  }
+
+  async function applyReferencePickerSelection(selectedItemIds: string[]): Promise<void> {
+    const resolvedReferenceIds = await resolveReferencePickerSelection(selectedItemIds);
+    setEditVideoSelectedReferenceIds(
+      currentTaskWorkflowId === "character_animate_workflow" ? resolvedReferenceIds.slice(0, 1) : resolvedReferenceIds,
+    );
+  }
+
+  async function applyToolReferencePickerSelection(selectedItemIds: string[]): Promise<void> {
+    const resolvedReferenceIds = await resolveReferencePickerSelection(selectedItemIds);
+    setEditVideoToolSelectedReferenceIds(resolvedReferenceIds);
+  }
+
+  async function applyPrevizReferencePickerSelection(selectedItemIds: string[]): Promise<void> {
+    const resolvedReferenceIds = await resolveReferencePickerSelection(selectedItemIds);
+    await updatePrevizTask({ selectedReferenceIds: resolvedReferenceIds });
+  }
+
+  async function applyPrevizFramePickerSelection(selectedItemIds: string[]): Promise<void> {
+    const resolvedReferenceIds = await resolveReferencePickerSelection(selectedItemIds);
+    const allowedReferenceIds = resolvedReferenceIds.filter((referenceId) => previzFrameReferenceIds.includes(referenceId));
+    await updatePrevizTask({ selectedFrameIds: allowedReferenceIds });
+  }
+
+  async function applyPrevizToolReferencePickerSelection(selectedItemIds: string[]): Promise<void> {
+    const resolvedReferenceIds = await resolveReferencePickerSelection(selectedItemIds);
+    setPrevizToolSelectedReferenceIds(resolvedReferenceIds);
+  }
+
+  const captureReferenceFrameFromVideo = useCallback(
+    async (videoItem: ReferencePickerVideoItem, progressRatio: number): Promise<string[]> => {
+      if (!selectedTaskId) throw new Error("No task selected");
+      if (!videoItem.canCaptureFrame) {
+        throw new Error("Frame capture is currently supported only for uploaded task source videos.");
+      }
+      const frameCount = Math.max(1, Number(videoItem.frameCount ?? 0) || 0);
+      if (!frameCount) {
+        throw new Error("Selected video is missing frame metadata.");
+      }
+      const clampedRatio = Math.min(1, Math.max(0, progressRatio));
+      const frameIndex = clampInteger(Math.round(clampedRatio * Math.max(0, frameCount - 1)), 0, Math.max(0, frameCount - 1));
+      const captured = await apiClient.captureFrame(videoItem.taskId, frameIndex);
+      await queryClient.invalidateQueries({ queryKey: ["task", videoItem.taskId] });
+      await queryClient.invalidateQueries({ queryKey: ["task", "assets", videoItem.taskId] });
+
+      const existingImportedReference = editVideoReferences.find(
+        (reference) => reference.originSourceKey === captured.captureKey || reference.key === captured.captureKey,
+      );
+      if (existingImportedReference) {
+        return [`reference:${existingImportedReference.referenceId}`];
+      }
+
+      const imported = await apiClient.importEditVideoReferences(selectedTaskId, {
+        sources: [
+          {
+            sourceKey: captured.captureKey,
+            filename: `frame-${captured.frameIndex}.png`,
+            sourceType: "frame_capture",
+            originTaskId: videoItem.taskId,
+          },
+        ],
+      });
+      appendEditVideoReferencesToTaskCache(selectedTaskId, imported.references);
+      await queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
+      await queryClient.invalidateQueries({ queryKey: ["task", "assets", selectedTaskId] });
+      return imported.references.map((reference) => `reference:${reference.referenceId}`);
+    },
+    [appendEditVideoReferencesToTaskCache, editVideoReferences, queryClient, selectedTaskId],
+  );
+
+  const moveSelectedPrevizReference = useCallback(
+    (referenceId: string, direction: -1 | 1): void => {
+      const currentIndex = previzSelectedReferenceIds.indexOf(referenceId);
+      if (currentIndex < 0) return;
+      const targetIndex = currentIndex + direction;
+      if (targetIndex < 0 || targetIndex >= previzSelectedReferenceIds.length) return;
+      const nextReferenceIds = [...previzSelectedReferenceIds];
+      const [movedReferenceId] = nextReferenceIds.splice(currentIndex, 1);
+      nextReferenceIds.splice(targetIndex, 0, movedReferenceId);
+      void updatePrevizTask({ selectedReferenceIds: nextReferenceIds });
+    },
+    [previzSelectedReferenceIds, updatePrevizTask],
+  );
+
+  const removeSelectedPrevizReference = useCallback(
+    async (referenceId: string): Promise<void> => {
+      await updatePrevizTask({
+        selectedReferenceIds: previzSelectedReferenceIds.filter((id) => id !== referenceId),
+      });
+    },
+    [previzSelectedReferenceIds, updatePrevizTask],
+  );
+
+  const toggleSelectedPrevizReferenceId = useCallback(
+    async (referenceId: string): Promise<void> => {
+      const nextSelectedReferenceIds = previzSelectedReferenceIds.includes(referenceId)
+        ? previzSelectedReferenceIds.filter((id) => id !== referenceId)
+        : [...previzSelectedReferenceIds, referenceId];
+      await updatePrevizTask({ selectedReferenceIds: nextSelectedReferenceIds });
+    },
+    [previzSelectedReferenceIds, updatePrevizTask],
+  );
+
+  const moveSelectedPrevizFrame = useCallback(
+    (referenceId: string, direction: -1 | 1): void => {
+      const currentIndex = previzSelectedFrameIds.indexOf(referenceId);
+      if (currentIndex < 0) return;
+      const targetIndex = currentIndex + direction;
+      if (targetIndex < 0 || targetIndex >= previzSelectedFrameIds.length) return;
+      const nextFrameIds = [...previzSelectedFrameIds];
+      const [movedReferenceId] = nextFrameIds.splice(currentIndex, 1);
+      nextFrameIds.splice(targetIndex, 0, movedReferenceId);
+      void updatePrevizTask({ selectedFrameIds: nextFrameIds });
+    },
+    [previzSelectedFrameIds, updatePrevizTask],
+  );
+
+  const removeSelectedPrevizFrame = useCallback(
+    async (referenceId: string): Promise<void> => {
+      await updatePrevizTask({
+        selectedFrameIds: previzSelectedFrameIds.filter((id) => id !== referenceId),
+      });
+    },
+    [previzSelectedFrameIds, updatePrevizTask],
+  );
+
+  const toggleSelectedPrevizFrameId = useCallback(
+    async (referenceId: string): Promise<void> => {
+      const nextSelectedFrameIds = previzSelectedFrameIds.includes(referenceId)
+        ? previzSelectedFrameIds.filter((id) => id !== referenceId)
+        : [...previzSelectedFrameIds, referenceId];
+      await updatePrevizTask({ selectedFrameIds: nextSelectedFrameIds });
+    },
+    [previzSelectedFrameIds, updatePrevizTask],
+  );
 
   function openQualityMatchForVariant(frameRecord: typeof activeEditFrame, variantId: string) {
     if (!frameRecord) return;
@@ -4369,6 +5906,7 @@ export default function App() {
   }, []);
 
   async function handleDeleteAsset(item: LibraryAsset) {
+    if (!item.deletePayload) return;
     const ok = window.confirm(`Delete this asset?\n\n${item.title}`);
     if (!ok) return;
     try {
@@ -4392,10 +5930,7 @@ export default function App() {
       setLastFrameId(result.frameId);
     }
   }
-  const primaryTabs = useMemo(
-    () => (generationInputMode === "edit_video" ? PRIMARY_WORKFLOW_TABS.filter((tabItem) => tabItem.id !== "post") : PRIMARY_WORKFLOW_TABS),
-    [generationInputMode],
-  );
+  const primaryTabs = useMemo(() => currentTaskWorkflow.primaryTabs, [currentTaskWorkflow]);
   const {
     currentReferenceSegment,
     currentReferenceStartImageUrl,
@@ -4403,11 +5938,13 @@ export default function App() {
     currentReferenceAssets,
     currentReferenceWarning,
   } = useCurrentWorkingReferenceState({
+    workflowId: currentTaskWorkflowId,
     activeWorkflowSection,
     selectedSegment,
     defaultVideoSegment,
     task,
     selectedPreviewGeneration,
+    mergeTargetGeneration,
     refineStartVariantId: refineSourceVariantIds.first,
     refineEndVariantId: refineSourceVariantIds.last,
     compareStartVariantId: compareVariantIds.first,
@@ -4418,12 +5955,19 @@ export default function App() {
     wholeVideoNeedsChunking,
     frameVariantImageUrl,
     generationThumbnailUrl,
+    editVideoReferencePreview,
+    previzReferencePreview,
+    previzFramePreview: previzSelectedFramePreview,
+    sourceMediaKind,
+    sourceWaveformUrl,
   });
 
   const pickFrameTabCtx = useMemo<PickFrameTabCtx>(
     () => ({
       timelinePlaybackUrl,
       timelineVideoRef,
+      sourceMediaKind,
+      sourceWaveformUrl,
       frameCount,
       task,
       fpsValue,
@@ -4465,6 +6009,8 @@ export default function App() {
     }),
     [
       timelinePlaybackUrl,
+      sourceMediaKind,
+      sourceWaveformUrl,
       task,
       currentFrameIndex,
       firstFrame,
@@ -4495,6 +6041,12 @@ export default function App() {
       setSelectedSegmentId,
     ],
   );
+
+  useEffect(() => {
+    if (!isCharacterAudioSource) return;
+    if (characterAnimateMode === "audio_driven") return;
+    setCharacterAnimateMode("audio_driven");
+  }, [characterAnimateMode, isCharacterAudioSource, setCharacterAnimateMode]);
 
   const editFrameTabCtx = useMemo<EditFrameTabCtx>(
     () => ({
@@ -4636,20 +6188,193 @@ export default function App() {
 
   const editVideoReferencesTabCtx = useMemo<EditVideoReferencesTabCtx>(
     () => ({
-      references: editVideoReferences,
-      selectedReferenceIds: editVideoSelectedReferenceIds,
-      toggleReferenceSelection: toggleEditVideoReferenceSelection,
-      removeReference: deleteEditVideoReference,
-      uploadReferenceImage: uploadEditVideoReferenceImage,
+      taskId: selectedTaskId,
+      references: editVideoReferenceLibraryItems,
+      warning: editVideoReferenceWarning,
+      openVideoReferencePicker: () => setIsReferenceImagePickerOpen(true),
+      openToolReferencePicker: () => setIsToolReferenceImagePickerOpen(true),
+      toolSelectedReferences: editVideoToolReferencePreview.map((item) => ({
+        referenceId: item.referenceId,
+        imageUrl: item.imageUrl,
+        title: item.title,
+        subtitle: item.subtitle ?? "",
+      })),
+      generatePrompt: editVideoReferencePromptDraft,
+      onGeneratePromptChange: setEditVideoReferencePromptDraft,
+      moveToolSelectedReference: moveToolSelectedEditVideoReference,
+      removeToolSelectedReference: removeToolSelectedEditVideoReference,
+      toggleVideoReference: toggleSelectedEditVideoReferenceId,
+      removeReference: removeEditVideoReference,
+      previewReference: ({ url, label }) => setImagePreviewModal({ url, label }),
       generateReferenceImage: generateEditVideoReferenceImage,
+      labels:
+        currentTaskWorkflowId === "character_animate_workflow"
+          ? {
+              selectTitle: "Select character image",
+              selectDescription:
+                "Upload or choose a previously generated image of the character you want to animate.",
+              selectButtonLabel: "Upload / choose character image",
+              createTitle: "Create character image",
+              toolPickerButtonLabel: "Use character references",
+              promptPlaceholder: "Describe the character image you want to create.",
+              promptHelper:
+                "If using reference images, describe their purpose in the prompt in the order they appear above.",
+              createButtonIdle: "Create character",
+              createButtonPending: "Creating...",
+              selectedTokenPrefix: "Character",
+              useAssetButtonLabel: "Use as Character",
+              removeAssetButtonLabel: "Remove Character",
+              queuedHint: "Waiting for generated character image...",
+              failedHint: "Character image generation failed.",
+            }
+          : undefined,
+      preferredAspectRatio: currentTaskWorkflowId === "character_animate_workflow" ? characterImagePreferredAspectRatio : null,
+      addTopSpacing: currentTaskWorkflowId === "character_animate_workflow",
     }),
     [
-      editVideoReferences,
-      editVideoSelectedReferenceIds,
-      toggleEditVideoReferenceSelection,
-      deleteEditVideoReference,
-      uploadEditVideoReferenceImage,
+      editVideoReferencePromptDraft,
+      selectedTaskId,
+      characterImagePreferredAspectRatio,
+      currentTaskWorkflowId,
+      editVideoReferenceLibraryItems,
+      editVideoReferenceWarning,
+      editVideoToolReferencePreview,
       generateEditVideoReferenceImage,
+      moveToolSelectedEditVideoReference,
+      removeEditVideoReference,
+      removeToolSelectedEditVideoReference,
+      setImagePreviewModal,
+      toggleSelectedEditVideoReferenceId,
+    ],
+  );
+
+  const previzSelectTabCtx = useMemo<PrevizSelectTabCtx>(
+    () => ({
+      taskId: selectedTaskId,
+      sceneAspectRatio: previzSceneAspectRatio,
+      onSceneAspectRatioChange: async (aspectRatio) => {
+        await updatePrevizTask({ sceneAspectRatio: aspectRatio });
+      },
+      uploadReferences: previzUploadReferenceLibraryItems,
+      createdReferences: previzCreatedReferenceLibraryItems,
+      warning: null,
+      openSceneReferencePicker: () => setIsPrevizReferenceImagePickerOpen(true),
+      openToolReferencePicker: () => setIsPrevizToolReferenceImagePickerOpen(true),
+      toolSelectedReferences: previzToolReferencePreview.map((item) => ({
+        referenceId: item.referenceId,
+        imageUrl: item.imageUrl,
+        title: item.title,
+        subtitle: item.subtitle ?? "",
+      })),
+      generatePrompt: previzReferencePromptDraft,
+      onGeneratePromptChange: setPrevizReferencePromptDraft,
+      moveToolSelectedReference: moveToolSelectedPrevizReference,
+      removeToolSelectedReference: removeToolSelectedPrevizReference,
+      toggleReferenceSelection: toggleSelectedPrevizReferenceId,
+      removeReference: removePrevizReference,
+      previewReference: ({ url, label }) => setImagePreviewModal({ url, label }),
+      generateReferenceImage: generatePrevizReferenceImage,
+    }),
+    [
+      selectedTaskId,
+      generatePrevizReferenceImage,
+      moveToolSelectedPrevizReference,
+      previzCreatedReferenceLibraryItems,
+      previzReferencePromptDraft,
+      previzSceneAspectRatio,
+      previzToolReferencePreview,
+      previzUploadReferenceLibraryItems,
+      removePrevizReference,
+      removeToolSelectedPrevizReference,
+      setImagePreviewModal,
+      toggleSelectedPrevizReferenceId,
+      updatePrevizTask,
+    ],
+  );
+
+  const previzEditTabCtx = useMemo<PrevizEditTabCtx>(
+    () => ({
+      taskId: selectedTaskId,
+      sceneAspectRatio: previzSceneAspectRatio ?? "16:9",
+      selectedReferenceCount: previzSelectedReferenceIds.length,
+      frames: previzFrameLibraryItems,
+      prompt: previzFramePromptDraft,
+      onPromptChange: setPrevizFramePromptDraft,
+      onCreateFrame: generatePrevizFrameImage,
+      onToggleFrameSelection: toggleSelectedPrevizFrameId,
+      onRemoveFrame: removePrevizFrameReference,
+      onPreviewFrame: ({ url, label }) => setImagePreviewModal({ url, label }),
+    }),
+    [
+      selectedTaskId,
+      generatePrevizFrameImage,
+      previzFramePromptDraft,
+      previzFrameLibraryItems,
+      previzSceneAspectRatio,
+      previzSelectedReferenceIds.length,
+      removePrevizFrameReference,
+      setImagePreviewModal,
+      toggleSelectedPrevizFrameId,
+    ],
+  );
+
+  const previzGenerateTabCtx = useMemo<PrevizGenerateTabCtx>(
+    () => ({
+      sceneAspectRatio: previzSceneAspectRatio ?? "16:9",
+      scenePrompt: typeof previzState?.scenePrompt === "string" ? previzState.scenePrompt : "",
+      selectedFrames: previzSelectedFramePreview.map((item) => ({
+        referenceId: item.referenceId,
+        imageUrl: item.imageUrl,
+        title: item.title,
+        subtitle: item.subtitle ?? "",
+      })),
+      model: previzGenerateModel,
+      onModelChange: setPrevizGenerateModel,
+      prompt: previzGeneratePrompt,
+      onPromptChange: setPrevizGeneratePrompt,
+      durationSec: previzGenerateDurationSec,
+      onDurationSecChange: setPrevizGenerateDurationSec,
+      generations: previzVisibleGenerations,
+      selectedGenerationId: selectedPreviewGeneration?.genId ?? null,
+      onGenerate: () => generatePrevizVideoMutation.mutate(),
+      isGenerating: generatePrevizVideoMutation.isPending,
+      onSelectGeneration: selectSegmentGeneration,
+      onPreviewGeneration: (generation) =>
+        setVideoPreviewModal({
+          url: generation.downloadUrl ?? "",
+          label: "Previz video preview",
+          taskId: task?.taskId,
+          generationId: generation.genId,
+        }),
+      onDeleteGeneration: (generation) =>
+        handleDeleteAsset({
+          id: `generation:${task?.taskId ?? ""}:${generation.genId}`,
+          taskId: task?.taskId ?? "",
+          title: describeGeneration(generation),
+          subtitle: `${generation.luma.model}/${generation.luma.mode}`,
+          createdAt: generation.createdAt,
+          previewUrl: generation.downloadUrl ?? generation.posterUrl ?? "",
+          downloadUrl: generation.downloadUrl ?? "",
+          thumbnailUrl: generation.posterUrl ?? undefined,
+          mediaType: "video",
+          deletePayload: { assetType: "segment_generation", genId: generation.genId },
+        }),
+    }),
+    [
+      describeGeneration,
+      generatePrevizVideoMutation,
+      handleDeleteAsset,
+      previzGenerateDurationSec,
+      previzGenerateModel,
+      previzGeneratePrompt,
+      previzSceneAspectRatio,
+      previzSelectedFramePreview,
+      previzState?.scenePrompt,
+      previzVisibleGenerations,
+      selectSegmentGeneration,
+      selectedPreviewGeneration?.genId,
+      setVideoPreviewModal,
+      task?.taskId,
     ],
   );
 
@@ -4668,9 +6393,11 @@ export default function App() {
           : null,
       generationModelByInput,
       generationInputMode,
-      editVideoSelectedReferenceIds,
       editVideoReferenceWarning,
-      editVideoReferencePreview,
+      openEditVideoReferencePicker: () => setIsReferenceImagePickerOpen(true),
+      supportsGenerationAudioReference: generationInputMode === "edit_video" && lumaModel === "seedance-2.0-reference-to-video",
+      generationAudioReference,
+      uploadGenerationAudioReference,
       selectedSegment,
       isWholeVideoSelection,
       wholeVideoNeedsChunking,
@@ -4759,6 +6486,15 @@ export default function App() {
       setVideoPreviewModal,
       setVideoCompareModal,
       openVideoCleanupModal: openVideoCleanupModalForGeneration,
+      extendGeneration: extendSegmentGenerationMutation.mutate,
+      isExtendingGeneration: extendSegmentGenerationMutation.isPending,
+      extendGenerationError:
+        extendSegmentGenerationMutation.error instanceof Error ? extendSegmentGenerationMutation.error.message : null,
+      lengthenGeneration: lengthenSegmentGenerationMutation.mutate,
+      isLengtheningGeneration: lengthenSegmentGenerationMutation.isPending,
+      lengthenGenerationError:
+        lengthenSegmentGenerationMutation.error instanceof Error ? lengthenSegmentGenerationMutation.error.message : null,
+      editVideoSelectedReferenceIds,
       onAssetError: handleMediaAssetError,
       handleDeleteAsset,
       setGenerationCardsVisible,
@@ -4767,9 +6503,8 @@ export default function App() {
       handleTabChange,
       generationModelByInput,
       generationInputMode,
-      editVideoSelectedReferenceIds,
       editVideoReferenceWarning,
-      editVideoReferencePreview,
+      generationAudioReference,
       selectedSegment,
       isWholeVideoSelection,
       wholeVideoNeedsChunking,
@@ -4819,6 +6554,7 @@ export default function App() {
       stableOriginalSegmentPreviewUrl,
       stableOriginalSegmentCompareUrl,
       uploadManualGeneratedVideo,
+      uploadGenerationAudioReference,
       selectedPreviewGeneration,
       task,
       originalPreviewIsSegmentClip,
@@ -4831,6 +6567,13 @@ export default function App() {
       selectSegmentGeneration,
       setVideoCompareModal,
       openVideoCleanupModalForGeneration,
+      extendSegmentGenerationMutation.mutate,
+      extendSegmentGenerationMutation.isPending,
+      extendSegmentGenerationMutation.error,
+      lengthenSegmentGenerationMutation.mutate,
+      lengthenSegmentGenerationMutation.isPending,
+      lengthenSegmentGenerationMutation.error,
+      editVideoSelectedReferenceIds,
       selectedTaskId,
       refreshSignedUrlsForTask,
       handleDeleteAsset,
@@ -4925,6 +6668,11 @@ export default function App() {
       isExtendingGeneration: extendSegmentGenerationMutation.isPending,
       extendGenerationError:
         extendSegmentGenerationMutation.error instanceof Error ? extendSegmentGenerationMutation.error.message : null,
+      lengthenGeneration: lengthenSegmentGenerationMutation.mutate,
+      isLengtheningGeneration: lengthenSegmentGenerationMutation.isPending,
+      lengthenGenerationError:
+        lengthenSegmentGenerationMutation.error instanceof Error ? lengthenSegmentGenerationMutation.error.message : null,
+      editVideoSelectedReferenceIds,
       cancelChunkedGeneration: cancelChunkedGenerationMutation.mutate,
       isChunkedGenerationMutationPending: cancelChunkedGenerationMutation.isPending,
       sortedExports,
@@ -4942,19 +6690,21 @@ export default function App() {
         });
       },
       openGenerationCompare: (generation) => {
-        const shouldUseInputVideo = isLikelyVideoAssetUrl(generation.inputMediaUrl);
-        const originalUrl = shouldUseInputVideo ? generation.inputMediaUrl ?? mergeOriginalVideoForPreview : mergeOriginalVideoForPreview;
+        const originalUrl = mergeOriginalVideoForPreview;
         if (!originalUrl || !generation.downloadUrl) return;
+        const segmentStartPosterUrl = mergeTargetSegment ? task?.frames?.[mergeTargetSegment.startFrameId]?.imageUrl ?? null : null;
+        const originalPosterUrl = segmentStartPosterUrl;
         setVideoCompareModal({
           originalUrl,
           compareUrl: generation.downloadUrl,
           label: describeGeneration(generation),
           posterUrl: generationThumbnailUrl(generation),
+          originalPosterUrl,
           segmentStartSec: segmentWindow?.startSec,
-          originalIsSegmentClip: shouldUseInputVideo || originalPreviewIsSegmentClip,
-          originalSegmentId: shouldUseInputVideo ? undefined : mergeTargetSegment?.segmentId,
+          originalIsSegmentClip: originalPreviewIsSegmentClip,
+          originalSegmentId: mergeTargetSegment?.segmentId,
           compareGenerationId: generation.genId,
-          preferGenerationInputMediaAsOriginal: shouldUseInputVideo,
+          preferGenerationInputMediaAsOriginal: false,
         });
       },
       canOpenGenerationCompare: Boolean(mergeOriginalVideoForPreview),
@@ -5052,6 +6802,10 @@ export default function App() {
       extendSegmentGenerationMutation.mutate,
       extendSegmentGenerationMutation.isPending,
       extendSegmentGenerationMutation.error,
+      lengthenSegmentGenerationMutation.mutate,
+      lengthenSegmentGenerationMutation.isPending,
+      lengthenSegmentGenerationMutation.error,
+      editVideoSelectedReferenceIds,
       cancelChunkedGenerationMutation.mutate,
       cancelChunkedGenerationMutation.isPending,
       sortedExports,
@@ -5080,18 +6834,42 @@ export default function App() {
     generatedVideoAssets,
     generatedAssetsVisible,
     setGeneratedAssetsVisible,
+    postProcessVideoAssets,
+    postProcessAssetsVisible,
+    setPostProcessAssetsVisible,
     editedFrameAssets,
     editedFrameAssetsVisible,
     setEditedFrameAssetsVisible,
+    referenceImageAssets,
+    referenceImageAssetsVisible,
+    setReferenceImageAssetsVisible,
+    orphanedAssets,
+    orphanedAssetsVisible,
+    setOrphanedAssetsVisible,
+    audioAssets,
+    audioAssetsVisible,
+    setAudioAssetsVisible,
     libraryMergedVideoAssets,
     libraryMergedAssetsVisible,
     setLibraryMergedAssetsVisible,
     libraryGeneratedVideoAssets,
     libraryGeneratedAssetsVisible,
     setLibraryGeneratedAssetsVisible,
+    libraryPostProcessVideoAssets,
+    libraryPostProcessAssetsVisible,
+    setLibraryPostProcessAssetsVisible,
     libraryEditedFrameAssets,
     libraryEditedFrameAssetsVisible,
     setLibraryEditedFrameAssetsVisible,
+    libraryReferenceImageAssets,
+    libraryReferenceImageAssetsVisible,
+    setLibraryReferenceImageAssetsVisible,
+    libraryOrphanedAssets,
+    libraryOrphanedAssetsVisible,
+    setLibraryOrphanedAssetsVisible,
+    libraryAudioAssets,
+    libraryAudioAssetsVisible,
+    setLibraryAudioAssetsVisible,
     selectedReportOutputs,
     reportOutputRefKey,
     toggleCustomReportOutput,
@@ -5100,10 +6878,77 @@ export default function App() {
     createCustomReport: createCustomReportMutation.mutateAsync,
     isCreatingCustomReport: createCustomReportMutation.isPending,
     formatAssetDate,
+    previewImage: ({ url, label }) => {
+      setImagePreviewModal({ url, label });
+    },
     goToReport: (taskId: string) => {
       goToReport(taskId, "reports", null);
     },
   });
+
+  const taskPickerModalNode = (
+    <WorkflowTaskPickerModal
+      workflowId={taskPickerWorkflowId}
+      tasks={taskPickerWorkflowId ? workflowTasksById.get(taskPickerWorkflowId) ?? [] : []}
+      onClose={() => setTaskPickerWorkflowId(null)}
+      onSelectTask={openTaskFromPicker}
+      onNewTask={openNewTaskWithAutomationDefaults}
+    />
+  );
+
+  const newTaskModalNode = (
+    <NewTaskModal
+      isOpen={isNewTaskModalOpen}
+      stage={newTaskStage}
+      taskName={newTaskName}
+      workflowId={newTaskWorkflowId}
+      normalizedTaskName={normalizedNewTaskName}
+      showTaskNameExistsWarning={showTaskNameExistsWarning}
+      taskNameAlreadyExists={taskNameAlreadyExists}
+      scenePrompt={newTaskScenePrompt}
+      uploadPercent={newTaskUploadPercent}
+      ingestProgress={pendingCreateJobQuery.data?.progress ?? 0}
+      ingestStatus={pendingCreateJobQuery.data?.status ?? "queued"}
+      error={automationUiError ?? newTaskError}
+      canSubmit={
+        !newTaskName.trim()
+          ? false
+          : newTaskWorkflowId === "simple_generation_workflow"
+            ? Boolean(normalizedNewTaskName && newTaskScenePrompt.trim())
+            : Boolean(normalizedNewTaskName && newTaskFile)
+      }
+      automationEnabled={automationEnabled}
+      automationStartPrompt={automationStartPrompt}
+      automationEndPrompt={automationEndPrompt}
+      automationVideoPrompt={automationVideoPrompt}
+      automationVideoOptions={automationVideoOptions}
+      automationSelectedVideoOptionIds={automationSelectedVideoOptionIds}
+      onClose={() => {
+        setAutomationUiError(null);
+        setIsNewTaskModalOpen(false);
+      }}
+      onTaskNameChange={setNewTaskName}
+      onScenePromptChange={setNewTaskScenePrompt}
+      onFileSelect={handleNewTaskFileSelect}
+      onAutomationEnabledChange={(value) => {
+        setAutomationEnabled(value);
+        if (!value) {
+          setAutomationUiError(null);
+        }
+      }}
+      onAutomationStartPromptChange={(value) => {
+        setAutomationStartPrompt(value);
+        if (automationUiError) setAutomationUiError(null);
+      }}
+      onAutomationEndPromptChange={setAutomationEndPrompt}
+      onAutomationVideoPromptChange={setAutomationVideoPrompt}
+      onAutomationVideoSelectionChange={(selectedIds) => {
+        setAutomationSelectedVideoOptionIds(selectedIds);
+        if (automationUiError) setAutomationUiError(null);
+      }}
+      onSubmit={handleNewTaskSubmit}
+    />
+  );
 
   if (!isAuthed) {
     return (
@@ -5119,16 +6964,54 @@ export default function App() {
     );
   }
 
+  if (isHomeRoute) {
+    return (
+      <>
+        <HomePage
+          cards={workflowHomeCardsWithPreview}
+          onSelectTask={openTaskPickerForWorkflow}
+          onNewTask={openNewTaskWithAutomationDefaults}
+          onSignOut={() => {
+            void logout();
+          }}
+        />
+        <>{taskPickerModalNode}{newTaskModalNode}</>
+      </>
+    );
+  }
+
+  if (isWorkflowLandingRoute) {
+    return (
+      <>
+        <WorkflowLandingPage
+          workflowId={currentTaskWorkflowId}
+          latestTaskId={workflowLandingLatestTask?.taskId ?? null}
+          latestTaskName={workflowLandingLatestTask?.name ?? null}
+          latestTaskThumbnailUrl={workflowLandingLatestTaskThumbnailUrl}
+          onSelectTask={openTaskPickerForWorkflow}
+          onNewTask={openNewTaskWithAutomationDefaults}
+          onGoHome={() => goHome()}
+          onSignOut={() => {
+            void logout();
+          }}
+        />
+        <>{taskPickerModalNode}{newTaskModalNode}</>
+      </>
+    );
+  }
+
   return (
     <main className="min-h-screen bg-bg text-ink">
       <div className="mx-auto grid max-w-[1500px] grid-cols-12 gap-4 p-4 md:p-6">
         <TaskSidebar
           tasks={tasksQuery.data ?? []}
           selectedTaskId={selectedTaskId}
+          currentWorkflowId={currentTaskWorkflowId}
           onSignOut={() => {
             void logout();
           }}
-          onOpenNewTask={openNewTaskWithAutomationDefaults}
+          onGoHome={() => goHome()}
+          onOpenNewTask={() => openNewTaskWithAutomationDefaults(currentTaskWorkflowId)}
           onOpenTaskReport={openTaskReport}
           onSelectTask={(taskId) => setTab(tab, taskId)}
           onDeleteTask={(taskId) => deleteTaskMutation.mutate(taskId)}
@@ -5158,69 +7041,277 @@ export default function App() {
             </StatusNotice>
           ) : null}
           <div className="rounded-2xl border border-ink/10 bg-card p-4">
-            {tab !== "custom_qc" && tab !== "api_logs" && tab !== "asset_library" && tab !== "admin" ? (
+            {!isGlobalUtilityTab ? (
               <div className="space-y-3">
-                <WorkflowTabs
-                  tabs={primaryTabs}
-                  activeTab={activeWorkflowSection ?? "source"}
-                  onSelect={(sectionId) => {
-                    handlePrimaryWorkflowSectionChange(sectionId as PrimaryWorkflowSection);
-                  }}
-                  variant="primary"
-                />
-                {activeWorkflowSection === "create" || activeWorkflowSection === "outputs" || activeWorkflowSection === "post" ? (
-                  <div className="mb-4">
-                    <CurrentWorkingReferencePanel
-                      segment={currentReferenceSegment}
-                      startFrameImageUrl={currentReferenceStartImageUrl}
-                      endFrameImageUrl={currentReferenceEndImageUrl}
-                      warning={currentReferenceWarning}
-                      assets={currentReferenceAssets}
-                      onPreviewImage={({ url, label }) => setImagePreviewModal({ url, label })}
-                      onPreviewVideo={({ url, label }) => setVideoPreviewModal({ url, label })}
-                    />
-                  </div>
-                ) : null}
-                {activeWorkflowSection === "source" ? (
-                  <div className="rounded-xl border border-ink/10 bg-bg p-3">
-                    <CreateRoutePicker
-                      activeMode={generationInputMode}
-                      onSelect={(mode) => {
-                        setGenerationInputMode(mode);
+                {isResolvingWorkflowShell ? (
+                  <StatusNotice variant="loading" title="Loading task">
+                    <p className="text-sm">Resolving workflow and task state…</p>
+                  </StatusNotice>
+                ) : (
+                  <>
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <p className="text-xs font-semibold uppercase tracking-[0.12em] text-ink/45">Workflow</p>
+                        <p className="text-sm text-ink/70">{currentTaskWorkflow.label}</p>
+                      </div>
+                      {!isCurrentWorkflowImplemented ? (
+                        <span className="rounded-full border border-ink/10 bg-bg px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-ink/55">
+                          Scaffolded
+                        </span>
+                      ) : null}
+                    </div>
+                    <WorkflowTabs
+                      tabs={primaryTabs}
+                      activeTab={activeWorkflowSection ?? "source"}
+                      onSelect={(sectionId) => {
+                        handlePrimaryWorkflowSectionChange(sectionId as PrimaryWorkflowSection);
                       }}
+                      variant="primary"
                     />
-                  </div>
-                ) : null}
+                    {showWorkflowCurrentReferences ? (
+                      <div className="mb-4">
+                        <CurrentWorkingReferencePanel
+                          segment={currentReferenceSegment}
+                          startFrameImageUrl={currentReferenceStartImageUrl}
+                          endFrameImageUrl={currentReferenceEndImageUrl}
+                          warning={currentReferenceWarning}
+                          assets={currentReferenceAssets}
+                          sourceMediaKind={showPrevizEditTab || showPrevizGenerateTab || showPrevizPostTab ? "scene" : sourceMediaKind}
+                          sourceFrameCount={frameCount(task)}
+                          sourceFps={fpsValue(task)}
+                          headerAction={
+                            showPrevizEditTab || showPrevizGenerateTab ? (
+                              <button
+                                type="button"
+                                className="w-[5.5rem] rounded-md border border-ink/20 bg-white px-2 py-2 text-[11px] font-medium leading-tight text-ink"
+                                onClick={() => {
+                                  if (showPrevizGenerateTab) {
+                                    setIsPrevizGenerateReferenceImagePickerOpen(true);
+                                    return;
+                                  }
+                                  setIsPrevizEditReferenceImagePickerOpen(true);
+                                }}
+                              >
+                                <span className="block text-center">
+                                  Manage
+                                  <br />
+                                  references
+                                </span>
+                              </button>
+                            ) : undefined
+                          }
+                          onPreviewImage={({ url, label }) => setImagePreviewModal({ url, label })}
+                          onPreviewVideo={({ url, label }) => setVideoPreviewModal({ url, label })}
+                          onPreviewAudio={({ url, label, waveformUrl }) => setAudioPreviewModal({ url, label, waveformUrl })}
+                          onAssetAction={(asset) => {
+                            if (asset.actionId === "edit-video-reference-picker") {
+                              setIsReferenceImagePickerOpen(true);
+                              return;
+                            }
+                            if (asset.actionId?.startsWith("previz-frame-move-left:")) {
+                              moveSelectedPrevizFrame(asset.actionId.slice("previz-frame-move-left:".length), -1);
+                              return;
+                            }
+                            if (asset.actionId?.startsWith("previz-frame-move-right:")) {
+                              moveSelectedPrevizFrame(asset.actionId.slice("previz-frame-move-right:".length), 1);
+                              return;
+                            }
+                            if (asset.actionId?.startsWith("previz-frame-remove:")) {
+                              void removeSelectedPrevizFrame(asset.actionId.slice("previz-frame-remove:".length));
+                              return;
+                            }
+                            if (asset.actionId?.startsWith("previz-reference-move-left:")) {
+                              moveSelectedPrevizReference(asset.actionId.slice("previz-reference-move-left:".length), -1);
+                              return;
+                            }
+                            if (asset.actionId?.startsWith("previz-reference-move-right:")) {
+                              moveSelectedPrevizReference(asset.actionId.slice("previz-reference-move-right:".length), 1);
+                              return;
+                            }
+                            if (asset.actionId?.startsWith("previz-reference-remove:")) {
+                              void removeSelectedPrevizReference(asset.actionId.slice("previz-reference-remove:".length));
+                              return;
+                            }
+                            if (asset.actionId?.startsWith("select-generation:")) {
+                              selectSegmentGeneration(asset.actionId.slice("select-generation:".length));
+                            }
+                          }}
+                        />
+                      </div>
+                    ) : null}
+                    {showWorkflowSourceControls ? (
+                      <div className="rounded-xl border border-ink/10 bg-bg p-3">
+                        {isCharacterAnimateWorkflow ? (
+                          <CharacterAnimateModePicker
+                            activeMode={characterAnimateMode}
+                            onSelect={setCharacterAnimateMode}
+                            sourceMediaKind={sourceMediaKind}
+                          />
+                        ) : (
+                          <CreateRoutePicker
+                            activeMode={generationInputMode}
+                            onSelect={(mode) => {
+                              setGenerationInputMode(mode);
+                            }}
+                          />
+                        )}
+                      </div>
+                    ) : null}
+                  </>
+                )}
               </div>
             ) : null}
 
-            {tab === "timeline" && (
+            {!isResolvingWorkflowShell && !isCurrentWorkflowImplemented && !showPrevizSelectTab && !showPrevizEditTab && !showPrevizGenerateTab && !showPrevizPostTab && !isGlobalUtilityTab ? (
+              <div className="rounded-xl border border-dashed border-ink/15 bg-bg p-4">
+                <p className="text-sm font-medium text-ink">{currentTaskWorkflow.label} is scaffolded but not implemented yet.</p>
+                <p className="mt-1 text-sm text-ink/65">
+                  The shared task shell, assets library, and reports infrastructure can already recognise this workflow. The
+                  workflow-specific step content will be added next.
+                </p>
+              </div>
+            ) : null}
+
+            {showPrevizSelectTab && (
+              <Suspense fallback={<p className="text-sm text-ink/60">Loading Select...</p>}>
+                <PrevizSelectTab ctx={previzSelectTabCtx} />
+              </Suspense>
+            )}
+
+            {showPrevizEditTab && (
+              <Suspense fallback={<p className="text-sm text-ink/60">Loading Edit...</p>}>
+                <PrevizEditTab ctx={previzEditTabCtx} />
+              </Suspense>
+            )}
+
+            {showPrevizGenerateTab && (
+              <Suspense fallback={<p className="text-sm text-ink/60">Loading Generate...</p>}>
+                <PrevizGenerateTab ctx={previzGenerateTabCtx} />
+              </Suspense>
+            )}
+
+            {!isResolvingWorkflowShell && showSourceVideoSelectTab && (
               <Suspense fallback={<p className="text-sm text-ink/60">Loading Source...</p>}>
                 <PickFrameTab ctx={pickFrameTabCtx} />
               </Suspense>
             )}
 
-            {tab === "frames" && (
+            {!isResolvingWorkflowShell && showSourceVideoEditTab && (
               <Suspense fallback={<p className="text-sm text-ink/60">Loading Edit frames...</p>}>
-                {generationInputMode === "edit_video" ? <EditVideoReferencesTab ctx={editVideoReferencesTabCtx} /> : <EditFrameTab ctx={editFrameTabCtx} />}
+                {generationInputMode === "edit_video" ? (
+                  <EditVideoReferencesTab ctx={editVideoReferencesTabCtx} />
+                ) : (
+                  <EditFrameTab ctx={editFrameTabCtx} />
+                )}
               </Suspense>
             )}
 
-            {tab === "refine" && (
+            {!isResolvingWorkflowShell && showCharacterSelectTab && (
+              <Suspense fallback={<p className="text-sm text-ink/60">Loading Select...</p>}>
+                <PickFrameTab ctx={pickFrameTabCtx} />
+              </Suspense>
+            )}
+
+            {!isResolvingWorkflowShell && showCharacterEditTab && (
+              <Suspense fallback={<p className="text-sm text-ink/60">Loading Edit...</p>}>
+                <EditVideoReferencesTab ctx={editVideoReferencesTabCtx} />
+              </Suspense>
+            )}
+
+            {!isResolvingWorkflowShell && showSourceVideoRefineTab && (
               <Suspense fallback={<p className="text-sm text-ink/60">Loading Refine Frames...</p>}>
                 <RefineFramesTab ctx={refineFramesTabCtx} />
               </Suspense>
             )}
 
-            {tab === "generate" && (
+            {!isResolvingWorkflowShell && showCharacterRefineTab && (
+              <Suspense fallback={<p className="text-sm text-ink/60">Loading Refine...</p>}>
+                <CharacterAnimatePlaceholderTab
+                  title="Refine step will be repurposed for character workflow"
+                  body="The shared six-step shell is now in place for character animation. Workflow-specific refine behavior will be defined after the character-image and generation paths are wired."
+                />
+              </Suspense>
+            )}
+
+            {!isResolvingWorkflowShell && showSourceVideoGenerateTab && (
               <Suspense fallback={<p className="text-sm text-ink/60">Loading Generate Video...</p>}>
                 <GenerateTab ctx={generateTabCtx} />
               </Suspense>
             )}
 
-            {tab === "outputs" && (
+            {!isResolvingWorkflowShell && showCharacterGenerateTab && (
               <Suspense fallback={<p className="text-sm text-ink/60">Loading Outputs...</p>}>
-                <GenerateTab ctx={generateTabCtx} />
+                <CharacterAnimateGenerateTab
+                  mode={characterAnimateMode}
+                  sourceMediaKind={sourceMediaKind}
+                  sourceAudioUrl={isCharacterAudioSource ? (task?.sourceMedia?.previewSource?.downloadUrl ?? task?.sourceMedia?.editSource?.downloadUrl ?? null) : null}
+                  sourceWaveformUrl={isCharacterAudioSource ? sourceWaveformUrl : null}
+                  sourceFrameCount={isCharacterAudioSource ? frameCount(task) : null}
+                  selectedSegmentStartFrame={isCharacterAudioSource ? (selectedSegment?.startFrame ?? null) : null}
+                  selectedSegmentEndFrameExclusive={isCharacterAudioSource ? (selectedSegment?.endFrameExclusive ?? null) : null}
+                  selectedSegmentStartTimecode={isCharacterAudioSource ? (selectedSegment?.startTimecode ?? null) : null}
+                  selectedSegmentEndTimecode={isCharacterAudioSource ? (selectedSegment?.endTimecode ?? null) : null}
+                  selectedModel={selectedCharacterAnimateModel}
+                  modelOptions={characterAnimateModelOptions}
+                  onSelectModel={(model) =>
+                    setCharacterAnimateModelByMode((previous) => ({ ...previous, [characterAnimateMode]: model }))
+                  }
+                  selectedSegmentLabel={selectedSegment ? describeSegment(selectedSegment) : null}
+                  selectedSegmentDurationSec={selectedSegment?.durationSec ?? null}
+                  selectedCharacterCount={editVideoSelectedReferenceIds.length}
+                  prompt={characterAnimatePrompt}
+                  onPromptChange={setCharacterAnimatePrompt}
+                  outputAspectRatio={characterAnimateOutputAspectRatio}
+                  onOutputAspectRatioChange={setCharacterAnimateOutputAspectRatio}
+                  bodyControl={characterAnimateBodyControl}
+                  onBodyControlChange={setCharacterAnimateBodyControl}
+                  expressionIntensity={characterAnimateExpressionIntensity}
+                  onExpressionIntensityChange={setCharacterAnimateExpressionIntensity}
+                  klingMode={characterAnimateKlingMode}
+                  onKlingModeChange={setCharacterAnimateKlingMode}
+                  klingCharacterOrientation={characterAnimateKlingCharacterOrientation}
+                  onKlingCharacterOrientationChange={setCharacterAnimateKlingCharacterOrientation}
+                  omnihumanResolution={characterAnimateOmnihumanResolution}
+                  onOmnihumanResolutionChange={setCharacterAnimateOmnihumanResolution}
+                  seedanceResolution={characterAnimateSeedanceResolution}
+                  onSeedanceResolutionChange={setCharacterAnimateSeedanceResolution}
+                  seedanceAspectRatio={characterAnimateSeedanceAspectRatio}
+                  onSeedanceAspectRatioChange={setCharacterAnimateSeedanceAspectRatio}
+                  characterImageValidationError={runwayCharacterImageValidationError}
+                  onGenerate={() => generateCharacterAnimationMutation.mutate()}
+                  isGenerating={generateCharacterAnimationMutation.isPending}
+                  generations={characterAnimateVisibleGenerations}
+                  selectedGenerationId={selectedPreviewGeneration?.genId ?? null}
+                  onSelectGeneration={selectSegmentGeneration}
+                  onPreviewGeneration={(generation) =>
+                    setVideoPreviewModal({
+                      url: generation.downloadUrl ?? "",
+                      label: "Character animation preview",
+                      taskId: task?.taskId,
+                      generationId: generation.genId,
+                    })
+                  }
+                  onDeleteGeneration={(generation) =>
+                    handleDeleteAsset({
+                      id: `generation:${task?.taskId ?? ""}:${generation.genId}`,
+                      taskId: task?.taskId ?? "",
+                      title: describeGeneration(generation),
+                      subtitle: `${generation.luma.model}/${generation.luma.mode}`,
+                      createdAt: generation.createdAt,
+                      previewUrl: generation.downloadUrl ?? generation.posterUrl ?? "",
+                      downloadUrl: generation.downloadUrl ?? "",
+                      thumbnailUrl: generation.posterUrl ?? undefined,
+                      mediaType: "video",
+                      deletePayload: { assetType: "segment_generation", genId: generation.genId },
+                    })
+                  }
+                />
+              </Suspense>
+            )}
+
+            {!isResolvingWorkflowShell && showSourceVideoPostTab && (
+              <Suspense fallback={<p className="text-sm text-ink/60">Loading Post Process...</p>}>
+                <MergeTab ctx={mergeTabCtx} />
               </Suspense>
             )}
 
@@ -5244,6 +7335,7 @@ export default function App() {
                     deleteCustomReportMutation,
                     toggleCustomReportOutput,
                     setVideoPreviewModal,
+                    setAudioPreviewModal,
                     setImagePreviewModal,
                     formatCompactTimestamp,
                     asNumber,
@@ -5258,9 +7350,158 @@ export default function App() {
               </Suspense>
             )}
 
-            {tab === "merge" && (
+            {!isResolvingWorkflowShell && showCharacterPostTab && (
               <Suspense fallback={<p className="text-sm text-ink/60">Loading Post Process...</p>}>
-                <MergeTab ctx={mergeTabCtx} />
+                <CharacterAnimatePostProcessTab
+                  generations={characterAnimatePostProcessGenerations}
+                  topazItems={characterAnimatePostProcessTopazItems}
+                  describeGeneration={describeGeneration}
+                  describeSegment={describeSegment}
+                  getSegmentForGeneration={getSegmentForGeneration}
+                  generationThumbnailUrl={generationThumbnailUrl}
+                  formatCompactTimestamp={formatCompactTimestamp}
+                  onPreviewGeneration={(generation) =>
+                    setVideoPreviewModal({
+                      url: generation.downloadUrl ?? "",
+                      label: describeGeneration(generation),
+                      taskId: task?.taskId,
+                      generationId: generation.genId,
+                    })
+                  }
+                  onPreviewTopazExport={(exportItem, sourceGeneration) =>
+                    setVideoPreviewModal({
+                      url: exportItem.downloadUrl ?? "",
+                      label: `Topaz upscale of ${describeGeneration(sourceGeneration)}`,
+                      taskId: task?.taskId,
+                    })
+                  }
+                  onDeleteGeneration={(generation) =>
+                    handleDeleteAsset({
+                      id: `generation:${task?.taskId ?? ""}:${generation.genId}`,
+                      taskId: task?.taskId ?? "",
+                      title: describeGeneration(generation),
+                      subtitle: `${generation.luma.model}/${generation.luma.mode}`,
+                      createdAt: generation.createdAt,
+                      previewUrl: generation.downloadUrl ?? generation.posterUrl ?? "",
+                      downloadUrl: generation.downloadUrl ?? "",
+                      thumbnailUrl: generation.posterUrl ?? undefined,
+                      mediaType: "video",
+                      deletePayload: { assetType: "segment_generation", genId: generation.genId },
+                    })
+                  }
+                  onDeleteTopazExport={(exportItem, sourceGeneration) =>
+                    handleDeleteAsset({
+                      id: `export:${task?.taskId ?? ""}:${exportItem.exportId}`,
+                      taskId: task?.taskId ?? "",
+                      title: `Topaz upscale of ${describeGeneration(sourceGeneration)}`,
+                      subtitle: exportItem.sourceExportId ? `Derived from export ${exportItem.sourceExportId}` : "Topaz export",
+                      createdAt: exportItem.createdAt,
+                      previewUrl: exportItem.downloadUrl ?? "",
+                      downloadUrl: exportItem.downloadUrl ?? "",
+                      mediaType: "video",
+                      deletePayload: { assetType: "export", exportId: exportItem.exportId },
+                    })
+                  }
+                  onAssetError={handleMediaAssetError}
+                  onLengthenGeneration={(payload) => lengthenSegmentGenerationMutation.mutate(payload)}
+                  isLengtheningGeneration={lengthenSegmentGenerationMutation.isPending}
+                  lengthenGenerationError={
+                    lengthenSegmentGenerationMutation.error instanceof Error ? lengthenSegmentGenerationMutation.error.message : null
+                  }
+                  onUpscaleGeneration={({ generationId, ...payload }) =>
+                    runTopazUpscaleForGenerationMutation.mutate({ generationId, payload })
+                  }
+                  isUpscalingGeneration={runTopazUpscaleForGenerationMutation.isPending}
+                  topazUpscalePendingGenerationId={topazUpscalePendingGenerationId}
+                  topazUpscaleError={
+                    runTopazUpscaleForGenerationMutation.error instanceof Error
+                      ? runTopazUpscaleForGenerationMutation.error.message
+                      : null
+                  }
+                  topazStateByGenerationId={characterTopazStateByGenerationId}
+                />
+              </Suspense>
+            )}
+
+            {!isResolvingWorkflowShell && showPrevizPostTab && (
+              <Suspense fallback={<p className="text-sm text-ink/60">Loading Post Process...</p>}>
+                <CharacterAnimatePostProcessTab
+                  generations={previzPostProcessGenerations}
+                  topazItems={previzPostProcessTopazItems}
+                  describeGeneration={describeGeneration}
+                  describeSegment={describeSegment}
+                  getSegmentForGeneration={getSegmentForGeneration}
+                  generationThumbnailUrl={generationThumbnailUrl}
+                  formatCompactTimestamp={formatCompactTimestamp}
+                  onPreviewGeneration={(generation) =>
+                    setVideoPreviewModal({
+                      url: generation.downloadUrl ?? "",
+                      label: describeGeneration(generation),
+                      taskId: task?.taskId,
+                      generationId: generation.genId,
+                    })
+                  }
+                  onPreviewTopazExport={(exportItem, sourceGeneration) =>
+                    setVideoPreviewModal({
+                      url: exportItem.downloadUrl ?? "",
+                      label: `Topaz upscale of ${describeGeneration(sourceGeneration)}`,
+                      taskId: task?.taskId,
+                    })
+                  }
+                  onDeleteGeneration={(generation) =>
+                    handleDeleteAsset({
+                      id: `generation:${task?.taskId ?? ""}:${generation.genId}`,
+                      taskId: task?.taskId ?? "",
+                      title: describeGeneration(generation),
+                      subtitle: `${generation.luma.model}/${generation.luma.mode}`,
+                      createdAt: generation.createdAt,
+                      previewUrl: generation.downloadUrl ?? generation.posterUrl ?? "",
+                      downloadUrl: generation.downloadUrl ?? "",
+                      thumbnailUrl: generation.posterUrl ?? undefined,
+                      mediaType: "video",
+                      deletePayload: { assetType: "segment_generation", genId: generation.genId },
+                    })
+                  }
+                  onDeleteTopazExport={(exportItem, sourceGeneration) =>
+                    handleDeleteAsset({
+                      id: `export:${task?.taskId ?? ""}:${exportItem.exportId}`,
+                      taskId: task?.taskId ?? "",
+                      title: `Topaz upscale of ${describeGeneration(sourceGeneration)}`,
+                      subtitle: exportItem.sourceExportId ? `Derived from export ${exportItem.sourceExportId}` : "Topaz export",
+                      createdAt: exportItem.createdAt,
+                      previewUrl: exportItem.downloadUrl ?? "",
+                      downloadUrl: exportItem.downloadUrl ?? "",
+                      mediaType: "video",
+                      deletePayload: { assetType: "export", exportId: exportItem.exportId },
+                    })
+                  }
+                  onAssetError={handleMediaAssetError}
+                  onLengthenGeneration={(payload) => lengthenSegmentGenerationMutation.mutate(payload)}
+                  isLengtheningGeneration={lengthenSegmentGenerationMutation.isPending}
+                  lengthenGenerationError={
+                    lengthenSegmentGenerationMutation.error instanceof Error ? lengthenSegmentGenerationMutation.error.message : null
+                  }
+                  onUpscaleGeneration={({ generationId, ...payload }) =>
+                    runTopazUpscaleForGenerationMutation.mutate({ generationId, payload })
+                  }
+                  isUpscalingGeneration={runTopazUpscaleForGenerationMutation.isPending}
+                  topazUpscalePendingGenerationId={topazUpscalePendingGenerationId}
+                  topazUpscaleError={
+                    runTopazUpscaleForGenerationMutation.error instanceof Error
+                      ? runTopazUpscaleForGenerationMutation.error.message
+                      : null
+                  }
+                  topazStateByGenerationId={characterTopazStateByGenerationId}
+                  labels={{
+                    sectionTitle: "Previz post-process",
+                    sectionDescription:
+                      "Review all completed previz outputs across this task. Extend uses the shared clip-lengthen flow and Upscale uses the shared Topaz path.",
+                    emptyState: "No completed previz videos yet.",
+                    extendModalTitle: "Extend previz video",
+                    upscaleModalTitle: "Upscale previz video",
+                    fallbackGenerationLabel: "Previz video",
+                  }}
+                />
               </Suspense>
             )}
 
@@ -5305,13 +7546,158 @@ export default function App() {
 
         </section>
       </div>
+      <ReferenceImagePickerModal
+        isOpen={isReferenceImagePickerOpen}
+        maxSelected={currentTaskWorkflowId === "character_animate_workflow" ? 1 : editVideoReferenceLimitByModel}
+        selectedIds={selectedReferencePickerItemIds}
+        items={referencePickerItems}
+        videoItems={referencePickerVideoItems}
+        initialTab="upload"
+        generatedScopeDefault="task"
+        isSaving={isReferenceImagePickerSaving}
+        onClose={() => setIsReferenceImagePickerOpen(false)}
+        onUpload={uploadEditVideoReferenceImages}
+        onCaptureVideoFrame={captureReferenceFrameFromVideo}
+        onConfirm={async (selectedItemIds) => {
+          setIsReferenceImagePickerSaving(true);
+          try {
+            await applyReferencePickerSelection(selectedItemIds);
+            setIsReferenceImagePickerOpen(false);
+          } catch (error) {
+            setAppUiError(error instanceof Error ? error.message : "Failed to update reference images");
+          } finally {
+            setIsReferenceImagePickerSaving(false);
+          }
+        }}
+      />
+      <ReferenceImagePickerModal
+        isOpen={isToolReferenceImagePickerOpen}
+        maxSelected={9}
+        selectedIds={selectedToolReferencePickerItemIds}
+        items={referencePickerItems}
+        videoItems={referencePickerVideoItems}
+        initialTab="generated"
+        generatedScopeDefault="current_mode_task"
+        isSaving={isToolReferenceImagePickerSaving}
+        onClose={() => setIsToolReferenceImagePickerOpen(false)}
+        onUpload={uploadEditVideoReferenceImages}
+        onCaptureVideoFrame={captureReferenceFrameFromVideo}
+        onConfirm={async (selectedItemIds) => {
+          setIsToolReferenceImagePickerSaving(true);
+          try {
+            await applyToolReferencePickerSelection(selectedItemIds);
+            setIsToolReferenceImagePickerOpen(false);
+          } catch (error) {
+            setAppUiError(error instanceof Error ? error.message : "Failed to update tool reference images");
+          } finally {
+            setIsToolReferenceImagePickerSaving(false);
+          }
+        }}
+      />
+      <ReferenceImagePickerModal
+        isOpen={isPrevizReferenceImagePickerOpen}
+        maxSelected={12}
+        selectedIds={selectedPrevizReferencePickerItemIds}
+        items={referencePickerItems}
+        videoItems={referencePickerVideoItems}
+        initialTab="upload"
+        generatedScopeDefault="task"
+        isSaving={isPrevizReferenceImagePickerSaving}
+        onClose={() => setIsPrevizReferenceImagePickerOpen(false)}
+        onUpload={uploadEditVideoReferenceImages}
+        onCaptureVideoFrame={captureReferenceFrameFromVideo}
+        onConfirm={async (selectedItemIds) => {
+          setIsPrevizReferenceImagePickerSaving(true);
+          try {
+            await applyPrevizReferencePickerSelection(selectedItemIds);
+            setIsPrevizReferenceImagePickerOpen(false);
+          } catch (error) {
+            setAppUiError(error instanceof Error ? error.message : "Failed to update scene references");
+          } finally {
+            setIsPrevizReferenceImagePickerSaving(false);
+          }
+        }}
+      />
+      <ReferenceImagePickerModal
+        isOpen={isPrevizToolReferenceImagePickerOpen}
+        maxSelected={9}
+        selectedIds={selectedPrevizToolReferencePickerItemIds}
+        items={referencePickerItems}
+        videoItems={referencePickerVideoItems}
+        initialTab="generated"
+        generatedScopeDefault="current_mode_task"
+        isSaving={isPrevizToolReferenceImagePickerSaving}
+        onClose={() => setIsPrevizToolReferenceImagePickerOpen(false)}
+        onUpload={uploadEditVideoReferenceImages}
+        onCaptureVideoFrame={captureReferenceFrameFromVideo}
+        onConfirm={async (selectedItemIds) => {
+          setIsPrevizToolReferenceImagePickerSaving(true);
+          try {
+            await applyPrevizToolReferencePickerSelection(selectedItemIds);
+            setIsPrevizToolReferenceImagePickerOpen(false);
+          } catch (error) {
+            setAppUiError(error instanceof Error ? error.message : "Failed to update tool reference images");
+          } finally {
+            setIsPrevizToolReferenceImagePickerSaving(false);
+          }
+        }}
+      />
+      <ReferenceImagePickerModal
+        isOpen={isPrevizEditReferenceImagePickerOpen}
+        maxSelected={12}
+        selectedIds={selectedPrevizReferencePickerItemIds}
+        items={referencePickerItems}
+        videoItems={referencePickerVideoItems}
+        initialTab="generated"
+        generatedScopeDefault="current_mode_task"
+        isSaving={isPrevizEditReferenceImagePickerSaving}
+        onClose={() => setIsPrevizEditReferenceImagePickerOpen(false)}
+        onUpload={uploadEditVideoReferenceImages}
+        onCaptureVideoFrame={captureReferenceFrameFromVideo}
+        onConfirm={async (selectedItemIds) => {
+          setIsPrevizEditReferenceImagePickerSaving(true);
+          try {
+            await applyPrevizReferencePickerSelection(selectedItemIds);
+            setIsPrevizEditReferenceImagePickerOpen(false);
+          } catch (error) {
+            setAppUiError(error instanceof Error ? error.message : "Failed to update selected references");
+          } finally {
+            setIsPrevizEditReferenceImagePickerSaving(false);
+          }
+        }}
+      />
+      <ReferenceImagePickerModal
+        isOpen={isPrevizGenerateReferenceImagePickerOpen}
+        maxSelected={12}
+        selectedIds={selectedPrevizFramePickerItemIds}
+        items={previzFrameReferencePickerItems}
+        videoItems={[]}
+        initialTab="generated"
+        generatedScopeDefault="task"
+        isSaving={isPrevizGenerateReferenceImagePickerSaving}
+        onClose={() => setIsPrevizGenerateReferenceImagePickerOpen(false)}
+        onUpload={uploadEditVideoReferenceImages}
+        onConfirm={async (selectedItemIds) => {
+          setIsPrevizGenerateReferenceImagePickerSaving(true);
+          try {
+            await applyPrevizFramePickerSelection(selectedItemIds);
+            setIsPrevizGenerateReferenceImagePickerOpen(false);
+          } catch (error) {
+            setAppUiError(error instanceof Error ? error.message : "Failed to update selected images");
+          } finally {
+            setIsPrevizGenerateReferenceImagePickerSaving(false);
+          }
+        }}
+      />
       <PreviewModals
         imagePreview={imagePreviewModal}
         videoPreview={videoPreviewModal}
+        audioPreview={audioPreviewModal}
         imageCompare={imageCompareModal}
         videoCompare={videoCompareModal}
         onCloseImage={() => setImagePreviewModal(null)}
         onCloseVideo={() => setVideoPreviewModal(null)}
+        onCloseAudio={() => setAudioPreviewModal(null)}
         onCloseImageCompare={() => setImageCompareModal(null)}
         onCloseVideoCompare={() => setVideoCompareModal(null)}
         onMediaError={handlePreviewModalMediaError}
@@ -5564,48 +7950,7 @@ export default function App() {
           await queryClient.invalidateQueries({ queryKey: ["task", "assets", selectedTaskId] });
         }}
       />
-      <NewTaskModal
-        isOpen={isNewTaskModalOpen}
-        stage={newTaskStage}
-        taskName={newTaskName}
-        normalizedTaskName={normalizedNewTaskName}
-        showTaskNameExistsWarning={showTaskNameExistsWarning}
-        taskNameAlreadyExists={taskNameAlreadyExists}
-        uploadPercent={newTaskUploadPercent}
-        ingestProgress={pendingCreateJobQuery.data?.progress ?? 0}
-        ingestStatus={pendingCreateJobQuery.data?.status ?? "queued"}
-        error={automationUiError ?? newTaskError}
-        canSubmit={!newTaskName.trim() ? false : Boolean(normalizedNewTaskName && newTaskFile)}
-        automationEnabled={automationEnabled}
-        automationStartPrompt={automationStartPrompt}
-        automationEndPrompt={automationEndPrompt}
-        automationVideoPrompt={automationVideoPrompt}
-        automationVideoOptions={automationVideoOptions}
-        automationSelectedVideoOptionIds={automationSelectedVideoOptionIds}
-        onClose={() => {
-          setAutomationUiError(null);
-          setIsNewTaskModalOpen(false);
-        }}
-        onTaskNameChange={setNewTaskName}
-        onFileSelect={handleNewTaskFileSelect}
-        onAutomationEnabledChange={(value) => {
-          setAutomationEnabled(value);
-          if (!value) {
-            setAutomationUiError(null);
-          }
-        }}
-        onAutomationStartPromptChange={(value) => {
-          setAutomationStartPrompt(value);
-          if (automationUiError) setAutomationUiError(null);
-        }}
-        onAutomationEndPromptChange={setAutomationEndPrompt}
-        onAutomationVideoPromptChange={setAutomationVideoPrompt}
-        onAutomationVideoSelectionChange={(selectedIds) => {
-          setAutomationSelectedVideoOptionIds(selectedIds);
-          if (automationUiError) setAutomationUiError(null);
-        }}
-        onSubmit={handleNewTaskSubmit}
-      />
+      <>{taskPickerModalNode}{newTaskModalNode}</>
     </main>
   );
 }

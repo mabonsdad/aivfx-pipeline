@@ -44,6 +44,7 @@ export const CUSTOM_REPORT_TYPE_IDS = [
   "qc_frame",
   "qc_video",
   "video_compare",
+  "previz_review",
 ] as const;
 
 export const MANUAL_REFINE_EXPORT_FORMAT_IDS = [
@@ -117,7 +118,9 @@ export type SegmentGeneratePayload = {
   wan27Resolution?: string | null;
   happyHorseResolution?: string | null;
   sora2Resolution?: string | null;
+  inputMode?: "start_video" | "start_end" | "start_only" | "edit_video" | null;
   selectedReferenceIds?: string[] | null;
+  audioReferenceId?: string | null;
 };
 
 export type ChunkedSegmentGeneratePayload = {
@@ -141,6 +144,15 @@ export type SegmentGenerationExtendPayload = {
   continueToRangeEnd?: boolean;
   useSourceLastFrame?: boolean;
   lastFrameVariantId?: string | null;
+};
+
+export type SegmentGenerationLengthenPayload = {
+  model: string;
+  direction: "start" | "end";
+  durationSeconds: number;
+  prompt: string;
+  inputMode: "start_end" | "edit_video";
+  selectedReferenceIds?: string[];
 };
 
 export type ReconcileTimingPayload = {
@@ -183,6 +195,7 @@ export type ApiImageEditFullPayload = {
   model: string;
   prompt: string;
   inputAssetKey: string;
+  referenceAssetKeys?: string[];
   lumaUniModel?: "uni-1" | "uni-1-max" | null;
   lumaUniStyle?: "auto" | "manga" | null;
   lumaUniOutputFormat?: "png" | "jpeg" | null;
@@ -203,6 +216,7 @@ export type ApiImageEditPatchPayload = {
   maskGrowPx: number;
   maskAssetKey?: string | null;
   referenceAssetKey?: string | null;
+  referenceAssetKeys?: string[];
 };
 
 export type ApiReferenceVideoGeneratePayload = {
@@ -214,6 +228,7 @@ export type ApiReferenceVideoGeneratePayload = {
   negativePrompt?: string | null;
   videoAssetKey?: string | null;
   lastFrameAssetKey?: string | null;
+  referenceAssetKeys?: string[];
   durationSeconds?: number | null;
   replicateKlingMode?: string | null;
   replicateKlingV3Mode?: string | null;
@@ -223,7 +238,7 @@ export type ApiReferenceVideoGeneratePayload = {
 };
 
 export type AssetDeletePayload = {
-  assetType: "upload" | "frame_capture" | "frame_variant" | "segment_generation" | "export" | "edit_video_reference";
+  assetType: "upload" | "frame_capture" | "frame_variant" | "segment_generation" | "export" | "edit_video_reference" | "generation_audio_reference";
   frameId?: string | null;
   variantId?: string | null;
   genId?: string | null;
@@ -250,7 +265,7 @@ export type CustomReportOutputRefPayload = {
 };
 
 export type CustomReportCreatePayload = {
-  reportType: "qc_frame" | "qc_video" | "video_compare";
+  reportType: "qc_frame" | "qc_video" | "video_compare" | "previz_review";
   outputRefs: CustomReportOutputRefPayload[];
   tests: string[];
   name?: string | null;

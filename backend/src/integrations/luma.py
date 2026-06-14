@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
 import requests
@@ -94,9 +95,66 @@ def create_uni_image_edit_generation(
     )
 
 
+def create_uni_image_generation(
+    *,
+    api_key: str,
+    prompt: str,
+    model: str = "uni-1",
+    style: str | None = None,
+    output_format: str | None = None,
+    image_refs: list[dict[str, Any]] | None = None,
+    aspect_ratio: str | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "type": "image",
+        "prompt": prompt,
+        "model": model,
+    }
+    if style:
+        payload["style"] = style
+    if output_format:
+        payload["output_format"] = output_format
+    if image_refs:
+        payload["image_ref"] = image_refs
+    if aspect_ratio:
+        payload["aspect_ratio"] = aspect_ratio
+    return _request(
+        "POST",
+        "https://agents.lumalabs.ai/v1/generations",
+        token=api_key,
+        payload=payload,
+    )
+
+
 def get_uni_generation(*, api_key: str, generation_id: str) -> dict[str, Any]:
     return _request(
         "GET",
         f"https://agents.lumalabs.ai/v1/generations/{generation_id}",
         token=api_key,
     )
+
+
+def parse_uni_output_url(payload: dict[str, Any]) -> str:
+    output = payload.get("output")
+    if isinstance(output, list):
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            maybe = item.get("url")
+            if isinstance(maybe, str) and maybe.startswith("http"):
+                return maybe
+    raise LumaError(f"Luma Uni completion payload missing output URL: {payload}")
+
+
+def wait_for_uni_generation_complete(*, api_key: str, generation_id: str, timeout_sec: int = 1200) -> dict[str, Any]:
+    start = time.time()
+    while True:
+        payload = get_uni_generation(api_key=api_key, generation_id=generation_id)
+        state = str(payload.get("state") or "").lower()
+        if state in {"completed", "complete", "succeeded", "success"}:
+            return payload
+        if state in {"failed", "error", "cancelled"}:
+            raise LumaError(f"Luma Uni generation failed: {payload}")
+        if time.time() - start > timeout_sec:
+            raise TimeoutError("Luma Uni generation poll timeout")
+        time.sleep(6)

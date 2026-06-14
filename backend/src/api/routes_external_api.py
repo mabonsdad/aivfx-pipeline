@@ -5,6 +5,54 @@ from typing import Any, Callable
 from src.models.schemas import ApiAssetUploadInitRequest, ApiImageEditFullRequest, ApiImageEditPatchRequest, ApiReferenceVideoGenerateRequest
 
 
+API_MULTI_REFERENCE_IMAGE_EDIT_LIMITS: dict[str, int] = {
+    "nano_banana": 3,
+    "nano_banana_pro": 9,
+    "chatgpt": 9,
+    "chatgpt_latest": 9,
+}
+
+API_PATCH_REFERENCE_LIMITS: dict[str, int] = {
+    "nano_banana_pro": 9,
+    "chatgpt": 9,
+    "chatgpt_latest": 9,
+    "runware_ace_pp": 1,
+}
+
+API_VIDEO_REFERENCE_LIMITS: dict[str, int] = {
+    "happy-horse-video-edit": 3,
+    "kling-o1": 3,
+    "kling-v3-omni-video": 3,
+    "seedance-2.0-reference-to-video": 3,
+}
+
+
+def _normalized_asset_keys(group: list[str] | tuple[str, ...] | None) -> list[str]:
+    if not group:
+        return []
+    return [candidate for candidate in (str(item or "").strip() for item in group) if candidate]
+
+
+def _normalized_patch_reference_asset_keys(*, plural: list[str] | tuple[str, ...] | None, singular: str | None) -> list[str]:
+    normalized_plural = _normalized_asset_keys(plural)
+    if normalized_plural:
+        return normalized_plural
+    if singular is None:
+        return []
+    candidate = str(singular).strip()
+    return [candidate] if candidate else []
+
+
+def _validate_reference_asset_limit(*, model: str, reference_asset_keys: list[str], limits: dict[str, int], context_label: str) -> None:
+    supported_limit = limits.get(model)
+    if supported_limit is None:
+        if reference_asset_keys:
+            raise ValueError(f"{context_label} does not support referenceAssetKeys for model {model}")
+        return
+    if len(reference_asset_keys) > supported_limit:
+        raise ValueError(f"{context_label} supports up to {supported_limit} ordered reference images for model {model}")
+
+
 def handle_external_api_routes(
     method: str,
     path: str,
@@ -93,6 +141,7 @@ def handle_external_api_routes(
 
     if method == "POST" and path == "/api/v1/image-edits/full":
         req = json_model(ApiImageEditFullRequest, event)
+        reference_asset_keys = _normalized_asset_keys(req.referenceAssetKeys)
         try:
             prompt = sanitize_prompt_fn(req.prompt)
             input_asset = validate_api_asset_key_fn(
@@ -101,6 +150,21 @@ def handle_external_api_routes(
                 asset_key=req.inputAssetKey,
                 expected_type="image",
             )
+            _validate_reference_asset_limit(
+                model=req.model,
+                reference_asset_keys=reference_asset_keys,
+                limits=API_MULTI_REFERENCE_IMAGE_EDIT_LIMITS,
+                context_label="This full image edit route",
+            )
+            reference_assets = [
+                validate_api_asset_key_fn(
+                    asset_store=asset_store,
+                    user_id=user_id,
+                    asset_key=asset_key,
+                    expected_type="image",
+                )
+                for asset_key in reference_asset_keys
+            ]
         except ValueError as exc:
             return response_fn(400, {"error": api_request_error_payload_fn("validation_error", str(exc))}, origin=origin)
         request_id_value = new_id_fn("apireq")
@@ -115,6 +179,7 @@ def handle_external_api_routes(
                 "model": req.model,
                 "prompt": prompt,
                 "inputAssetKey": req.inputAssetKey,
+                "referenceAssetKeys": reference_asset_keys,
                 "lumaUniModel": req.lumaUniModel,
                 "lumaUniStyle": req.lumaUniStyle,
                 "lumaUniOutputFormat": req.lumaUniOutputFormat,
@@ -135,12 +200,14 @@ def handle_external_api_routes(
             "updatedAt": now_iso_fn(),
             "request": {
                 "prompt": prompt,
+                "referenceAssetKeys": reference_asset_keys,
                 "lumaUniModel": req.lumaUniModel,
                 "lumaUniStyle": req.lumaUniStyle,
                 "lumaUniOutputFormat": req.lumaUniOutputFormat,
             },
             "inputAssets": {
                 "input": input_asset,
+                "referenceImages": reference_assets,
             },
             "preparedAssets": {},
             "outputAssets": {},
@@ -153,6 +220,7 @@ def handle_external_api_routes(
 
     if method == "POST" and path == "/api/v1/image-edits/patch":
         req = json_model(ApiImageEditPatchRequest, event)
+        reference_asset_keys = _normalized_patch_reference_asset_keys(plural=req.referenceAssetKeys, singular=req.referenceAssetKey)
         try:
             prompt = sanitize_prompt_fn(req.prompt)
             input_asset = validate_api_asset_key_fn(
@@ -177,17 +245,22 @@ def handle_external_api_routes(
                 if req.maskAssetKey
                 else None
             )
-            reference_asset = (
+            _validate_reference_asset_limit(
+                model=req.model,
+                reference_asset_keys=reference_asset_keys,
+                limits=API_PATCH_REFERENCE_LIMITS,
+                context_label="This patch image edit route",
+            )
+            reference_assets = [
                 validate_api_asset_key_fn(
                     asset_store=asset_store,
                     user_id=user_id,
-                    asset_key=req.referenceAssetKey,
+                    asset_key=asset_key,
                     expected_type="image",
                 )
-                if req.referenceAssetKey
-                else None
-            )
-            if req.model == "runware_ace_pp" and not reference_asset:
+                for asset_key in reference_asset_keys
+            ]
+            if req.model == "runware_ace_pp" and not reference_assets:
                 raise ValueError("Runware ACE++ requires a reference image")
         except ValueError as exc:
             return response_fn(400, {"error": api_request_error_payload_fn("validation_error", str(exc))}, origin=origin)
@@ -206,6 +279,7 @@ def handle_external_api_routes(
                 "patchAssetKey": req.patchAssetKey,
                 "maskAssetKey": req.maskAssetKey,
                 "referenceAssetKey": req.referenceAssetKey,
+                "referenceAssetKeys": reference_asset_keys,
                 "patchRect": req.patchRect.model_dump(),
                 "featherPx": req.featherPx,
                 "bleedPx": req.bleedPx,
@@ -237,12 +311,14 @@ def handle_external_api_routes(
                 "edgeAwareRadiusPx": req.edgeAwareRadiusPx,
                 "maskGrowPx": req.maskGrowPx,
                 "runwareRepaintingScale": req.runwareRepaintingScale,
+                "referenceAssetKeys": reference_asset_keys,
             },
             "inputAssets": {
                 "input": input_asset,
                 "patch": patch_asset,
                 "mask": mask_asset,
-                "reference": reference_asset,
+                "reference": reference_assets[0] if reference_assets else None,
+                "referenceImages": reference_assets,
             },
             "preparedAssets": {},
             "outputAssets": {},
@@ -255,12 +331,19 @@ def handle_external_api_routes(
 
     if method == "POST" and path == "/api/v1/video-generations/reference-video":
         req = json_model(ApiReferenceVideoGenerateRequest, event)
+        reference_asset_keys = _normalized_asset_keys(req.referenceAssetKeys)
         try:
             prompt = sanitize_prompt_fn(req.prompt) if req.prompt else None
             negative_prompt = sanitize_prompt_fn(req.negativePrompt) if req.negativePrompt else None
             validate_api_video_mode_fn(req.model, req.mode)
             validate_video_model_prompt_fn(req.model, prompt)
             capability = get_video_model_capability_fn(req.model)
+            _validate_reference_asset_limit(
+                model=req.model,
+                reference_asset_keys=reference_asset_keys,
+                limits=API_VIDEO_REFERENCE_LIMITS,
+                context_label=f"{capability.label} in this route",
+            )
             video_asset = (
                 validate_api_asset_key_fn(
                     asset_store=asset_store,
@@ -289,6 +372,15 @@ def handle_external_api_routes(
                 if req.lastFrameAssetKey
                 else None
             )
+            reference_assets = [
+                validate_api_asset_key_fn(
+                    asset_store=asset_store,
+                    user_id=user_id,
+                    asset_key=asset_key,
+                    expected_type="image",
+                )
+                for asset_key in reference_asset_keys
+            ]
         except ValueError as exc:
             return response_fn(400, {"error": api_request_error_payload_fn("validation_error", str(exc))}, origin=origin)
         request_id_value = new_id_fn("apireq")
@@ -307,6 +399,7 @@ def handle_external_api_routes(
                 "videoAssetKey": req.videoAssetKey,
                 "firstFrameAssetKey": req.firstFrameAssetKey,
                 "lastFrameAssetKey": req.lastFrameAssetKey,
+                "referenceAssetKeys": reference_asset_keys,
                 "durationSeconds": req.durationSeconds,
                 "replicateKlingMode": req.replicateKlingMode,
                 "replicateKlingV3Mode": req.replicateKlingV3Mode,
@@ -331,6 +424,7 @@ def handle_external_api_routes(
                 "mode": req.mode,
                 "prompt": prompt,
                 "negativePrompt": negative_prompt,
+                "referenceAssetKeys": reference_asset_keys,
                 "durationSeconds": req.durationSeconds,
                 "replicateKlingMode": req.replicateKlingMode,
                 "replicateKlingV3Mode": req.replicateKlingV3Mode,
@@ -343,6 +437,7 @@ def handle_external_api_routes(
                 "video": video_asset,
                 "firstFrame": first_frame_asset,
                 "lastFrame": last_frame_asset,
+                "referenceImages": reference_assets,
             },
             "preparedAssets": {},
             "outputAssets": {},

@@ -325,6 +325,7 @@ export default function VideoCleanupModal({
   const [maskEditorBaseLayer, setMaskEditorBaseLayer] = useState<MaskEditorBaseLayer>("generated");
   const [editorStatusMessage, setEditorStatusMessage] = useState<string | null>(null);
   const [pendingCorrectionFrame, setPendingCorrectionFrame] = useState<number | null>(null);
+  const [deletingTrackId, setDeletingTrackId] = useState<string | null>(null);
   const maskEditorImageRef = useRef<HTMLImageElement | null>(null);
   const maskEditorOverlayRef = useRef<HTMLCanvasElement | null>(null);
   const maskEditorCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -716,6 +717,27 @@ export default function VideoCleanupModal({
     }
   }
 
+  async function handleDeleteTrack(trackId: string) {
+    if (!task?.taskId) return;
+    const confirmed = window.confirm("Delete this cleanup track and all of its generated cleanup assets?");
+    if (!confirmed) return;
+    setUiError(null);
+    setDeletingTrackId(trackId);
+    try {
+      await apiClient.deleteVideoCleanupTrack(task.taskId, trackId);
+      if (activeTrackId === trackId) {
+        const nextTrack = matchingTracks.find((item) => item.trackId !== trackId) ?? null;
+        setActiveTrackId(nextTrack?.trackId ?? null);
+      }
+      await refreshTask();
+      await activeTrackQuery.refetch();
+    } catch (error) {
+      setUiError(error instanceof Error ? error.message : "Unable to delete cleanup track");
+    } finally {
+      setDeletingTrackId(null);
+    }
+  }
+
   function handleFrameClick(event: React.MouseEvent<HTMLImageElement>) {
     if (pointMode === "none") return;
     const element = frameImageRef.current;
@@ -820,16 +842,30 @@ export default function VideoCleanupModal({
               {matchingTracks.map((track) => {
                 const isActive = track.trackId === activeTrackId;
                 return (
-                  <button
+                  <div
                     key={track.trackId}
-                    type="button"
-                    className={`block w-full rounded-xl border px-3 py-3 text-left ${isActive ? "border-accent/35 bg-white shadow-sm" : "border-ink/10 bg-white"}`}
-                    onClick={() => setActiveTrackId(track.trackId)}
+                    className={`rounded-xl border px-3 py-3 ${isActive ? "border-accent/35 bg-white shadow-sm" : "border-ink/10 bg-white"}`}
                   >
-                    <p className="text-sm font-semibold">Track {track.trackId.slice(-6)}</p>
-                    <p className="mt-1 text-xs uppercase text-ink/50">{track.status.replace(/_/g, " ")}</p>
-                    <p className="mt-1 text-[11px] text-ink/55">{new Date(track.updatedAt).toLocaleString()}</p>
-                  </button>
+                    <div className="flex items-start justify-between gap-2">
+                      <button
+                        type="button"
+                        className="block min-w-0 flex-1 text-left"
+                        onClick={() => setActiveTrackId(track.trackId)}
+                      >
+                        <p className="text-sm font-semibold">Track {track.trackId.slice(-6)}</p>
+                        <p className="mt-1 text-xs uppercase text-ink/50">{track.status.replace(/_/g, " ")}</p>
+                        <p className="mt-1 text-[11px] text-ink/55">{new Date(track.updatedAt).toLocaleString()}</p>
+                      </button>
+                      <button
+                        type="button"
+                        className="rounded-md border border-red-200 px-2 py-1 text-[11px] text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
+                        disabled={deletingTrackId === track.trackId}
+                        onClick={() => void handleDeleteTrack(track.trackId)}
+                      >
+                        {deletingTrackId === track.trackId ? "Deleting" : "Delete"}
+                      </button>
+                    </div>
+                  </div>
                 );
               })}
             </div>

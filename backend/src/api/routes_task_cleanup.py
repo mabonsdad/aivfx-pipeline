@@ -57,6 +57,7 @@ def handle_task_cleanup_routes(
     cleanup_track_response_fn: Callable[[dict[str, Any], Any], dict[str, Any]],
     get_cleanup_track_fn: Callable[[dict[str, Any], str], dict[str, Any] | None],
     resolve_first_mask_key_from_analysis_fn: Callable[[dict[str, Any]], str | None],
+    cleanup_custom_reports_fn: Callable[[dict[str, Any]], bool],
 ) -> dict[str, Any] | None:
     if method == "GET" and len(parts) == 4 and parts[2] == "cleanup-tracks":
         track_id = parts[3]
@@ -64,6 +65,39 @@ def handle_task_cleanup_routes(
         if track is None:
             return error_response_fn(404, "Cleanup track not found", origin=origin)
         return response_fn(200, {"track": cleanup_track_response_fn(track, asset_store)}, origin=origin)
+
+    if method == "DELETE" and len(parts) == 4 and parts[2] == "cleanup-tracks":
+        track_id = parts[3]
+        track = _resolve_track(task=task, track_id=track_id, get_cleanup_track_fn=get_cleanup_track_fn)
+        if track is None:
+            return error_response_fn(404, "Cleanup track not found", origin=origin)
+        try:
+            asset_store.delete_prefix(f"{asset_paths_for_task_fn(task).cleanup_track_prefix(track_id)}/", purge_versions=True)
+        except ClientError:
+            return error_response_fn(500, "Failed to delete cleanup track assets", origin=origin)
+
+        derived_generation_ids = [
+            str(gen_id)
+            for gen_id, generation in (task.get("segmentGenerations") or {}).items()
+            if isinstance(generation, dict) and str(generation.get("cleanupTrackId") or "") == track_id
+        ]
+        for gen_id in derived_generation_ids:
+            task.get("segmentGenerations", {}).pop(gen_id, None)
+        source_generation_id = str(track.get("generationId") or "")
+        for segment in task.get("segments", []):
+            if not isinstance(segment, dict):
+                continue
+            if str(segment.get("selectedGenerationId") or "") in derived_generation_ids:
+                segment["selectedGenerationId"] = source_generation_id or None
+
+        task["videoCleanupTracks"] = [
+            item
+            for item in task.get("videoCleanupTracks", [])
+            if not (isinstance(item, dict) and str(item.get("trackId") or "") == track_id)
+        ]
+        cleanup_custom_reports_fn(task)
+        store.save_task(task)
+        return response_fn(200, {"ok": True}, origin=origin)
 
     if method == "POST" and len(parts) == 6 and parts[2] == "cleanup-tracks" and parts[4] == "keyframes" and parts[5] == "upload-init":
         track_id = parts[3]

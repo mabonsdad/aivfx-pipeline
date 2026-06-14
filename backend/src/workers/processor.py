@@ -23,12 +23,18 @@ from src.core.assets import ApiAssetPaths, AssetPaths, AssetStore
 from src.core.ffmpeg import (
     FFMPEG_BIN,
     compose_cropped_generated_segment,
+    extract_audio_track,
+    extract_audio_segment,
     extract_frame_png,
     extract_segment_by_frames,
+    ffprobe_audio,
     ffprobe_video,
     generate_thumbnail_strip,
+    generate_waveform_png,
     merge_with_segment_replacement,
     stitch_video_segments,
+    transcode_audio_edit_source,
+    transcode_audio_preview,
     trim_video_to_duration,
     trim_and_retime_video_uniform,
     transcode_for_preview,
@@ -47,12 +53,16 @@ from src.generation import (
     resolve_video_model_limit_error,
     resolve_video_model_provider_fps,
 )
-from src.integrations.gemini import generate_image_edit as generate_gemini_image_edit
+from src.integrations.gemini import (
+    generate_image_edit as generate_gemini_image_edit,
+    generate_image_from_references as generate_gemini_image_from_references,
+)
 from src.integrations.fal import (
     get_queue_result as get_fal_queue_result,
     get_queue_status as get_fal_queue_status,
     submit_happy_horse_image_to_video,
     submit_happy_horse_video_edit,
+    submit_omnihuman_v15,
     submit_sora_2_image_to_video_pro,
     submit_seedance_reference_to_video,
     submit_topaz_video_upscale,
@@ -63,12 +73,18 @@ from src.integrations.kling import (
     get_generation_response as get_kling_generation_response,
 )
 from src.integrations.luma import (
+    create_uni_image_generation,
     create_modify_generation,
     create_uni_image_edit_generation,
     get_generation,
     get_uni_generation,
+    parse_uni_output_url,
+    wait_for_uni_generation_complete,
 )
-from src.integrations.openai_images import generate_image_edit as generate_openai_image_edit
+from src.integrations.openai_images import (
+    generate_image_edit as generate_openai_image_edit,
+    generate_image_from_references as generate_openai_image_from_references,
+)
 from src.integrations.replicate import (
     REPLICATE_KLING_O1_VERSION,
     REPLICATE_KLING_V3_OMNI_VIDEO_VERSION,
@@ -78,6 +94,7 @@ from src.integrations.replicate import (
 )
 from src.integrations.runware import patch_edit_aceplusplus, patch_edit_flux_fill
 from src.integrations.runway import (
+    create_character_performance,
     create_ephemeral_upload,
     create_video_to_video,
     create_image_to_video,
@@ -90,6 +107,7 @@ from src.integrations.runware_video import (
     RUNWARE_WAN22_A14B_MODEL,
     RUNWARE_WAN22_ANIMATE_MODEL,
     create_veo_first_last_generation,
+    create_veo_video_extension,
     create_wan22_a14b_generation,
     create_wan22_animate_generation,
     get_generation_response as get_runware_video_generation_response,
@@ -133,6 +151,22 @@ class _WorkerStoreProxy:
     ) -> dict[str, Any]:
         return self._store.save_task(task, snapshot=snapshot, merge_on_conflict=merge_on_conflict)
 
+
+def _reference_content_type_from_key(key: str) -> str:
+    normalized = key.lower()
+    if normalized.endswith(".jpg") or normalized.endswith(".jpeg"):
+        return "image/jpeg"
+    if normalized.endswith(".webp"):
+        return "image/webp"
+    return "image/png"
+
+
+def _normalize_generated_reference_png(image_bytes: bytes) -> bytes:
+    with Image.open(BytesIO(image_bytes)) as source:
+        output = BytesIO()
+        ImageOps.exif_transpose(source).convert("RGBA").save(output, format="PNG")
+    return output.getvalue()
+
 FULL_VIDEO_MAX_BYTES = 100 * 1024 * 1024
 REPLICATE_VIDEO_MAX_BYTES = 200 * 1024 * 1024
 MAX_PROVIDER_IMAGE_BYTES = 10 * 1024 * 1024
@@ -153,6 +187,7 @@ ADV_QC_TOP_REGION_COUNT = 8
 MOTION_SYNC_SAMPLE_FPS = 6
 MOTION_SYNC_MAX_LAG_SEC = 3.0
 TOPAZ_UPSCALE_TIMEOUT_SEC = 7200
+RUNWARE_VIDEO_POLL_TIMEOUT_SEC = 12 * 60
 FRAME_REPORT_ADVANCED_TESTS = {
     "frame_composite",
     "frame_perceptual",
@@ -715,31 +750,53 @@ def _ensure_segment_clip(
     segment: dict[str, Any],
     assets_bucket: str,
 ) -> str:
-    segment_key = asset_paths.segment_original(segment["segmentId"])
+    source_media_kind = str(task.get("sourceMedia", {}).get("kind") or task.get("video", {}).get("editSource", {}).get("mediaType") or "video")
+    segment_key = asset_paths.segment_original_audio(segment["segmentId"], ".wav") if source_media_kind == "audio" else asset_paths.segment_original(segment["segmentId"])
 
     with tempfile.TemporaryDirectory() as td:
         edit_source_key = task["video"]["editSource"]["s3Key"]
-        input_path = Path(td) / "edit.mp4"
-        output_path = Path(td) / "segment.mp4"
+        input_path = Path(td) / ("edit.wav" if source_media_kind == "audio" else "edit.mp4")
+        output_path = Path(td) / ("segment.wav" if source_media_kind == "audio" else "segment.mp4")
         _download_s3(s3, assets_bucket, edit_source_key, input_path)
-        crop = segment.get("crop") if isinstance(segment.get("crop"), dict) and segment.get("crop", {}).get("enabled") else None
-        extract_segment_by_frames(
-            str(input_path),
-            str(output_path),
-            start_frame=segment["startFrame"],
-            end_frame_exclusive=segment["endFrameExclusive"],
-            fps_num=task["video"]["editSource"]["fps"]["num"],
-            fps_den=task["video"]["editSource"]["fps"]["den"],
-            target_width=(int(crop["outputWidth"]) if crop else None),
-            target_height=(int(crop["outputHeight"]) if crop else None),
-            crop_x=(int(crop["x"]) if crop else None),
-            crop_y=(int(crop["y"]) if crop else None),
-            crop_width=(int(crop["width"]) if crop else None),
-            crop_height=(int(crop["height"]) if crop else None),
-        )
-        _upload_s3(s3, assets_bucket, segment_key, output_path, "video/mp4")
+        if source_media_kind == "audio":
+            pseudo_fps = Fraction(
+                int(task["video"]["editSource"]["fps"]["num"]),
+                max(1, int(task["video"]["editSource"]["fps"]["den"])),
+            )
+            start_sec = float(Fraction(int(segment["startFrame"]), 1) / pseudo_fps)
+            duration_sec = float(Fraction(max(0, int(segment["endFrameExclusive"]) - int(segment["startFrame"])), 1) / pseudo_fps)
+            audio_channels = int(task.get("sourceMedia", {}).get("editSource", {}).get("channels") or 2)
+            audio_sample_rate = int(task.get("sourceMedia", {}).get("editSource", {}).get("sampleRate") or 48000)
+            extract_audio_segment(
+                str(input_path),
+                str(output_path),
+                start_sec=start_sec,
+                duration_sec=duration_sec,
+                codec="pcm_s16le",
+                sample_rate=audio_sample_rate,
+                channels=audio_channels,
+            )
+            _upload_s3(s3, assets_bucket, segment_key, output_path, "audio/wav")
+        else:
+            crop = segment.get("crop") if isinstance(segment.get("crop"), dict) and segment.get("crop", {}).get("enabled") else None
+            extract_segment_by_frames(
+                str(input_path),
+                str(output_path),
+                start_frame=segment["startFrame"],
+                end_frame_exclusive=segment["endFrameExclusive"],
+                fps_num=task["video"]["editSource"]["fps"]["num"],
+                fps_den=task["video"]["editSource"]["fps"]["den"],
+                target_width=(int(crop["outputWidth"]) if crop else None),
+                target_height=(int(crop["outputHeight"]) if crop else None),
+                crop_x=(int(crop["x"]) if crop else None),
+                crop_y=(int(crop["y"]) if crop else None),
+                crop_width=(int(crop["width"]) if crop else None),
+                crop_height=(int(crop["height"]) if crop else None),
+            )
+            _upload_s3(s3, assets_bucket, segment_key, output_path, "video/mp4")
     segment["segmentClipKey"] = segment_key
     segment["segmentClipUpdatedAt"] = now_iso()
+    segment["segmentClipContentType"] = "audio/wav" if source_media_kind == "audio" else "video/mp4"
     return segment_key
 
 
@@ -783,6 +840,28 @@ def _processing_duration_seconds(started_at: Any, finished_at: Any) -> float | N
     if seconds < 0:
         return None
     return round(seconds, 3)
+
+
+def _create_segment_generation_poster(
+    *,
+    asset_store: AssetStore,
+    paths: AssetPaths,
+    segment_id: str,
+    gen_id: str,
+    video_path: str,
+) -> str | None:
+    try:
+        probe = ffprobe_video(video_path)
+        frame_count = max(0, int(probe.get("frame_count") or 0))
+        poster_frame_index = 1 if frame_count > 1 else 0
+        with tempfile.TemporaryDirectory() as td:
+            poster_path = Path(td) / "generation_poster.png"
+            extract_frame_png(video_path, poster_frame_index, str(poster_path))
+            poster_key = paths.segment_generated_poster(segment_id, gen_id)
+            asset_store.put_bytes(poster_key, poster_path.read_bytes(), content_type="image/png")
+            return poster_key
+    except Exception:
+        return None
 
 
 def _update_segment_generation_record(
@@ -1246,6 +1325,13 @@ def _handle_chunked_generation_finalize(
             output_key,
             ExtraArgs={"ContentType": "video/mp4"},
         )
+        poster_key = _create_segment_generation_poster(
+            asset_store=asset_store,
+            paths=paths,
+            segment_id=source_segment_id,
+            gen_id=gen_id,
+            video_path=str(stitched_path),
+        )
 
     _job_progress(job, store, 85, "running", "Saving stitched draft")
     finished_at = now_iso()
@@ -1262,6 +1348,7 @@ def _handle_chunked_generation_finalize(
         },
         "status": "complete",
         "outputKey": output_key,
+        "posterKey": poster_key,
         "sourceFirstFrameCaptureKey": source_start_frame.get("captureKey") if isinstance(source_start_frame, dict) else None,
         "requestedDurationSec": round(float(source_segment.get("durationSec") or 0.0), 3),
         "providerDurationSec": round(float(stitched_probe.get("duration_sec") or 0.0), 3),
@@ -1338,6 +1425,8 @@ def _handle_chunked_generation_finalize(
     store.save_task(task, merge_on_conflict=True)
     _job_progress(job, store, 100, "complete", "Chunked draft saved")
     job["resultRefs"] = {"runId": run_id, "genId": gen_id, "outputKey": output_key}
+    if poster_key:
+        job["resultRefs"]["posterKey"] = poster_key
     store.save_job(job)
     return job
 
@@ -1363,6 +1452,8 @@ def _finalize_extension_chain_generation_after_success(
         return
     extension = _as_dict(generation.get("extension"))
     if not extension:
+        return
+    if extension.get("type") == "clip_lengthen":
         return
     parent_generation_id = str(generation.get("parentGenerationId") or extension.get("parentGenerationId") or "")
     if not parent_generation_id or parent_generation_id == gen_id:
@@ -1509,6 +1600,13 @@ def _finalize_extension_chain_generation_after_success(
         },
         "status": "complete",
         "outputKey": output_key,
+        "posterKey": _create_segment_generation_poster(
+            asset_store=asset_store,
+            paths=paths,
+            segment_id=display_segment_id,
+            gen_id=stitched_gen_id,
+            video_path=str(stitched_path),
+        ),
         "sourceFirstFrameCaptureKey": parent.get("sourceFirstFrameCaptureKey") or generation.get("sourceFirstFrameCaptureKey"),
         "requestedDurationSec": round(max(stitched_duration_sec, source_segment_duration_sec), 3),
         "providerDurationSec": stitched_duration_sec,
@@ -1586,95 +1684,214 @@ def _handle_ingest(
     s3 = boto3.client("s3")
     asset_paths = _asset_paths(task)
 
-    original_key = task["video"]["original"]["s3Key"]
-    _job_progress(job, store, 5, "running", "Downloading source video")
+    source_media = task.setdefault("sourceMedia", {})
+    original_meta = source_media.get("original") if isinstance(source_media.get("original"), dict) else task["video"]["original"]
+    original_key = original_meta["s3Key"]
+    source_content_type = str(original_meta.get("contentType") or "")
+    source_kind = str(source_media.get("kind") or ("audio" if source_content_type.startswith("audio/") else "video"))
+    _job_progress(job, store, 5, "running", f"Downloading source {source_kind}")
 
     with tempfile.TemporaryDirectory() as td:
         td_path = Path(td)
-        original_path = td_path / "original.mp4"
-        edit_path = td_path / "edit.mp4"
-        preview_path = td_path / "preview.mp4"
+        original_path = td_path / f"original{Path(original_key).suffix or ('.wav' if source_kind == 'audio' else '.mp4')}"
+        edit_path = td_path / ("edit.wav" if source_kind == "audio" else "edit.mp4")
+        preview_path = td_path / ("preview.m4a" if source_kind == "audio" else "preview.mp4")
+        waveform_path = td_path / "waveform.png"
 
         _download_s3(s3, settings.assets_bucket, original_key, original_path)
         with open(original_path, "rb") as src_file:
             sha = hashlib.sha256()
             for chunk in iter(lambda: src_file.read(8 * 1024 * 1024), b""):
                 sha.update(chunk)
-            task["video"]["original"]["sha256"] = sha.hexdigest()
+            original_meta["sha256"] = sha.hexdigest()
 
-        probe = ffprobe_video(str(original_path))
-        duration_sec = float(probe.get("duration_sec") or 0.0)
-        if duration_sec > SOURCE_VIDEO_MAX_DURATION_SECONDS + 1e-3:
-            raise RuntimeError(
-                f"Source video is {duration_sec:.2f}s. Uploaded source videos must be {SOURCE_VIDEO_MAX_DURATION_SECONDS:.2f}s or shorter."
-            )
-        fps = Fraction(probe["fps_num"], probe["fps_den"]) if probe["fps_den"] else Fraction(30, 1)
-        if fps.numerator <= 0 or fps.denominator <= 0:
-            fps = Fraction(30, 1)
-        if probe.get("is_vfr_input"):
-            _job_progress(job, store, 15, "running", "Input is VFR: normalizing edit source to CFR at source resolution")
-            transcode_to_cfr(
+        if source_kind == "audio":
+            audio_probe = ffprobe_audio(str(original_path))
+            duration_sec = float(audio_probe.get("duration_sec") or 0.0)
+            if duration_sec > 600.0 + 1e-3:
+                raise RuntimeError("Source audio is too long. Uploaded source audio must be 600.00s or shorter.")
+            _job_progress(job, store, 15, "running", "Normalizing source audio for editing")
+            transcode_audio_edit_source(
                 str(original_path),
                 str(edit_path),
-                fps,
-                crf=16,
-                preset="medium",
-                audio_bitrate="192k",
+                sample_rate=48000,
+                channels=max(1, int(audio_probe.get("channels") or 2)),
             )
-            edit_source_path = edit_path
-            edit_probe = ffprobe_video(str(edit_source_path))
+            edit_audio_probe = ffprobe_audio(str(edit_path))
+            _job_progress(job, store, 28, "running", "Building lightweight audio preview")
+            transcode_audio_preview(
+                str(edit_path),
+                str(preview_path),
+                audio_bitrate="192k",
+                sample_rate=int(edit_audio_probe.get("sample_rate") or 48000) or 48000,
+            )
+            _job_progress(job, store, 38, "running", "Generating waveform preview")
+            generate_waveform_png(str(edit_path), str(waveform_path))
+            edit_key = asset_paths.audio_edit_source()
+            preview_key = asset_paths.audio_preview_source()
+            waveform_key = asset_paths.audio_waveform()
+            _upload_s3(s3, settings.assets_bucket, edit_key, edit_path, "audio/wav")
+            _upload_s3(s3, settings.assets_bucket, preview_key, preview_path, "audio/mp4")
+            _upload_s3(s3, settings.assets_bucket, waveform_key, waveform_path, "image/png")
+            pseudo_fps = Fraction(100, 1)
+            pseudo_frame_count = max(1, int(round(duration_sec * float(pseudo_fps))))
+            waveform_width = 1280
+            waveform_height = 240
+            task["video"]["editSource"] = {
+                "s3Key": edit_key,
+                "fps": {"num": pseudo_fps.numerator, "den": pseudo_fps.denominator},
+                "isVfrInput": False,
+                "width": 0,
+                "height": 0,
+                "durationSec": round(duration_sec, 4),
+                "frameCount": pseudo_frame_count,
+                "mediaType": "audio",
+                "contentType": "audio/wav",
+                "waveformKey": waveform_key,
+                "waveformWidth": waveform_width,
+                "waveformHeight": waveform_height,
+                "sampleRate": int(edit_audio_probe.get("sample_rate") or 48000),
+                "channels": int(edit_audio_probe.get("channels") or 2),
+            }
+            task["video"]["previewSource"] = {
+                "s3Key": preview_key,
+                "width": 0,
+                "height": 0,
+                "durationSec": round(duration_sec, 4),
+                "frameCount": pseudo_frame_count,
+                "mediaType": "audio",
+                "contentType": "audio/mp4",
+            }
+            task["sourceMedia"] = {
+                "kind": "audio",
+                "original": original_meta,
+                "editSource": {
+                    "s3Key": edit_key,
+                    "contentType": "audio/wav",
+                    "durationSec": round(duration_sec, 4),
+                    "sampleRate": int(edit_audio_probe.get("sample_rate") or 48000),
+                    "channels": int(edit_audio_probe.get("channels") or 2),
+                    "codec": str(edit_audio_probe.get("codec") or "pcm_s16le"),
+                    "frameCount": pseudo_frame_count,
+                    "fps": {"num": pseudo_fps.numerator, "den": pseudo_fps.denominator},
+                    "waveformKey": waveform_key,
+                    "waveformWidth": waveform_width,
+                    "waveformHeight": waveform_height,
+                },
+                "previewSource": {
+                    "s3Key": preview_key,
+                    "contentType": "audio/mp4",
+                    "durationSec": round(duration_sec, 4),
+                    "frameCount": pseudo_frame_count,
+                },
+                "waveform": {
+                    "s3Key": waveform_key,
+                    "width": waveform_width,
+                    "height": waveform_height,
+                },
+            }
+            manifest_key = None
         else:
-            _job_progress(job, store, 15, "running", "Input already CFR: preserving source as edit source")
-            edit_source_path = original_path
-            edit_probe = probe
+            probe = ffprobe_video(str(original_path))
+            duration_sec = float(probe.get("duration_sec") or 0.0)
+            if duration_sec > SOURCE_VIDEO_MAX_DURATION_SECONDS + 1e-3:
+                raise RuntimeError(
+                    f"Source video is {duration_sec:.2f}s. Uploaded source videos must be {SOURCE_VIDEO_MAX_DURATION_SECONDS:.2f}s or shorter."
+                )
+            fps = Fraction(probe["fps_num"], probe["fps_den"]) if probe["fps_den"] else Fraction(30, 1)
+            if fps.numerator <= 0 or fps.denominator <= 0:
+                fps = Fraction(30, 1)
+            if probe.get("is_vfr_input"):
+                _job_progress(job, store, 15, "running", "Input is VFR: normalizing edit source to CFR at source resolution")
+                transcode_to_cfr(
+                    str(original_path),
+                    str(edit_path),
+                    fps,
+                    crf=16,
+                    preset="medium",
+                    audio_bitrate="192k",
+                )
+                edit_source_path = edit_path
+                edit_probe = ffprobe_video(str(edit_source_path))
+            else:
+                _job_progress(job, store, 15, "running", "Input already CFR: preserving source as edit source")
+                edit_source_path = original_path
+                edit_probe = probe
 
-        _job_progress(job, store, 32, "running", "Building lightweight preview proxy")
-        preview_w, preview_h = transcode_for_preview(
-            str(edit_source_path),
-            str(preview_path),
-            fps=Fraction(edit_probe["fps_num"], edit_probe["fps_den"]) if edit_probe["fps_den"] else Fraction(30, 1),
-            source_width=edit_probe["width"],
-            source_height=edit_probe["height"],
-        )
+            _job_progress(job, store, 32, "running", "Building lightweight preview proxy")
+            preview_w, preview_h = transcode_for_preview(
+                str(edit_source_path),
+                str(preview_path),
+                fps=Fraction(edit_probe["fps_num"], edit_probe["fps_den"]) if edit_probe["fps_den"] else Fraction(30, 1),
+                source_width=edit_probe["width"],
+                source_height=edit_probe["height"],
+            )
 
-        edit_key = asset_paths.edit_source()
-        _upload_s3(s3, settings.assets_bucket, edit_key, edit_source_path, "video/mp4")
-        preview_key = asset_paths.preview_source()
-        _upload_s3(s3, settings.assets_bucket, preview_key, preview_path, "video/mp4")
-        _job_progress(job, store, 45, "running", "Generating timeline thumbnails")
+            edit_key = asset_paths.edit_source()
+            _upload_s3(s3, settings.assets_bucket, edit_key, edit_source_path, "video/mp4")
+            preview_key = asset_paths.preview_source()
+            _upload_s3(s3, settings.assets_bucket, preview_key, preview_path, "video/mp4")
+            _job_progress(job, store, 45, "running", "Generating timeline thumbnails")
 
-        thumbs_dir = td_path / "thumbs"
-        thumbs = generate_thumbnail_strip(str(edit_source_path), str(thumbs_dir), fps=1, width=320)
-        thumb_manifest: list[dict[str, Any]] = []
-        for item in thumbs:
-            source = thumbs_dir / item["filename"]
-            key = f"{asset_paths.thumbs_prefix()}/{item['filename']}"
-            _upload_s3(s3, settings.assets_bucket, key, source, "image/jpeg")
-            thumb_manifest.append({
-                "frameIndex": item["index"],
-                "timeSec": item["timeSec"],
-                "key": key,
-            })
+            thumbs_dir = td_path / "thumbs"
+            thumbs = generate_thumbnail_strip(str(edit_source_path), str(thumbs_dir), fps=1, width=320)
+            thumb_manifest: list[dict[str, Any]] = []
+            for item in thumbs:
+                source = thumbs_dir / item["filename"]
+                key = f"{asset_paths.thumbs_prefix()}/{item['filename']}"
+                _upload_s3(s3, settings.assets_bucket, key, source, "image/jpeg")
+                thumb_manifest.append({
+                    "frameIndex": item["index"],
+                    "timeSec": item["timeSec"],
+                    "key": key,
+                })
 
-        manifest_key = f"{asset_paths.thumbs_prefix()}/manifest.json"
-        asset_store.put_bytes(manifest_key, json.dumps({"frames": thumb_manifest}).encode("utf-8"), content_type="application/json")
+            manifest_key = f"{asset_paths.thumbs_prefix()}/manifest.json"
+            asset_store.put_bytes(manifest_key, json.dumps({"frames": thumb_manifest}).encode("utf-8"), content_type="application/json")
 
-    task["video"]["editSource"] = {
-        "s3Key": edit_key,
-        "fps": {"num": edit_probe["fps_num"], "den": edit_probe["fps_den"]},
-        "isVfrInput": probe["is_vfr_input"],
-        "width": edit_probe["width"],
-        "height": edit_probe["height"],
-        "durationSec": edit_probe["duration_sec"],
-        "frameCount": edit_probe["frame_count"],
-    }
-    task["video"]["previewSource"] = {
-        "s3Key": preview_key,
-        "width": preview_w,
-        "height": preview_h,
-        "durationSec": edit_probe["duration_sec"],
-        "frameCount": edit_probe["frame_count"],
-    }
+            task["video"]["editSource"] = {
+                "s3Key": edit_key,
+                "fps": {"num": edit_probe["fps_num"], "den": edit_probe["fps_den"]},
+                "isVfrInput": probe["is_vfr_input"],
+                "width": edit_probe["width"],
+                "height": edit_probe["height"],
+                "durationSec": edit_probe["duration_sec"],
+                "frameCount": edit_probe["frame_count"],
+                "mediaType": "video",
+                "contentType": "video/mp4",
+            }
+            task["video"]["previewSource"] = {
+                "s3Key": preview_key,
+                "width": preview_w,
+                "height": preview_h,
+                "durationSec": edit_probe["duration_sec"],
+                "frameCount": edit_probe["frame_count"],
+                "mediaType": "video",
+                "contentType": "video/mp4",
+            }
+            task["sourceMedia"] = {
+                "kind": "video",
+                "original": original_meta,
+                "editSource": {
+                    "s3Key": edit_key,
+                    "contentType": "video/mp4",
+                    "durationSec": edit_probe["duration_sec"],
+                    "frameCount": edit_probe["frame_count"],
+                    "width": edit_probe["width"],
+                    "height": edit_probe["height"],
+                    "fps": {"num": edit_probe["fps_num"], "den": edit_probe["fps_den"]},
+                    "isVfrInput": probe["is_vfr_input"],
+                },
+                "previewSource": {
+                    "s3Key": preview_key,
+                    "contentType": "video/mp4",
+                    "durationSec": edit_probe["duration_sec"],
+                    "frameCount": edit_probe["frame_count"],
+                    "width": preview_w,
+                    "height": preview_h,
+                },
+            }
+
     task["status"] = "ready"
     task.setdefault("history", []).append(
         {
@@ -1890,7 +2107,7 @@ def _wait_kling_complete(api_key: str, *, task_uuid: str, timeout_sec: int = 180
         time.sleep(6)
 
 
-def _wait_runware_video_complete(api_key: str, *, task_uuid: str, timeout_sec: int = 1800) -> dict[str, Any]:
+def _wait_runware_video_complete(api_key: str, *, task_uuid: str, timeout_sec: int = RUNWARE_VIDEO_POLL_TIMEOUT_SEC) -> dict[str, Any]:
     start = time.time()
     while True:
         payload = get_runware_video_generation_response(api_key=api_key, task_uuid=task_uuid)
@@ -2084,6 +2301,62 @@ def _run_wan27_i2v_prediction(
     raise RuntimeError("Wan 2.7 image-to-video generation did not produce a result")
 
 
+def _run_wan27_continuation_prediction(
+    *,
+    api_key: str,
+    prompt: str,
+    first_clip: str,
+    negative_prompt: str | None,
+    resolution: str,
+    duration_seconds: int,
+    job: dict[str, Any],
+    store: S3JsonStore,
+) -> tuple[str, dict[str, Any]]:
+    input_payload: dict[str, Any] = {
+        "first_clip": first_clip,
+        "prompt": prompt,
+        "resolution": resolution,
+        "duration": int(duration_seconds),
+        "enable_prompt_expansion": True,
+    }
+    if negative_prompt:
+        input_payload["negative_prompt"] = negative_prompt
+    last_exc: BaseException | None = None
+    for retry_index in range(3):
+        _job_progress(job, store, 35, "running", "Creating Replicate Wan 2.7 clip continuation")
+        created = create_replicate_official_model_prediction(
+            api_key=api_key,
+            owner="wan-video",
+            name="wan-2.7-i2v",
+            input=input_payload,
+        )
+        generation_id = created.get("id")
+        if not isinstance(generation_id, str):
+            raise RuntimeError(f"Unexpected Replicate Wan 2.7 clip continuation response: {created}")
+        _job_progress(job, store, 55, "running", "Polling Replicate Wan 2.7 clip continuation")
+        try:
+            result = _wait_replicate_complete(api_key, prediction_id=generation_id)
+            return generation_id, result
+        except RuntimeError as exc:
+            last_exc = exc
+            message = str(exc)
+            if ("(E004)" in message or "temporarily unavailable" in message.lower()) and retry_index < 2:
+                wait_sec = 15 * (retry_index + 1)
+                _job_progress(
+                    job,
+                    store,
+                    55,
+                    "running",
+                    f"Wan 2.7 provider is temporarily unavailable, retrying in {wait_sec}s",
+                )
+                time.sleep(wait_sec)
+                continue
+            raise
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("Wan 2.7 clip continuation did not produce a result")
+
+
 def _run_ltx23_i2v_prediction(
     *,
     api_key: str,
@@ -2144,6 +2417,64 @@ def _run_ltx23_i2v_prediction(
     if last_exc is not None:
         raise last_exc
     raise RuntimeError("LTX 2.3 Pro generation did not produce a result")
+
+
+def _run_ltx23_extend_prediction(
+    *,
+    api_key: str,
+    prompt: str,
+    video: str,
+    duration_seconds: int,
+    extend_mode: str,
+    fps: int,
+    generate_audio: bool,
+    job: dict[str, Any],
+    store: S3JsonStore,
+) -> tuple[str, dict[str, Any]]:
+    input_payload: dict[str, Any] = {
+        "task": "extend",
+        "prompt": prompt,
+        "video": video,
+        "duration": int(duration_seconds),
+        "extend_mode": extend_mode if extend_mode in {"start", "end"} else "end",
+        "fps": int(fps),
+        "resolution": "1080p",
+        "generate_audio": bool(generate_audio),
+    }
+    last_exc: BaseException | None = None
+    for retry_index in range(3):
+        _job_progress(job, store, 35, "running", "Creating Replicate LTX 2.3 Pro extension")
+        created = create_replicate_official_model_prediction(
+            api_key=api_key,
+            owner="lightricks",
+            name="ltx-2.3-pro",
+            input=input_payload,
+        )
+        generation_id = created.get("id")
+        if not isinstance(generation_id, str):
+            raise RuntimeError(f"Unexpected Replicate LTX 2.3 Pro extension response: {created}")
+        _job_progress(job, store, 55, "running", "Polling Replicate LTX 2.3 Pro extension")
+        try:
+            result = _wait_replicate_complete(api_key, prediction_id=generation_id)
+            return generation_id, result
+        except RuntimeError as exc:
+            last_exc = exc
+            message = str(exc)
+            if ("(E004)" in message or "temporarily unavailable" in message.lower()) and retry_index < 2:
+                wait_sec = 15 * (retry_index + 1)
+                _job_progress(
+                    job,
+                    store,
+                    55,
+                    "running",
+                    f"LTX 2.3 Pro is temporarily unavailable, retrying in {wait_sec}s",
+                )
+                time.sleep(wait_sec)
+                continue
+            raise
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("LTX 2.3 Pro extension did not produce a result")
 
 
 def _alpha_mask_for_rect(size: tuple[int, int], rect: dict[str, int], feather_px: int, bleed_px: int) -> Image.Image:
@@ -2678,6 +3009,15 @@ def _handle_api_image_edit_full(
 
     _api_request_progress(job=job, store=store, request_record=request_record, progress=10, status="running", logs="Loading input image")
     src_bytes = asset_store.read_bytes(str(payload["inputAssetKey"]))
+    reference_asset_keys = [str(item or "").strip() for item in payload.get("referenceAssetKeys") or [] if str(item or "").strip()]
+    reference_images: list[tuple[bytes, str]] = []
+    if reference_asset_keys:
+        _api_request_progress(job=job, store=store, request_record=request_record, progress=20, status="running", logs="Loading ordered reference images")
+        for reference_asset_key in reference_asset_keys:
+            reference_bytes = asset_store.read_bytes(reference_asset_key)
+            with Image.open(BytesIO(reference_bytes)) as reference_probe:
+                mime_type = Image.MIME.get(reference_probe.format or "", "image/png")
+            reference_images.append((reference_bytes, mime_type))
     src_image = ImageOps.exif_transpose(Image.open(BytesIO(src_bytes))).convert("RGBA")
     secrets = load_secret(settings.secrets_arn)
     model_name = str(payload["model"])
@@ -2694,8 +3034,11 @@ def _handle_api_image_edit_full(
             model=model_name,
             prompt=str(payload["prompt"]),
             input_image_bytes=src_bytes,
+            reference_images=reference_images,
         )
     elif _is_luma_uni_full_edit_model(model_name):
+        if reference_images:
+            raise RuntimeError("Luma Uni full image edit does not support additional ordered reference images in this API route")
         luma_key = _resolve_luma_uni_api_key(secrets)
         if not luma_key:
             raise RuntimeError(
@@ -2732,6 +3075,7 @@ def _handle_api_image_edit_full(
             model=model_name,
             prompt=str(payload["prompt"]),
             input_image_bytes=src_bytes,
+            reference_images=reference_images,
         )
 
     normalized_bytes = _normalize_full_variant(source_bytes=src_bytes, variant_bytes=out_bytes)
@@ -2789,7 +3133,16 @@ def _handle_api_image_edit_patch(
     source_bytes = asset_store.read_bytes(str(payload["inputAssetKey"]))
     patch_bytes = asset_store.read_bytes(str(payload["patchAssetKey"]))
     mask_bytes = asset_store.read_bytes(str(payload["maskAssetKey"])) if payload.get("maskAssetKey") else None
-    reference_bytes = asset_store.read_bytes(str(payload["referenceAssetKey"])) if payload.get("referenceAssetKey") else None
+    raw_reference_asset_keys = payload.get("referenceAssetKeys") or []
+    reference_asset_keys = [str(item or "").strip() for item in raw_reference_asset_keys if str(item or "").strip()]
+    reference_images: list[tuple[bytes, str]] = []
+    if reference_asset_keys:
+        _api_request_progress(job=job, store=store, request_record=request_record, progress=20, status="running", logs="Loading ordered reference images")
+        for reference_asset_key in reference_asset_keys:
+            reference_bytes = asset_store.read_bytes(reference_asset_key)
+            with Image.open(BytesIO(reference_bytes)) as reference_probe:
+                mime_type = Image.MIME.get(reference_probe.format or "", "image/png")
+            reference_images.append((reference_bytes, mime_type))
 
     source_image = ImageOps.exif_transpose(Image.open(BytesIO(source_bytes))).convert("RGBA")
     patch_source_image = ImageOps.exif_transpose(Image.open(BytesIO(patch_bytes))).convert("RGBA")
@@ -2824,7 +3177,7 @@ def _handle_api_image_edit_patch(
         refined_mask_image.save(mask_io, format="PNG")
         refined_mask_bytes = mask_io.getvalue()
         if model_name == "runware_ace_pp":
-            if not reference_bytes:
+            if not reference_images:
                 raise RuntimeError("Runware ACE++ reference image is required")
             _api_request_progress(job=job, store=store, request_record=request_record, progress=35, status="running", logs="Calling Runware ACE++ patch edit")
             edited_patch = patch_edit_aceplusplus(
@@ -2832,7 +3185,7 @@ def _handle_api_image_edit_patch(
                 prompt=model_prompt,
                 seed_image_bytes=patch_bytes,
                 mask_image_bytes=refined_mask_bytes,
-                reference_image_bytes=reference_bytes,
+                reference_image_bytes=reference_images[0][0],
                 width=patch_source_image.width,
                 height=patch_source_image.height,
                 repainting_scale=float(payload.get("runwareRepaintingScale", 0.7)),
@@ -2875,6 +3228,7 @@ def _handle_api_image_edit_patch(
                 prompt=model_prompt,
                 input_image_bytes=patch_bytes,
                 mask_image_bytes=_to_openai_alpha_mask(refined_mask_bytes),
+                reference_images=reference_images,
             )
         else:
             gemini_key = secrets["GEMINI_API_KEY"]
@@ -2885,6 +3239,7 @@ def _handle_api_image_edit_patch(
                 prompt=model_prompt,
                 input_image_bytes=patch_bytes,
                 mask_image_bytes=refined_mask_bytes,
+                reference_images=reference_images,
             )
 
     final_variant_bytes = edited_patch
@@ -2963,6 +3318,7 @@ def _handle_api_video_generate_reference(
     wan27_negative_prompt = str(payload.get("negativePrompt") or "").strip() or None
     preserve_frames = bool(payload.get("preserveFrames", True))
     provider_name = capability.provider
+    reference_asset_keys = [str(item or "").strip() for item in payload.get("referenceAssetKeys") or [] if str(item or "").strip()]
 
     _api_request_progress(job=job, store=store, request_record=request_record, progress=10, status="running", logs="Loading video generation assets")
     with tempfile.TemporaryDirectory() as td:
@@ -3285,6 +3641,33 @@ def _handle_api_video_generate_reference(
             last_frame_input_key = paths.request_artifact(request_id, "prepared", "last_frame", last_frame_ext)
             asset_store.put_bytes(last_frame_input_key, prepared_last_frame, content_type=last_frame_content_type)
 
+        selected_reference_urls: list[str] = []
+        prepared_reference_assets: list[dict[str, Any]] = []
+        if reference_asset_keys:
+            _api_request_progress(job=job, store=store, request_record=request_record, progress=30, status="running", logs="Preparing ordered reference images")
+            for index, reference_asset_key in enumerate(reference_asset_keys, start=1):
+                reference_bytes = asset_store.read_bytes(reference_asset_key)
+                prepared_reference_bytes, reference_content_type, reference_ext = _prepare_first_frame_image_payload(
+                    reference_bytes,
+                    target_width=first_target_w,
+                    target_height=first_target_h,
+                    max_bytes=MAX_PROVIDER_IMAGE_BYTES,
+                    fit_mode=first_frame_fit_mode,
+                )
+                prepared_reference_key = paths.request_artifact(request_id, "prepared", f"reference_{index}", reference_ext)
+                asset_store.put_bytes(prepared_reference_key, prepared_reference_bytes, content_type=reference_content_type)
+                selected_reference_urls.append(asset_store.presign_get(prepared_reference_key, expires=3600))
+                prepared_reference_assets.append(
+                    {
+                        "key": prepared_reference_key,
+                        "contentType": reference_content_type,
+                    }
+                )
+        if prepared_reference_assets:
+            request_record.setdefault("preparedAssets", {})["referenceImages"] = prepared_reference_assets
+            request_record.setdefault("request", {})["referenceAssetKeys"] = reference_asset_keys
+            _save_api_request(store, request_record)
+
         media_url = asset_store.presign_get(media_key_for_provider, expires=3600) if media_key_for_provider else None
         first_frame_url = asset_store.presign_get(first_frame_input_key, expires=3600)
         last_frame_url = asset_store.presign_get(last_frame_input_key, expires=3600) if last_frame_input_key else None
@@ -3446,7 +3829,7 @@ def _handle_api_video_generate_reference(
                 input={
                     "video_url": media_url,
                     "prompt": payload.get("prompt"),
-                    "reference_image_urls": [first_frame_url],
+                    "reference_image_urls": selected_reference_urls[:3] if selected_reference_urls else [first_frame_url],
                     "resolution": happy_horse_resolution if happy_horse_resolution in {"720p", "1080p"} else "1080p",
                     "audio_setting": "origin" if provider_media_has_audio else "auto",
                     "enable_safety_checker": True,
@@ -3597,7 +3980,7 @@ def _handle_api_video_generate_reference(
                 input={
                     "prompt": payload.get("prompt"),
                     "reference_video": media_url,
-                    "reference_images": [first_frame_url],
+                    "reference_images": selected_reference_urls[:3] if selected_reference_urls else [first_frame_url],
                     "video_reference_type": "base",
                     "keep_original_sound": True,
                     "mode": replicate_kling_mode if replicate_kling_mode in {"std", "pro"} else "pro",
@@ -3625,7 +4008,7 @@ def _handle_api_video_generate_reference(
                 input={
                     "prompt": payload.get("prompt"),
                     "reference_video": media_url,
-                    "reference_images": [first_frame_url],
+                    "reference_images": selected_reference_urls[:3] if selected_reference_urls else [first_frame_url],
                     "video_reference_type": "base",
                     "keep_original_sound": True,
                     "mode": replicate_kling_v3_mode if replicate_kling_v3_mode in {"standard", "pro"} else "pro",
@@ -3653,7 +4036,7 @@ def _handle_api_video_generate_reference(
                 api_key=fal_api_key,
                 input={
                     "prompt": payload.get("prompt"),
-                    "image_urls": [first_frame_url],
+                    "image_urls": selected_reference_urls[:3] if selected_reference_urls else [first_frame_url],
                     "video_urls": [media_url],
                     "resolution": "720p",
                     "duration": str(int(provider_duration_sec)),
@@ -3872,6 +4255,154 @@ def _handle_api_video_generate_reference(
     return job
 
 
+def _handle_edit_video_reference_generate(
+    *,
+    job: dict[str, Any],
+    store: S3JsonStore,
+    asset_store: AssetStore,
+    task: dict[str, Any],
+    settings: Any,
+) -> dict[str, Any]:
+    payload = job["payload"]
+    reference_id = str(payload["referenceId"])
+    model = str(payload["model"])
+    prompt = str(payload["prompt"])
+    aspect_ratio = str(payload.get("aspectRatio") or "").strip() or None
+    selected_reference_ids = [str(item or "").strip() for item in payload.get("selectedReferenceIds") or [] if str(item or "").strip()]
+    references = task.setdefault("editVideoReferences", [])
+    reference_record = next(
+        (item for item in references if isinstance(item, dict) and str(item.get("referenceId") or "") == reference_id),
+        None,
+    )
+    if not isinstance(reference_record, dict):
+        raise RuntimeError(f"Edit video reference not found: {reference_id}")
+
+    now = now_iso()
+    reference_record["status"] = "running"
+    reference_record["jobId"] = job.get("jobId")
+    reference_record["updatedAt"] = now
+    reference_record.pop("error", None)
+    store.save_task(task, merge_on_conflict=True)
+
+    secrets = load_secret(settings.secrets_arn)
+    selected_reference_images: list[tuple[bytes, str]] = []
+    selected_reference_luma_inputs: list[dict[str, str]] = []
+    reference_prefix = f"users/{task['userId']}/tasks/{task['taskId']}/"
+    reference_lookup = {
+        str(item.get("referenceId") or ""): item
+        for item in references
+        if isinstance(item, dict) and item.get("referenceId")
+    }
+    for selected_reference_id in selected_reference_ids:
+        source_reference = reference_lookup.get(selected_reference_id)
+        key = str((source_reference or {}).get("key") or "").strip()
+        if not key or not key.startswith(reference_prefix):
+            continue
+        image_bytes = asset_store.read_bytes(key)
+        mime_type = _reference_content_type_from_key(key)
+        selected_reference_images.append((image_bytes, mime_type))
+        selected_reference_luma_inputs.append(
+            {
+                "data": base64.b64encode(image_bytes).decode("utf-8"),
+                "media_type": mime_type,
+            }
+        )
+
+    if model in {"chatgpt", "chatgpt_latest"}:
+        openai_key = str(secrets.get("OPENAI_API_KEY") or "")
+        if not openai_key:
+            raise RuntimeError("OPENAI_API_KEY is required for ChatGPT image generation")
+        if selected_reference_images:
+            out_bytes = generate_openai_image_from_references(
+                api_key=openai_key,
+                model=model,
+                prompt=prompt,
+                reference_images=selected_reference_images,
+                aspect_ratio=aspect_ratio,
+            )
+        else:
+            blank_image = Image.new("RGBA", (1024, 1024), (255, 255, 255, 255))
+            blank_output = BytesIO()
+            blank_image.save(blank_output, format="PNG")
+            out_bytes = generate_openai_image_edit(
+                api_key=openai_key,
+                model=model,
+                prompt=prompt,
+                input_image_bytes=blank_output.getvalue(),
+                aspect_ratio=aspect_ratio,
+            )
+    elif model in {"luma_uni_1", "luma_uni_1_max"}:
+        luma_key = str(secrets.get("LUMA_AGENTS_API_KEY") or secrets.get("LUMA_API_KEY") or "").strip()
+        if not luma_key or not luma_key.startswith("luma-api-"):
+            raise RuntimeError("Luma Uni requires a Luma Agents key (`luma-api-*`).")
+        created = create_uni_image_generation(
+            api_key=luma_key,
+            prompt=prompt,
+            model="uni-1-max" if model == "luma_uni_1_max" else "uni-1",
+            style="auto",
+            output_format="png",
+            image_refs=selected_reference_luma_inputs or None,
+            aspect_ratio=aspect_ratio,
+        )
+        generation_id = str(created.get("id") or "")
+        if not generation_id:
+            raise RuntimeError(f"Luma Uni create response missing id: {created}")
+        result = wait_for_uni_generation_complete(api_key=luma_key, generation_id=generation_id)
+        output_url = parse_uni_output_url(result)
+        download = requests.get(output_url, timeout=240)
+        download.raise_for_status()
+        out_bytes = download.content
+    else:
+        gemini_key = str(secrets.get("GEMINI_API_KEY") or "")
+        if not gemini_key:
+            raise RuntimeError("GEMINI_API_KEY is required for Gemini image generation")
+        if selected_reference_images:
+            out_bytes = generate_gemini_image_from_references(
+                api_key=gemini_key,
+                model=model,
+                prompt=prompt,
+                reference_images=selected_reference_images,
+                aspect_ratio=aspect_ratio,
+            )
+        else:
+            blank_image = Image.new("RGBA", (1024, 1024), (255, 255, 255, 255))
+            blank_output = BytesIO()
+            blank_image.save(blank_output, format="PNG")
+            out_bytes = generate_gemini_image_edit(
+                api_key=gemini_key,
+                model=model,
+                prompt=prompt,
+                input_image_bytes=blank_output.getvalue(),
+                aspect_ratio=aspect_ratio,
+            )
+
+    normalized_bytes = _normalize_generated_reference_png(out_bytes)
+    key = _asset_paths(task).edit_video_reference(reference_id, f"{reference_id}.png")
+    asset_store.put_bytes(key, normalized_bytes, content_type="image/png")
+    finished_at = now_iso()
+    reference_record["key"] = key
+    reference_record["filename"] = f"{reference_id}.png"
+    reference_record["aspectRatio"] = aspect_ratio
+    reference_record["status"] = "complete"
+    reference_record["updatedAt"] = finished_at
+    reference_record["jobId"] = job.get("jobId")
+    reference_record["error"] = None
+    task.setdefault("history", []).append(
+        {
+            "at": finished_at,
+            "event": "edit_video_reference.complete",
+            "jobId": job.get("jobId"),
+            "referenceId": reference_id,
+            "model": model,
+        }
+    )
+    store.save_task(task, merge_on_conflict=True)
+    _job_progress(job, store, 100, "complete", "Edit video reference generation completed")
+    job["resultRefs"] = {"referenceId": reference_id, "outputKey": key}
+    store.save_job(job)
+    return job
+
+
 def _handle_quality_match_apply(
     *,
     job: dict[str, Any],
@@ -3990,6 +4521,1169 @@ def _handle_quality_match_sam(
     return job
 
 
+def _handle_segment_generate_clip_lengthen(
+    *,
+    job: dict[str, Any],
+    store: S3JsonStore,
+    asset_store: AssetStore,
+    task: dict[str, Any],
+    settings: Any,
+) -> dict[str, Any]:
+    payload = job["payload"]
+    segment_id = str(payload["segmentId"])
+    gen_id = str(payload["genId"])
+    model_name = str(payload["lumaModel"])
+    requested_mode = str(payload.get("mode") or "")
+    clip_lengthen = payload.get("clipLengthenMetadata") if isinstance(payload.get("clipLengthenMetadata"), dict) else {}
+    parent_generation_id = str(payload.get("parentGenerationId") or clip_lengthen.get("parentGenerationId") or "")
+    direction = str(clip_lengthen.get("direction") or "end")
+    input_mode = str(payload.get("inputMode") or clip_lengthen.get("inputMode") or "")
+    requested_added_duration_sec = max(1, int(clip_lengthen.get("durationSeconds") or 6))
+    prompt = str(payload.get("prompt") or "").strip()
+    if not parent_generation_id:
+        raise RuntimeError("Clip lengthen requires a parent generation")
+    parent_generation = task.get("segmentGenerations", {}).get(parent_generation_id)
+    if not isinstance(parent_generation, dict):
+        raise RuntimeError("Parent generation not found for clip lengthen")
+    if parent_generation.get("status") != "complete" or not parent_generation.get("outputKey"):
+        raise RuntimeError("Parent generation must be complete before it can be lengthened")
+
+    segment = next((item for item in task.get("segments", []) if isinstance(item, dict) and item.get("segmentId") == segment_id), None)
+    if not isinstance(segment, dict):
+        raise RuntimeError("Source segment not found")
+
+    gen_meta = _update_segment_generation_record(
+        store=store,
+        user_id=task["userId"],
+        task_id=task["taskId"],
+        gen_id=gen_id,
+        updates={
+            "genId": gen_id,
+            "segmentId": segment_id,
+            "status": "running",
+            "jobId": job.get("jobId"),
+            "error": None,
+            "startedAt": now_iso(),
+            "updatedAt": now_iso(),
+        },
+        history_entry={
+            "at": now_iso(),
+            "event": "segment_generation.running",
+            "jobId": job.get("jobId"),
+            "genId": gen_id,
+            "segmentId": segment_id,
+            "model": model_name,
+        },
+    )
+
+    paths = _asset_paths(task)
+    s3 = boto3.client("s3")
+    parent_settings = parent_generation.get("generationSettings") if isinstance(parent_generation.get("generationSettings"), dict) else {}
+    parent_stored_output = parent_settings.get("storedOutput") if isinstance(parent_settings.get("storedOutput"), dict) else {}
+    preserve_frames = bool(payload.get("preserveFrames", parent_settings.get("preserveFrames", True)))
+    wan27_resolution = str(payload.get("wan27Resolution") or parent_settings.get("wan27Resolution") or "720p")
+    source_fps = Fraction(
+        int(parent_stored_output.get("fps", {}).get("num") or task.get("video", {}).get("editSource", {}).get("fps", {}).get("num") or 24),
+        int(parent_stored_output.get("fps", {}).get("den") or task.get("video", {}).get("editSource", {}).get("fps", {}).get("den") or 1),
+    )
+
+    reference_prefix = f"users/{task['userId']}/tasks/{task['taskId']}/"
+    reference_lookup: dict[str, dict[str, Any]] = {
+        str(item.get("referenceId")): item
+        for item in task.get("editVideoReferences", [])
+        if isinstance(item, dict) and item.get("referenceId")
+    }
+    raw_selected_reference_ids = payload.get("selectedReferenceIds")
+    selected_reference_ids: list[str] = []
+    if isinstance(raw_selected_reference_ids, list):
+        for item in raw_selected_reference_ids:
+            ref_id = str(item or "").strip()
+            if ref_id and ref_id not in selected_reference_ids:
+                selected_reference_ids.append(ref_id)
+    selected_reference_keys: list[str] = []
+    for ref_id in selected_reference_ids:
+        reference = reference_lookup.get(ref_id)
+        key = str((reference or {}).get("key") or "").strip()
+        if key and key.startswith(reference_prefix):
+            selected_reference_keys.append(key)
+
+    provider_name = _segment_generation_provider_name(model_name)
+    used_provider_model = model_name
+    generation_id: str | None = None
+    provider_duration_sec = 0.0
+    provider_input_duration_sec = 0.0
+    provider_input_timing_policy = "clip_lengthen"
+    provider_media_width: int | None = None
+    provider_media_height: int | None = None
+    provider_media_fps: Fraction | None = None
+    provider_media_has_audio: bool | None = None
+    media_key_for_provider: str | None = None
+    out_url: str | None = None
+    raw_output_probe: dict[str, Any] | None = None
+    stored_output_probe: dict[str, Any] | None = None
+    timeline_resize_mode = "pad"
+
+    with tempfile.TemporaryDirectory() as td:
+        td_path = Path(td)
+        base_video_path = td_path / "base_generation.mp4"
+        _download_s3(s3, settings.assets_bucket, str(parent_generation["outputKey"]), base_video_path)
+        base_probe = ffprobe_video(str(base_video_path))
+        base_width = int(base_probe.get("width") or parent_stored_output.get("width") or task.get("video", {}).get("editSource", {}).get("width") or 0)
+        base_height = int(base_probe.get("height") or parent_stored_output.get("height") or task.get("video", {}).get("editSource", {}).get("height") or 0)
+        base_duration_sec = float(base_probe.get("duration_sec") or 0.0)
+        provider_media_has_audio = bool(base_probe.get("has_audio"))
+        provider_media_width = base_width
+        provider_media_height = base_height
+        provider_media_fps = source_fps
+        provider_input_duration_sec = round(base_duration_sec, 3)
+        selected_reference_urls = [asset_store.presign_get(key, expires=3600) for key in selected_reference_keys]
+        secrets = load_secret(settings.secrets_arn)
+
+        if model_name == "ltx-2.3-pro":
+            replicate_key = secrets.get("REPLICATE_API_KEY")
+            if not replicate_key:
+                raise RuntimeError("LTX 2.3 Pro extension requires REPLICATE_API_KEY")
+            prepared_video_path = td_path / "ltx_extension_input.mp4"
+            provider_media_width, provider_media_height = transcode_for_provider(
+                str(base_video_path),
+                str(prepared_video_path),
+                fps=source_fps,
+                source_width=base_width,
+                source_height=base_height,
+                landscape_target=(1920, 1080),
+                portrait_target=(1080, 1920),
+                resize_mode="crop",
+                crf=18,
+            )
+            timeline_resize_mode = "crop"
+            media_key_for_provider = paths.segment_provider_input(segment_id, gen_id, "replicate")
+            _upload_s3(s3, settings.assets_bucket, media_key_for_provider, prepared_video_path, "video/mp4")
+            media_url = asset_store.presign_get(media_key_for_provider, expires=3600)
+            provider_duration_sec = float(requested_added_duration_sec)
+            ltx23_requested_fps = _nearest_supported_ltx23_fps(source_fps)
+            generation_id, result = _run_ltx23_extend_prediction(
+                api_key=replicate_key,
+                prompt=prompt,
+                video=media_url,
+                duration_seconds=requested_added_duration_sec,
+                extend_mode=direction,
+                fps=ltx23_requested_fps,
+                generate_audio=False,
+                job=job,
+                store=store,
+            )
+            out_url = _parse_replicate_output_url(result)
+            used_provider_model = "lightricks/ltx-2.3-pro"
+        elif model_name == "wan2.7-i2v":
+            if direction != "end":
+                raise RuntimeError("Wan 2.7 clip continuation only supports extending from the end")
+            if base_duration_sec < 2.0 or base_duration_sec > 10.0:
+                raise RuntimeError("Wan 2.7 clip continuation requires a base clip between 2 and 10 seconds")
+            replicate_key = secrets.get("REPLICATE_API_KEY")
+            if not replicate_key:
+                raise RuntimeError("Wan 2.7 clip continuation requires REPLICATE_API_KEY")
+            target_total_duration = min(15, max(int(math.ceil(base_duration_sec + requested_added_duration_sec)), int(math.ceil(base_duration_sec))))
+            if target_total_duration <= int(math.ceil(base_duration_sec)):
+                raise RuntimeError("Wan 2.7 clip continuation needs at least one additional second")
+            prepared_video_path = td_path / "wan27_continuation_input.mp4"
+            provider_media_width, provider_media_height = transcode_for_provider(
+                str(base_video_path),
+                str(prepared_video_path),
+                fps=source_fps,
+                source_width=base_width,
+                source_height=base_height,
+                landscape_target=(1920 if wan27_resolution == "1080p" else 1280, 1080 if wan27_resolution == "1080p" else 720),
+                portrait_target=(1080 if wan27_resolution == "1080p" else 720, 1920 if wan27_resolution == "1080p" else 1280),
+                resize_mode="pad",
+                crf=18,
+            )
+            media_key_for_provider = paths.segment_provider_input(segment_id, gen_id, "replicate")
+            _upload_s3(s3, settings.assets_bucket, media_key_for_provider, prepared_video_path, "video/mp4")
+            media_url = asset_store.presign_get(media_key_for_provider, expires=3600)
+            provider_duration_sec = float(target_total_duration)
+            generation_id, result = _run_wan27_continuation_prediction(
+                api_key=replicate_key,
+                prompt=prompt,
+                first_clip=media_url,
+                negative_prompt=str(payload.get("negativePrompt") or "").strip() or None,
+                resolution=wan27_resolution if wan27_resolution in {"720p", "1080p"} else "720p",
+                duration_seconds=target_total_duration,
+                job=job,
+                store=store,
+            )
+            out_url = _parse_replicate_output_url(result)
+            used_provider_model = "wan-video/wan-2.7-i2v"
+        elif model_name in {"veo-3.1", "veo-3.1-fast"}:
+            if direction != "end":
+                raise RuntimeError("Veo clip extension only supports extending from the end")
+            runware_key = secrets.get("RUNWARE_API_KEY")
+            if not runware_key:
+                raise RuntimeError("Veo clip extension requires RUNWARE_API_KEY")
+            prepared_video_path = td_path / "veo_extension_input.mp4"
+            provider_media_width, provider_media_height = transcode_for_provider(
+                str(base_video_path),
+                str(prepared_video_path),
+                fps=Fraction(24, 1),
+                source_width=base_width,
+                source_height=base_height,
+                landscape_target=(1280, 720),
+                portrait_target=(720, 1280),
+                resize_mode="pad",
+                crf=18,
+            )
+            provider_media_fps = Fraction(24, 1)
+            provider_input_timing_policy = "fixed_24fps"
+            media_key_for_provider = paths.segment_provider_input(segment_id, gen_id, "runware")
+            _upload_s3(s3, settings.assets_bucket, media_key_for_provider, prepared_video_path, "video/mp4")
+            media_url = asset_store.presign_get(media_key_for_provider, expires=3600)
+            provider_duration_sec = 7.0
+            runware_model = RUNWARE_VEO_31_MODEL if model_name == "veo-3.1" else RUNWARE_VEO_31_FAST_MODEL
+            _job_progress(job, store, 35, "running", f"Creating Runware {model_name} clip extension")
+            created = create_veo_video_extension(
+                api_key=runware_key,
+                model=runware_model,
+                video_url=media_url,
+                prompt=prompt,
+                duration_seconds=7,
+            )
+            generation_id = created.get("taskUUID")
+            if not isinstance(generation_id, str):
+                raise RuntimeError(f"Unexpected Runware Veo extension response: {created}")
+            _job_progress(job, store, 55, "running", "Polling Runware Veo clip extension")
+            result = _wait_runware_video_complete(runware_key, task_uuid=generation_id)
+            out_url = _parse_runware_video_output_url(result)
+            provider_name = "runware"
+            used_provider_model = runware_model
+        elif model_name == "seedance-2.0-reference-to-video":
+            fal_api_key = secrets.get("FAL_API_KEY")
+            if not fal_api_key:
+                raise RuntimeError("Seedance continuation requires FAL_API_KEY")
+            target_total_duration = min(15, max(int(math.ceil(base_duration_sec + requested_added_duration_sec)), int(math.ceil(base_duration_sec))))
+            if target_total_duration <= int(math.ceil(base_duration_sec)):
+                raise RuntimeError("Seedance continuation needs at least one additional second")
+            media_key_for_provider = paths.segment_provider_input(segment_id, gen_id, "fal")
+            _upload_s3(s3, settings.assets_bucket, media_key_for_provider, base_video_path, "video/mp4")
+            media_url = asset_store.presign_get(media_key_for_provider, expires=3600)
+            provider_duration_sec = float(target_total_duration)
+            provider_name = "fal"
+            aspect_ratio = _nearest_allowed_aspect_ratio(base_width, base_height, allowed=("21:9", "16:9", "4:3", "1:1", "3:4", "9:16"))
+            reference_tokens = ", ".join(f"@Image{idx + 1}" for idx in range(len(selected_reference_urls)))
+            if direction == "start":
+                prompt_prefix = (
+                    f"Create a shot that happens immediately before @Video1 and transitions seamlessly into it without restarting the scene. Use {reference_tokens} as ordered visual references. "
+                    if selected_reference_urls
+                    else "Create a shot that happens immediately before @Video1 and transitions seamlessly into it without restarting the scene. "
+                )
+            else:
+                prompt_prefix = (
+                    f"Continue naturally from @Video1 without restarting the shot. Use {reference_tokens} as ordered visual references. "
+                    if selected_reference_urls
+                    else "Continue naturally from @Video1 without restarting the shot. "
+                )
+            _job_progress(job, store, 35, "running", "Creating fal.ai Seedance continuation")
+            created = submit_seedance_reference_to_video(
+                api_key=fal_api_key,
+                input={
+                    "prompt": f"{prompt_prefix}{prompt}".strip(),
+                    "image_urls": selected_reference_urls[:9],
+                    "video_urls": [media_url],
+                    "resolution": "720p",
+                    "duration": str(target_total_duration),
+                    "aspect_ratio": aspect_ratio or "auto",
+                    "generate_audio": False,
+                    "end_user_id": task.get("userId"),
+                },
+            )
+            generation_id = created.get("request_id")
+            if not isinstance(generation_id, str):
+                raise RuntimeError(f"Unexpected fal.ai Seedance continuation response: {created}")
+            _job_progress(job, store, 55, "running", "Polling fal.ai Seedance continuation")
+            result = _wait_fal_queue_complete(fal_api_key, created=created)
+            out_url = _parse_fal_video_output_url(result)
+            used_provider_model = "bytedance/seedance-2.0/reference-to-video"
+        else:
+            raise RuntimeError(f"Unsupported clip lengthen model: {model_name}")
+
+        if not out_url:
+            raise RuntimeError("Provider did not return a clip output URL")
+
+        output_key = paths.segment_generated(segment_id, gen_id)
+        _job_progress(job, store, 75, "running", "Downloading generation output to S3")
+        downloaded_path = td_path / "provider_output_raw.mp4"
+        _download_url_to_path(out_url, downloaded_path)
+        raw_output_probe = ffprobe_video(str(downloaded_path))
+        needs_timeline_conform = _needs_timeline_conform(
+            raw_output_probe,
+            target_width=base_width,
+            target_height=base_height,
+            target_fps=source_fps,
+        )
+        if needs_timeline_conform:
+            _job_progress(job, store, 82, "running", "Conforming provider output to working clip resolution and frame rate")
+            conformed_path = td_path / "provider_output_timeline.mp4"
+            transcode_to_cfr(
+                str(downloaded_path),
+                str(conformed_path),
+                source_fps,
+                target_width=base_width,
+                target_height=base_height,
+                resize_mode=timeline_resize_mode,
+                crf=16,
+                preset="medium",
+            )
+            _upload_s3(s3, settings.assets_bucket, output_key, conformed_path, "video/mp4")
+            stored_output_probe = ffprobe_video(str(conformed_path))
+        else:
+            _upload_s3(s3, settings.assets_bucket, output_key, downloaded_path, "video/mp4")
+            stored_output_probe = raw_output_probe
+
+        output_duration_value = float(stored_output_probe.get("duration_sec") or 0.0)
+        if output_duration_value > 0:
+            provider_duration_sec = round(output_duration_value, 3)
+        timeline_conform = _timeline_conform_summary(
+            source_probe=base_probe,
+            raw_output_probe=raw_output_probe,
+            stored_output_probe=stored_output_probe,
+            applied=needs_timeline_conform,
+            policy="clip_lengthen_cfr_resolution",
+        )
+
+    finished_at = now_iso()
+    processing_duration_sec = _processing_duration_seconds(gen_meta.get("startedAt"), finished_at)
+    poster_key = _create_segment_generation_poster(
+        asset_store=asset_store,
+        paths=paths,
+        segment_id=segment_id,
+        gen_id=gen_id,
+        video_path=str(conformed_path if needs_timeline_conform else downloaded_path),
+    )
+    inherited_alignment = parent_generation.get("alignment") if isinstance(parent_generation.get("alignment"), dict) and direction == "end" else None
+    inherited_source_frame_offset = None
+    if direction == "end":
+        parent_timeline_alignment = parent_settings.get("timelineAlignment") if isinstance(parent_settings.get("timelineAlignment"), dict) else {}
+        inherited_source_frame_offset = int(
+            parent_generation.get("sourceFrameOffset")
+            or (inherited_alignment or {}).get("sourceFrameOffset")
+            or parent_timeline_alignment.get("sourceFrameOffset")
+            or 0
+        )
+    generation_settings = {
+        **parent_settings,
+        "workflow": "clip_lengthen",
+        "provider": provider_name,
+        "requestedModel": model_name,
+        "model": used_provider_model or model_name,
+        "mode": requested_mode,
+        "inputMode": input_mode,
+        "preserveFrames": preserve_frames,
+        "selectedReferenceIds": selected_reference_ids,
+        "selectedReferenceCount": len(selected_reference_ids),
+        "requestedDurationSec": round(provider_duration_sec, 3),
+        "providerDurationSec": provider_duration_sec,
+        "providerInputTimingPolicy": provider_input_timing_policy,
+        "mediaHasAudio": provider_media_has_audio,
+        "providerInputTiming": (
+            {
+                "durationSec": round(float(provider_input_duration_sec or 0.0), 4),
+                "fps": {"num": provider_media_fps.numerator, "den": provider_media_fps.denominator},
+                "width": provider_media_width,
+                "height": provider_media_height,
+                "timingPolicy": provider_input_timing_policy,
+            }
+            if provider_media_fps and provider_media_width and provider_media_height
+            else None
+        ),
+        "storedOutput": _video_timing_payload(stored_output_probe or {}),
+        "providerOutputRaw": _video_timing_payload(raw_output_probe or {}),
+        "timelineAlignment": inherited_alignment if direction == "end" else None,
+        "timelineConform": timeline_conform,
+        "clipLengthen": {
+            "parentGenerationId": parent_generation_id,
+            "direction": direction,
+            "addedDurationSec": requested_added_duration_sec,
+            "inputMode": input_mode,
+            "providerModel": used_provider_model or model_name,
+            "requestedPrompt": prompt,
+        },
+    }
+    gen_meta = _update_segment_generation_record(
+        store=store,
+        user_id=task["userId"],
+        task_id=task["taskId"],
+        gen_id=gen_id,
+        updates={
+            "genId": gen_id,
+            "segmentId": segment_id,
+            "luma": {
+                "provider": provider_name,
+                "model": model_name,
+                "mode": requested_mode,
+                "prompt": prompt,
+                "negativePrompt": payload.get("negativePrompt"),
+                "lumaGenerationId": generation_id,
+            },
+            "status": "complete",
+            "outputKey": paths.segment_generated(segment_id, gen_id),
+            "posterKey": poster_key,
+            "inputMediaKey": media_key_for_provider,
+            "inputFirstFrameKey": None,
+            "inputLastFrameKey": None,
+            "sourceFirstFrameCaptureKey": parent_generation.get("sourceFirstFrameCaptureKey"),
+            "sourceFirstFrameVariantId": parent_generation.get("sourceFirstFrameVariantId"),
+            "sourceFirstFrameResolvedKey": parent_generation.get("sourceFirstFrameResolvedKey"),
+            "sourceLastFrameCaptureKey": parent_generation.get("sourceLastFrameCaptureKey"),
+            "sourceLastFrameVariantId": parent_generation.get("sourceLastFrameVariantId"),
+            "sourceLastFrameResolvedKey": parent_generation.get("sourceLastFrameResolvedKey"),
+            "requestedDurationSec": round(provider_duration_sec, 3),
+            "providerDurationSec": provider_duration_sec,
+            "sourceFrameOffset": inherited_source_frame_offset,
+            "alignment": inherited_alignment if direction == "end" else None,
+            "segmentCrop": parent_generation.get("segmentCrop") or segment.get("crop"),
+            "generationSettings": generation_settings,
+            "createdAt": gen_meta.get("createdAt") or now_iso(),
+            "updatedAt": finished_at,
+            "finishedAt": finished_at,
+            "processingDurationSec": processing_duration_sec,
+            "error": None,
+            "parentGenerationId": parent_generation_id,
+            "extension": clip_lengthen,
+        },
+        history_entry={
+            "at": finished_at,
+            "event": "segment_generation.complete",
+            "jobId": job.get("jobId"),
+            "genId": gen_id,
+            "segmentId": segment_id,
+            "model": model_name,
+            "outputKey": paths.segment_generated(segment_id, gen_id),
+        },
+    )
+    job["resultRefs"] = {
+        "genId": gen_id,
+        "segmentId": segment_id,
+        "outputKey": paths.segment_generated(segment_id, gen_id),
+        "posterKey": poster_key,
+        "provider": provider_name,
+        "model": model_name,
+        "mode": requested_mode,
+        "providerGenerationId": generation_id,
+        "finishedAt": gen_meta.get("finishedAt"),
+        "processingDurationSec": processing_duration_sec,
+    }
+    _job_progress(job, store, 100, "complete", "Clip lengthen generation complete")
+    store.save_job(job)
+    return job
+
+
+def _character_animate_model_label(model: str) -> str:
+    if model == "runway_act_two":
+        return "Runway Act-Two"
+    if model == "kling_v3_motion_control":
+        return "Kling 3.0 Motion Control"
+    if model == "seedance_2_0_reference_to_video":
+        return "ByteDance Seedance 2.0"
+    if model == "omnihuman_v1_5":
+        return "Bytedance OmniHuman v1.5"
+    return model
+
+
+def _previz_model_label(model: str) -> str:
+    if model == "veo_3_1":
+        return "Veo 3.1"
+    if model == "happy_horse_1_0":
+        return "Happy Horse 1.0"
+    if model == "seedance_2_0":
+        return "ByteDance Seedance 2.0"
+    return model
+
+
+def _previz_scene_dimensions(scene_aspect_ratio: str) -> tuple[int, int]:
+    mapping = {
+        "21:9": (1680, 720),
+        "16:9": (1280, 720),
+        "4:3": (1152, 864),
+        "1:1": (1024, 1024),
+        "3:4": (864, 1152),
+        "9:16": (720, 1280),
+    }
+    return mapping.get(scene_aspect_ratio, mapping["16:9"])
+
+
+def _build_previz_prompt_prefix(model_name: str, selected_frame_ids: list[str]) -> str:
+    if model_name == "seedance_2_0":
+        if len(selected_frame_ids) <= 1:
+            return "@Image1 is the storyboard frame for the scene."
+        if len(selected_frame_ids) == 2:
+            return "@Image1 is the start frame and @Image2 is the end frame for the scene."
+        key_count = len(selected_frame_ids) - 2
+        key_label = "key frame" if key_count == 1 else "key frames"
+        key_tokens = ", ".join(f"@Image{index}" for index in range(2, len(selected_frame_ids)))
+        return f"@Image1 is the start frame. {key_tokens} are the {key_label}. @Image{len(selected_frame_ids)} is the end frame."
+    if len(selected_frame_ids) <= 1:
+        return "Animate the supplied storyboard frame into a coherent previz shot."
+    if len(selected_frame_ids) == 2:
+        return "Use the supplied storyboard frames as the start and end beats of the shot."
+    return "Use the supplied storyboard frames as the ordered start, key, and end beats of the shot."
+
+
+def _handle_previz_generate(
+    *,
+    job: dict[str, Any],
+    store: S3JsonStore,
+    asset_store: AssetStore,
+    task: dict[str, Any],
+    settings: Any,
+) -> dict[str, Any]:
+    payload = job["payload"]
+    metadata = payload.get("previzGenerateMetadata")
+    if not isinstance(metadata, dict):
+        raise RuntimeError("Previz generation metadata is missing")
+
+    segment_id = str(payload.get("segmentId") or "")
+    gen_id = str(payload.get("genId") or "")
+    if not segment_id or not gen_id:
+        raise RuntimeError("Previz generation job is missing segment or generation identifiers")
+
+    segment = next((s for s in task.get("segments", []) if s.get("segmentId") == segment_id), None)
+    if not isinstance(segment, dict):
+        raise RuntimeError("Scene segment not found")
+
+    model_name = str(metadata.get("model") or "")
+    prompt = str(metadata.get("prompt") or "").strip()
+    if not prompt:
+        raise RuntimeError("Previz generation prompt is required")
+    scene_aspect_ratio = str(metadata.get("sceneAspectRatio") or "16:9").strip() or "16:9"
+    selected_frame_ids = [
+        str(item or "").strip()
+        for item in metadata.get("selectedFrameIds") or []
+        if str(item or "").strip()
+    ]
+    if not selected_frame_ids:
+        raise RuntimeError("Select at least one generated frame before generating previz video")
+    duration_sec = int(metadata.get("durationSec") or 8)
+    duration_sec = max(4, min(15, duration_sec))
+
+    provider_name = "runware" if model_name == "veo_3_1" else "fal"
+    gen_meta = _update_segment_generation_record(
+        store=store,
+        user_id=task["userId"],
+        task_id=task["taskId"],
+        gen_id=gen_id,
+        updates={
+            "genId": gen_id,
+            "segmentId": segment_id,
+            "status": "running",
+            "jobId": job.get("jobId"),
+            "error": None,
+            "startedAt": now_iso(),
+            "updatedAt": now_iso(),
+        },
+        history_entry={
+            "at": now_iso(),
+            "event": "previz_generation.running",
+            "jobId": job.get("jobId"),
+            "genId": gen_id,
+            "segmentId": segment_id,
+            "model": model_name,
+        },
+    )
+
+    reference_lookup: dict[str, dict[str, Any]] = {
+        str(item.get("referenceId")): item
+        for item in task.get("editVideoReferences", [])
+        if isinstance(item, dict) and item.get("referenceId")
+    }
+    selected_reference_records = [reference_lookup.get(reference_id) for reference_id in selected_frame_ids]
+    selected_reference_records = [record for record in selected_reference_records if isinstance(record, dict)]
+    if not selected_reference_records:
+        raise RuntimeError("Selected Previz frames were not found")
+
+    frame_keys = [str(record.get("key") or "").strip() for record in selected_reference_records if str(record.get("key") or "").strip()]
+    if not frame_keys:
+        raise RuntimeError("Selected Previz frames are missing image assets")
+
+    first_frame_key = frame_keys[0]
+    last_frame_key = frame_keys[-1]
+    first_frame_url = asset_store.presign_get(first_frame_key, expires=3600)
+    last_frame_url = asset_store.presign_get(last_frame_key, expires=3600)
+    selected_frame_urls = [asset_store.presign_get(key, expires=3600) for key in frame_keys]
+
+    output_width, output_height = _previz_scene_dimensions(scene_aspect_ratio)
+    input_prompt_prefix = _build_previz_prompt_prefix(model_name, selected_frame_ids)
+    provider_prompt = f"{input_prompt_prefix} {prompt}".strip()
+
+    secrets = load_secret(settings.secrets_arn)
+    out_url: str
+    generation_id: str
+    used_provider_model: str | None = None
+    provider_duration_sec: float | None = float(duration_sec)
+    out_key = _asset_paths(task).segment_generated(segment_id, gen_id)
+    paths = _asset_paths(task)
+    s3 = boto3.client("s3")
+
+    with tempfile.TemporaryDirectory() as td:
+        td_path = Path(td)
+        if model_name == "veo_3_1":
+            runware_key = secrets.get("RUNWARE_API_KEY")
+            if not runware_key:
+                raise RuntimeError("Veo 3.1 requires RUNWARE_API_KEY")
+            _job_progress(job, store, 35, "running", "Creating Veo 3.1 previz generation")
+            created = create_veo_first_last_generation(
+                api_key=runware_key,
+                model=RUNWARE_VEO_31_MODEL,
+                start_image_url=first_frame_url,
+                end_image_url=last_frame_url,
+                duration_seconds=duration_sec,
+                prompt=provider_prompt,
+                width=output_width,
+                height=output_height,
+                generate_audio=False,
+            )
+            generation_id = str(created.get("taskUUID") or "")
+            if not generation_id:
+                raise RuntimeError(f"Unexpected Runware Veo create response: {created}")
+            _job_progress(job, store, 55, "running", "Polling Veo 3.1 generation")
+            result = _wait_runware_video_complete(runware_key, task_uuid=generation_id)
+            out_url = _parse_runware_video_output_url(result)
+            used_provider_model = RUNWARE_VEO_31_MODEL
+        elif model_name == "happy_horse_1_0":
+            fal_api_key = secrets.get("FAL_API_KEY")
+            if not fal_api_key:
+                raise RuntimeError("Happy Horse 1.0 requires FAL_API_KEY")
+            _job_progress(job, store, 35, "running", "Creating Happy Horse 1.0 previz generation")
+            created = submit_happy_horse_image_to_video(
+                api_key=fal_api_key,
+                input={
+                    "image_url": first_frame_url,
+                    "prompt": provider_prompt,
+                    "resolution": "1080p",
+                    "duration": duration_sec,
+                    "enable_safety_checker": True,
+                },
+            )
+            generation_id = str(created.get("request_id") or "")
+            if not generation_id:
+                raise RuntimeError(f"Unexpected Happy Horse image-to-video create response: {created}")
+            _job_progress(job, store, 55, "running", "Polling Happy Horse 1.0 generation")
+            result = _wait_fal_queue_complete(fal_api_key, created=created)
+            out_url = _parse_fal_video_output_url(result)
+            used_provider_model = "alibaba/happy-horse/image-to-video"
+        elif model_name == "seedance_2_0":
+            fal_api_key = secrets.get("FAL_API_KEY")
+            if not fal_api_key:
+                raise RuntimeError("Seedance 2.0 requires FAL_API_KEY")
+            _job_progress(job, store, 35, "running", "Creating Seedance 2.0 previz generation")
+            created = submit_seedance_reference_to_video(
+                api_key=fal_api_key,
+                input={
+                    "prompt": provider_prompt,
+                    "image_urls": selected_frame_urls[:9],
+                    "resolution": "720p",
+                    "duration": str(duration_sec),
+                    "aspect_ratio": scene_aspect_ratio if scene_aspect_ratio in {"auto", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"} else "16:9",
+                    "generate_audio": False,
+                    "end_user_id": task.get("userId"),
+                },
+            )
+            generation_id = str(created.get("request_id") or "")
+            if not generation_id:
+                raise RuntimeError(f"Unexpected Seedance 2.0 create response: {created}")
+            _job_progress(job, store, 55, "running", "Polling Seedance 2.0 generation")
+            result = _wait_fal_queue_complete(fal_api_key, created=created)
+            out_url = _parse_fal_video_output_url(result)
+            used_provider_model = "bytedance/seedance-2.0/reference-to-video"
+        else:
+            raise RuntimeError(f"Unsupported Previz model: {model_name}")
+
+        _job_progress(job, store, 75, "running", "Downloading previz output to S3")
+        downloaded_path = td_path / "provider_output.mp4"
+        _download_url_to_path(out_url, downloaded_path)
+        raw_output_probe = ffprobe_video(str(downloaded_path))
+
+        needs_timeline_conform = _needs_timeline_conform(
+            raw_output_probe,
+            target_width=output_width,
+            target_height=output_height,
+            target_fps=Fraction(24, 1),
+        )
+        if needs_timeline_conform:
+            _job_progress(job, store, 82, "running", "Conforming output to scene aspect ratio and frame rate")
+            conformed_path = td_path / "provider_output_conformed.mp4"
+            transcode_to_cfr(
+                str(downloaded_path),
+                str(conformed_path),
+                Fraction(24, 1),
+                target_width=output_width,
+                target_height=output_height,
+                crf=16,
+                preset="medium",
+            )
+            _upload_s3(s3, settings.assets_bucket, out_key, conformed_path, "video/mp4")
+            stored_output_probe = ffprobe_video(str(conformed_path))
+            poster_source_path = conformed_path
+        else:
+            _upload_s3(s3, settings.assets_bucket, out_key, downloaded_path, "video/mp4")
+            stored_output_probe = raw_output_probe
+            poster_source_path = downloaded_path
+
+        output_duration_value = float(stored_output_probe.get("duration_sec") or 0.0)
+        if output_duration_value > 0:
+            provider_duration_sec = round(output_duration_value, 3)
+        finished_at = now_iso()
+        processing_duration_sec = _processing_duration_seconds(gen_meta.get("startedAt"), finished_at)
+        poster_key = _create_segment_generation_poster(
+            asset_store=asset_store,
+            paths=paths,
+            segment_id=segment_id,
+            gen_id=gen_id,
+            video_path=str(poster_source_path),
+        )
+        gen_meta = _update_segment_generation_record(
+            store=store,
+            user_id=task["userId"],
+            task_id=task["taskId"],
+            gen_id=gen_id,
+            updates={
+                "genId": gen_id,
+                "segmentId": segment_id,
+                "luma": {
+                    "provider": provider_name,
+                    "model": model_name,
+                    "mode": "previz_frames",
+                    "prompt": prompt,
+                    "negativePrompt": None,
+                    "lumaGenerationId": generation_id,
+                },
+                "status": "complete",
+                "outputKey": out_key,
+                "posterKey": poster_key,
+                "inputFirstFrameKey": first_frame_key,
+                "inputLastFrameKey": last_frame_key if len(frame_keys) > 1 else None,
+                "requestedDurationSec": round(float(duration_sec), 3),
+                "providerDurationSec": provider_duration_sec,
+                "generationSettings": {
+                    "workflowId": "simple_generation_workflow",
+                    "provider": provider_name,
+                    "requestedModel": model_name,
+                    "model": used_provider_model or model_name,
+                    "sceneAspectRatio": scene_aspect_ratio,
+                    "selectedFrameIds": selected_frame_ids,
+                    "selectedFrameCount": len(selected_frame_ids),
+                    "selectedReferenceIds": selected_frame_ids,
+                    "selectedReferenceCount": len(selected_frame_ids),
+                    "requestedDurationSec": round(float(duration_sec), 3),
+                    "scenePrompt": metadata.get("scenePrompt"),
+                    "storedOutput": _video_timing_payload(stored_output_probe or {}),
+                    "timelineConform": {
+                        "policy": "scene_cfr_resolution",
+                        "applied": needs_timeline_conform,
+                        "durationDeltaSec": round(float(stored_output_probe.get("duration_sec") or 0.0) - float(duration_sec), 4),
+                        "frameDelta": int(stored_output_probe.get("frame_count") or 0) - int(round(duration_sec * 24)),
+                        "fpsConformed": True,
+                        "resolutionConformed": needs_timeline_conform,
+                    },
+                },
+                "createdAt": gen_meta.get("createdAt") or now_iso(),
+                "updatedAt": finished_at,
+                "finishedAt": finished_at,
+                "processingDurationSec": processing_duration_sec,
+                "error": None,
+            },
+            history_entry={
+                "at": finished_at,
+                "event": "previz_generation.complete",
+                "jobId": job.get("jobId"),
+                "genId": gen_id,
+                "segmentId": segment_id,
+                "model": model_name,
+                "outputKey": out_key,
+            },
+        )
+        latest_task = store.load_task(task["userId"], task["taskId"])
+        if isinstance(latest_task, dict):
+            latest_segment = next(
+                (
+                    item
+                    for item in latest_task.get("segments", [])
+                    if isinstance(item, dict) and str(item.get("segmentId") or "") == segment_id
+                ),
+                None,
+            )
+            if isinstance(latest_segment, dict):
+                latest_segment["selectedGenerationId"] = gen_id
+                store.save_task(latest_task, merge_on_conflict=True)
+        job["resultRefs"] = {
+            "genId": gen_id,
+            "segmentId": segment_id,
+            "outputKey": out_key,
+            "posterKey": poster_key,
+            "provider": provider_name,
+            "model": model_name,
+            "mode": "previz_frames",
+            "providerGenerationId": generation_id,
+            "finishedAt": gen_meta.get("finishedAt"),
+            "processingDurationSec": processing_duration_sec,
+        }
+        _job_progress(job, store, 100, "complete", "Previz generation complete")
+        store.save_job(job)
+        return job
+
+
+def _handle_segment_generate_character_animate(
+    *,
+    job: dict[str, Any],
+    store: S3JsonStore,
+    asset_store: AssetStore,
+    task: dict[str, Any],
+    settings: Any,
+) -> dict[str, Any]:
+    payload = job["payload"]
+    metadata = payload.get("characterAnimateMetadata")
+    if not isinstance(metadata, dict):
+        raise RuntimeError("Character animation metadata is missing")
+    segment_id = str(payload.get("segmentId") or "")
+    gen_id = str(payload.get("genId") or "")
+    if not segment_id or not gen_id:
+        raise RuntimeError("Character animation job is missing segment or generation identifiers")
+    segment = next((s for s in task.get("segments", []) if s.get("segmentId") == segment_id), None)
+    if not isinstance(segment, dict):
+        raise RuntimeError("Segment not found")
+
+    model_name = str(metadata.get("model") or payload.get("lumaModel") or "")
+    mode = str(metadata.get("mode") or payload.get("mode") or "")
+    character_reference_id = str(metadata.get("characterReferenceId") or "").strip()
+    prompt = str(metadata.get("prompt") or payload.get("prompt") or "").strip() or None
+    output_aspect_ratio = str(metadata.get("outputAspectRatio") or "1280:720")
+    omnihuman_resolution = str(metadata.get("omnihumanResolution") or "720p")
+    kling_mode = str(metadata.get("klingMode") or "pro")
+    kling_character_orientation = str(metadata.get("klingCharacterOrientation") or "image")
+    seedance_resolution = str(metadata.get("seedanceResolution") or "720p")
+    seedance_aspect_ratio = str(metadata.get("seedanceAspectRatio") or "auto")
+    body_control = bool(metadata.get("bodyControl", True))
+    expression_intensity = int(metadata.get("expressionIntensity") or 3)
+
+    if model_name == "runway_act_two":
+        provider_name = "runway"
+    elif model_name == "kling_v3_motion_control":
+        provider_name = "replicate"
+    else:
+        provider_name = "fal"
+    gen_meta = _update_segment_generation_record(
+        store=store,
+        user_id=task["userId"],
+        task_id=task["taskId"],
+        gen_id=gen_id,
+        updates={
+            "genId": gen_id,
+            "segmentId": segment_id,
+            "status": "running",
+            "jobId": job.get("jobId"),
+            "error": None,
+            "startedAt": now_iso(),
+            "updatedAt": now_iso(),
+        },
+        history_entry={
+            "at": now_iso(),
+            "event": "character_animation.running",
+            "jobId": job.get("jobId"),
+            "genId": gen_id,
+            "segmentId": segment_id,
+            "model": model_name,
+            "mode": mode,
+        },
+    )
+
+    reference_lookup: dict[str, dict[str, Any]] = {
+        str(item.get("referenceId")): item
+        for item in task.get("editVideoReferences", [])
+        if isinstance(item, dict) and item.get("referenceId")
+    }
+    reference_record = reference_lookup.get(character_reference_id)
+    character_key = str((reference_record or {}).get("key") or "").strip()
+    if not character_key:
+        raise RuntimeError("Character image not found")
+
+    paths = _asset_paths(task)
+    s3 = boto3.client("s3")
+    source_segment_key = _ensure_segment_clip(
+        s3=s3,
+        asset_store=asset_store,
+        asset_paths=paths,
+        task=task,
+        segment=segment,
+        assets_bucket=settings.assets_bucket,
+    )
+    source_segment_url = asset_store.presign_get(source_segment_key, expires=3600)
+    character_image_url = asset_store.presign_get(character_key, expires=3600)
+    input_audio_key: str | None = None
+    used_provider_model: str | None = None
+    provider_duration_sec: float | None = None
+    out_url: str
+    generation_id: str
+    source_probe: dict[str, Any] | None = None
+    source_media_kind = str(task.get("sourceMedia", {}).get("kind") or task.get("video", {}).get("editSource", {}).get("mediaType") or "video")
+
+    with tempfile.TemporaryDirectory() as td:
+        td_path = Path(td)
+        local_segment = td_path / ("segment.wav" if source_media_kind == "audio" else "segment.mp4")
+        _download_s3(s3, settings.assets_bucket, source_segment_key, local_segment)
+        if source_media_kind == "audio":
+            audio_probe = ffprobe_audio(str(local_segment))
+            provider_duration_sec = round(float(audio_probe.get("duration_sec") or segment.get("durationSec") or 0.0), 3)
+            source_probe = {
+                "duration_sec": provider_duration_sec,
+                "has_audio": True,
+                "frame_count": int(segment.get("durationFrames") or 0),
+                "fps_num": int(task.get("video", {}).get("editSource", {}).get("fps", {}).get("num") or 100),
+                "fps_den": int(task.get("video", {}).get("editSource", {}).get("fps", {}).get("den") or 1),
+            }
+        else:
+            source_probe = ffprobe_video(str(local_segment))
+            provider_duration_sec = round(float(source_probe.get("duration_sec") or segment.get("durationSec") or 0.0), 3)
+
+        secrets = load_secret(settings.secrets_arn)
+        if model_name == "runway_act_two":
+            runway_key = secrets["RUNWAY_API_KEY"]
+            _job_progress(job, store, 35, "running", "Creating Runway Act-Two character animation")
+            created = create_character_performance(
+                api_key=runway_key,
+                character_uri=character_image_url,
+                character_type="image",
+                reference_video_uri=source_segment_url,
+                ratio=output_aspect_ratio,
+                body_control=body_control,
+                expression_intensity=expression_intensity,
+            )
+            generation_id = str(created.get("id") or "")
+            if not generation_id:
+                raise RuntimeError(f"Unexpected Runway Act-Two create response: {created}")
+            _job_progress(job, store, 55, "running", "Polling Runway Act-Two generation")
+            result = _wait_runway_complete(runway_key, generation_id)
+            out_url = _parse_runway_output_url(result)
+            used_provider_model = "act_two"
+        elif model_name == "kling_v3_motion_control":
+            replicate_key = secrets.get("REPLICATE_API_KEY")
+            if not replicate_key:
+                raise RuntimeError("Kling 3.0 Motion Control requires REPLICATE_API_KEY")
+            if not source_segment_url:
+                raise RuntimeError("Kling 3.0 Motion Control requires a prepared source video")
+            _job_progress(job, store, 35, "running", "Creating Kling 3.0 Motion Control animation")
+            created = create_replicate_official_model_prediction(
+                api_key=replicate_key,
+                owner="kwaivgi",
+                name="kling-v3-motion-control",
+                input={
+                    "prompt": prompt or "",
+                    "image": character_image_url,
+                    "video": source_segment_url,
+                    "keep_original_sound": True,
+                    "character_orientation": kling_character_orientation if kling_character_orientation in {"image", "video"} else "image",
+                    "mode": kling_mode if kling_mode in {"std", "pro"} else "pro",
+                },
+            )
+            generation_id = str(created.get("id") or "")
+            if not generation_id:
+                raise RuntimeError(f"Unexpected Kling 3.0 Motion Control create response: {created}")
+            _job_progress(job, store, 55, "running", "Polling Kling 3.0 Motion Control generation")
+            result = _wait_replicate_complete(replicate_key, prediction_id=generation_id)
+            out_url = _parse_replicate_output_url(result)
+            used_provider_model = "kwaivgi/kling-v3-motion-control"
+        elif model_name == "seedance_2_0_reference_to_video":
+            fal_api_key = secrets.get("FAL_API_KEY")
+            if not fal_api_key:
+                raise RuntimeError("Seedance 2.0 Reference to Video requires FAL_API_KEY")
+            seedance_prompt_prefix = (
+                "@Image1 is the character reference. @Video1 provides the motion reference."
+                if mode == "pose_video"
+                else "@Image1 is the character reference. @Audio1 drives the character performance."
+            )
+            input_payload: dict[str, Any] = {
+                "prompt": f"{seedance_prompt_prefix} {prompt}".strip() if prompt else seedance_prompt_prefix,
+                "image_urls": [character_image_url],
+                "resolution": seedance_resolution if seedance_resolution in {"480p", "720p", "1080p"} else "720p",
+                "duration": "auto",
+                "aspect_ratio": seedance_aspect_ratio if seedance_aspect_ratio in {"auto", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"} else "auto",
+                "generate_audio": mode == "audio_driven",
+                "end_user_id": task.get("userId"),
+            }
+            if mode == "pose_video":
+                if not source_segment_url:
+                    raise RuntimeError("Seedance 2.0 pose-video mode requires a prepared source video")
+                input_payload["video_urls"] = [source_segment_url]
+            else:
+                if source_media_kind == "audio":
+                    local_audio = td_path / "segment_audio.mp3"
+                    extract_audio_track(str(local_segment), str(local_audio))
+                else:
+                    if not bool(source_probe.get("has_audio")):
+                        raise RuntimeError("Seedance 2.0 audio-driven mode requires the selected source range to contain audio")
+                    local_audio = td_path / "segment_audio.mp3"
+                    extract_audio_track(str(local_segment), str(local_audio))
+                input_audio_key = paths.segment_provider_audio(segment_id, gen_id, "fal", ".mp3")
+                _upload_s3(s3, settings.assets_bucket, input_audio_key, local_audio, "audio/mpeg")
+                audio_url = asset_store.presign_get(input_audio_key, expires=3600)
+                input_payload["audio_urls"] = [audio_url]
+            _job_progress(job, store, 35, "running", "Creating Seedance 2.0 character animation")
+            created = submit_seedance_reference_to_video(api_key=fal_api_key, input=input_payload)
+            generation_id = str(created.get("request_id") or "")
+            if not generation_id:
+                raise RuntimeError(f"Unexpected Seedance 2.0 create response: {created}")
+            _job_progress(job, store, 55, "running", "Polling Seedance 2.0 character animation")
+            result = _wait_fal_queue_complete(fal_api_key, created=created)
+            out_url = _parse_fal_video_output_url(result)
+            used_provider_model = "bytedance/seedance-2.0/reference-to-video"
+        elif model_name == "omnihuman_v1_5":
+            fal_api_key = secrets.get("FAL_API_KEY")
+            if not fal_api_key:
+                raise RuntimeError("OmniHuman v1.5 requires FAL_API_KEY")
+            if source_media_kind == "audio":
+                local_audio = td_path / "segment_audio.mp3"
+                extract_audio_track(str(local_segment), str(local_audio))
+            else:
+                if not bool(source_probe.get("has_audio")):
+                    raise RuntimeError("OmniHuman v1.5 requires the selected source range to contain audio")
+                local_audio = td_path / "segment_audio.mp3"
+                extract_audio_track(str(local_segment), str(local_audio))
+            input_audio_key = paths.segment_provider_audio(segment_id, gen_id, "fal", ".mp3")
+            _upload_s3(s3, settings.assets_bucket, input_audio_key, local_audio, "audio/mpeg")
+            audio_url = asset_store.presign_get(input_audio_key, expires=3600)
+            _job_progress(job, store, 35, "running", "Creating OmniHuman v1.5 character animation")
+            created = submit_omnihuman_v15(
+                api_key=fal_api_key,
+                input={
+                    "image_url": character_image_url,
+                    "audio_url": audio_url,
+                    "prompt": prompt,
+                    "resolution": omnihuman_resolution if omnihuman_resolution in {"720p", "1080p"} else "720p",
+                },
+            )
+            generation_id = str(created.get("request_id") or "")
+            if not generation_id:
+                raise RuntimeError(f"Unexpected OmniHuman v1.5 create response: {created}")
+            _job_progress(job, store, 55, "running", "Polling OmniHuman v1.5 generation")
+            result = _wait_fal_queue_complete(fal_api_key, created=created)
+            out_url = _parse_fal_video_output_url(result)
+            used_provider_model = "fal-ai/bytedance/omnihuman/v1.5"
+        else:
+            raise RuntimeError(f"Unsupported character animation model: {model_name}")
+
+        out_key = paths.segment_generated(segment_id, gen_id)
+        _job_progress(job, store, 75, "running", "Downloading character animation output to S3")
+        downloaded_path = td_path / "provider_output.mp4"
+        _download_url_to_path(out_url, downloaded_path)
+        raw_output_probe = ffprobe_video(str(downloaded_path))
+        _upload_s3(s3, settings.assets_bucket, out_key, downloaded_path, "video/mp4")
+        stored_output_probe = raw_output_probe
+        output_duration_value = float(stored_output_probe.get("duration_sec") or 0.0)
+        if output_duration_value > 0:
+            provider_duration_sec = round(output_duration_value, 3)
+        finished_at = now_iso()
+        processing_duration_sec = _processing_duration_seconds(gen_meta.get("startedAt"), finished_at)
+        poster_key = _create_segment_generation_poster(
+            asset_store=asset_store,
+            paths=paths,
+            segment_id=segment_id,
+            gen_id=gen_id,
+            video_path=str(downloaded_path),
+        )
+        gen_meta = _update_segment_generation_record(
+            store=store,
+            user_id=task["userId"],
+            task_id=task["taskId"],
+            gen_id=gen_id,
+            updates={
+                "genId": gen_id,
+                "segmentId": segment_id,
+                "luma": {
+                    "provider": provider_name,
+                    "model": model_name,
+                    "mode": mode,
+                    "prompt": prompt,
+                    "negativePrompt": None,
+                    "lumaGenerationId": generation_id,
+                },
+                "characterAnimation": {
+                    "workflowId": "character_animate_workflow",
+                    "mode": mode,
+                    "model": model_name,
+                    "modelLabel": _character_animate_model_label(model_name),
+                    "characterReferenceId": character_reference_id,
+                    "outputAspectRatio": output_aspect_ratio if mode == "pose_video" else None,
+                    "omnihumanResolution": omnihuman_resolution if mode == "audio_driven" else None,
+                    "klingMode": kling_mode if model_name == "kling_v3_motion_control" else None,
+                    "klingCharacterOrientation": kling_character_orientation if model_name == "kling_v3_motion_control" else None,
+                    "seedanceResolution": seedance_resolution if model_name == "seedance_2_0_reference_to_video" else None,
+                    "seedanceAspectRatio": seedance_aspect_ratio if model_name == "seedance_2_0_reference_to_video" else None,
+                    "bodyControl": body_control if mode == "pose_video" else None,
+                    "expressionIntensity": expression_intensity if mode == "pose_video" else None,
+                    "prompt": prompt,
+                },
+                "status": "complete",
+                "outputKey": out_key,
+                "posterKey": poster_key,
+                "inputMediaKey": source_segment_key,
+                "inputFirstFrameKey": character_key,
+                "inputAudioKey": input_audio_key,
+                "requestedDurationSec": round(float(segment.get("durationSec") or 0.0), 3),
+                "providerDurationSec": provider_duration_sec,
+                "generationSettings": {
+                    "workflowId": "character_animate_workflow",
+                    "provider": provider_name,
+                    "requestedModel": model_name,
+                    "model": used_provider_model or model_name,
+                    "characterMode": mode,
+                    "characterReferenceId": character_reference_id,
+                    "outputAspectRatio": output_aspect_ratio if mode == "pose_video" else None,
+                    "omnihumanResolution": omnihuman_resolution if mode == "audio_driven" else None,
+                    "klingMode": kling_mode if model_name == "kling_v3_motion_control" else None,
+                    "klingCharacterOrientation": kling_character_orientation if model_name == "kling_v3_motion_control" else None,
+                    "seedanceResolution": seedance_resolution if model_name == "seedance_2_0_reference_to_video" else None,
+                    "seedanceAspectRatio": seedance_aspect_ratio if model_name == "seedance_2_0_reference_to_video" else None,
+                    "bodyControl": body_control if mode == "pose_video" else None,
+                    "expressionIntensity": expression_intensity if mode == "pose_video" else None,
+                    "requestedDurationSec": round(float(segment.get("durationSec") or 0.0), 3),
+                    "providerDurationSec": provider_duration_sec,
+                    "sourceSegmentTiming": {
+                        "startFrame": int(segment.get("startFrame") or 0),
+                        "endFrameExclusive": int(segment.get("endFrameExclusive") or 0),
+                        "durationFrames": int(segment.get("durationFrames") or 0),
+                        "durationSec": round(float(segment.get("durationSec") or 0.0), 4),
+                    },
+                    "providerOutputRaw": _video_timing_payload(raw_output_probe or {}),
+                    "storedOutput": _video_timing_payload(stored_output_probe or {}),
+                },
+                "createdAt": gen_meta.get("createdAt") or now_iso(),
+                "updatedAt": finished_at,
+                "finishedAt": finished_at,
+                "processingDurationSec": processing_duration_sec,
+                "error": None,
+            },
+            history_entry={
+                "at": finished_at,
+                "event": "character_animation.complete",
+                "jobId": job.get("jobId"),
+                "genId": gen_id,
+                "segmentId": segment_id,
+                "model": model_name,
+                "outputKey": out_key,
+            },
+        )
+        job["resultRefs"] = {
+            "genId": gen_id,
+            "segmentId": segment_id,
+            "outputKey": out_key,
+            "posterKey": poster_key,
+            "provider": provider_name,
+            "model": model_name,
+            "mode": mode,
+            "providerGenerationId": generation_id,
+            "finishedAt": gen_meta.get("finishedAt"),
+            "processingDurationSec": processing_duration_sec,
+        }
+    _job_progress(job, store, 100, "complete", "Character animation complete")
+    return job
+
+
 def _handle_segment_generate(
     *,
     job: dict[str, Any],
@@ -3998,6 +5692,25 @@ def _handle_segment_generate(
     task: dict[str, Any],
     settings: Any,
 ) -> dict[str, Any]:
+    payload = job["payload"]
+    character_animate_metadata = payload.get("characterAnimateMetadata")
+    if isinstance(character_animate_metadata, dict):
+        return _handle_segment_generate_character_animate(
+            job=job,
+            store=store,
+            asset_store=asset_store,
+            task=task,
+            settings=settings,
+        )
+    clip_lengthen_metadata = payload.get("clipLengthenMetadata")
+    if isinstance(clip_lengthen_metadata, dict):
+        return _handle_segment_generate_clip_lengthen(
+            job=job,
+            store=store,
+            asset_store=asset_store,
+            task=task,
+            settings=settings,
+        )
     payload = job["payload"]
     segment_id = payload["segmentId"]
     gen_id = payload["genId"]
@@ -4060,6 +5773,18 @@ def _handle_segment_generate(
         key = str((reference or {}).get("key") or "").strip()
         if key and key.startswith(reference_prefix):
             selected_reference_keys.append(key)
+    generation_audio_reference = task.get("generationAudioReference") if isinstance(task.get("generationAudioReference"), dict) else None
+    selected_audio_reference_id = str(payload.get("audioReferenceId") or "").strip()
+    selected_audio_reference = (
+        generation_audio_reference
+        if generation_audio_reference and str(generation_audio_reference.get("referenceId") or "").strip() == selected_audio_reference_id
+        else None
+    )
+    selected_audio_reference_key = (
+        str(selected_audio_reference.get("editSourceKey") or selected_audio_reference.get("originalKey") or "").strip()
+        if selected_audio_reference
+        else ""
+    )
     segment_key: str | None = None
     if capability.uses_source_video:
         segment_key = _ensure_segment_clip(
@@ -4135,6 +5860,7 @@ def _handle_segment_generate(
     seedance_raw_output_height: int | None = None
     seedance_output_width: int | None = None
     seedance_output_height: int | None = None
+    input_audio_key: str | None = selected_audio_reference_key or None
     with tempfile.TemporaryDirectory() as td:
         td_path = Path(td)
         if segment_key:
@@ -4428,6 +6154,7 @@ def _handle_segment_generate(
     first_frame_url = asset_store.presign_get(first_frame_input_key, expires=3600)
     last_frame_url = asset_store.presign_get(last_frame_input_key, expires=3600) if last_frame_input_key else None
     selected_reference_urls = [asset_store.presign_get(key, expires=3600) for key in selected_reference_keys]
+    selected_audio_reference_url = asset_store.presign_get(selected_audio_reference_key, expires=3600) if selected_audio_reference_key else None
     primary_reference_bytes = asset_store.read_bytes(selected_reference_keys[0]) if selected_reference_keys else frame_bytes
 
     secrets = load_secret(settings.secrets_arn)
@@ -4824,6 +6551,7 @@ def _handle_segment_generate(
                 "prompt": payload.get("prompt"),
                 "image_urls": selected_reference_urls[:3] if selected_reference_urls else [first_frame_url],
                 "video_urls": [media_url],
+                **({"audio_urls": [selected_audio_reference_url]} if selected_audio_reference_url else {}),
                 "resolution": "720p",
                 "duration": str(int(provider_duration_sec)),
                 "aspect_ratio": seedance_aspect_ratio or "auto",
@@ -4990,6 +6718,13 @@ def _handle_segment_generate(
 
     finished_at = now_iso()
     processing_duration_sec = _processing_duration_seconds(gen_meta.get("startedAt"), finished_at)
+    poster_key = _create_segment_generation_poster(
+        asset_store=asset_store,
+        paths=paths,
+        segment_id=segment_id,
+        gen_id=gen_id,
+        video_path=str(conformed_path if needs_timeline_conform else downloaded_path),
+    )
     gen_meta = _update_segment_generation_record(
         store=store,
         user_id=task["userId"],
@@ -5008,9 +6743,11 @@ def _handle_segment_generate(
             },
             "status": "complete",
             "outputKey": out_key,
+            "posterKey": poster_key,
             "inputMediaKey": media_key_for_provider,
             "inputFirstFrameKey": first_frame_input_key,
             "inputLastFrameKey": last_frame_input_key,
+            "inputAudioKey": input_audio_key,
             "sourceFirstFrameCaptureKey": start_frame.get("captureKey"),
             "sourceFirstFrameVariantId": source_first_variant_id,
             "sourceFirstFrameResolvedKey": first_frame_key,
@@ -5075,6 +6812,7 @@ def _handle_segment_generate(
                 "happyHorseResolution": happy_horse_resolution if model_name in {"happy-horse-video-edit", "happy-horse-image-to-video"} else None,
                 "selectedReferenceIds": selected_reference_ids,
                 "selectedReferenceCount": len(selected_reference_ids),
+                "audioReferenceId": selected_audio_reference_id or None,
                 "sora2RequestedDurationSec": sora2_requested_duration_sec if model_name == "sora-2-image-to-video" else None,
                 "sora2ProviderDurationSec": sora2_provider_duration_sec if model_name == "sora-2-image-to-video" else None,
                 "preserveFrames": preserve_frames,
@@ -5130,6 +6868,7 @@ def _handle_segment_generate(
         "genId": gen_id,
         "segmentId": segment_id,
         "outputKey": out_key,
+        "posterKey": poster_key,
         "provider": provider_name,
         "model": model_name,
         "mode": requested_mode,
@@ -6882,6 +8621,78 @@ def _build_video_report_row(
         "endFrameKey": source_last_variant.get("outputKey") if isinstance(source_last_variant, dict) else (end_frame.get("captureKey") if isinstance(end_frame, dict) else None),
         "generatedVideoKey": generation.get("outputKey"),
         "standard": standard_payload,
+    }
+
+
+def _build_previz_report_row(
+    *,
+    task: dict[str, Any],
+    report_id: str,
+    gen_id: str,
+) -> dict[str, Any]:
+    generation = task.get("segmentGenerations", {}).get(gen_id)
+    if not isinstance(generation, dict):
+        raise RuntimeError(f"Generation {gen_id} not found")
+    if generation.get("status") != "complete" or not generation.get("outputKey"):
+        raise RuntimeError(f"Generation {gen_id} is not complete")
+    workflow_id = (
+        generation.get("generationSettings", {}).get("workflowId")
+        if isinstance(generation.get("generationSettings"), dict)
+        else None
+    )
+    if workflow_id != "simple_generation_workflow":
+        raise RuntimeError(f"Generation {gen_id} is not a Previz generation")
+
+    reference_lookup = {
+        str(item.get("referenceId") or ""): item
+        for item in task.get("editVideoReferences", [])
+        if isinstance(item, dict) and item.get("referenceId")
+    }
+    selected_frame_ids = [
+        str(item or "").strip()
+        for item in (generation.get("generationSettings", {}) or {}).get("selectedFrameIds", [])
+        if str(item or "").strip()
+    ]
+    previz_frames: list[dict[str, Any]] = []
+    for index, reference_id in enumerate(selected_frame_ids):
+        reference = reference_lookup.get(reference_id)
+        if not isinstance(reference, dict):
+            continue
+        frame_count = len(selected_frame_ids)
+        label = f"Frame {index + 1}"
+        if frame_count > 1 and index == 0:
+            label = "Start"
+        elif frame_count > 1 and index == frame_count - 1:
+            label = "End"
+        elif frame_count > 2:
+            label = f"Key {index}"
+        previz_frames.append(
+            {
+                "referenceId": reference_id,
+                "label": label,
+                "imageKey": reference.get("key"),
+                "filename": reference.get("filename"),
+                "model": reference.get("model"),
+                "referenceType": reference.get("type"),
+            }
+        )
+
+    return {
+        "assetType": "segment_generation",
+        "genId": gen_id,
+        "segmentId": generation.get("segmentId"),
+        "createdAt": generation.get("createdAt"),
+        "model": generation.get("luma", {}).get("model"),
+        "mode": generation.get("luma", {}).get("mode"),
+        "processingDurationSec": _asset_processing_duration_sec(generation),
+        "prompt": generation.get("luma", {}).get("prompt") or "No prompt provided",
+        "sceneAspectRatio": generation.get("generationSettings", {}).get("sceneAspectRatio"),
+        "generatedVideoKey": generation.get("outputKey"),
+        "posterKey": generation.get("posterKey"),
+        "previzFrames": previz_frames,
+        "selectedFrameCount": len(previz_frames),
+        "reportKind": "previz_review",
+        "reportId": report_id,
     }
 
 
@@ -8922,6 +10733,28 @@ def _handle_qc_report_build(
             _job_progress(job, store, 90, "running", "Built video comparison report")
         except Exception as exc:
             failures.append({"assetRef": {"assetType": "video_compare"}, "error": str(exc)})
+    elif report_type == "previz_review":
+        for index, asset_ref in enumerate(asset_refs):
+            try:
+                if not isinstance(asset_ref, dict):
+                    raise RuntimeError("Invalid report asset reference")
+                if asset_ref.get("assetType") != "segment_generation":
+                    raise RuntimeError("Previz review reports only support generated videos")
+                row = _build_previz_report_row(
+                    task=task,
+                    report_id=report_id,
+                    gen_id=str(asset_ref.get("genId") or ""),
+                )
+                rows.append(row)
+            except Exception as exc:
+                failures.append(
+                    {
+                        "assetRef": asset_ref,
+                        "error": str(exc),
+                    }
+                )
+            progress = 10 + math.floor(80 * (index + 1) / max(1, len(asset_refs)))
+            _job_progress(job, store, progress, "running", f"Built {index + 1}/{len(asset_refs)} previz report rows")
     else:
         for index, asset_ref in enumerate(asset_refs):
             try:
@@ -9034,6 +10867,47 @@ def _handle_qc_report_build(
     store.save_task(task)
     _job_progress(job, store, 100, "complete", "QC report build complete")
     job["resultRefs"] = {"reportId": report_id, "resultKey": result_key}
+    store.save_job(job)
+    return job
+
+
+def _handle_task_purge(
+    *,
+    job: dict[str, Any],
+    store: S3JsonStore,
+    asset_store: AssetStore,
+    task: dict[str, Any],
+    settings: Any,
+) -> dict[str, Any]:
+    _job_progress(job, store, 10, "running", "Purging task assets")
+    paths = _asset_paths(task)
+    asset_store.delete_prefix(f"{paths.task_prefix()}/", purge_versions=True)
+
+    _job_progress(job, store, 55, "running", "Purging task metadata snapshots")
+    user_id = str(task.get("userId") or "")
+    task_id = str(task.get("taskId") or "")
+    store.delete_prefix(store.task_snapshots_prefix(user_id, task_id), purge_versions=True)
+    store.delete_prefix(f"users/{user_id}/tasks/{task_id}/reports/", purge_versions=True)
+
+    _job_progress(job, store, 80, "running", "Shrinking deleted task metadata")
+    tombstone = {
+        "taskId": task_id,
+        "userId": user_id,
+        "name": task.get("name"),
+        "workflowId": task.get("workflowId"),
+        "filePrefix": task.get("filePrefix"),
+        "createdAt": task.get("createdAt"),
+        "updatedAt": now_iso(),
+        "deletedAt": task.get("deletedAt") or now_iso(),
+        "purgedAt": now_iso(),
+        "status": "deleted",
+        "metaVersion": int(task.get("metaVersion", 0)),
+        "history": [],
+    }
+    store.save_task(tombstone, snapshot=False, merge_on_conflict=False)
+
+    _job_progress(job, store, 100, "complete", "Task purge complete")
+    job["resultRefs"] = {"taskId": task_id}
     store.save_job(job)
     return job
 
@@ -10353,6 +12227,8 @@ def process_job_record(record: dict[str, Any], *, settings: Any) -> None:
             handle_api_image_edit_full_fn=_handle_api_image_edit_full,
             handle_api_image_edit_patch_fn=_handle_api_image_edit_patch,
             handle_api_video_generate_reference_fn=_handle_api_video_generate_reference,
+            handle_edit_video_reference_generate_fn=_handle_edit_video_reference_generate,
+            handle_previz_generate_fn=_handle_previz_generate,
             handle_quality_match_apply_fn=_handle_quality_match_apply,
             handle_quality_match_sam_fn=_handle_quality_match_sam,
             handle_segment_generate_fn=_handle_segment_generate,
@@ -10363,6 +12239,7 @@ def process_job_record(record: dict[str, Any], *, settings: Any) -> None:
             handle_export_topaz_upscale_fn=_handle_export_topaz_upscale,
             handle_qc_report_build_fn=_handle_qc_report_build,
             handle_motion_sync_qc_fn=_handle_motion_sync_qc,
+            handle_task_purge_fn=_handle_task_purge,
             handle_video_cleanup_init_fn=_handle_video_cleanup_init,
             handle_video_cleanup_track_fn=_handle_video_cleanup_track,
             handle_video_cleanup_retrack_window_fn=_handle_video_cleanup_retrack_window,

@@ -7,8 +7,90 @@ Production-oriented React + AWS serverless application for frame-accurate VFX ex
 - `frontend/`: React, TypeScript, Vite, Tailwind, TanStack Query, Zustand
 - `backend/`: Python 3.10 Lambda API and SQS worker code
 - `infra/`: AWS CDK stack for S3, CloudFront, Cognito, HTTP API Gateway, Lambda, SQS, IAM, and Secrets Manager
-- `api-readme.md`: developer-facing external API documentation
+- `docs/external-api-reference.md`: developer-facing external API documentation
 - `README-charactertool.md`: notes for the current Wan Animate support and future character-animation workflow
+
+## AWS CLI Region
+
+The AIVFX stack lives in `eu-west-2`. Set your CLI default there unless you have a profile-specific reason not to:
+
+```bash
+aws configure set region eu-west-2
+```
+
+If you use a named profile:
+
+```bash
+aws configure set region eu-west-2 --profile YOUR_PROFILE
+```
+
+Check the active value with:
+
+```bash
+aws configure get region
+```
+
+The deploy helpers in this repo also force `eu-west-2` if no region is set, which avoids accidentally deploying AIVFX infra into the wrong region.
+
+## Common Deploy Commands
+
+Use these from the repo root:
+
+```bash
+npm run deploy:infra:shared
+npm run deploy:infra:prod
+npm run deploy:infra:dev
+npm run deploy:frontend:prod
+npm run deploy:frontend:dev
+```
+
+`deploy:infra:shared` updates the long-lived shared stack that currently backs the path-hosted dev app and its historical data.
+
+`deploy:infra:prod` updates the isolated production stack in `eu-west-2`.
+
+`deploy:infra:dev` creates or updates the separate development backend/auth/storage stack in `eu-west-2`.
+
+`deploy:frontend:prod` builds the subdomain frontend from `infra/cdk-outputs.prod.json`, writes `frontend/.env.production.local`, syncs to the prod web bucket, and invalidates the prod CloudFront distribution.
+
+`deploy:frontend:dev` builds the path-hosted dev frontend from `infra/cdk-outputs.dev.json`, writes `frontend/.env.devhosted.local`, syncs it to `s3://shwsh.co.uk/experiments/aivfx/`, and invalidates the root-site CloudFront path.
+
+## Current Environment Topology
+
+- Dev frontend: `https://www.shwsh.co.uk/experiments/aivfx/`
+- Dev backend/data baseline: shared `AivfxStack`
+- Prod frontend: `https://aivfx.shwsh.co.uk/`
+- Prod backend/data: isolated `AivfxProdStack`
+- Optional isolated dev stack: `AivfxDevStack`
+
+This means prod starts clean and isolated, while the path-hosted dev app keeps the older shared dataset for testing and troubleshooting.
+
+## Clone Prod Tasks Into Dev
+
+For troubleshooting, clone a specific production task into the isolated dev environment instead of mirroring prod continuously:
+
+```bash
+python3 scripts/clone_prod_task_to_dev.py --task-id TASK_ID --target-email YOUR_LOGIN_EMAIL
+```
+
+You can also target a specific dev Cognito user id directly:
+
+```bash
+python3 scripts/clone_prod_task_to_dev.py --task-id TASK_ID --target-user-id COGNITO_SUB
+```
+
+Dry-run first if you want a copy count before moving data:
+
+```bash
+python3 scripts/clone_prod_task_to_dev.py --task-id TASK_ID --target-email YOUR_LOGIN_EMAIL --dry-run
+```
+
+The clone tool:
+
+- copies one prod task at a time into the dev metadata and asset buckets
+- copies referenced report JSON and referenced task assets
+- stamps the cloned task with `clonedFrom`
+- rewrites task-scoped S3 keys into the dev bucket namespace
+- marks in-flight prod background states as failed in dev so the cloned task does not wait on non-existent prod jobs
 
 ## Current UI Structure
 
@@ -137,7 +219,8 @@ The backend is split into a synchronous API Lambda and an async SQS worker.
 
 The main persisted records are:
 
-- `TaskDetail`: task snapshot containing video metadata, segments, frames, frame variants, segment generations, cleanup tracks, reports, and exports.
+- `TaskDetail`: task snapshot containing `workflowId`, video metadata, segments, frames, frame variants, segment generations, cleanup tracks, reports, and exports.
+- `TaskSummary`: sidebar/list snapshot containing `workflowId`, task status, timestamps, and basic video metadata.
 - `JobStatus`: async job state with `type`, `status`, `progress`, `logs`, `error`, and `resultRefs`.
 - `ExternalApiRequest`: standalone API request record under the authenticated user.
 
@@ -175,6 +258,18 @@ The mode registry is the canonical source for route-level UI behavior, including
 - route label and description
 - whether the route requires an end frame
 - which Post Process tools are visible for that route
+
+## Task Workflow Registry
+
+Top-level task workflows are now tracked separately from per-segment generation modes:
+
+- backend task metadata: `workflowId`
+- frontend workflow registry: `frontend/src/lib/taskWorkflows.ts`
+- homepage/frontdoor: root route `#/`
+
+This keeps the current source-video implementation explicit as `source_video_flow` while allowing future workflow shells such as `character_animate_workflow` to reuse the same task chrome, asset library, reports, and provider API paths without overloading `generationInputMode`.
+
+The root route now serves as a workflow chooser rather than automatically jumping into the last task. Existing task routes and direct utility routes continue to work, and the sidebar Fivefold logo returns users to that homepage.
 
 Current mode/tool behavior is:
 
@@ -340,7 +435,7 @@ Key task routes:
 - `POST /tasks/{taskId}/cleanup-tracks/{trackId}/apply`
 - `GET /jobs/{jobId}`
 
-Developer-facing external API routes are documented in `api-readme.md`.
+Developer-facing external API routes are documented in [docs/external-api-reference.md](/Users/robinmoore/aivfx-pipeline/docs/external-api-reference.md).
 
 ## External API
 
@@ -358,7 +453,7 @@ Current external API workflows:
 
 The API is async, Cognito user-delegated, and request scoped. Each API request gets its own record and asset namespace to avoid collisions when multiple generations run concurrently.
 
-See `api-readme.md` for request schemas, model options, validation, and auth guidance.
+See [docs/external-api-reference.md](/Users/robinmoore/aivfx-pipeline/docs/external-api-reference.md) for request schemas, model options, ordered reference-image handling, validation, and auth guidance.
 
 ## Reports
 
@@ -432,7 +527,20 @@ Deploy is handled through the existing CDK/static-site workflow used for the liv
 
 For this project we normally test against live immediately after a completed change set.
 
-Typical deploy sequence:
+The repo now supports two frontend targets:
+
+- `dev`:
+  - `https://www.shwsh.co.uk/experiments/aivfx/`
+  - path-hosted build
+- `prod`:
+  - `https://aivfx.shwsh.co.uk/`
+  - dedicated root-hosted subdomain build
+
+Subdomain cutover and CloudFront/Route53 instructions:
+
+- [docs/subdomain-prod-cutover.md](/Users/robinmoore/aivfx-pipeline/docs/subdomain-prod-cutover.md)
+
+Typical development deploy sequence:
 
 1. Deploy infra/backend stack
 
@@ -443,7 +551,7 @@ npm run build
 npx cdk deploy AivfxStack --require-approval never --outputs-file cdk-outputs.json
 ```
 
-2. Build frontend with production env
+2. Build frontend with dev-hosted env
 
 ```bash
 cd frontend
@@ -461,6 +569,12 @@ aws s3 sync frontend/dist s3://shwsh.co.uk/experiments/aivfx/ --delete
 
 ```bash
 aws cloudfront create-invalidation --distribution-id E3LS87IBDVMSCO --paths "/experiments/aivfx/*"
+```
+
+Production frontend build command:
+
+```bash
+npm run build:frontend:prod
 ```
 
 ## Baseline Gates
@@ -488,7 +602,12 @@ The app now includes a trial creation mode focused on source-video editing:
 1. Up to 3 references: Seedance 2.0 / Happy Horse 1.0 Video Edit / Kling v3 Omni Video
 2. Up to 1 reference: Wan 2.7 VideoEdit / Runway Gen-4 Aleph
 
-Reference images are managed in the Edit step (upload or generate via ChatGPT/Nano Banana models), then selected for use in Generate.
+Reference images are managed through a shared working-reference strip and picker modal:
+
+1. Upload new reference images in the Edit step.
+2. Reuse previous uploads from the same account.
+3. Pull in generated stills and current-task frame captures.
+4. Keep the ordered working set visible in both Edit and Generate so prompt order stays explicit.
 
 Feature flags:
 

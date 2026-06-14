@@ -2,11 +2,13 @@ import { useEffect, useMemo, useState } from "react";
 import { useQuery, type QueryClient } from "@tanstack/react-query";
 
 import { apiClient } from "../api/client";
+import { DEFAULT_TASK_WORKFLOW_ID, type TaskWorkflowId } from "../lib/taskWorkflows";
 import type { TabId } from "./useWorkflowRouting";
 
 export type NewTaskStage = "idle" | "creating" | "uploading" | "ingesting" | "error";
 type IngestCompleteHook = (taskId: string) => void | Promise<void>;
 const MAX_SOURCE_VIDEO_DURATION_SECONDS = 120;
+const MAX_CHARACTER_AUDIO_DURATION_SECONDS = 600;
 
 type UseTaskLifecycleParams = {
   isAuthed: boolean;
@@ -85,6 +87,35 @@ function readLocalVideoDuration(file: File): Promise<number> {
   });
 }
 
+function readLocalAudioDuration(file: File): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const objectUrl = URL.createObjectURL(file);
+    const audio = document.createElement("audio");
+    const cleanup = () => {
+      audio.removeEventListener("loadedmetadata", handleLoaded);
+      audio.removeEventListener("error", handleError);
+      URL.revokeObjectURL(objectUrl);
+    };
+    const handleLoaded = () => {
+      const duration = Number.isFinite(audio.duration) ? Math.max(0, audio.duration) : NaN;
+      cleanup();
+      if (!Number.isFinite(duration) || duration <= 0) {
+        reject(new Error("Could not read audio duration"));
+        return;
+      }
+      resolve(duration);
+    };
+    const handleError = () => {
+      cleanup();
+      reject(new Error("Could not read audio metadata"));
+    };
+    audio.preload = "metadata";
+    audio.src = objectUrl;
+    audio.addEventListener("loadedmetadata", handleLoaded);
+    audio.addEventListener("error", handleError);
+  });
+}
+
 export function useTaskLifecycle({
   isAuthed,
   isPageVisible,
@@ -98,6 +129,8 @@ export function useTaskLifecycle({
   const [isNewTaskModalOpen, setIsNewTaskModalOpen] = useState(false);
   const [newTaskName, setNewTaskName] = useState("New Video");
   const [newTaskFile, setNewTaskFile] = useState<File | null>(null);
+  const [newTaskScenePrompt, setNewTaskScenePrompt] = useState("");
+  const [newTaskWorkflowId, setNewTaskWorkflowId] = useState<TaskWorkflowId>(DEFAULT_TASK_WORKFLOW_ID);
   const [newTaskStage, setNewTaskStage] = useState<NewTaskStage>("idle");
   const [newTaskError, setNewTaskError] = useState<string | null>(null);
   const [newTaskUploadPercent, setNewTaskUploadPercent] = useState(0);
@@ -159,9 +192,11 @@ export function useTaskLifecycle({
     }
   }, [newTaskStage, pendingCreateJobQuery.data, pendingCreatedTaskId, pendingIngestCompleteHook, queryClient, selectedTaskId, setTab]);
 
-  function openNewTaskModal() {
-    setNewTaskName("New Video");
+  function openNewTaskModal(workflowId: TaskWorkflowId = DEFAULT_TASK_WORKFLOW_ID) {
+    setNewTaskName(workflowId === "simple_generation_workflow" ? "New Scene" : "New Video");
     setNewTaskFile(null);
+    setNewTaskScenePrompt("");
+    setNewTaskWorkflowId(workflowId);
     setNewTaskStage("idle");
     setNewTaskError(null);
     setNewTaskUploadPercent(0);
@@ -172,7 +207,8 @@ export function useTaskLifecycle({
   }
 
   async function handleCreateTaskWithUpload(options?: { onIngestComplete?: IngestCompleteHook }) {
-    if (!newTaskName.trim() || !newTaskFile) return;
+    if (!newTaskName.trim()) return;
+    if (newTaskWorkflowId !== "simple_generation_workflow" && !newTaskFile) return;
     try {
       setNewTaskError(null);
       setNewTaskUploadPercent(0);
@@ -189,21 +225,37 @@ export function useTaskLifecycle({
       }
       setNewTaskStage("creating");
       setNewTaskName(normalizedTaskName);
-      const created = await apiClient.createTask(normalizedTaskName);
+      const created = await apiClient.createTask(normalizedTaskName, newTaskWorkflowId, {
+        scenePrompt: newTaskWorkflowId === "simple_generation_workflow" ? newTaskScenePrompt.trim() : null,
+      });
       setPendingCreatedTaskId(created.taskId);
       setPendingIngestCompleteHook(() => options?.onIngestComplete ?? null);
       setSelectedTaskId(created.taskId);
       setTab("timeline", created.taskId, true);
       await queryClient.invalidateQueries({ queryKey: ["tasks"] });
 
+      if (newTaskWorkflowId === "simple_generation_workflow") {
+        setNewTaskStage("idle");
+        setPendingCreatedTaskId(null);
+        setPendingIngestCompleteHook(null);
+        setNewTaskError(null);
+        setIsNewTaskModalOpen(false);
+        await queryClient.invalidateQueries({ queryKey: ["task", created.taskId] });
+        return;
+      }
+
       setNewTaskStage("uploading");
-      const contentType = newTaskFile.type || "video/mp4";
+      const uploadFile = newTaskFile;
+      if (!uploadFile) {
+        throw new Error("Choose a source file before creating this task.");
+      }
+      const contentType = uploadFile.type || "video/mp4";
       const upload = await apiClient.createVideoUpload(created.taskId, {
-        filename: newTaskFile.name,
+        filename: uploadFile.name,
         contentType,
-        sizeBytes: newTaskFile.size,
+        sizeBytes: uploadFile.size,
       });
-      await uploadFileWithProgress(upload.uploadUrl, newTaskFile, contentType, setNewTaskUploadPercent);
+      await uploadFileWithProgress(upload.uploadUrl, uploadFile, contentType, setNewTaskUploadPercent);
 
       setNewTaskStage("ingesting");
       const ingest = await apiClient.ingestTask(created.taskId);
@@ -225,12 +277,32 @@ export function useTaskLifecycle({
       return;
     }
     try {
-      const durationSec = await readLocalVideoDuration(file);
-      if (durationSec > MAX_SOURCE_VIDEO_DURATION_SECONDS + 1e-3) {
-        setNewTaskFile(null);
-        setNewTaskStage("idle");
-        setNewTaskError(`Source video is ${durationSec.toFixed(2)}s. Uploaded source videos must be 120.00s or shorter.`);
-        return;
+      const isAudioFile = (file.type || "").startsWith("audio/");
+      const isVideoFile = (file.type || "").startsWith("video/");
+      if (newTaskWorkflowId === "character_animate_workflow" && isAudioFile) {
+        const durationSec = await readLocalAudioDuration(file);
+        if (durationSec > MAX_CHARACTER_AUDIO_DURATION_SECONDS + 1e-3) {
+          setNewTaskFile(null);
+          setNewTaskStage("idle");
+          setNewTaskError(
+            `Source audio is ${durationSec.toFixed(2)}s. Uploaded source audio must be ${MAX_CHARACTER_AUDIO_DURATION_SECONDS.toFixed(2)}s or shorter.`,
+          );
+          return;
+        }
+      } else {
+        if (!isVideoFile) {
+          setNewTaskFile(null);
+          setNewTaskStage("idle");
+          setNewTaskError("Choose a video file, or for Character workflow an audio file.");
+          return;
+        }
+        const durationSec = await readLocalVideoDuration(file);
+        if (durationSec > MAX_SOURCE_VIDEO_DURATION_SECONDS + 1e-3) {
+          setNewTaskFile(null);
+          setNewTaskStage("idle");
+          setNewTaskError(`Source video is ${durationSec.toFixed(2)}s. Uploaded source videos must be 120.00s or shorter.`);
+          return;
+        }
       }
       setNewTaskFile(file);
       setNewTaskStage("idle");
@@ -247,7 +319,10 @@ export function useTaskLifecycle({
     newTaskName,
     setNewTaskName,
     newTaskFile,
+    newTaskScenePrompt,
+    newTaskWorkflowId,
     setNewTaskFile,
+    setNewTaskScenePrompt,
     newTaskStage,
     newTaskError,
     newTaskUploadPercent,

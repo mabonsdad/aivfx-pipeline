@@ -4,6 +4,7 @@ import json
 from types import SimpleNamespace
 
 from src import api_handler
+from src.api.routes_external_api import handle_external_api_routes
 
 
 def _event(method: str, path: str, body: dict | None = None) -> dict:
@@ -266,6 +267,192 @@ def test_api_requests_list_route_returns_empty_list(monkeypatch) -> None:
     assert payload["requests"] == []
 
 
+def test_external_api_full_image_edit_preserves_reference_asset_key_order_and_duplicates() -> None:
+    saved_requests: list[dict] = []
+    queued_jobs: list[dict] = []
+    enqueued_messages: list[dict] = []
+
+    class _Store:
+        def save_api_request(self, payload: dict):
+            saved_requests.append(payload)
+
+    class _Queue:
+        def enqueue(self, payload: dict):
+            enqueued_messages.append(payload)
+
+    def _json_model(model, event: dict):
+        return model.model_validate_json(event["body"])
+
+    def _response(status_code: int, body: dict, *, origin: str | None = None):
+        return {"statusCode": status_code, "body": json.dumps(body), "headers": {"origin": origin}}
+
+    def _queue_job_fn(**kwargs):
+        queued_jobs.append(kwargs)
+        return "job_api_1"
+
+    def _validate_api_asset_key_fn(*, asset_store, user_id: str, asset_key: str, expected_type: str):
+        assert asset_store is not None
+        assert user_id == "user-1"
+        return {
+            "key": asset_key,
+            "contentType": "image/png" if expected_type == "image" else "video/mp4",
+        }
+
+    result = handle_external_api_routes(
+        "POST",
+        "/api/v1/image-edits/full",
+        event=_event(
+            "POST",
+            "/api/v1/image-edits/full",
+            {
+                "model": "chatgpt_latest",
+                "prompt": "Use the first two references in the exact order provided.",
+                "inputAssetKey": "users/user-1/uploads/base.png",
+                "referenceAssetKeys": [
+                    "users/user-1/uploads/ref-a.png",
+                    "users/user-1/uploads/ref-b.png",
+                    "users/user-1/uploads/ref-a.png",
+                ],
+            },
+        ),
+        origin="https://example.com",
+        user_id="user-1",
+        store=_Store(),
+        asset_store=object(),
+        queue=_Queue(),
+        json_model=_json_model,
+        response_fn=_response,
+        error_response_fn=lambda status, message, *, origin=None: _response(status, {"error": message}, origin=origin),
+        new_id_fn=lambda prefix: f"{prefix}_1",
+        now_iso_fn=lambda: "2026-06-12T12:00:00Z",
+        queue_job_fn=_queue_job_fn,
+        sanitize_prompt_fn=lambda value: value.strip(),
+        validate_api_asset_key_fn=_validate_api_asset_key_fn,
+        api_request_error_payload_fn=lambda code, message: {"code": code, "message": message},
+        api_asset_paths_for_user_fn=lambda _user_id: SimpleNamespace(upload_asset=lambda asset_id, filename: f"users/{_user_id}/uploads/{asset_id}/{filename}"),
+        extract_query_fn=lambda _event: {},
+        api_request_response_fn=lambda *args, **kwargs: {},
+        validate_api_video_mode_fn=lambda model, mode: None,
+        validate_video_model_prompt_fn=lambda model, prompt: None,
+        get_video_model_capability_fn=lambda model: None,
+        segment_generation_provider_name_fn=lambda model: "openai",
+    )
+
+    assert result is not None
+    assert result["statusCode"] == 202
+    assert queued_jobs[0]["payload"]["referenceAssetKeys"] == [
+        "users/user-1/uploads/ref-a.png",
+        "users/user-1/uploads/ref-b.png",
+        "users/user-1/uploads/ref-a.png",
+    ]
+    assert saved_requests[0]["request"]["referenceAssetKeys"] == [
+        "users/user-1/uploads/ref-a.png",
+        "users/user-1/uploads/ref-b.png",
+        "users/user-1/uploads/ref-a.png",
+    ]
+    assert [item["key"] for item in saved_requests[0]["inputAssets"]["referenceImages"]] == [
+        "users/user-1/uploads/ref-a.png",
+        "users/user-1/uploads/ref-b.png",
+        "users/user-1/uploads/ref-a.png",
+    ]
+    assert enqueued_messages == [{"jobId": "job_api_1", "taskId": "__api__", "userId": "user-1"}]
+
+
+def test_external_api_patch_image_edit_prefers_plural_reference_asset_keys_over_legacy_singular() -> None:
+    saved_requests: list[dict] = []
+    queued_jobs: list[dict] = []
+
+    class _Store:
+        def save_api_request(self, payload: dict):
+            saved_requests.append(payload)
+
+    class _Queue:
+        def enqueue(self, payload: dict):
+            pass
+
+    def _json_model(model, event: dict):
+        return model.model_validate_json(event["body"])
+
+    def _response(status_code: int, body: dict, *, origin: str | None = None):
+        return {"statusCode": status_code, "body": json.dumps(body), "headers": {"origin": origin}}
+
+    def _queue_job_fn(**kwargs):
+        queued_jobs.append(kwargs)
+        return "job_api_patch_1"
+
+    def _validate_api_asset_key_fn(*, asset_store, user_id: str, asset_key: str, expected_type: str):
+        assert asset_store is not None
+        assert user_id == "user-1"
+        return {
+            "key": asset_key,
+            "contentType": "image/png",
+        }
+
+    result = handle_external_api_routes(
+        "POST",
+        "/api/v1/image-edits/patch",
+        event=_event(
+            "POST",
+            "/api/v1/image-edits/patch",
+            {
+                "model": "chatgpt_latest",
+                "prompt": "Use the plural reference array order only.",
+                "inputAssetKey": "users/user-1/uploads/base.png",
+                "patchAssetKey": "users/user-1/uploads/base.png",
+                "maskAssetKey": "users/user-1/uploads/mask.png",
+                "referenceAssetKey": "users/user-1/uploads/legacy-single.png",
+                "referenceAssetKeys": [
+                    "users/user-1/uploads/ref-1.png",
+                    "users/user-1/uploads/ref-2.png",
+                ],
+                "patchRect": {"x": 0, "y": 0, "width": 512, "height": 512},
+                "featherPx": 0,
+                "bleedPx": 0,
+                "edgeAwareRefine": True,
+                "edgeAwareStrength": 0.45,
+                "edgeAwareRadiusPx": 6,
+                "maskGrowPx": 0,
+            },
+        ),
+        origin="https://example.com",
+        user_id="user-1",
+        store=_Store(),
+        asset_store=object(),
+        queue=_Queue(),
+        json_model=_json_model,
+        response_fn=_response,
+        error_response_fn=lambda status, message, *, origin=None: _response(status, {"error": message}, origin=origin),
+        new_id_fn=lambda prefix: f"{prefix}_1",
+        now_iso_fn=lambda: "2026-06-12T12:00:00Z",
+        queue_job_fn=_queue_job_fn,
+        sanitize_prompt_fn=lambda value: value.strip(),
+        validate_api_asset_key_fn=_validate_api_asset_key_fn,
+        api_request_error_payload_fn=lambda code, message: {"code": code, "message": message},
+        api_asset_paths_for_user_fn=lambda _user_id: SimpleNamespace(upload_asset=lambda asset_id, filename: f"users/{_user_id}/uploads/{asset_id}/{filename}"),
+        extract_query_fn=lambda _event: {},
+        api_request_response_fn=lambda *args, **kwargs: {},
+        validate_api_video_mode_fn=lambda model, mode: None,
+        validate_video_model_prompt_fn=lambda model, prompt: None,
+        get_video_model_capability_fn=lambda model: None,
+        segment_generation_provider_name_fn=lambda model: "openai",
+    )
+
+    assert result is not None
+    assert result["statusCode"] == 202
+    assert queued_jobs[0]["payload"]["referenceAssetKeys"] == [
+        "users/user-1/uploads/ref-1.png",
+        "users/user-1/uploads/ref-2.png",
+    ]
+    assert saved_requests[0]["request"]["referenceAssetKeys"] == [
+        "users/user-1/uploads/ref-1.png",
+        "users/user-1/uploads/ref-2.png",
+    ]
+    assert [item["key"] for item in saved_requests[0]["inputAssets"]["referenceImages"]] == [
+        "users/user-1/uploads/ref-1.png",
+        "users/user-1/uploads/ref-2.png",
+    ]
+
+
 def test_create_task_route_persists_and_returns_task_id(monkeypatch) -> None:
     saved: list[dict] = []
 
@@ -391,6 +578,69 @@ def test_task_upload_video_route_sets_original_upload(monkeypatch) -> None:
     assert saved
     assert saved[-1]["video"]["original"]["s3Key"] == payload["s3Key"]
     assert saved[-1]["status"] == "created"
+
+
+def test_edit_video_reference_import_route_copies_user_asset_into_task_library(monkeypatch) -> None:
+    task = {
+        "taskId": "task_1",
+        "userId": "user-1",
+        "name": "Task 1",
+        "status": "ready",
+        "editVideoReferences": [],
+    }
+    saved: list[dict] = []
+    copied: list[tuple[str, str, str | None]] = []
+
+    class _Store:
+        def save_task(self, task_payload: dict):
+            saved.append(json.loads(json.dumps(task_payload)))
+            return task_payload
+
+    class _AssetStore:
+        def copy_object(self, source_key: str, target_key: str, *, content_type: str | None = None):
+            copied.append((source_key, target_key, content_type))
+
+        def presign_get(self, key: str, expires: int = 0):
+            return f"https://download.example/{key}?e={expires}"
+
+    monkeypatch.setattr(api_handler, "get_user_id", lambda _event: "user-1")
+    monkeypatch.setattr(api_handler, "get_user_claims", lambda _event: {"email": "u@example.com"})
+    monkeypatch.setattr(api_handler, "S3JsonStore", lambda _bucket: _Store())
+    monkeypatch.setattr(api_handler, "AssetStore", lambda _bucket, _region: _AssetStore())
+    monkeypatch.setattr(api_handler, "JobQueue", lambda _url: object())
+    monkeypatch.setattr(api_handler, "_load_task_or_404", lambda _store, _user_id, _task_id: task)
+
+    result = api_handler._route(
+        _event(
+            "POST",
+            "/tasks/task_1/edit-video/references/import",
+            {
+                "sources": [
+                    {
+                        "sourceKey": "users/user-1/tasks/task_other/frames/frame_1/variants/example.png",
+                        "filename": "example.png",
+                        "sourceType": "frame_variant",
+                        "originTaskId": "task_other",
+                    }
+                ]
+            },
+        )
+    )
+    assert result["statusCode"] == 201
+    payload = json.loads(result["body"])
+    assert len(payload["references"]) == 1
+    reference = payload["references"][0]
+    assert reference["originSourceKey"] == "users/user-1/tasks/task_other/frames/frame_1/variants/example.png"
+    assert reference["originSourceType"] == "frame_variant"
+    assert reference["key"].startswith("users/user-1/tasks/task_1/edit_video/references/")
+    assert copied == [
+        (
+            "users/user-1/tasks/task_other/frames/frame_1/variants/example.png",
+            reference["key"],
+            "image/png",
+        )
+    ]
+    assert saved
 
 
 def test_task_delete_upload_asset_route_removes_original(monkeypatch) -> None:
@@ -594,6 +844,65 @@ def test_segment_generate_route_returns_job_and_gen(monkeypatch) -> None:
     assert payload["genId"] == "gen_abc"
     assert saved
     assert "gen_abc" in saved[-1]["segmentGenerations"]
+
+
+def test_character_animate_generate_route_returns_job_and_gen(monkeypatch) -> None:
+    task = {
+        "taskId": "task_1",
+        "userId": "user-1",
+        "name": "Task 1",
+        "workflowId": "character_animate_workflow",
+        "video": {"editSource": {"fps": {"num": 24, "den": 1}}},
+        "segments": [
+            {
+                "segmentId": "seg_1",
+                "startFrame": 0,
+                "endFrameExclusive": 120,
+                "durationFrames": 120,
+                "durationSec": 5.0,
+                "crop": None,
+            }
+        ],
+        "editVideoReferences": [
+            {"referenceId": "ref_1", "key": "users/user-1/tasks/task_1/edit_video/references/ref_1.png"}
+        ],
+        "segmentGenerations": {},
+        "history": [],
+    }
+    saved: list[dict] = []
+
+    class _Store:
+        def save_task(self, task_payload: dict, merge_on_conflict: bool = False):
+            saved.append(json.loads(json.dumps(task_payload)))
+            return task_payload
+
+    class _AssetStore:
+        pass
+
+    monkeypatch.setattr(api_handler, "get_user_id", lambda _event: "user-1")
+    monkeypatch.setattr(api_handler, "get_user_claims", lambda _event: {"email": "u@example.com"})
+    monkeypatch.setattr(api_handler, "S3JsonStore", lambda _bucket: _Store())
+    monkeypatch.setattr(api_handler, "AssetStore", lambda _bucket, _region: _AssetStore())
+    monkeypatch.setattr(api_handler, "JobQueue", lambda _url: object())
+    monkeypatch.setattr(api_handler, "_load_task_or_404", lambda _store, _user_id, _task_id: task)
+    monkeypatch.setattr(api_handler, "_queue_job", lambda **_kwargs: "job_char")
+    monkeypatch.setattr(api_handler, "new_id", lambda prefix: f"{prefix}_char")
+
+    result = api_handler._route(
+        _event(
+            "POST",
+            "/tasks/task_1/segments/seg_1/character-generate",
+            {"mode": "pose_video", "model": "runway_act_two", "characterReferenceId": "ref_1"},
+        )
+    )
+    assert result["statusCode"] == 202
+    payload = json.loads(result["body"])
+    assert payload["jobId"] == "job_char"
+    assert payload["genId"] == "gen_char"
+    assert saved
+    generation = saved[-1]["segmentGenerations"]["gen_char"]
+    assert generation["characterAnimation"]["mode"] == "pose_video"
+    assert generation["generationSettings"]["workflowId"] == "character_animate_workflow"
 
 
 def test_manual_segment_upload_init_route_returns_upload_details(monkeypatch) -> None:

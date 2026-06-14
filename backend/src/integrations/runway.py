@@ -73,6 +73,33 @@ def create_image_to_video(
     return _request("POST", "https://api.dev.runwayml.com/v1/image_to_video", token=api_key, payload=payload)
 
 
+def create_character_performance(
+    *,
+    api_key: str,
+    character_uri: str,
+    character_type: str,
+    reference_video_uri: str,
+    ratio: str,
+    body_control: bool = True,
+    expression_intensity: int = 3,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "model": "act_two",
+        "character": {
+            "type": character_type,
+            "uri": character_uri,
+        },
+        "reference": {
+            "type": "video",
+            "uri": reference_video_uri,
+        },
+        "ratio": ratio,
+        "bodyControl": bool(body_control),
+        "expressionIntensity": int(expression_intensity),
+    }
+    return _request("POST", "https://api.dev.runwayml.com/v1/character_performance", token=api_key, payload=payload)
+
+
 def get_task(*, api_key: str, task_id: str) -> dict[str, Any]:
     return _request("GET", f"https://api.dev.runwayml.com/v1/tasks/{task_id}", token=api_key)
 

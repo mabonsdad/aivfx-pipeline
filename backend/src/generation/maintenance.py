@@ -3,6 +3,9 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+_START_END_MODES = frozenset({"kling_start_end", "veo_start_end", "ltx23_i2v_start_end"})
+_START_ONLY_MODES = frozenset({"kling_start_only", "veo_start_only", "runway_i2v", "sora_i2v", "happy_horse_i2v", "wan_a14b_i2v"})
+
 
 def _generation_context(task: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any], dict[str, dict[str, Any]]]:
     generations = task.get("segmentGenerations")
@@ -13,17 +16,116 @@ def _generation_context(task: dict[str, Any]) -> tuple[dict[str, Any] | None, di
     return generations, frames, segments
 
 
+def _infer_source_generation_input_mode(task: dict[str, Any], generation: dict[str, Any]) -> str | None:
+    generation_settings = generation.get("generationSettings") if isinstance(generation.get("generationSettings"), dict) else {}
+    explicit_input_mode = str(generation_settings.get("inputMode") or "").strip()
+    if explicit_input_mode in {"start_video", "start_end", "start_only", "edit_video"}:
+        return explicit_input_mode
+    selected_reference_ids = generation_settings.get("selectedReferenceIds")
+    if isinstance(selected_reference_ids, list) and selected_reference_ids:
+        return "edit_video"
+    prompt = str((generation.get("luma") or {}).get("prompt") or "").lower()
+    audio_reference_id = str(generation_settings.get("audioReferenceId") or "").strip()
+    if audio_reference_id or "@image" in prompt or "@audio" in prompt:
+        return "edit_video"
+    mode = str((generation.get("luma") or {}).get("mode") or "").strip()
+    if mode in _START_END_MODES:
+        return "start_end"
+    if mode in _START_ONLY_MODES:
+        return "start_only"
+    if mode in {"happy_horse_video_edit", "runway_aleph_v2v", "kling_v3_omni_video_edit", "seedance_reference_to_video", "flex_1"}:
+        has_edit_references = isinstance(task.get("editVideoReferences"), list) and len(task.get("editVideoReferences")) > 0
+        if mode == "seedance_reference_to_video" and "@video1" in prompt and has_edit_references:
+            return "edit_video"
+        return "start_video"
+    if str((generation.get("luma") or {}).get("model") or "").strip() == "wan2.7-videoedit":
+        return "edit_video"
+    return None
+
+
+def _infer_generation_origin(task: dict[str, Any], generation: dict[str, Any]) -> dict[str, Any]:
+    generation_settings = generation.get("generationSettings") if isinstance(generation.get("generationSettings"), dict) else {}
+    character_animation = generation.get("characterAnimation") if isinstance(generation.get("characterAnimation"), dict) else {}
+    task_workflow_id = str(task.get("workflowId") or "source_video_flow").strip() or "source_video_flow"
+    workflow_id = str(
+        generation_settings.get("workflowId")
+        or character_animation.get("workflowId")
+        or task_workflow_id
+    ).strip() or task_workflow_id
+
+    tool_origin = "segment_generate"
+    step_origin = "generate"
+    creation_mode: str | None = None
+
+    workflow_marker = str(generation_settings.get("workflow") or "").strip()
+    if workflow_marker == "clip_lengthen":
+        tool_origin = "clip_lengthen"
+        step_origin = "post_process"
+    elif workflow_marker == "timing_reconcile":
+        tool_origin = "timing_reconcile"
+        step_origin = "post_process"
+    elif workflow_marker == "manual_upload_normalize" or generation.get("manualUpload"):
+        tool_origin = "manual_upload"
+    elif workflow_marker == "chunked_generation" or generation.get("chunkRole") == "draft_stitched":
+        tool_origin = "chunked_generate"
+    elif workflow_marker == "extension_chain_stitch":
+        tool_origin = "extension_chain_stitch"
+
+    if workflow_id == "character_animate_workflow":
+        creation_mode = str(character_animation.get("mode") or generation_settings.get("characterMode") or "").strip() or None
+        if tool_origin == "segment_generate":
+            tool_origin = "character_generate"
+    elif workflow_id == "simple_generation_workflow":
+        creation_mode = "previz"
+        if tool_origin == "segment_generate":
+            tool_origin = "previz_generate"
+    else:
+        creation_mode = _infer_source_generation_input_mode(task, generation)
+
+    return {
+        "workflowId": workflow_id,
+        "stepOrigin": step_origin,
+        "toolOrigin": tool_origin,
+        "creationMode": creation_mode,
+    }
+
+
+def backfill_segment_generation_origin(task: dict[str, Any]) -> bool:
+    generations = task.get("segmentGenerations")
+    if not isinstance(generations, dict) or not generations:
+        return False
+    changed = False
+    for generation in generations.values():
+        if not isinstance(generation, dict):
+            continue
+        existing_origin = generation.get("origin") if isinstance(generation.get("origin"), dict) else {}
+        inferred_origin = _infer_generation_origin(task, generation)
+        next_origin = {
+            "workflowId": str(existing_origin.get("workflowId") or inferred_origin.get("workflowId") or "").strip() or None,
+            "stepOrigin": str(existing_origin.get("stepOrigin") or inferred_origin.get("stepOrigin") or "").strip() or None,
+            "toolOrigin": str(existing_origin.get("toolOrigin") or inferred_origin.get("toolOrigin") or "").strip() or None,
+            "creationMode": str(existing_origin.get("creationMode") or inferred_origin.get("creationMode") or "").strip() or None,
+        }
+        normalized_origin = {key: value for key, value in next_origin.items() if value}
+        if normalized_origin != existing_origin:
+            generation["origin"] = normalized_origin
+            changed = True
+    return changed
+
+
 def reconcile_segment_generation_job_states(
     task: dict[str, Any],
     store,
     *,
     now_iso_fn: Callable[[], str],
     append_history_event_fn: Callable[[dict[str, Any], dict[str, Any]], None],
+    stale_running_job_max_age_seconds: int,
 ) -> bool:
     generations, frames, segments = _generation_context(task)
     if generations is None:
         return False
     user_id = str(task.get("userId") or "")
+    now_dt = datetime.now(timezone.utc)
     changed = False
     for gen_id, generation in generations.items():
         if not isinstance(generation, dict):
@@ -38,6 +140,34 @@ def reconcile_segment_generation_job_states(
         if not isinstance(job, dict):
             continue
         job_status = str(job.get("status") or "").lower()
+        output_key = generation.get("outputKey")
+        job_updated_at = _parse_iso_datetime(job.get("updatedAt"))
+        if (
+            job_status == "running"
+            and not output_key
+            and job_updated_at
+            and (now_dt - job_updated_at).total_seconds() > stale_running_job_max_age_seconds
+        ):
+            failure_message = "Worker timed out before provider polling completed."
+            job["status"] = "failed"
+            job["error"] = failure_message
+            job["finishedAt"] = now_iso_fn()
+            store.save_job(job)
+            generation["status"] = "failed"
+            generation["error"] = failure_message
+            generation["updatedAt"] = job.get("updatedAt") or now_iso_fn()
+            generation["finishedAt"] = job.get("finishedAt") or job.get("updatedAt") or now_iso_fn()
+            append_history_event_fn(
+                task,
+                {
+                    "at": now_iso_fn(),
+                    "event": "segment_generation.reconciled_timeout",
+                    "jobId": job_id,
+                    "genId": gen_id,
+                },
+            )
+            changed = True
+            continue
         if job_status == "complete":
             result_refs = job.get("resultRefs") or {}
             output_key = result_refs.get("outputKey")
@@ -46,6 +176,8 @@ def reconcile_segment_generation_job_states(
             payload = job.get("payload") or {}
             generation["status"] = "complete"
             generation["outputKey"] = output_key
+            if result_refs.get("posterKey"):
+                generation["posterKey"] = result_refs.get("posterKey")
             generation["error"] = None
             generation["updatedAt"] = job.get("updatedAt") or now_iso_fn()
             generation["finishedAt"] = result_refs.get("finishedAt") or job.get("finishedAt") or job.get("updatedAt") or now_iso_fn()
@@ -97,6 +229,100 @@ def reconcile_segment_generation_job_states(
                     "event": "segment_generation.reconciled_failed",
                     "jobId": job_id,
                     "genId": gen_id,
+                },
+            )
+            changed = True
+    return changed
+
+
+def reconcile_edit_video_reference_job_states(
+    task: dict[str, Any],
+    store,
+    *,
+    now_iso_fn: Callable[[], str],
+    append_history_event_fn: Callable[[dict[str, Any], dict[str, Any]], None],
+    stale_running_job_max_age_seconds: int,
+) -> bool:
+    references = task.get("editVideoReferences")
+    if not isinstance(references, list) or not references:
+        return False
+    user_id = str(task.get("userId") or "")
+    now_dt = datetime.now(timezone.utc)
+    changed = False
+    for reference in references:
+        if not isinstance(reference, dict):
+            continue
+        status = str(reference.get("status") or "").lower()
+        if status not in {"queued", "running"}:
+            continue
+        job_id = str(reference.get("jobId") or "").strip()
+        if not job_id:
+            continue
+        job = store.load_job(user_id, job_id)
+        if not isinstance(job, dict):
+            continue
+        job_status = str(job.get("status") or "").lower()
+        job_updated_at = _parse_iso_datetime(job.get("updatedAt"))
+        if job_status == "complete":
+            result_refs = job.get("resultRefs") or {}
+            output_key = str(result_refs.get("outputKey") or "").strip()
+            if not output_key:
+                continue
+            reference["status"] = "complete"
+            reference["key"] = output_key
+            reference["updatedAt"] = job.get("updatedAt") or now_iso_fn()
+            reference["jobId"] = job_id
+            reference.pop("error", None)
+            append_history_event_fn(
+                task,
+                {
+                    "at": now_iso_fn(),
+                    "event": "edit_video_reference.reconciled_complete",
+                    "jobId": job_id,
+                    "referenceId": reference.get("referenceId"),
+                },
+            )
+            changed = True
+            continue
+        if job_status == "failed":
+            reference["status"] = "failed"
+            reference["updatedAt"] = job.get("updatedAt") or now_iso_fn()
+            reference["jobId"] = job_id
+            reference["error"] = job.get("error")
+            append_history_event_fn(
+                task,
+                {
+                    "at": now_iso_fn(),
+                    "event": "edit_video_reference.reconciled_failed",
+                    "jobId": job_id,
+                    "referenceId": reference.get("referenceId"),
+                },
+            )
+            changed = True
+            continue
+        output_key = str(reference.get("key") or "").strip()
+        if (
+            job_status == "running"
+            and not output_key
+            and job_updated_at
+            and (now_dt - job_updated_at).total_seconds() > stale_running_job_max_age_seconds
+        ):
+            failure_message = "Worker timed out before reference generation completed."
+            job["status"] = "failed"
+            job["error"] = failure_message
+            job["finishedAt"] = now_iso_fn()
+            store.save_job(job)
+            reference["status"] = "failed"
+            reference["updatedAt"] = job.get("updatedAt") or now_iso_fn()
+            reference["jobId"] = job_id
+            reference["error"] = failure_message
+            append_history_event_fn(
+                task,
+                {
+                    "at": now_iso_fn(),
+                    "event": "edit_video_reference.reconciled_timeout",
+                    "jobId": job_id,
+                    "referenceId": reference.get("referenceId"),
                 },
             )
             changed = True
@@ -198,13 +424,22 @@ def maintain_segment_generations(
     now_iso_fn: Callable[[], str],
     append_history_event_fn: Callable[[dict[str, Any], dict[str, Any]], None],
     stale_generation_max_age_seconds: int,
+    stale_running_job_max_age_seconds: int,
 ) -> bool:
     changed = reconcile_segment_generation_job_states(
         task,
         store,
         now_iso_fn=now_iso_fn,
         append_history_event_fn=append_history_event_fn,
+        stale_running_job_max_age_seconds=stale_running_job_max_age_seconds,
     )
+    changed = reconcile_edit_video_reference_job_states(
+        task,
+        store,
+        now_iso_fn=now_iso_fn,
+        append_history_event_fn=append_history_event_fn,
+        stale_running_job_max_age_seconds=stale_running_job_max_age_seconds,
+    ) or changed
     changed = prune_stale_segment_generations(
         task,
         store,
@@ -212,4 +447,5 @@ def maintain_segment_generations(
         stale_generation_max_age_seconds=stale_generation_max_age_seconds,
     ) or changed
     changed = backfill_segment_generation_preview_refs(task) or changed
+    changed = backfill_segment_generation_origin(task) or changed
     return changed

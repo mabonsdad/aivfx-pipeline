@@ -19,7 +19,7 @@ export const GENERATION_MODE_CONFIGS: Record<GenerateInputMode, GenerationModeCo
     description: "Edit a start frame, then generate motion from the working range video.",
     requiresEndFrame: false,
     postProcessTools: {
-      extend: true,
+      extend: false,
       reconcileTiming: true,
       trackedCleanup: true,
       mergeIntoSource: true,
@@ -31,7 +31,7 @@ export const GENERATION_MODE_CONFIGS: Record<GenerateInputMode, GenerationModeCo
     description: "Edit both the start and end frames, then generate a transition between them.",
     requiresEndFrame: true,
     postProcessTools: {
-      extend: true,
+      extend: false,
       reconcileTiming: false,
       trackedCleanup: false,
       mergeIntoSource: true,
@@ -43,7 +43,7 @@ export const GENERATION_MODE_CONFIGS: Record<GenerateInputMode, GenerationModeCo
     description: "Generate a new clip from the edited start frame without using source motion.",
     requiresEndFrame: false,
     postProcessTools: {
-      extend: true,
+      extend: false,
       reconcileTiming: false,
       trackedCleanup: false,
       mergeIntoSource: false,
@@ -56,9 +56,9 @@ export const GENERATION_MODE_CONFIGS: Record<GenerateInputMode, GenerationModeCo
     requiresEndFrame: false,
     postProcessTools: {
       extend: false,
-      reconcileTiming: false,
+      reconcileTiming: true,
       trackedCleanup: false,
-      mergeIntoSource: false,
+      mergeIntoSource: true,
     },
   },
 };

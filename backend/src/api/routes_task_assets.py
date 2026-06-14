@@ -32,17 +32,28 @@ def handle_task_asset_routes(
         req = json_model(UploadVideoRequest, event)
         if req.sizeBytes > max_upload_bytes:
             return error_response_fn(400, f"Upload too large (max={max_upload_bytes})", origin=origin)
-        if not req.contentType.startswith("video/"):
+        is_video = req.contentType.startswith("video/")
+        is_audio = req.contentType.startswith("audio/")
+        if not is_video and not (is_audio and str(task.get("workflowId") or "") == "character_animate_workflow"):
             return error_response_fn(400, "Invalid content type", origin=origin)
 
         key = asset_paths_for_task_fn(task).original_video(req.filename)
         upload_url = asset_store.presign_put(key, expires=900, content_type=req.contentType)
-        task["video"]["original"] = {
+        source_media_kind = "video" if is_video else "audio"
+        source_original = {
             "s3Key": key,
             "filename": req.filename,
+            "contentType": req.contentType,
             "sizeBytes": req.sizeBytes,
             "sha256": None,
         }
+        task.setdefault("sourceMedia", {})
+        task["sourceMedia"]["kind"] = source_media_kind
+        task["sourceMedia"]["original"] = source_original
+        if is_video:
+            task["video"]["original"] = source_original
+        else:
+            task.setdefault("video", {}).pop("original", None)
         task["status"] = "created"
         store.save_task(task)
         return response_fn(200, {"uploadUrl": upload_url, "s3Key": key}, origin=origin)
@@ -101,17 +112,67 @@ def handle_task_asset_routes(
         if not key:
             return
         try:
-            asset_store.delete_object(key)
+            asset_store.delete_object(key, purge_versions=True)
         except ClientError:
             logger.warning("Asset delete failed", extra={"taskId": task_id, "key": key})
 
+    def _delete_prefix_if_present(prefix: str | None) -> None:
+        if not prefix:
+            return
+        try:
+            asset_store.delete_prefix(prefix, purge_versions=True)
+        except ClientError:
+            logger.warning("Asset prefix delete failed", extra={"taskId": task_id, "prefix": prefix})
+
+    def _delete_quality_match_artifacts(frame_id: str, analysis_ids: list[str]) -> None:
+        paths = asset_paths_for_task_fn(task)
+        for analysis_id in analysis_ids:
+            _delete_prefix_if_present(paths.quality_match_prefix(frame_id, analysis_id))
+
+    def _delete_generation_attached_keys(generation: dict[str, Any]) -> None:
+        explicit_keys = {
+            generation.get("outputKey"),
+            generation.get("posterKey"),
+            generation.get("inputMediaKey"),
+            generation.get("inputAudioKey"),
+            generation.get("inputFirstFrameKey"),
+            generation.get("inputLastFrameKey"),
+        }
+        generation_settings = generation.get("generationSettings") if isinstance(generation.get("generationSettings"), dict) else {}
+        inputs = generation_settings.get("inputs") if isinstance(generation_settings.get("inputs"), dict) else {}
+        for item in inputs.values():
+            if isinstance(item, dict):
+                explicit_keys.add(item.get("key"))
+        review = generation.get("review") if isinstance(generation.get("review"), dict) else {}
+        if isinstance(review.get("previewManifestKey"), str):
+            explicit_keys.add(review.get("previewManifestKey"))
+        for key in explicit_keys:
+            if isinstance(key, str) and key:
+                _delete_key_if_present(key)
+
     if req.assetType == "upload":
+        source_media = task.setdefault("sourceMedia", {})
+        video = task.setdefault("video", {})
         original = task.get("video", {}).get("original", {})
+        if not original:
+            original = task.get("sourceMedia", {}).get("original", {})
         key = original.get("s3Key")
         if not key:
             return error_response_fn(404, "Upload not found", origin=origin)
         _delete_key_if_present(key)
-        task.setdefault("video", {}).pop("original", None)
+        edit_source = video.get("editSource") if isinstance(video.get("editSource"), dict) else {}
+        preview_source = video.get("previewSource") if isinstance(video.get("previewSource"), dict) else {}
+        _delete_key_if_present(edit_source.get("s3Key"))
+        _delete_key_if_present(preview_source.get("s3Key"))
+        _delete_key_if_present(source_media.get("waveform", {}).get("s3Key") if isinstance(source_media.get("waveform"), dict) else None)
+        _delete_prefix_if_present(f"{asset_paths_for_task_fn(task).thumbs_prefix()}/")
+        video.pop("original", None)
+        video.pop("editSource", None)
+        video.pop("previewSource", None)
+        source_media.pop("original", None)
+        source_media.pop("editSource", None)
+        source_media.pop("previewSource", None)
+        source_media.pop("waveform", None)
         if not task.get("video", {}).get("editSource"):
             task["status"] = "created"
         store.save_task(task)
@@ -141,6 +202,7 @@ def handle_task_asset_routes(
                 for analysis_id, analysis in analyses.items()
                 if isinstance(analysis, dict) and analysis.get("frameId") == frame_id
             ]
+            _delete_quality_match_artifacts(str(frame_id), [str(item) for item in remove_analysis_ids])
             for analysis_id in remove_analysis_ids:
                 analyses.pop(analysis_id, None)
         task.get("frames", {}).pop(frame_id, None)
@@ -173,6 +235,7 @@ def handle_task_asset_routes(
                 and analysis.get("frameId") == frame_id
                 and analysis.get("variantId") == variant_id
             ]
+            _delete_quality_match_artifacts(str(frame_id), [str(item) for item in remove_analysis_ids])
             for analysis_id in remove_analysis_ids:
                 analyses.pop(analysis_id, None)
             status = frame.get("qualityMatchStatus")
@@ -190,7 +253,7 @@ def handle_task_asset_routes(
         generation = task.get("segmentGenerations", {}).get(gen_id or "")
         if not generation:
             return error_response_fn(404, "Generation not found", origin=origin)
-        _delete_key_if_present(generation.get("outputKey"))
+        _delete_generation_attached_keys(generation)
         task.get("segmentGenerations", {}).pop(gen_id, None)
         for segment in task.get("segments", []):
             if segment.get("selectedGenerationId") == gen_id:
@@ -206,7 +269,21 @@ def handle_task_asset_routes(
         if not export_item:
             return error_response_fn(404, "Export not found", origin=origin)
         _delete_key_if_present(export_item.get("outputKey"))
-        task["exports"] = [e for e in exports if e.get("exportId") != export_id]
+        motion_qc = export_item.get("motionSyncQc") if isinstance(export_item.get("motionSyncQc"), dict) else {}
+        for key_name in ("timelineCsvKey", "timelineGraphKey", "reportJsonKey"):
+            _delete_key_if_present(motion_qc.get(key_name))
+        topaz_upscale = export_item.get("topazUpscale") if isinstance(export_item.get("topazUpscale"), dict) else {}
+        _delete_key_if_present(topaz_upscale.get("resultOutputKey"))
+        result_export_id = str(topaz_upscale.get("resultExportId") or "")
+        if result_export_id:
+            result_export = next((e for e in exports if isinstance(e, dict) and e.get("exportId") == result_export_id), None)
+            if isinstance(result_export, dict):
+                _delete_key_if_present(result_export.get("outputKey"))
+        task["exports"] = [
+            e
+            for e in exports
+            if e.get("exportId") != export_id and (not result_export_id or e.get("exportId") != result_export_id)
+        ]
         store.save_task(task)
         return response_fn(200, {"ok": True}, origin=origin)
 
@@ -218,6 +295,18 @@ def handle_task_asset_routes(
             return error_response_fn(404, "Edit-video reference not found", origin=origin)
         _delete_key_if_present(reference.get("key"))
         task["editVideoReferences"] = [item for item in references if item.get("referenceId") != reference_id]
+        store.save_task(task)
+        return response_fn(200, {"ok": True}, origin=origin)
+
+    if req.assetType == "generation_audio_reference":
+        generation_audio_reference = task.get("generationAudioReference") if isinstance(task.get("generationAudioReference"), dict) else None
+        if not generation_audio_reference:
+            return error_response_fn(404, "Generation audio reference not found", origin=origin)
+        _delete_key_if_present(generation_audio_reference.get("originalKey"))
+        _delete_key_if_present(generation_audio_reference.get("editSourceKey"))
+        _delete_key_if_present(generation_audio_reference.get("previewKey"))
+        _delete_key_if_present(generation_audio_reference.get("waveformKey"))
+        task.pop("generationAudioReference", None)
         store.save_task(task)
         return response_fn(200, {"ok": True}, origin=origin)
 

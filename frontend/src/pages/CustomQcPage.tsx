@@ -4,6 +4,7 @@ import type { UseMutationResult, UseQueryResult } from "@tanstack/react-query";
 import { apiClient } from "../api/client";
 import { StatusNotice } from "../components/layout/UiFeedback";
 import { FRAME_TEST_OPTIONS, ReportCreateModal } from "../components/reports/QcReportShared";
+import type { CustomReportTypeId } from "../lib/generated/apiContracts";
 import type { CustomReportOutputRef, CustomReportRecord, TaskDetail } from "../types/api";
 
 type CustomQcPageProps = {
@@ -15,7 +16,7 @@ type CustomQcPageProps = {
     Error,
     {
       taskId: string;
-      reportType: "qc_frame" | "qc_video" | "video_compare";
+      reportType: CustomReportTypeId;
       tests: string[];
       outputRefs: CustomReportOutputRef[];
       name?: string;

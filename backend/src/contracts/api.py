@@ -37,6 +37,7 @@ CUSTOM_REPORT_TYPE_IDS: tuple[str, ...] = (
     "qc_frame",
     "qc_video",
     "video_compare",
+    "previz_review",
 )
 MANUAL_REFINE_EXPORT_FORMAT_IDS: tuple[str, ...] = ("psd", "png_zip")
 QC_EDGE_SUPPRESSION_IDS: tuple[str, ...] = ("off", "low", "medium", "high")
@@ -78,7 +79,9 @@ class SegmentGeneratePayload(TypedDict):
     wan27Resolution: NotRequired[str | None]
     happyHorseResolution: NotRequired[str | None]
     sora2Resolution: NotRequired[str | None]
+    inputMode: NotRequired[Literal["start_video", "start_end", "start_only", "edit_video"] | None]
     selectedReferenceIds: NotRequired[list[str] | None]
+    audioReferenceId: NotRequired[str | None]
 
 
 class ChunkedSegmentGeneratePayload(TypedDict):
@@ -102,6 +105,15 @@ class SegmentGenerationExtendPayload(TypedDict):
     continueToRangeEnd: NotRequired[bool]
     useSourceLastFrame: NotRequired[bool]
     lastFrameVariantId: NotRequired[str | None]
+
+
+class SegmentGenerationLengthenPayload(TypedDict):
+    model: str
+    direction: Literal["start", "end"]
+    durationSeconds: int
+    prompt: str
+    inputMode: Literal["start_end", "edit_video"]
+    selectedReferenceIds: NotRequired[list[str]]
 
 
 class ReconcileTimingPayload(TypedDict):
@@ -153,6 +165,7 @@ class ApiImageEditFullPayload(TypedDict):
     model: str
     prompt: str
     inputAssetKey: str
+    referenceAssetKeys: NotRequired[list[str]]
     lumaUniModel: NotRequired[Literal["uni-1", "uni-1-max"] | None]
     lumaUniStyle: NotRequired[Literal["auto", "manga"] | None]
     lumaUniOutputFormat: NotRequired[Literal["png", "jpeg"] | None]
@@ -173,6 +186,7 @@ class ApiImageEditPatchPayload(TypedDict):
     maskGrowPx: int
     maskAssetKey: NotRequired[str | None]
     referenceAssetKey: NotRequired[str | None]
+    referenceAssetKeys: NotRequired[list[str]]
 
 
 class ApiReferenceVideoGeneratePayload(TypedDict):
@@ -184,6 +198,7 @@ class ApiReferenceVideoGeneratePayload(TypedDict):
     negativePrompt: NotRequired[str | None]
     videoAssetKey: NotRequired[str | None]
     lastFrameAssetKey: NotRequired[str | None]
+    referenceAssetKeys: NotRequired[list[str]]
     durationSeconds: NotRequired[int | None]
     replicateKlingMode: NotRequired[str | None]
     replicateKlingV3Mode: NotRequired[str | None]
@@ -193,7 +208,7 @@ class ApiReferenceVideoGeneratePayload(TypedDict):
 
 
 class AssetDeletePayload(TypedDict):
-    assetType: Literal["upload", "frame_capture", "frame_variant", "segment_generation", "export", "edit_video_reference"]
+    assetType: Literal["upload", "frame_capture", "frame_variant", "segment_generation", "export", "edit_video_reference", "generation_audio_reference"]
     frameId: NotRequired[str | None]
     variantId: NotRequired[str | None]
     genId: NotRequired[str | None]
@@ -211,7 +226,7 @@ class CustomReportOutputRefPayload(TypedDict):
 
 
 class CustomReportCreatePayload(TypedDict):
-    reportType: Literal["qc_frame", "qc_video", "video_compare"]
+    reportType: Literal["qc_frame", "qc_video", "video_compare", "previz_review"]
     outputRefs: list[CustomReportOutputRefPayload]
     tests: list[str]
     name: NotRequired[str | None]

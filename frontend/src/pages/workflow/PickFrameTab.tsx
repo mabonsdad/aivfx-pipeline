@@ -144,7 +144,9 @@ function resizeFromCorner(
 
 export type PickFrameTabCtx = {
   timelinePlaybackUrl: string;
-  timelineVideoRef: RefObject<HTMLVideoElement>;
+  timelineVideoRef: RefObject<HTMLMediaElement | null>;
+  sourceMediaKind?: "video" | "audio";
+  sourceWaveformUrl?: string | null;
   frameCount: (task: TaskDetail | undefined) => number;
   task: TaskDetail | undefined;
   fpsValue: (task: TaskDetail | undefined) => number;
@@ -156,6 +158,7 @@ export type PickFrameTabCtx = {
     selectLabel: string;
     onSelect: () => void;
     onClear: () => void;
+    selectionKind?: "frame" | "point";
   }>;
   firstFrame: { frameId: string; frameIndex: number; timecode: string; imageUrl?: string } | null;
   captureCurrentFrameFor: (boundary: "first" | "last") => Promise<void>;
@@ -203,6 +206,8 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
   const {
     timelinePlaybackUrl,
     frameCount,
+    sourceMediaKind = "video",
+    sourceWaveformUrl,
     task,
     fpsValue,
     currentFrameIndex,
@@ -230,7 +235,8 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
 
   const sourceWidth = Number(task?.video?.editSource?.width ?? 0);
   const sourceHeight = Number(task?.video?.editSource?.height ?? 0);
-  const canOpenCropTool = Boolean(selectedSegmentId || selectedRange);
+  const isAudioSource = sourceMediaKind === "audio";
+  const canOpenCropTool = !isAudioSource && Boolean(selectedSegmentId || selectedRange);
   const [isWorkingRangeModalOpen, setIsWorkingRangeModalOpen] = useState(false);
 
   const [isCropModalOpen, setIsCropModalOpen] = useState(false);
@@ -575,7 +581,9 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
           <div className="flex items-start gap-2">
             <div>
               <p className="text-sm font-semibold text-ink">Select Working Range</p>
-              <p className="text-xs text-ink/60">Choose a segment of the video to work on or use the whole video</p>
+              <p className="text-xs text-ink/60">
+                {isAudioSource ? "Choose a segment of the audio to work on or use the whole source audio" : "Choose a segment of the video to work on or use the whole video"}
+              </p>
             </div>
           </div>
           <HelpInfoButton
@@ -586,22 +594,24 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
               "Saved working ranges can be reused across Create, Outputs, Post Process, and Reports.",
             ]}
           />
-          <button
-            type="button"
-            onClick={openWorkingRangeModal}
-            className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-white"
-          >
-            Create New Working Range
-          </button>
+              <button
+                type="button"
+                onClick={openWorkingRangeModal}
+                className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-white"
+              >
+                Create New Working Range
+              </button>
         </div>
         <div className="mt-3 grid gap-2 lg:grid-cols-2">
           {orderedSegments.map((seg, index) => {
             const endFrame = Math.max(seg.endFrameExclusive - 1, seg.startFrame);
-            const startFrameImage = task?.frames?.[seg.startFrameId]?.imageUrl;
-            const endFrameImage = task?.frames?.[seg.endFrameId]?.imageUrl;
+            const startFrameImage = task?.frames?.[seg.startFrameId]?.imageUrl ?? sourceWaveformUrl ?? null;
+            const endFrameImage = task?.frames?.[seg.endFrameId]?.imageUrl ?? sourceWaveformUrl ?? null;
             const isSelected = seg.segmentId === selectedBaseSegment?.segmentId;
             const rangeWarning =
-              generationInputMode === "start_video" && seg.durationFrames > 192
+              isAudioSource
+                ? null
+                : generationInputMode === "start_video" && seg.durationFrames > 192
                 ? "Above frame limit for this mode - chunking required"
                 : generationInputMode === "start_end" && seg.durationFrames > 240
                   ? "Above frame limit: output shorter than source"
@@ -631,11 +641,11 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
                 </div>
                 <div className="mt-3 flex flex-wrap items-start gap-2">
                   <div>
-                    <p className="mb-1 text-xs font-medium text-ink/65">Start f{seg.startFrame}</p>
+                    <p className="mb-1 text-xs font-medium text-ink/65">{isAudioSource ? `Start ${seg.startTimecode}` : `Start f${seg.startFrame}`}</p>
                     {startFrameImage ? (
                       <img
                         src={startFrameImage}
-                        alt={`Start frame ${seg.startFrame}`}
+                        alt={isAudioSource ? `Start point ${seg.startTimecode}` : `Start frame ${seg.startFrame}`}
                         className="h-20 w-32 rounded border border-ink/10 bg-bg object-cover"
                         loading="lazy"
                         decoding="async"
@@ -645,16 +655,16 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
                     )}
                   </div>
                   <div className="flex min-w-[5.5rem] flex-col items-center justify-center pt-6 text-center text-xs text-ink/65">
-                    <p>{seg.durationFrames} frames</p>
+                    <p>{isAudioSource ? seg.startTimecode : `${seg.durationFrames} frames`}</p>
                     <div className="my-1 text-sm leading-none text-ink/45">→</div>
                     <p>{seg.durationSec.toFixed(2)}s</p>
                   </div>
                   <div>
-                    <p className="mb-1 text-xs font-medium text-ink/65">End f{endFrame}</p>
+                    <p className="mb-1 text-xs font-medium text-ink/65">{isAudioSource ? `End ${seg.endTimecode}` : `End f${endFrame}`}</p>
                     {endFrameImage ? (
                       <img
                         src={endFrameImage}
-                        alt={`End frame ${endFrame}`}
+                        alt={isAudioSource ? `End point ${seg.endTimecode}` : `End frame ${endFrame}`}
                         className="h-20 w-32 rounded border border-ink/10 bg-bg object-cover"
                         loading="lazy"
                         decoding="async"
@@ -676,87 +686,97 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
         </div>
       </div>
 
-      <div className="rounded-2xl border border-ink/10 bg-card p-4">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <p className="text-sm font-semibold text-ink">Select Region (optional)</p>
-            <p className="text-xs text-ink/60">Crop into a region of the video to regenerate - Nb. works best for static shots and/or if all action in one part of video</p>
+      {!isAudioSource ? (
+        <div className="rounded-2xl border border-ink/10 bg-card p-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p className="text-sm font-semibold text-ink">Select Region (optional)</p>
+              <p className="text-xs text-ink/60">Crop into a region of the video to regenerate - Nb. works best for static shots and/or if all action in one part of video</p>
+            </div>
+            <button
+              type="button"
+              disabled={!canOpenCropTool}
+              onClick={() => {
+                void openCropModal();
+              }}
+              className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Create New Cropped Region
+            </button>
+            <HelpInfoButton
+              title="Select Region"
+              lines={[
+                "Cropping focuses regeneration on one region of the frame.",
+                "It works best for static shots or where the action stays in one area of the image.",
+                "Overcropping or using it on fast camera movement can make results less stable.",
+              ]}
+            />
           </div>
-          <button
-            type="button"
-            disabled={!canOpenCropTool}
-            onClick={() => {
-              void openCropModal();
-            }}
-            className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            Create New Cropped Region
-          </button>
-          <HelpInfoButton
-            title="Select Region"
-            lines={[
-              "Cropping focuses regeneration on one region of the frame.",
-              "It works best for static shots or where the action stays in one area of the image.",
-              "Overcropping or using it on fast camera movement can make results less stable.",
-            ]}
-          />
-        </div>
-        <div className="mt-3 grid gap-2 lg:grid-cols-2">
-          {cropOptions.map((segment) => {
-            const previewUrl = task?.frames?.[segment.startFrameId]?.imageUrl ?? null;
-            const isSelected = segment.segmentId === selectedSegmentId;
-            const crop = segment.crop?.enabled ? segment.crop : null;
-            const title =
-              !crop && defaultVideoSegment?.segmentId === segment.segmentId
-                ? "Whole Video (no crop)"
-                : !crop
-                  ? "No crop"
-                  : `Crop ${crop.aspect}`;
-            const meta = crop
-              ? [`Aspect ${crop.aspect}`, `x:${crop.x} y:${crop.y}`, `w:${crop.width} h:${crop.height}`]
-              : [`Aspect ${sourceWidth}:${sourceHeight}`, `x:0 y:0`, `w:${sourceWidth} h:${sourceHeight}`];
-            return (
-              <button
-                key={segment.segmentId}
-                type="button"
-                onClick={() => {
-                  setSelectedSegmentId(segment.segmentId);
-                  setCurrentFrameIndex(segment.startFrame);
-                  setFirstFrameId(segment.startFrameId);
-                  setLastFrameId(segment.endFrameId);
-                }}
-                className={`w-full rounded-lg border p-2.5 text-left transition ${
-                  isSelected ? "border-teal-500 bg-teal-50" : "border-ink/10 bg-white hover:border-ink/20"
-                }`}
-              >
-                <div className="flex items-start gap-3">
-                  <div className="flex h-20 w-32 items-center justify-center rounded border border-ink/10 bg-bg">
-                    {previewUrl ? (
-                      <img
-                        src={previewUrl}
-                        alt={title}
-                        className="h-full w-full rounded object-contain"
-                        loading="lazy"
-                        decoding="async"
-                      />
-                    ) : (
-                      <div className="text-xs text-ink/45">No preview</div>
-                    )}
+          <div className="mt-3 grid gap-2 lg:grid-cols-2">
+            {cropOptions.map((segment) => {
+              const previewUrl = task?.frames?.[segment.startFrameId]?.imageUrl ?? null;
+              const previewImageUrl = previewUrl ?? sourceWaveformUrl ?? null;
+              const isSelected = segment.segmentId === selectedSegmentId;
+              const crop = segment.crop?.enabled ? segment.crop : null;
+              const title =
+                !crop && defaultVideoSegment?.segmentId === segment.segmentId
+                  ? "Whole Video (no crop)"
+                  : !crop
+                    ? "No crop"
+                    : `Crop ${crop.aspect}`;
+              const meta = crop
+                ? [`Aspect ${crop.aspect}`, `x:${crop.x} y:${crop.y}`, `w:${crop.width} h:${crop.height}`]
+                : [`Aspect ${sourceWidth}:${sourceHeight}`, `x:0 y:0`, `w:${sourceWidth} h:${sourceHeight}`];
+              return (
+                <button
+                  key={segment.segmentId}
+                  type="button"
+                  onClick={() => {
+                    setSelectedSegmentId(segment.segmentId);
+                    setCurrentFrameIndex(segment.startFrame);
+                    setFirstFrameId(segment.startFrameId);
+                    setLastFrameId(segment.endFrameId);
+                  }}
+                  className={`w-full rounded-lg border p-2.5 text-left transition ${
+                    isSelected ? "border-teal-500 bg-teal-50" : "border-ink/10 bg-white hover:border-ink/20"
+                  }`}
+                >
+                  <div className="flex items-start gap-3">
+                    <div className="flex h-20 w-32 items-center justify-center rounded border border-ink/10 bg-bg">
+                      {previewImageUrl ? (
+                        <img
+                          src={previewImageUrl}
+                          alt={title}
+                          className="h-full w-full rounded object-contain"
+                          loading="lazy"
+                          decoding="async"
+                        />
+                      ) : (
+                        <div className="text-xs text-ink/45">No preview</div>
+                      )}
+                    </div>
+                    <div className="space-y-1 text-sm text-ink/70">
+                      <p className="font-medium text-ink">{title}</p>
+                      {meta.map((line) => (
+                        <p key={line} className="text-xs">
+                          {line}
+                        </p>
+                      ))}
+                    </div>
                   </div>
-                  <div className="space-y-1 text-sm text-ink/70">
-                    <p className="font-medium text-ink">{title}</p>
-                    {meta.map((line) => (
-                      <p key={line} className="text-xs">
-                        {line}
-                      </p>
-                    ))}
-                  </div>
-                </div>
-              </button>
-            );
-          })}
+                </button>
+              );
+            })}
+          </div>
         </div>
-      </div>
+      ) : (
+        <div className="rounded-2xl border border-ink/10 bg-card p-4">
+          <p className="text-sm font-semibold text-ink">Select Region</p>
+          <p className="mt-1 text-sm text-ink/60">
+            Region cropping is only available when the source media is video. Audio-driven character animation uses the selected audio range directly.
+          </p>
+        </div>
+      )}
       <div className="flex justify-end">
         <button
           type="button"
@@ -774,7 +794,11 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
             <div className="mb-3 flex items-center justify-between gap-2">
               <div>
                 <h4 className="text-lg font-semibold">Create Working Range</h4>
-                <p className="text-sm text-ink/60">Choose a start and end frame from the source video, then save the range for reuse.</p>
+                <p className="text-sm text-ink/60">
+                  {isAudioSource
+                    ? "Choose a start and end point from the source audio, then save the range for reuse."
+                    : "Choose a start and end frame from the source video, then save the range for reuse."}
+                </p>
               </div>
               <button
                 type="button"
@@ -786,22 +810,46 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
             </div>
             <div className="grid gap-3 lg:grid-cols-[1fr_320px]">
               {timelinePlaybackUrl ? (
-                <video
-                  ref={workingRangeVideoRef}
-                  className="max-h-[360px] max-w-full rounded-lg border border-ink/10 bg-black"
-                  src={timelinePlaybackUrl}
-                  controls
-                  preload="metadata"
-                  onTimeUpdate={(e) => {
-                    const totalFrames = frameCount(task);
-                    if (!totalFrames) return;
-                    const fps = fpsValue(task);
-                    const nextFrame = Math.max(0, Math.min(totalFrames - 1, Math.round(e.currentTarget.currentTime * fps)));
-                    if (nextFrame !== currentFrameIndex) {
-                      setCurrentFrameIndex(nextFrame);
-                    }
-                  }}
-                />
+                isAudioSource ? (
+                  <div className="space-y-3">
+                    {sourceWaveformUrl ? (
+                      <img src={sourceWaveformUrl} alt="Audio waveform" className="max-h-[240px] w-full rounded-lg border border-ink/10 bg-white object-contain" />
+                    ) : null}
+                    <audio
+                      ref={workingRangeVideoRef as RefObject<HTMLAudioElement>}
+                      className="w-full rounded-lg border border-ink/10 bg-white"
+                      src={timelinePlaybackUrl}
+                      controls
+                      preload="metadata"
+                      onTimeUpdate={(e) => {
+                        const totalFrames = frameCount(task);
+                        if (!totalFrames) return;
+                        const fps = fpsValue(task);
+                        const nextFrame = Math.max(0, Math.min(totalFrames - 1, Math.round(e.currentTarget.currentTime * fps)));
+                        if (nextFrame !== currentFrameIndex) {
+                          setCurrentFrameIndex(nextFrame);
+                        }
+                      }}
+                    />
+                  </div>
+                ) : (
+                  <video
+                    ref={workingRangeVideoRef as RefObject<HTMLVideoElement>}
+                    className="max-h-[360px] max-w-full rounded-lg border border-ink/10 bg-black"
+                    src={timelinePlaybackUrl}
+                    controls
+                    preload="metadata"
+                    onTimeUpdate={(e) => {
+                      const totalFrames = frameCount(task);
+                      if (!totalFrames) return;
+                      const fps = fpsValue(task);
+                      const nextFrame = Math.max(0, Math.min(totalFrames - 1, Math.round(e.currentTarget.currentTime * fps)));
+                      if (nextFrame !== currentFrameIndex) {
+                        setCurrentFrameIndex(nextFrame);
+                      }
+                    }}
+                  />
+                )
               ) : (
                 <p className="text-sm text-ink/70">Ingest must complete before timeline is available.</p>
               )}
@@ -812,14 +860,18 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
                     <HelpInfoButton
                       title="Create a working range"
                       lines={[
-                        "Use the source player and slider to choose the start and end frames for a shorter saved range.",
+                        isAudioSource
+                          ? "Use the source player and slider to choose the start and end points for a shorter saved range."
+                          : "Use the source player and slider to choose the start and end frames for a shorter saved range.",
                         "If you cancel without saving, the previously selected working range stays in place.",
                       ]}
                     />
                   </div>
                 </div>
                 <div>
-                  <label className="mb-1 block text-sm font-medium">Current frame: {currentFrameIndex}</label>
+                  <label className="mb-1 block text-sm font-medium">
+                    {isAudioSource ? `Current position: ${(currentFrameIndex / Math.max(1, fpsValue(task))).toFixed(2)}s` : `Current frame: ${currentFrameIndex}`}
+                  </label>
                   <input
                     type="range"
                     min={0}
@@ -834,9 +886,10 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
 
             <div className="mt-4 grid grid-cols-[1fr_auto_1fr] items-stretch gap-2">
               <FrameSelectCard
-                title="Start Frame"
+                title={isAudioSource ? "Start Point" : "Start Frame"}
                 frame={firstFrame}
-                selectLabel="Select Start Frame"
+                selectLabel={isAudioSource ? "Select Start Point" : "Select Start Frame"}
+                selectionKind={isAudioSource ? "point" : "frame"}
                 onSelect={() => {
                   onBeginCustomSegmentEdit();
                   void captureCurrentFrameFor("first");
@@ -848,15 +901,18 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
               />
 
               <div className="flex w-24 flex-col items-center justify-center text-center">
-                <p className={`text-xs font-medium ${timelineDelta.overLimit ? "text-red-600" : "text-ink/70"}`}>{timelineDelta.frames} frames</p>
+                <p className={`text-xs font-medium ${timelineDelta.overLimit ? "text-red-600" : "text-ink/70"}`}>
+                  {isAudioSource ? `${firstFrame?.timecode ?? "0:00"} → ${lastFrame?.timecode ?? "0:00"}` : `${timelineDelta.frames} frames`}
+                </p>
                 <p className="my-1 text-xl text-ink/70">→</p>
                 <p className={`text-xs font-medium ${timelineDelta.overLimit ? "text-red-600" : "text-ink/70"}`}>{timelineDelta.seconds.toFixed(2)}s</p>
               </div>
 
               <FrameSelectCard
-                title="End Frame"
+                title={isAudioSource ? "End Point" : "End Frame"}
                 frame={lastFrame}
-                selectLabel="Select End Frame"
+                selectLabel={isAudioSource ? "Select End Point" : "Select End Frame"}
+                selectionKind={isAudioSource ? "point" : "frame"}
                 onSelect={() => {
                   onBeginCustomSegmentEdit();
                   void captureCurrentFrameFor("last");
@@ -871,8 +927,9 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
             {selectedRange ? (
               <div className="mt-4 space-y-2 rounded-lg border border-ink/10 bg-white p-3">
                 <p className={`text-xs ${selectedRange.overLimit ? "text-red-600" : "text-ink/70"}`}>
-                  Selected range: f{selectedRange.startFrame} to f{selectedRange.endFrameInclusive} ({selectedRange.durationFrames} frames /{" "}
-                  {selectedRange.durationSec.toFixed(2)}s)
+                  {isAudioSource
+                    ? `Selected range: ${firstFrame?.timecode ?? selectedRange.startFrame} to ${lastFrame?.timecode ?? selectedRange.endFrameInclusive} (${selectedRange.durationSec.toFixed(2)}s)`
+                    : `Selected range: f${selectedRange.startFrame} to f${selectedRange.endFrameInclusive} (${selectedRange.durationFrames} frames / ${selectedRange.durationSec.toFixed(2)}s)`}
                 </p>
                 {selectedRange.overLimit ? (
                   <StatusNotice variant="warning">

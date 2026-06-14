@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState, type ChangeEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 
-import { CompareIcon, DeleteIcon, DownloadIcon, IconActionButton, PreviewIcon } from "../../components/layout/MediaActionButtons";
+import { CompareIcon, CopyIcon, DeleteIcon, DownloadIcon, IconActionButton, PreviewIcon } from "../../components/layout/MediaActionButtons";
 import { PendingButtonLabel, Spinner, StatusNotice } from "../../components/layout/UiFeedback";
 import FrameLimitInfoButton from "../../components/workflow/FrameLimitInfoButton";
+import { copyTextToClipboard } from "../../lib/clipboard";
 import type {
   HappyHorseResolutionId,
   ReplicateKlingModeId,
@@ -15,16 +16,6 @@ import type { GenerateInputMode } from "../../lib/generationModeRegistry";
 import type { ChunkedGenerationRun, CustomReportOutputRef, SegmentGeneration, SegmentRecord, TaskDetail } from "../../types/api";
 
 type VideoModel = VideoModelId;
-
-function isLikelyVideoAssetUrl(url: string | null | undefined): boolean {
-  if (!url) return false;
-  try {
-    const pathname = new URL(url).pathname.toLowerCase();
-    return /\.(mp4|mov|m4v|webm|ogv|avi|mkv)$/i.test(pathname);
-  } catch {
-    return false;
-  }
-}
 
 type PendingGenerationCard = {
   jobId: string;
@@ -46,9 +37,11 @@ export type GenerateTabCtx = {
   nextWarning: string | null;
   generationModelByInput: Record<GenerateInputMode, VideoModel>;
   generationInputMode: GenerateInputMode;
-  editVideoSelectedReferenceIds: string[];
   editVideoReferenceWarning: string | null;
-  editVideoReferencePreview: Array<{ referenceId: string; imageUrl?: string; token: string }>;
+  openEditVideoReferencePicker: () => void;
+  supportsGenerationAudioReference: boolean;
+  generationAudioReference: TaskDetail["generationAudioReference"] | null;
+  uploadGenerationAudioReference: (file: File) => Promise<void>;
   selectedSegment: SegmentRecord | null;
   isWholeVideoSelection: boolean;
   wholeVideoNeedsChunking: boolean;
@@ -130,6 +123,7 @@ export type GenerateTabCtx = {
     compareUrl: string;
     label: string;
     posterUrl?: string | null;
+    originalPosterUrl?: string | null;
     segmentStartSec?: number;
     originalIsSegmentClip?: boolean;
     originalSegmentId?: string;
@@ -137,6 +131,31 @@ export type GenerateTabCtx = {
     preferGenerationInputMediaAsOriginal?: boolean;
   } | null) => void;
   openVideoCleanupModal: (generation: SegmentGeneration) => void;
+  extendGeneration: (payload: {
+    generationId: string;
+    alignmentFrameIndex: number;
+    anchorFramesFromEnd: number;
+    durationSeconds?: number;
+    prompt?: string;
+    inputMode?: GenerateInputMode;
+    continueToRangeEnd?: boolean;
+    useSourceLastFrame?: boolean;
+    lastFrameVariantId?: string;
+  }) => void;
+  isExtendingGeneration: boolean;
+  extendGenerationError: string | null;
+  lengthenGeneration: (payload: {
+    generationId: string;
+    model: string;
+    direction: "start" | "end";
+    durationSeconds: number;
+    prompt: string;
+    inputMode: "start_end" | "edit_video";
+    selectedReferenceIds?: string[];
+  }) => void;
+  isLengtheningGeneration: boolean;
+  lengthenGenerationError: string | null;
+  editVideoSelectedReferenceIds: string[];
   onAssetError: (url?: string) => void;
   handleDeleteAsset: (item: {
     id: string;
@@ -156,17 +175,76 @@ type GenerateTabProps = {
   ctx: GenerateTabCtx;
 };
 
+type ExtendModalState =
+  | { tool: "extend"; generation: SegmentGeneration }
+  | { tool: "lengthen"; generation: SegmentGeneration; inputMode: "start_end" | "edit_video" };
+
+function asFiniteNumber(value: unknown): number | null {
+  const numeric = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+function estimateGenerationDurationFrames(generation: SegmentGeneration, fps: number, fallbackDurationFrames: number): number {
+  const storedFrameCount = asFiniteNumber(generation.generationSettings?.storedOutput?.frameCount);
+  if (storedFrameCount != null && storedFrameCount > 0) {
+    return Math.max(1, Math.round(storedFrameCount));
+  }
+  const durationSec =
+    asFiniteNumber(generation.generationSettings?.storedOutput?.durationSec) ??
+    asFiniteNumber(generation.providerDurationSec) ??
+    asFiniteNumber(generation.generationSettings?.providerDurationSec) ??
+    asFiniteNumber(generation.requestedDurationSec);
+  if (durationSec != null && durationSec > 0 && fps > 0) {
+    return Math.max(1, Math.round(durationSec * fps));
+  }
+  return Math.max(1, fallbackDurationFrames);
+}
+
+const CLIP_LENGTHEN_MODEL_OPTIONS: Record<
+  "start_end" | "edit_video",
+  Record<"start" | "end", Array<{ value: string; label: string }>>
+> = {
+  start_end: {
+    start: [
+      { value: "ltx-2.3-pro", label: "LTX 2.3 Pro" },
+      { value: "seedance-2.0-reference-to-video", label: "Seedance 2.0 Reference to Video" },
+    ],
+    end: [
+      { value: "ltx-2.3-pro", label: "LTX 2.3 Pro" },
+      { value: "wan2.7-i2v", label: "Wan 2.7 I2V" },
+      { value: "veo-3.1", label: "Veo 3.1" },
+      { value: "veo-3.1-fast", label: "Veo 3.1 Fast" },
+    ],
+  },
+  edit_video: {
+    start: [
+      { value: "ltx-2.3-pro", label: "LTX 2.3 Pro" },
+      { value: "seedance-2.0-reference-to-video", label: "Seedance 2.0 Reference to Video" },
+    ],
+    end: [
+      { value: "ltx-2.3-pro", label: "LTX 2.3 Pro" },
+      { value: "seedance-2.0-reference-to-video", label: "Seedance 2.0 Reference to Video" },
+      { value: "veo-3.1", label: "Veo 3.1" },
+      { value: "veo-3.1-fast", label: "Veo 3.1 Fast" },
+    ],
+  },
+};
+
 export default function GenerateTab({ ctx }: GenerateTabProps) {
   const {
     onNext,
     nextDisabled,
     nextWarning,
     generationInputMode,
-    editVideoSelectedReferenceIds,
     editVideoReferenceWarning,
-    editVideoReferencePreview,
+    openEditVideoReferencePicker,
+    supportsGenerationAudioReference,
+    generationAudioReference,
+    uploadGenerationAudioReference,
+    selectedSegment,
     wholeVideoNeedsChunking,
     lumaModel,
+    describeSegment,
     setGenerationModelByInput,
     generationModelOptions,
     advancedMode,
@@ -229,6 +307,13 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
     setVideoPreviewModal,
     setVideoCompareModal,
     onAssetError,
+    extendGeneration,
+    isExtendingGeneration,
+    extendGenerationError,
+    lengthenGeneration,
+    isLengtheningGeneration,
+    lengthenGenerationError,
+    editVideoSelectedReferenceIds,
     handleDeleteAsset,
     setGenerationCardsVisible,
   } = ctx;
@@ -237,13 +322,26 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
   const [chunkPromptDrafts, setChunkPromptDrafts] = useState<Record<number, string>>({});
   const [manualUploadPending, setManualUploadPending] = useState(false);
   const [manualUploadError, setManualUploadError] = useState<string | null>(null);
+  const [audioReferenceUploadPending, setAudioReferenceUploadPending] = useState(false);
+  const [audioReferenceUploadError, setAudioReferenceUploadError] = useState<string | null>(null);
   const [promptWizardAdvice, setPromptWizardAdvice] = useState<string | null>(null);
   const [promptWizardWarnings, setPromptWizardWarnings] = useState<string[]>([]);
   const [promptWizardError, setPromptWizardError] = useState<string | null>(null);
   const [cancellingPendingJobIds, setCancellingPendingJobIds] = useState<Record<string, boolean>>({});
+  const [extendModal, setExtendModal] = useState<ExtendModalState | null>(null);
+  const [extendAlignmentFrame, setExtendAlignmentFrame] = useState("");
+  const [extendAnchorFramesFromEnd, setExtendAnchorFramesFromEnd] = useState("5");
+  const [extendDurationSeconds, setExtendDurationSeconds] = useState("");
+  const [extendPrompt, setExtendPrompt] = useState("");
+  const [extendContinueToRangeEnd, setExtendContinueToRangeEnd] = useState(false);
+  const [clipLengthenDirection, setClipLengthenDirection] = useState<"start" | "end">("end");
+  const [clipLengthenModel, setClipLengthenModel] = useState("ltx-2.3-pro");
+  const [clipLengthenDurationSeconds, setClipLengthenDurationSeconds] = useState("6");
+  const [clipLengthenPrompt, setClipLengthenPrompt] = useState("");
   const lastSavedRunRef = useRef<string | null>(null);
   const promptDraftRunIdRef = useRef<string | null>(null);
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
+  const audioReferenceInputRef = useRef<HTMLInputElement | null>(null);
   const isPreparingChunkPlan = Boolean(generateChunkedSegmentMutation.isPending);
   const canStartChunkedGeneration =
     Boolean(selectedSegmentId) &&
@@ -261,6 +359,8 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
   const visiblePendingGenerationCards = pendingGenerationCards.slice(0, generationCardsVisible);
   const visibleGenerationSlots = Math.max(0, generationCardsVisible - visiblePendingGenerationCards.length);
   const visibleSegmentGenerations = selectedSegmentGenerations.slice(0, visibleGenerationSlots);
+  const sourceFrameCount = task?.video?.editSource?.frameCount ?? 0;
+  const sourceFps = task?.video?.editSource?.fps?.den ? task.video.editSource.fps.num / task.video.editSource.fps.den : 30;
 
   useEffect(() => {
     if (!latestChunkedRun) return;
@@ -292,6 +392,230 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
     setIsChunkSessionOpen(false);
   }, [latestChunkedRun?.runId, latestChunkedRun?.saveStatus, latestChunkedRun?.savedGenerationId, selectSegmentGeneration]);
 
+  const extendModalGeneration = extendModal?.generation ?? null;
+  const extendModalInputMode = extendModal?.tool === "lengthen" ? extendModal.inputMode : null;
+  const clipLengthenModelOptions = useMemo(
+    () => (extendModalInputMode ? CLIP_LENGTHEN_MODEL_OPTIONS[extendModalInputMode][clipLengthenDirection] : []),
+    [clipLengthenDirection, extendModalInputMode],
+  );
+  const currentClipDurationFrames = useMemo(() => {
+    if (!extendModalGeneration) return 0;
+    return estimateGenerationDurationFrames(extendModalGeneration, sourceFps, selectedSegment?.durationFrames ?? 1);
+  }, [extendModalGeneration, selectedSegment?.durationFrames, sourceFps]);
+  const currentClipDurationSeconds = sourceFps > 0 ? currentClipDurationFrames / sourceFps : 0;
+  const clipLengthenModelConfig = useMemo(() => {
+    if (!extendModalInputMode) {
+      return { fixedDuration: null as number | null, maxAdditionalSeconds: 0, disabledReason: null as string | null, note: null as string | null };
+    }
+    if (clipLengthenModel === "ltx-2.3-pro") {
+      return {
+        fixedDuration: null,
+        maxAdditionalSeconds: 20,
+        disabledReason: null,
+        note:
+          clipLengthenDirection === "start"
+            ? "LTX can prepend new motion before the current clip."
+            : "LTX can add new duration to the end of the current clip.",
+      };
+    }
+    if (clipLengthenModel === "wan2.7-i2v") {
+      if (currentClipDurationSeconds < 2 || currentClipDurationSeconds > 10) {
+        return {
+          fixedDuration: null,
+          maxAdditionalSeconds: 0,
+          disabledReason: "Wan 2.7 continuation needs the current clip to be between 2 and 10 seconds.",
+          note: "Wan 2.7 continues the clip forward from the current end.",
+        };
+      }
+      return {
+        fixedDuration: null,
+        maxAdditionalSeconds: Math.max(0, 15 - Math.ceil(currentClipDurationSeconds)),
+        disabledReason: null,
+        note: "Wan 2.7 continues the clip forward from the current end.",
+      };
+    }
+    if (clipLengthenModel === "seedance-2.0-reference-to-video") {
+      if (currentClipDurationSeconds <= 0 || currentClipDurationSeconds > 15) {
+        return {
+          fixedDuration: null,
+          maxAdditionalSeconds: 0,
+          disabledReason: "Seedance continuation needs the current clip to be 15 seconds or shorter.",
+          note:
+            clipLengthenDirection === "start"
+              ? "Seedance can generate a clip that leads naturally into the current video and can also use the current reference images."
+              : "Seedance continues from the current clip and can also use the current reference images.",
+        };
+      }
+      return {
+        fixedDuration: null,
+        maxAdditionalSeconds: Math.max(0, 15 - Math.ceil(currentClipDurationSeconds)),
+        disabledReason: null,
+        note:
+          clipLengthenDirection === "start"
+            ? "Seedance can generate a clip that leads naturally into the current video and can also use the current reference images."
+            : "Seedance continues from the current clip and can also use the current reference images.",
+      };
+    }
+    if (clipLengthenModel === "veo-3.1" || clipLengthenModel === "veo-3.1-fast") {
+      return {
+        fixedDuration: 7,
+        maxAdditionalSeconds: 7,
+        disabledReason: clipLengthenDirection === "start" ? "Veo currently supports end-only extension." : null,
+        note: "Veo extension adds a fixed 7 second continuation at the end.",
+      };
+    }
+    return {
+      fixedDuration: null,
+      maxAdditionalSeconds: 0,
+      disabledReason: "Model is not available for clip lengthening.",
+      note: null,
+    };
+  }, [clipLengthenDirection, clipLengthenModel, currentClipDurationSeconds, extendModalInputMode]);
+  const clipLengthenPromptAdvice = useMemo(() => {
+    if (!extendModalInputMode) return null;
+    if (clipLengthenModel === "ltx-2.3-pro") {
+      return clipLengthenDirection === "start"
+        ? "Prompt the motion and camera state immediately before the current clip so it can flow into the existing first frame."
+        : "Prompt the action and camera movement that should continue naturally after the current last frame.";
+    }
+    if (clipLengthenModel === "seedance-2.0-reference-to-video") {
+      return clipLengthenDirection === "start"
+        ? "Describe the moment just before @Video1 and say it should transition seamlessly into @Video1 without restarting the scene."
+        : "Describe what happens after @Video1 and say it should continue naturally from @Video1 without restarting the scene.";
+    }
+    if (clipLengthenModel === "wan2.7-i2v") {
+      return "Describe the next beat after the current clip and keep the motion/camera continuation explicit.";
+    }
+    if (clipLengthenModel === "veo-3.1" || clipLengthenModel === "veo-3.1-fast") {
+      return "Describe the next 7 seconds after the current clip and keep the continuation of motion and camera explicit.";
+    }
+    return null;
+  }, [clipLengthenDirection, clipLengthenModel, extendModalInputMode]);
+  const parsedAlignmentFrame = Number(extendAlignmentFrame);
+  const parsedAnchorFramesFromEnd = Number(extendAnchorFramesFromEnd);
+  const parsedDurationSeconds = extendDurationSeconds.trim() ? Number(extendDurationSeconds) : undefined;
+  const extendDurationIsValid =
+    extendContinueToRangeEnd ||
+    parsedDurationSeconds === undefined ||
+    (Number.isInteger(parsedDurationSeconds) && parsedDurationSeconds >= 1 && parsedDurationSeconds <= 15);
+  const canSubmitExtension =
+    extendModal?.tool === "extend" &&
+    Boolean(extendModalGeneration) &&
+    Number.isInteger(parsedAlignmentFrame) &&
+    parsedAlignmentFrame >= 0 &&
+    (sourceFrameCount <= 0 || parsedAlignmentFrame < sourceFrameCount) &&
+    Number.isInteger(parsedAnchorFramesFromEnd) &&
+    parsedAnchorFramesFromEnd >= 1 &&
+    parsedAnchorFramesFromEnd <= 60 &&
+    extendDurationIsValid;
+  const parsedClipLengthenDuration = clipLengthenModelConfig.fixedDuration ?? Number(clipLengthenDurationSeconds);
+  const clipLengthenDurationIsValid =
+    clipLengthenModelConfig.fixedDuration != null
+      ? true
+      : Number.isInteger(parsedClipLengthenDuration) &&
+        parsedClipLengthenDuration >= 1 &&
+        parsedClipLengthenDuration <= clipLengthenModelConfig.maxAdditionalSeconds;
+  const canSubmitClipLengthen =
+    extendModal?.tool === "lengthen" &&
+    Boolean(extendModalGeneration) &&
+    clipLengthenModelOptions.some((option: { value: string; label: string }) => option.value === clipLengthenModel) &&
+    !clipLengthenModelConfig.disabledReason &&
+    clipLengthenDurationIsValid &&
+    Boolean(clipLengthenPrompt.trim());
+
+  useEffect(() => {
+    if (!extendModalGeneration || !selectedSegment) return;
+    const segmentStartFrame = selectedSegment.startFrame;
+    const segmentEndFrameExclusive = selectedSegment.endFrameExclusive;
+    const segmentDurationFrames = Math.max(1, selectedSegment.durationFrames);
+    const estimatedGeneratedFrames = estimateGenerationDurationFrames(extendModalGeneration, sourceFps, segmentDurationFrames);
+    const anchorFramesFromEndDefault = Math.min(5, Math.max(1, estimatedGeneratedFrames - 1));
+    const estimatedAnchorFrameIndex = Math.max(0, estimatedGeneratedFrames - 1 - anchorFramesFromEndDefault);
+    const maxSourceFrame = sourceFrameCount > 0 ? Math.max(0, sourceFrameCount - 1) : segmentEndFrameExclusive - 1;
+    const defaultAlignment = Math.max(segmentStartFrame, Math.min(Math.max(segmentStartFrame, maxSourceFrame), segmentStartFrame + estimatedAnchorFrameIndex));
+    const remainingFrames = sourceFrameCount > 0 ? Math.max(1, sourceFrameCount - defaultAlignment) : segmentDurationFrames;
+    const maxDurationSecondsFromRemaining = Math.max(1, Math.floor(remainingFrames / Math.max(1, sourceFps)));
+    const baseDurationSeconds = Math.max(1, Math.ceil(selectedSegment.durationSec ?? estimatedGeneratedFrames / Math.max(1, sourceFps)));
+    const defaultDuration = Math.max(1, Math.min(Math.min(15, Math.max(1, maxDurationSecondsFromRemaining)), baseDurationSeconds));
+    setExtendAlignmentFrame(String(defaultAlignment));
+    setExtendAnchorFramesFromEnd(String(anchorFramesFromEndDefault));
+    setExtendDurationSeconds(String(defaultDuration));
+    setExtendPrompt(extendModalGeneration.luma.prompt ?? "");
+    setExtendContinueToRangeEnd(false);
+    setClipLengthenDirection("end");
+    setClipLengthenPrompt(extendModalGeneration.luma.prompt ?? "");
+    setClipLengthenDurationSeconds("6");
+  }, [extendModalGeneration, selectedSegment, sourceFps, sourceFrameCount]);
+
+  useEffect(() => {
+    if (!extendModalInputMode) return;
+    const fallbackModel = clipLengthenModelOptions[0]?.value ?? "ltx-2.3-pro";
+    if (!clipLengthenModelOptions.some((option: { value: string; label: string }) => option.value === clipLengthenModel)) {
+      setClipLengthenModel(fallbackModel);
+      return;
+    }
+    if (clipLengthenModelConfig.fixedDuration != null) {
+      const fixedValue = String(clipLengthenModelConfig.fixedDuration);
+      if (clipLengthenDurationSeconds !== fixedValue) {
+        setClipLengthenDurationSeconds(fixedValue);
+      }
+      return;
+    }
+    if (!clipLengthenDurationSeconds.trim()) {
+      setClipLengthenDurationSeconds(String(Math.min(6, Math.max(1, clipLengthenModelConfig.maxAdditionalSeconds || 1))));
+      return;
+    }
+    const numeric = Number(clipLengthenDurationSeconds);
+    if (!Number.isFinite(numeric) || numeric < 1) {
+      setClipLengthenDurationSeconds("1");
+      return;
+    }
+    if (clipLengthenModelConfig.maxAdditionalSeconds > 0 && numeric > clipLengthenModelConfig.maxAdditionalSeconds) {
+      setClipLengthenDurationSeconds(String(clipLengthenModelConfig.maxAdditionalSeconds));
+    }
+  }, [clipLengthenDurationSeconds, clipLengthenModel, clipLengthenModelConfig.fixedDuration, clipLengthenModelConfig.maxAdditionalSeconds, clipLengthenModelOptions, extendModalInputMode]);
+
+  function openExtendModal(generation: SegmentGeneration) {
+    if (selectedPreviewGeneration?.genId !== generation.genId) {
+      selectSegmentGeneration(generation.genId);
+    }
+    if (generationInputMode === "start_video") {
+      setExtendModal({ tool: "extend", generation });
+      return;
+    }
+    if (generationInputMode === "start_end" || generationInputMode === "edit_video") {
+      setExtendModal({ tool: "lengthen", generation, inputMode: generationInputMode });
+    }
+  }
+
+  function submitExtensionFromGenerate() {
+    if (!canSubmitExtension || !extendModalGeneration) return;
+    extendGeneration({
+      generationId: extendModalGeneration.genId,
+      alignmentFrameIndex: parsedAlignmentFrame,
+      anchorFramesFromEnd: parsedAnchorFramesFromEnd,
+      durationSeconds: extendContinueToRangeEnd ? undefined : parsedDurationSeconds,
+      prompt: extendPrompt.trim() || undefined,
+      inputMode: generationInputMode,
+      continueToRangeEnd: extendContinueToRangeEnd,
+      useSourceLastFrame: false,
+      lastFrameVariantId: undefined,
+    });
+  }
+
+  function submitClipLengthenFromGenerate() {
+    if (!canSubmitClipLengthen || !extendModalGeneration || !extendModalInputMode) return;
+    lengthenGeneration({
+      generationId: extendModalGeneration.genId,
+      model: clipLengthenModel,
+      direction: clipLengthenDirection,
+      durationSeconds: clipLengthenModelConfig.fixedDuration ?? Number(clipLengthenDurationSeconds),
+      prompt: clipLengthenPrompt.trim(),
+      inputMode: extendModalInputMode,
+      selectedReferenceIds: extendModalInputMode === "edit_video" ? editVideoSelectedReferenceIds.slice(0, 9) : [],
+    });
+  }
+
   function triggerDirectDownload(url: string, filename?: string) {
     const link = document.createElement("a");
     link.href = url;
@@ -314,6 +638,21 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
       setManualUploadError(error instanceof Error ? error.message : "Failed to upload generated video");
     } finally {
       setManualUploadPending(false);
+    }
+  }
+
+  async function handleAudioReferenceUpload(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setAudioReferenceUploadPending(true);
+    setAudioReferenceUploadError(null);
+    try {
+      await uploadGenerationAudioReference(file);
+    } catch (error) {
+      setAudioReferenceUploadError(error instanceof Error ? error.message : "Failed to upload audio reference");
+    } finally {
+      setAudioReferenceUploadPending(false);
     }
   }
 
@@ -351,6 +690,7 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
   return (
     <div className="space-y-4">
       <input ref={uploadInputRef} type="file" accept="video/*" className="hidden" onChange={(event) => void handleManualGeneratedVideoUpload(event)} />
+      <input ref={audioReferenceInputRef} type="file" accept="audio/*" className="hidden" onChange={(event) => void handleAudioReferenceUpload(event)} />
       <div className="rounded-xl border border-ink/15 bg-white">
         <div className="grid gap-3 p-3 lg:grid-cols-[1.65fr_1fr]">
           <div className="space-y-3">
@@ -466,20 +806,52 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
               </div>
             ) : (
               <div className="space-y-3">
+                {generationInputMode === "edit_video" && editVideoReferenceWarning ? (
+                  <StatusNotice variant="warning">
+                    <p className="text-xs">{editVideoReferenceWarning}</p>
+                  </StatusNotice>
+                ) : null}
                 <label className="block space-y-1">
                   <span className="flex items-center justify-between gap-2 text-xs font-medium text-ink/75">
                     <span>Opening prompt</span>
-                    <button
-                      type="button"
-                      title="Improve prompt"
-                      aria-label="Improve prompt with Prompt Wizard"
-                      className="inline-flex items-center gap-1 rounded-md border border-ink/20 bg-white px-2 py-1 text-[11px] text-ink/75 disabled:cursor-not-allowed disabled:opacity-50"
-                      disabled={isPromptWizardPending || !promptWizardSupported}
-                      onClick={() => void handlePromptWizardClick()}
-                    >
-                      {isPromptWizardPending ? <Spinner className="h-3 w-3" /> : <MagicWandIcon />}
-                      <span>Improve</span>
-                    </button>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {generationInputMode === "edit_video" ? (
+                        <>
+                          <button
+                            type="button"
+                            className="inline-flex items-center gap-1 rounded-md border border-ink/20 bg-white px-2 py-1 text-[11px] text-ink/75"
+                            onClick={openEditVideoReferencePicker}
+                          >
+                            Add / edit reference images
+                          </button>
+                          {supportsGenerationAudioReference ? (
+                            <button
+                              type="button"
+                              className="inline-flex items-center gap-1 rounded-md border border-ink/20 bg-white px-2 py-1 text-[11px] text-ink/75 disabled:cursor-not-allowed disabled:opacity-50"
+                              disabled={audioReferenceUploadPending}
+                              onClick={() => audioReferenceInputRef.current?.click()}
+                            >
+                              <PendingButtonLabel
+                                isPending={audioReferenceUploadPending}
+                                idle={generationAudioReference ? "Replace audio reference" : "Add audio reference"}
+                                pending="Uploading audio..."
+                              />
+                            </button>
+                          ) : null}
+                        </>
+                      ) : null}
+                      <button
+                        type="button"
+                        title="Improve prompt"
+                        aria-label="Improve prompt with Prompt Wizard"
+                        className="inline-flex items-center gap-1 rounded-md border border-ink/20 bg-white px-2 py-1 text-[11px] text-ink/75 disabled:cursor-not-allowed disabled:opacity-50"
+                        disabled={isPromptWizardPending || !promptWizardSupported}
+                        onClick={() => void handlePromptWizardClick()}
+                      >
+                        {isPromptWizardPending ? <Spinner className="h-3 w-3" /> : <MagicWandIcon />}
+                        <span>Improve</span>
+                      </button>
+                    </div>
                   </span>
                   <textarea
                     value={lumaPrompt}
@@ -487,6 +859,14 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
                     placeholder={generationPromptPlaceholder}
                     className="h-20 w-full rounded-md border border-ink/20 p-2"
                   />
+                  {generationInputMode === "edit_video" ? (
+                    <p className="text-[11px] text-ink/60">
+                      If using reference images, describe their purpose in the prompt in the order they appear above.
+                      {supportsGenerationAudioReference
+                        ? ` ${generationAudioReference ? "Use @Audio1 to reference the uploaded audio file." : "You can also upload one audio reference and call it @Audio1 in the prompt."}`
+                        : ""}
+                    </p>
+                  ) : null}
                 </label>
                 {promptWizardAdvice ? (
                   <StatusNotice variant="info">
@@ -538,24 +918,6 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
                 <p className="text-xs">{generationPromptError}</p>
               </StatusNotice>
             ) : null}
-            {generationInputMode === "edit_video" ? (
-              <StatusNotice variant={editVideoReferenceWarning ? "warning" : "info"}>
-                <p className="text-xs">
-                  Selected reference images: {editVideoSelectedReferenceIds.length}.{" "}
-                  {editVideoReferenceWarning ?? "Model allow different number of reference images: 3 Seedance / Happy Horse / Kling, 1 Wan2.7 / Runway Aleph."}
-                </p>
-                {editVideoReferencePreview.length ? (
-                  <div className="mt-2 grid gap-2 sm:grid-cols-3">
-                    {editVideoReferencePreview.map((item) => (
-                      <div key={item.referenceId} className="rounded border border-ink/20 bg-white p-1">
-                        {item.imageUrl ? <img src={item.imageUrl} alt={item.token} className="aspect-video w-full rounded object-contain" /> : null}
-                        <p className="mt-1 text-[11px] text-ink/70">{item.token}</p>
-                      </div>
-                    ))}
-                  </div>
-                ) : null}
-              </StatusNotice>
-            ) : null}
             {missingRouteInputsMessage ? (
               <StatusNotice variant="warning">
                 <p className="text-xs">{missingRouteInputsMessage}</p>
@@ -564,6 +926,11 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
             {manualUploadError ? (
               <StatusNotice variant="error">
                 <p className="text-xs">{manualUploadError}</p>
+              </StatusNotice>
+            ) : null}
+            {audioReferenceUploadError ? (
+              <StatusNotice variant="error">
+                <p className="text-xs">{audioReferenceUploadError}</p>
               </StatusNotice>
             ) : null}
           </div>
@@ -793,50 +1160,15 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
                                 className="h-28 w-full rounded-md border border-ink/15 p-2 text-sm"
                               />
                             </label>
-                            <div className="mt-3 rounded-md border border-ink/10 bg-bg p-2">
-                              <p className="text-[11px] font-semibold uppercase tracking-wide text-ink/55">Exact media sent</p>
-                              <div className="mt-2 flex flex-wrap gap-2">
-                                {chunkGeneration?.inputMediaUrl ? (
-                                  <button
-                                    type="button"
-                                    className="rounded border border-ink/20 bg-white px-3 py-2 text-xs"
-                                    onClick={() =>
-                                      setVideoPreviewModal({
-                                        url: chunkGeneration.inputMediaUrl as string,
-                                        label: `Chunk ${chunk.chunkIndex + 1} source clip sent to model`,
-                                      })
-                                    }
-                                  >
-                                    Preview source clip
-                                  </button>
-                                ) : null}
-                                {chunkGeneration?.inputMediaUrl ? (
-                                  <a
-                                    href={chunkGeneration.inputMediaUrl}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    download
-                                    className="rounded border border-ink/20 bg-white px-3 py-2 text-xs"
-                                  >
-                                    Download source clip
-                                  </a>
-                                ) : null}
-                              </div>
-                              {chunkGeneration?.inputFirstFrameUrl ? (
-                                <img
-                                  src={chunkGeneration.inputFirstFrameUrl}
-                                  alt={`Chunk ${chunk.chunkIndex + 1} prepared first frame`}
-                                  className="mt-2 aspect-video w-full rounded-md bg-white object-contain"
-                                  loading="lazy"
-                                  decoding="async"
-                                  onError={(event) => onAssetError(event.currentTarget.currentSrc || event.currentTarget.src)}
-                                />
-                              ) : null}
+                            {sourceClipLabel || storedClipLabel ? (
+                              <div className="mt-3 rounded-md border border-ink/10 bg-bg p-2">
+                                <p className="text-[11px] font-semibold uppercase tracking-wide text-ink/55">Prepared clip timing</p>
                               <div className="mt-2 space-y-1 text-[11px] text-ink/60">
                                 {sourceClipLabel ? <p>Prepared input: {sourceClipLabel}</p> : null}
                                 {storedClipLabel ? <p>Stored output: {storedClipLabel}</p> : null}
                               </div>
-                            </div>
+                              </div>
+                            ) : null}
                             <div className="mt-3 rounded-md border border-ink/10 bg-bg p-2">
                               {chunkGeneration?.downloadUrl ? (
                                 <>
@@ -1006,6 +1338,8 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
           ))}
           {visibleSegmentGenerations.map((gen, index) => {
               const isSelected = selectedPreviewGeneration?.genId === gen.genId;
+              const thumbnailUrl = generationThumbnailUrl(gen);
+              const copyablePrompt = gen.luma.prompt?.trim() ?? "";
               return (
             <div
               key={gen.genId}
@@ -1018,7 +1352,20 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
               }`}
             >
               <div className="mb-2 flex items-center justify-between gap-2 text-xs">
-                <span className={`uppercase text-ink/60 ${index === 0 ? "font-semibold" : ""}`}>{gen.status}</span>
+                {gen.status === "complete" ? (
+                  <button
+                    type="button"
+                    className={`rounded border px-2 py-1 text-[11px] font-medium disabled:cursor-not-allowed disabled:opacity-60 ${
+                      isSelected ? "border-teal-500 bg-teal-50 text-ink" : "border-ink/20 bg-white text-ink"
+                    }`}
+                    disabled={!gen.downloadUrl}
+                    onClick={() => selectSegmentGeneration(gen.genId)}
+                  >
+                    {isSelected ? "Selected" : "Select"}
+                  </button>
+                ) : (
+                  <span className={`uppercase text-ink/60 ${index === 0 ? "font-semibold" : ""}`}>{gen.status}</span>
+                )}
                 <div className="flex items-center gap-2">
                   <span className="text-[11px] text-ink/50">{truncateIdentifier(gen.genId, 14)}</span>
                 </div>
@@ -1030,9 +1377,9 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
                 onClick={() => selectSegmentGeneration(gen.genId)}
                 title={gen.downloadUrl ? `Use ${describeGeneration(gen)}` : "Video unavailable"}
               >
-                {generationThumbnailUrl(gen) ? (
+                {thumbnailUrl ? (
                   <img
-                    src={generationThumbnailUrl(gen) as string}
+                    src={thumbnailUrl}
                     alt={describeGeneration(gen)}
                     className="aspect-video w-full rounded-md bg-bg object-contain"
                     loading="lazy"
@@ -1041,7 +1388,7 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
                   />
                 ) : (
                   <div className="flex aspect-video w-full items-center justify-center rounded-md border border-dashed border-ink/20 bg-bg text-xs text-ink/60">
-                    Video thumbnail unavailable
+                    {gen.downloadUrl ? "Video thumbnail unavailable" : "Video unavailable"}
                   </div>
                 )}
               </button>
@@ -1056,13 +1403,11 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
               <div className="mt-2 flex items-center gap-2">
                 <button
                   type="button"
-                  className={`rounded border px-3 py-2 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-60 ${
-                    isSelected ? "border-teal-500 bg-teal-50 text-ink" : "border-ink/20 bg-white text-ink"
-                  }`}
+                  className="rounded border border-ink/20 bg-white px-3 py-2 text-xs font-medium text-ink disabled:cursor-not-allowed disabled:opacity-60"
                   disabled={!gen.downloadUrl}
-                  onClick={() => selectSegmentGeneration(gen.genId)}
+                  onClick={() => openExtendModal(gen)}
                 >
-                  {isSelected ? "Selected" : "Select"}
+                  Extend
                 </button>
                 <IconActionButton
                   title="Preview"
@@ -1084,18 +1429,19 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
                   disabled={!originalSegmentCompareUrl || !gen.downloadUrl}
                   onClick={() => {
                     if (!originalSegmentCompareUrl || !gen.downloadUrl) return;
-                    const shouldUseInputVideo = isLikelyVideoAssetUrl(gen.inputMediaUrl);
-                    const originalUrl = shouldUseInputVideo ? gen.inputMediaUrl ?? originalSegmentCompareUrl : originalSegmentCompareUrl;
+                    const originalUrl = originalSegmentCompareUrl;
+                    const segmentStartPosterUrl = selectedSegment ? task?.frames?.[selectedSegment.startFrameId]?.imageUrl ?? null : null;
                     setVideoCompareModal({
                       originalUrl,
                       compareUrl: gen.downloadUrl,
                       label: describeGeneration(gen),
                       posterUrl: generationThumbnailUrl(gen),
+                      originalPosterUrl: segmentStartPosterUrl,
                       segmentStartSec: segmentWindow?.startSec,
-                      originalIsSegmentClip: shouldUseInputVideo || originalPreviewIsSegmentClip,
-                      originalSegmentId: shouldUseInputVideo ? undefined : selectedSegmentId ?? undefined,
+                      originalIsSegmentClip: originalPreviewIsSegmentClip,
+                      originalSegmentId: selectedSegmentId ?? undefined,
                       compareGenerationId: gen.genId,
-                      preferGenerationInputMediaAsOriginal: shouldUseInputVideo,
+                      preferGenerationInputMediaAsOriginal: false,
                     });
                   }}
                 >
@@ -1104,6 +1450,11 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
                 {gen.downloadUrl ? (
                   <IconActionButton href={gen.downloadUrl} download title="Download full quality video">
                     <DownloadIcon />
+                  </IconActionButton>
+                ) : null}
+                {copyablePrompt ? (
+                  <IconActionButton title="Copy prompt" onClick={() => void copyTextToClipboard(copyablePrompt)}>
+                    <CopyIcon />
                   </IconActionButton>
                 ) : null}
                 <IconActionButton
@@ -1132,6 +1483,202 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
             }
           )}
         </div>
+        {extendModal ? (
+          <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/60 p-4">
+            <div className="w-full max-w-3xl rounded-2xl bg-white shadow-xl">
+              <div className="flex items-center justify-between border-b border-ink/10 px-5 py-4">
+                <div>
+                  <p className="text-lg font-semibold text-ink">
+                    {extendModal.tool === "extend" ? "Extend generation" : "Lengthen clip"}
+                  </p>
+                  <p className="text-sm text-ink/65">
+                    {extendModal.tool === "extend"
+                      ? "Continue from this generated clip to cover more of the current working range."
+                      : "Add duration to this generated clip from either the end or the start."}
+                  </p>
+                </div>
+                <button type="button" className="rounded-md border border-ink/20 px-3 py-2 text-sm" onClick={() => setExtendModal(null)}>
+                  Close
+                </button>
+              </div>
+              <div className="space-y-4 px-5 py-4">
+                <div className="rounded-md border border-ink/10 bg-bg p-3 text-xs text-ink/70">
+                  <p className="font-medium text-ink/85">{describeGeneration(extendModal.generation)}</p>
+                  {selectedSegment ? <p className="mt-1">Current working range: {describeSegment(selectedSegment)}</p> : null}
+                  <p className="mt-1">Current clip length: {currentClipDurationSeconds.toFixed(2)}s</p>
+                </div>
+                {extendModal.tool === "extend" ? (
+                  <>
+                    <div className="grid gap-3 md:grid-cols-3">
+                      <label className="space-y-1 text-sm">
+                        <span className="block font-medium">Alignment source frame</span>
+                        <input
+                          type="number"
+                          min={0}
+                          max={Math.max(0, sourceFrameCount - 1)}
+                          className="w-full rounded-md border border-ink/20 px-2 py-2"
+                          value={extendAlignmentFrame}
+                          onChange={(event) => setExtendAlignmentFrame(event.target.value)}
+                        />
+                      </label>
+                      <label className="space-y-1 text-sm">
+                        <span className="block font-medium">Anchor offset from end</span>
+                        <input
+                          type="number"
+                          min={1}
+                          max={60}
+                          className="w-full rounded-md border border-ink/20 px-2 py-2"
+                          value={extendAnchorFramesFromEnd}
+                          onChange={(event) => setExtendAnchorFramesFromEnd(event.target.value)}
+                        />
+                      </label>
+                      <label className="space-y-1 text-sm">
+                        <span className="block font-medium">Next range seconds</span>
+                        <input
+                          type="number"
+                          min={1}
+                          max={15}
+                          className="w-full rounded-md border border-ink/20 px-2 py-2 disabled:bg-ink/5 disabled:text-ink/50"
+                          value={extendDurationSeconds}
+                          onChange={(event) => setExtendDurationSeconds(event.target.value)}
+                          disabled={extendContinueToRangeEnd}
+                        />
+                      </label>
+                    </div>
+                    <label className="flex items-center gap-2 text-sm text-ink/80">
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4 rounded border border-ink/25"
+                        checked={extendContinueToRangeEnd}
+                        onChange={(event) => setExtendContinueToRangeEnd(event.target.checked)}
+                      />
+                      Continue to end of working range
+                    </label>
+                    <label className="block space-y-1 text-sm">
+                      <span className="font-medium">Prompt for next continuation</span>
+                      <textarea
+                        rows={4}
+                        className="w-full rounded-md border border-ink/20 px-2 py-2"
+                        value={extendPrompt}
+                        onChange={(event) => setExtendPrompt(event.target.value)}
+                      />
+                    </label>
+                    {extendGenerationError ? (
+                      <StatusNotice variant="error">
+                        <p className="text-xs">{extendGenerationError}</p>
+                      </StatusNotice>
+                    ) : null}
+                    <div className="flex justify-end gap-2">
+                      <button type="button" className="rounded-md border border-ink/20 px-4 py-2 text-sm" onClick={() => setExtendModal(null)}>
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        className="rounded bg-accent2 px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-60"
+                        disabled={!canSubmitExtension || isExtendingGeneration}
+                        onClick={() => {
+                          submitExtensionFromGenerate();
+                          setExtendModal(null);
+                        }}
+                      >
+                        <PendingButtonLabel isPending={isExtendingGeneration} idle="Queue next continuation" pending="Queueing continuation..." />
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="grid gap-3 md:grid-cols-3">
+                      <label className="space-y-1 text-sm">
+                        <span className="block font-medium">Extend</span>
+                        <select
+                          className="w-full rounded-md border border-ink/20 px-2 py-2"
+                          value={clipLengthenDirection}
+                          onChange={(event) => setClipLengthenDirection(event.target.value as "start" | "end")}
+                        >
+                          <option value="end">End</option>
+                          <option value="start">Start</option>
+                        </select>
+                      </label>
+                      <label className="space-y-1 text-sm">
+                        <span className="block font-medium">Model</span>
+                        <select
+                          className="w-full rounded-md border border-ink/20 px-2 py-2"
+                          value={clipLengthenModel}
+                          onChange={(event) => setClipLengthenModel(event.target.value)}
+                        >
+                          {clipLengthenModelOptions.map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="space-y-1 text-sm">
+                        <span className="block font-medium">Add seconds</span>
+                        <input
+                          type="number"
+                          min={1}
+                          max={Math.max(1, clipLengthenModelConfig.maxAdditionalSeconds)}
+                          className="w-full rounded-md border border-ink/20 px-2 py-2 disabled:bg-ink/5 disabled:text-ink/50"
+                          value={clipLengthenDurationSeconds}
+                          onChange={(event) => setClipLengthenDurationSeconds(event.target.value)}
+                          disabled={clipLengthenModelConfig.fixedDuration != null}
+                        />
+                      </label>
+                    </div>
+                    <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_280px]">
+                      <label className="block space-y-1 text-sm">
+                        <span className="font-medium">Prompt</span>
+                        <textarea
+                          rows={4}
+                          className="w-full rounded-md border border-ink/20 px-2 py-2"
+                          value={clipLengthenPrompt}
+                          onChange={(event) => setClipLengthenPrompt(event.target.value)}
+                        />
+                      </label>
+                      <div className="rounded-md border border-ink/10 bg-bg p-3 text-xs text-ink/70">
+                        <p className="font-medium text-ink/85">Prompt advice</p>
+                        <p className="mt-1">{clipLengthenPromptAdvice ?? "Describe the continuation clearly in relation to the current clip."}</p>
+                      </div>
+                    </div>
+                    {clipLengthenModelConfig.note ? <p className="text-xs text-ink/60">{clipLengthenModelConfig.note}</p> : null}
+                    {extendModalInputMode === "edit_video" ? (
+                      <p className="text-xs text-ink/60">
+                        Current reference images will be sent in the same order shown above when the selected model supports them.
+                      </p>
+                    ) : null}
+                    {clipLengthenModelConfig.disabledReason ? (
+                      <StatusNotice variant="warning">
+                        <p className="text-xs">{clipLengthenModelConfig.disabledReason}</p>
+                      </StatusNotice>
+                    ) : null}
+                    {lengthenGenerationError ? (
+                      <StatusNotice variant="error">
+                        <p className="text-xs">{lengthenGenerationError}</p>
+                      </StatusNotice>
+                    ) : null}
+                    <div className="flex justify-end gap-2">
+                      <button type="button" className="rounded-md border border-ink/20 px-4 py-2 text-sm" onClick={() => setExtendModal(null)}>
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        className="rounded bg-accent2 px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-60"
+                        disabled={!canSubmitClipLengthen || isLengtheningGeneration}
+                        onClick={() => {
+                          submitClipLengthenFromGenerate();
+                          setExtendModal(null);
+                        }}
+                      >
+                        <PendingButtonLabel isPending={isLengtheningGeneration} idle="Queue clip extension" pending="Queueing clip extension..." />
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+        ) : null}
         {generationCardsVisible < totalOutputCards ? (
           <button className="text-sm text-accent underline" onClick={() => setGenerationCardsVisible((count) => count + 6)}>
             More...

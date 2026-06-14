@@ -3,12 +3,17 @@ import { ReactCompareSlider, ReactCompareSliderImage } from "react-compare-slide
 
 type ImagePreviewState = { url: string; label: string } | null;
 type VideoPreviewState = { url: string; label: string; taskId?: string; generationId?: string } | null;
+type AudioPreviewState = { url: string; label: string; waveformUrl?: string | null } | null;
 type ImageCompareState = { originalUrl: string; compareUrl: string; label: string } | null;
 type VideoCompareState = {
   originalUrl: string;
   compareUrl: string;
   label: string;
   posterUrl?: string | null;
+  originalPosterUrl?: string | null;
+  originalMediaType?: "video" | "audio";
+  originalAudioUrl?: string | null;
+  originalWaveformUrl?: string | null;
   segmentStartSec?: number;
   originalIsSegmentClip?: boolean;
 } | null;
@@ -16,10 +21,12 @@ type VideoCompareState = {
 type PreviewModalsProps = {
   imagePreview: ImagePreviewState;
   videoPreview: VideoPreviewState;
+  audioPreview: AudioPreviewState;
   imageCompare: ImageCompareState;
   videoCompare: VideoCompareState;
   onCloseImage: () => void;
   onCloseVideo: () => void;
+  onCloseAudio: () => void;
   onCloseImageCompare: () => void;
   onCloseVideoCompare: () => void;
   onMediaError?: (url?: string) => void;
@@ -99,10 +106,12 @@ function preloadVideoObjectUrl(url: string, signal: AbortSignal): Promise<string
 export default function PreviewModals({
   imagePreview,
   videoPreview,
+  audioPreview,
   imageCompare,
   videoCompare,
   onCloseImage,
   onCloseVideo,
+  onCloseAudio,
   onCloseImageCompare,
   onCloseVideoCompare,
   onMediaError,
@@ -151,6 +160,13 @@ export default function PreviewModals({
       setVideoCompareOriginalSourceUrl(null);
       return;
     }
+    if (videoCompare.originalMediaType === "audio") {
+      setVideoCompareOriginalSourceUrl(videoCompare.originalWaveformUrl ?? videoCompare.originalUrl);
+      setVideoCompareReady({ original: true, generated: false });
+      setVideoCompareBuffered({ original: true, generated: false });
+      setVideoCompareLoadTimedOut(false);
+      return;
+    }
     const cachedOriginal = getCachedVideoObjectUrl(videoCompare.originalUrl);
     setVideoCompareOriginalSourceUrl(cachedOriginal ?? videoCompare.originalUrl);
     setVideoCompareReady({ original: false, generated: false });
@@ -164,6 +180,7 @@ export default function PreviewModals({
 
   useEffect(() => {
     if (!videoCompare) return;
+    if (videoCompare.originalMediaType === "audio") return;
     if (!isSameOriginUrl(videoCompare.originalUrl)) {
       setVideoCompareOriginalSourceUrl(videoCompare.originalUrl);
       return;
@@ -191,6 +208,7 @@ export default function PreviewModals({
 
   useEffect(() => {
     if (!videoCompare) return;
+    if (videoCompare.originalMediaType === "audio") return;
     const timeoutHandle = window.setTimeout(() => {
       setVideoCompareLoadTimedOut(true);
     }, 12000);
@@ -201,6 +219,15 @@ export default function PreviewModals({
 
   useEffect(() => {
     if (!videoCompare) return;
+    if (videoCompare.originalMediaType === "audio") {
+      markVideoCompareReady("original");
+      markVideoCompareBuffered("original");
+      const generated = compareVariantRef.current;
+      if (generated?.readyState && generated.readyState >= 1) {
+        markVideoCompareReady("generated");
+      }
+      return;
+    }
     const original = compareOriginalRef.current;
     const generated = compareVariantRef.current;
     if (original?.readyState && original.readyState >= 1) {
@@ -215,7 +242,9 @@ export default function PreviewModals({
     const canBeginPlayback =
       videoCompareReady.generated &&
       videoCompareBuffered.generated &&
-      ((videoCompareReady.original && videoCompareBuffered.original) || videoCompareLoadTimedOut);
+      ((videoCompareReady.original && videoCompareBuffered.original) ||
+        videoCompareLoadTimedOut ||
+        Boolean(videoCompare?.originalPosterUrl));
     if (!videoCompare || !canBeginPlayback) return;
     const generated = compareVariantRef.current;
     const original = compareOriginalRef.current;
@@ -391,6 +420,38 @@ export default function PreviewModals({
         </div>
       ) : null}
 
+      {audioPreview ? (
+        <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/80 p-4" onClick={onCloseAudio}>
+          <div className="relative w-[90vw] max-w-4xl rounded-lg border border-ink/20 bg-white p-4" onClick={(event) => event.stopPropagation()}>
+            <button type="button" className="absolute right-2 top-2 rounded bg-black/70 px-3 py-1 text-sm text-white" onClick={onCloseAudio}>
+              x
+            </button>
+            <div className="space-y-4 pt-6">
+              <div>
+                <p className="text-sm font-semibold text-ink">{audioPreview.label}</p>
+                <p className="text-xs text-ink/55">Audio preview</p>
+              </div>
+              {audioPreview.waveformUrl ? (
+                <img
+                  src={audioPreview.waveformUrl}
+                  alt={`${audioPreview.label} waveform`}
+                  className="max-h-[280px] w-full rounded border border-ink/10 bg-bg object-contain"
+                  onError={(event) => notifyMediaError(event.currentTarget.currentSrc || event.currentTarget.src)}
+                />
+              ) : null}
+              <audio
+                src={audioPreview.url}
+                controls
+                autoPlay
+                preload="metadata"
+                className="w-full"
+                onError={(event) => notifyMediaError(event.currentTarget.currentSrc || event.currentTarget.src)}
+              />
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {imageCompare ? (
         <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/80 p-4" onClick={onCloseImageCompare}>
           <div className="relative w-[90vw] max-w-6xl rounded-lg border border-ink/20 bg-black p-3" onClick={(event) => event.stopPropagation()}>
@@ -419,7 +480,9 @@ export default function PreviewModals({
                 className={
                   !videoCompareReady.generated ||
                   !videoCompareBuffered.generated ||
-                  ((!videoCompareReady.original || !videoCompareBuffered.original) && !videoCompareLoadTimedOut)
+                  ((!videoCompareReady.original || !videoCompareBuffered.original) &&
+                    !videoCompareLoadTimedOut &&
+                    !videoCompare.originalPosterUrl)
                     ? "pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-black/85"
                     : "sr-only"
                 }
@@ -434,43 +497,70 @@ export default function PreviewModals({
                 className="h-[80vh] w-full"
                 itemOne={
                   <div className="relative h-full w-full bg-black">
-                    <video
-                      key={`compare-original:${videoCompare.originalUrl}:${videoCompareOriginalSourceUrl ?? "none"}`}
-                      ref={compareOriginalRef}
-                      src={videoCompareOriginalSourceUrl ?? videoCompare.originalUrl}
-                      autoPlay
-                      loop
-                      muted
-                      playsInline
-                      preload="metadata"
-                      className="h-full w-full object-contain"
-                      onLoadedMetadata={() => markVideoCompareReady("original")}
-                      onLoadedData={(event) => {
-                        markVideoCompareReady("original");
-                        if (hasBufferedAhead(event.currentTarget, 0.35)) {
-                          markVideoCompareBuffered("original");
-                        }
-                      }}
-                      onCanPlay={(event) => {
-                        markVideoCompareReady("original");
-                        if (hasBufferedAhead(event.currentTarget, 0.35)) {
-                          markVideoCompareBuffered("original");
-                        }
-                      }}
-                      onCanPlayThrough={() => markVideoCompareBuffered("original")}
-                      onProgress={(event) => {
-                        if (hasBufferedAhead(event.currentTarget, 0.35)) {
-                          markVideoCompareBuffered("original");
-                        }
-                      }}
-                      onError={(event) => {
-                        if (shouldIgnoreMediaError(event.currentTarget)) return;
-                        setVideoCompareLoadTimedOut(true);
-                        notifyMediaError(event.currentTarget.currentSrc || event.currentTarget.src);
-                      }}
-                    />
+                    {videoCompare.originalMediaType === "audio" ? (
+                      <div className="flex h-full flex-col items-center justify-center gap-4 bg-white px-6 py-8 text-ink">
+                        {videoCompare.originalWaveformUrl ? (
+                          <img
+                            src={videoCompare.originalWaveformUrl}
+                            alt="Source audio waveform"
+                            className="max-h-[55vh] w-full rounded border border-ink/10 bg-bg object-contain"
+                            onError={(event) => notifyMediaError(event.currentTarget.currentSrc || event.currentTarget.src)}
+                          />
+                        ) : (
+                          <div className="flex h-[55vh] w-full items-center justify-center rounded border border-ink/10 bg-bg text-sm text-ink/55">
+                            No waveform preview
+                          </div>
+                        )}
+                        {videoCompare.originalAudioUrl ? (
+                          <audio
+                            src={videoCompare.originalAudioUrl}
+                            controls
+                            preload="metadata"
+                            className="w-full"
+                            onError={(event) => notifyMediaError(event.currentTarget.currentSrc || event.currentTarget.src)}
+                          />
+                        ) : null}
+                      </div>
+                    ) : (
+                      <video
+                        key={`compare-original:${videoCompare.originalUrl}:${videoCompareOriginalSourceUrl ?? "none"}`}
+                        ref={compareOriginalRef}
+                        src={videoCompareOriginalSourceUrl ?? videoCompare.originalUrl}
+                        autoPlay
+                        loop
+                        muted
+                        playsInline
+                        preload="metadata"
+                        poster={videoCompare.originalPosterUrl ?? undefined}
+                        className="h-full w-full object-contain"
+                        onLoadedMetadata={() => markVideoCompareReady("original")}
+                        onLoadedData={(event) => {
+                          markVideoCompareReady("original");
+                          if (hasBufferedAhead(event.currentTarget, 0.35)) {
+                            markVideoCompareBuffered("original");
+                          }
+                        }}
+                        onCanPlay={(event) => {
+                          markVideoCompareReady("original");
+                          if (hasBufferedAhead(event.currentTarget, 0.35)) {
+                            markVideoCompareBuffered("original");
+                          }
+                        }}
+                        onCanPlayThrough={() => markVideoCompareBuffered("original")}
+                        onProgress={(event) => {
+                          if (hasBufferedAhead(event.currentTarget, 0.35)) {
+                            markVideoCompareBuffered("original");
+                          }
+                        }}
+                        onError={(event) => {
+                          if (shouldIgnoreMediaError(event.currentTarget)) return;
+                          setVideoCompareLoadTimedOut(true);
+                          notifyMediaError(event.currentTarget.currentSrc || event.currentTarget.src);
+                        }}
+                      />
+                    )}
                     <div className="pointer-events-none absolute left-3 top-3 rounded bg-black/65 px-2 py-1 text-xs font-medium tracking-wide text-white/90">
-                      Source
+                      {videoCompare.originalMediaType === "audio" ? "Source audio" : "Source"}
                     </div>
                   </div>
                 }
@@ -519,7 +609,7 @@ export default function PreviewModals({
                 }
               />
             </div>
-            {videoCompareLoadTimedOut && !videoCompareReady.original ? (
+            {videoCompare.originalMediaType !== "audio" && videoCompareLoadTimedOut && !videoCompareReady.original ? (
               <div className="mt-3 rounded border border-amber-300/40 bg-amber-300/10 px-3 py-2 text-xs text-amber-100">
                 Source preview is still loading, but compare playback will continue and sync as soon as source metadata is ready.
               </div>

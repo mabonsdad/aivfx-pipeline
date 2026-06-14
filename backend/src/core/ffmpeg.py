@@ -106,6 +106,36 @@ def ffprobe_video(input_path: str) -> dict[str, Any]:
     }
 
 
+def ffprobe_audio(input_path: str) -> dict[str, Any]:
+    cmd = [
+        FFPROBE_BIN,
+        "-v",
+        "error",
+        "-print_format",
+        "json",
+        "-show_streams",
+        "-show_format",
+        input_path,
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise FFmpegError(proc.stderr)
+    payload = json.loads(proc.stdout)
+    audio_stream = next((s for s in payload.get("streams", []) if s.get("codec_type") == "audio"), None)
+    if not audio_stream:
+        raise FFmpegError("No audio stream found")
+    duration = float(audio_stream.get("duration") or payload.get("format", {}).get("duration") or 0.0)
+    sample_rate = int(audio_stream.get("sample_rate") or 0)
+    channels = int(audio_stream.get("channels") or 0)
+    return {
+        "duration_sec": duration,
+        "sample_rate": sample_rate,
+        "channels": channels,
+        "codec": audio_stream.get("codec_name"),
+        "bit_rate": int(audio_stream.get("bit_rate") or payload.get("format", {}).get("bit_rate") or 0),
+    }
+
+
 def _format_seconds(value: float) -> str:
     return f"{max(0.0, float(value)):.6f}"
 
@@ -191,6 +221,151 @@ def transcode_to_cfr(
         "aac",
         "-b:a",
         audio_bitrate,
+        output_path,
+    ]
+    _run(cmd)
+
+
+def extract_audio_track(
+    input_path: str,
+    output_path: str,
+    *,
+    codec: str = "libmp3lame",
+    audio_bitrate: str = "192k",
+    sample_rate: int = 44100,
+) -> None:
+    cmd = [
+        FFMPEG_BIN,
+        "-y",
+        "-i",
+        input_path,
+        "-vn",
+        "-map",
+        "0:a:0",
+        "-c:a",
+        codec,
+        "-b:a",
+        audio_bitrate,
+        "-ar",
+        str(sample_rate),
+        output_path,
+    ]
+    _run(cmd)
+
+
+def transcode_audio_preview(
+    input_path: str,
+    output_path: str,
+    *,
+    codec: str = "aac",
+    audio_bitrate: str = "192k",
+    sample_rate: int = 48000,
+) -> None:
+    cmd = [
+        FFMPEG_BIN,
+        "-y",
+        "-i",
+        input_path,
+        "-vn",
+        "-map",
+        "0:a:0",
+        "-c:a",
+        codec,
+        "-b:a",
+        audio_bitrate,
+        "-ar",
+        str(sample_rate),
+        output_path,
+    ]
+    _run(cmd)
+
+
+def transcode_audio_edit_source(
+    input_path: str,
+    output_path: str,
+    *,
+    sample_rate: int = 48000,
+    channels: int = 2,
+) -> None:
+    cmd = [
+        FFMPEG_BIN,
+        "-y",
+        "-i",
+        input_path,
+        "-vn",
+        "-map",
+        "0:a:0",
+        "-c:a",
+        "pcm_s16le",
+        "-ar",
+        str(sample_rate),
+        "-ac",
+        str(max(1, channels)),
+        output_path,
+    ]
+    _run(cmd)
+
+
+def extract_audio_segment(
+    input_path: str,
+    output_path: str,
+    *,
+    start_sec: float,
+    duration_sec: float,
+    codec: str = "pcm_s16le",
+    audio_bitrate: str = "192k",
+    sample_rate: int = 48000,
+    channels: int | None = None,
+) -> None:
+    cmd = [
+        FFMPEG_BIN,
+        "-y",
+        "-ss",
+        _format_seconds(start_sec),
+        "-i",
+        input_path,
+        "-t",
+        _format_seconds(duration_sec),
+        "-vn",
+        "-map",
+        "0:a:0",
+        "-c:a",
+        codec,
+        "-ar",
+        str(sample_rate),
+    ]
+    if channels and channels > 0:
+        cmd.extend(["-ac", str(channels)])
+    elif codec != "pcm_s16le":
+        cmd.extend(["-b:a", audio_bitrate])
+    cmd.append(output_path)
+    _run(cmd)
+
+
+def generate_waveform_png(
+    input_path: str,
+    output_path: str,
+    *,
+    width: int = 1280,
+    height: int = 240,
+    color: str = "0x0fb09b",
+    background: str = "0xf8faf9",
+) -> None:
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    filter_complex = (
+        f"showwavespic=s={width}x{height}:colors={color}:filter=peak,"
+        f"format=rgba,"
+        f"colorchannelmixer=aa=0.95"
+    )
+    cmd = [
+        FFMPEG_BIN,
+        "-y",
+        "-i",
+        input_path,
+        "-lavfi",
+        filter_complex,
+        "-frames:v",
+        "1",
         output_path,
     ]
     _run(cmd)

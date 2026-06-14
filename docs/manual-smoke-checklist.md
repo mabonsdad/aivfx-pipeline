@@ -10,8 +10,9 @@ Use this checklist after deploys and before large refactors.
 
 ## Smoke Flow
 1. **Login**
-   - Sign in and confirm task list and navigation load without console/API auth errors.
-   - Click the sidebar brand/home logo and confirm it opens `https://www.shwsh.co.uk/experiments/aivfx/`.
+   - Sign in and confirm the workflow homepage loads at the root route without console/API auth errors.
+   - Confirm the three workflow cards appear: `Previz`, `Character`, and `VFX`.
+   - Click the sidebar brand/home logo from an in-task page and confirm it returns to the workflow homepage.
 2. **Upload**
    - Create a task and upload a source video.
    - Confirm upload completes and asset appears in task details.
@@ -21,11 +22,14 @@ Use this checklist after deploys and before large refactors.
 4. **Edit**
    - Capture/select start frame and submit one full edit.
    - Confirm edited frame variant appears and preview opens.
+   - Switch to **Edit Source Video** mode, open **Add / edit reference images**, upload one non-16:9 image, and confirm it appears in **Current Working References**.
+   - Reopen the picker and confirm previous uploads plus generated stills/current-task frame captures are listed in the expected tabs.
 5. **Generate**
    - Generate one segment video from edited start input.
    - Confirm job completes and generation appears in outputs.
    - Open generation preview and compare once, then switch away and back to the step.
    - Confirm preview playback still opens and output thumbnails do not visibly reload on each tab change.
+   - In **Edit Source Video** mode, confirm the prompt shows the reference-order helper line and that changing to a lower-reference model warns instead of clearing the current selection.
 6. **Merge**
    - Confirm **Current Working References** has a completed generation selected.
    - Open **Extend generation** and confirm there is no "Previous output" dropdown.
@@ -45,7 +49,7 @@ Use this checklist after deploys and before large refactors.
    - Confirm report job completes and report artifacts render in Reports.
 8. **Off-flow navigation**
    - Open Asset Library and Admin pages.
-   - Confirm the sidebar brand/home logo still appears and always returns to the app home URL.
+   - Confirm the sidebar brand/home logo still appears and always returns to the workflow homepage.
 
 ## Expected Result
 - End-to-end flow completes without blocking errors.

@@ -74,6 +74,29 @@ def handle_job_failure(
             store.save_task(latest_task, merge_on_conflict=True)
         return True
 
+    if job_type == "edit_video_reference_generate":
+        reference_id = str((job.get("payload") or {}).get("referenceId") or "")
+        references = latest_task.get("editVideoReferences", [])
+        reference_record = next(
+            (item for item in references if isinstance(item, dict) and item.get("referenceId") == reference_id),
+            None,
+        )
+        if isinstance(reference_record, dict):
+            reference_record["status"] = "failed"
+            reference_record["updatedAt"] = now_iso_fn()
+            reference_record["error"] = str(error)
+            reference_record["jobId"] = job_id
+            latest_task.setdefault("history", []).append(
+                {
+                    "at": now_iso_fn(),
+                    "event": "edit_video_reference.failed",
+                    "jobId": job_id,
+                    "referenceId": reference_id,
+                }
+            )
+            store.save_task(latest_task, merge_on_conflict=True)
+        return True
+
     if job_type.startswith("video_cleanup_"):
         track_id = str((job.get("payload") or {}).get("trackId") or "")
         track = get_cleanup_track_fn(latest_task, track_id) if track_id else None

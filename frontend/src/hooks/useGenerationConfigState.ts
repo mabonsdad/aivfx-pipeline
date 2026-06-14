@@ -10,6 +10,18 @@ import type {
 } from "../lib/generated/videoContracts";
 import type { GenerateInputMode } from "../lib/generationModeRegistry";
 
+const GENERATION_INPUT_MODE_STORAGE_KEY = "aivfx:generation-input-mode";
+
+function readStoredGenerationInputMode(): GenerateInputMode | null {
+  if (typeof window === "undefined") return null;
+  const raw = window.sessionStorage.getItem(GENERATION_INPUT_MODE_STORAGE_KEY);
+  if (!raw) return null;
+  if (raw === "start_video" || raw === "start_end" || raw === "start_only" || raw === "edit_video") {
+    return raw;
+  }
+  return null;
+}
+
 export type GenerationModelOption = {
   value: VideoModelId;
   label: string;
@@ -53,7 +65,7 @@ export const GENERATION_MODELS_BY_INPUT: Record<GenerateInputMode, GenerationMod
 };
 
 export function useGenerationConfigState() {
-  const [generationInputMode, setGenerationInputMode] = useState<GenerateInputMode>("start_video");
+  const [generationInputMode, setGenerationInputMode] = useState<GenerateInputMode>(() => readStoredGenerationInputMode() ?? "start_video");
   const [generationModelByInput, setGenerationModelByInput] = useState<Record<GenerateInputMode, VideoModelId>>({
     start_video: "ray-flash-2",
     start_end: "kling-2.6",
@@ -90,6 +102,11 @@ export function useGenerationConfigState() {
     setGenerationModelByInput((previous) => ({ ...previous, [generationInputMode]: fallback }));
     setLumaModel(fallback);
   }, [generationInputMode, generationModelOptions, lumaModel]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.sessionStorage.setItem(GENERATION_INPUT_MODE_STORAGE_KEY, generationInputMode);
+  }, [generationInputMode]);
 
   return {
     generationInputMode,

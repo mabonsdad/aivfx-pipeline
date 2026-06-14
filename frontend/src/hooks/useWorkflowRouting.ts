@@ -1,5 +1,6 @@
 import { useEffect, useMemo } from "react";
 import type { NavigateFunction } from "react-router-dom";
+import { isTaskWorkflowId, type TaskWorkflowId } from "../lib/taskWorkflows";
 
 export type TabId =
   | "timeline"
@@ -17,8 +18,10 @@ export type TabId =
 export type ReportView = "frames" | "videos" | "reports";
 
 export type WorkflowRouteState = {
+  kind: "home" | "workflow" | "task" | "direct";
   taskId: string | null;
   tab: TabId | null;
+  workflowId: TaskWorkflowId | null;
 };
 
 export const TAB_ROUTE_SEGMENT: Record<TabId, string> = {
@@ -55,17 +58,30 @@ export function taskRoute(taskId: string, tab: TabId): string {
   return `/tasks/${encodeURIComponent(taskId)}/${TAB_ROUTE_SEGMENT[tab]}`;
 }
 
+export function workflowRoute(workflowId: TaskWorkflowId): string {
+  return `/workflows/${encodeURIComponent(workflowId)}`;
+}
+
 function parseRouteStateFromPath(candidatePath: string): WorkflowRouteState {
   const normalizedPath = candidatePath.replace(/\/+$/, "") || "/";
+  if (normalizedPath === "/") {
+    return { kind: "home", taskId: null, tab: null, workflowId: null };
+  }
   const parts = normalizedPath.split("/").filter(Boolean);
+  if (parts[0] === "workflows" && isTaskWorkflowId(parts[1] ?? null)) {
+    return { kind: "workflow", taskId: null, tab: null, workflowId: parts[1] as TaskWorkflowId };
+  }
   const tasksIndex = parts.findIndex((part) => part === "tasks");
   if (tasksIndex >= 0) {
     const taskId = parts[tasksIndex + 1] ? decodeURIComponent(parts[tasksIndex + 1]) : null;
     const tabFromRoute = parts[tasksIndex + 2] ? ROUTE_SEGMENT_TO_TAB[parts[tasksIndex + 2]] ?? null : null;
-    return { taskId, tab: tabFromRoute };
+    return { kind: "task", taskId, tab: tabFromRoute, workflowId: null };
   }
   const directTab = parts[0] ? ROUTE_SEGMENT_TO_TAB[parts[0]] ?? null : null;
-  return { taskId: null, tab: directTab };
+  if (directTab) {
+    return { kind: "direct", taskId: null, tab: directTab, workflowId: null };
+  }
+  return { kind: "home", taskId: null, tab: null, workflowId: null };
 }
 
 function extractHashPath(hash: string): string | null {
@@ -137,6 +153,7 @@ export function useCanonicalTaskRoute(params: {
 
   useEffect(() => {
     if (!isAuthed) return;
+    if (routeState.kind === "home" || routeState.kind === "workflow") return;
     const fallbackTaskId = routeState.taskId ?? storeSelectedTaskId ?? taskIds[0] ?? null;
     if (!fallbackTaskId) return;
     if (storeSelectedTaskId !== fallbackTaskId) {
@@ -164,6 +181,7 @@ export function useCanonicalTaskRoute(params: {
     locationPathname,
     locationSearch,
     navigate,
+    routeState.kind,
     routeState.tab,
     routeState.taskId,
     setSelectedTaskId,

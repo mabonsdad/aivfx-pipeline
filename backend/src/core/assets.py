@@ -35,6 +35,15 @@ class AssetPaths:
     def preview_source(self) -> str:
         return f"{self.task_prefix()}/preview/{self._filename('preview', '.mp4')}"
 
+    def audio_edit_source(self) -> str:
+        return f"{self.task_prefix()}/edit_source/{self._filename('editsource', '.wav')}"
+
+    def audio_preview_source(self) -> str:
+        return f"{self.task_prefix()}/preview/{self._filename('preview', '.m4a')}"
+
+    def audio_waveform(self) -> str:
+        return f"{self.task_prefix()}/preview/{self._filename('waveform', '.png')}"
+
     def thumbs_prefix(self) -> str:
         return f"{self.task_prefix()}/thumbs"
 
@@ -65,6 +74,23 @@ class AssetPaths:
         ext = Path(filename).suffix or ".png"
         return f"{self.task_prefix()}/edit_video/references/{self._filename(f'ref{short_ref}', ext)}"
 
+    def generation_audio_reference_original(self, reference_id: str, filename: str) -> str:
+        short_ref = re.sub(r"[^a-zA-Z0-9]+", "", reference_id)[-8:]
+        ext = Path(filename).suffix or ".wav"
+        return f"{self.task_prefix()}/generation_audio/{self._filename(f'audio{short_ref}_orig', ext)}"
+
+    def generation_audio_reference_edit_source(self, reference_id: str) -> str:
+        short_ref = re.sub(r"[^a-zA-Z0-9]+", "", reference_id)[-8:]
+        return f"{self.task_prefix()}/generation_audio/{self._filename(f'audio{short_ref}_edit', '.wav')}"
+
+    def generation_audio_reference_preview(self, reference_id: str) -> str:
+        short_ref = re.sub(r"[^a-zA-Z0-9]+", "", reference_id)[-8:]
+        return f"{self.task_prefix()}/generation_audio/{self._filename(f'audio{short_ref}_preview', '.m4a')}"
+
+    def generation_audio_reference_waveform(self, reference_id: str) -> str:
+        short_ref = re.sub(r"[^a-zA-Z0-9]+", "", reference_id)[-8:]
+        return f"{self.task_prefix()}/generation_audio/{self._filename(f'audio{short_ref}_waveform', '.png')}"
+
     def external_qc_original(self, pair_id: str, filename: str) -> str:
         ext = Path(filename).suffix or ".png"
         return f"{self.task_prefix()}/external_qc/{pair_id}/{self._filename('original', ext)}"
@@ -77,9 +103,18 @@ class AssetPaths:
         short_seg = re.sub(r"[^a-zA-Z0-9]+", "", segment_id)[-8:]
         return f"{self.task_prefix()}/segments/{segment_id}/{self._filename(f'seg{short_seg}_orig', '.mp4')}"
 
+    def segment_original_audio(self, segment_id: str, ext: str = ".wav") -> str:
+        short_seg = re.sub(r"[^a-zA-Z0-9]+", "", segment_id)[-8:]
+        safe_ext = ext if ext.startswith(".") else f".{ext}"
+        return f"{self.task_prefix()}/segments/{segment_id}/{self._filename(f'seg{short_seg}_orig', safe_ext)}"
+
     def segment_generated(self, segment_id: str, generation_id: str) -> str:
         short_gen = re.sub(r"[^a-zA-Z0-9]+", "", generation_id)[-8:]
         return f"{self.task_prefix()}/segments/{segment_id}/generated/{self._filename(f'output{short_gen}', '.mp4')}"
+
+    def segment_generated_poster(self, segment_id: str, generation_id: str) -> str:
+        short_gen = re.sub(r"[^a-zA-Z0-9]+", "", generation_id)[-8:]
+        return f"{self.task_prefix()}/segments/{segment_id}/generated/{self._filename(f'output{short_gen}_poster', '.png')}"
 
     def segment_provider_input(self, segment_id: str, generation_id: str, provider: str) -> str:
         short_gen = re.sub(r"[^a-zA-Z0-9]+", "", generation_id)[-8:]
@@ -95,6 +130,12 @@ class AssetPaths:
         short_gen = re.sub(r"[^a-zA-Z0-9]+", "", generation_id)[-8:]
         safe_provider = re.sub(r"[^a-zA-Z0-9]+", "", provider.lower())[:12] or "provider"
         return f"{self.task_prefix()}/segments/{segment_id}/inputs/{self._filename(f'{safe_provider}{short_gen}_last', ext)}"
+
+    def segment_provider_audio(self, segment_id: str, generation_id: str, provider: str, ext: str = ".mp3") -> str:
+        short_gen = re.sub(r"[^a-zA-Z0-9]+", "", generation_id)[-8:]
+        safe_provider = re.sub(r"[^a-zA-Z0-9]+", "", provider.lower())[:12] or "provider"
+        safe_ext = ext if ext.startswith(".") else f".{ext}"
+        return f"{self.task_prefix()}/segments/{segment_id}/inputs/{self._filename(f'{safe_provider}{short_gen}_audio', safe_ext)}"
 
     def export_output(self, export_id: str) -> str:
         short_export = re.sub(r"[^a-zA-Z0-9]+", "", export_id)[-8:]
@@ -321,8 +362,52 @@ class AssetStore:
     def read_bytes(self, key: str) -> bytes:
         return self.s3.get_object(Bucket=self.assets_bucket, Key=key)["Body"].read()
 
-    def delete_object(self, key: str) -> None:
-        self.s3.delete_object(Bucket=self.assets_bucket, Key=key)
+    def delete_object(self, key: str, *, purge_versions: bool = False) -> None:
+        if not purge_versions:
+            self.s3.delete_object(Bucket=self.assets_bucket, Key=key)
+            return
+        self.delete_prefix(key, purge_versions=True, exact_key=True)
+
+    def delete_prefix(self, prefix: str, *, purge_versions: bool = False, exact_key: bool = False) -> None:
+        if not prefix:
+            return
+        if not purge_versions:
+            paginator = self.s3.get_paginator("list_objects_v2")
+            for page in paginator.paginate(Bucket=self.assets_bucket, Prefix=prefix):
+                contents = page.get("Contents") or []
+                if not contents:
+                    continue
+                delete_batch = {
+                    "Objects": [{"Key": item["Key"]} for item in contents if isinstance(item, dict) and item.get("Key")],
+                    "Quiet": True,
+                }
+                if delete_batch["Objects"]:
+                    self.s3.delete_objects(Bucket=self.assets_bucket, Delete=delete_batch)
+            if exact_key:
+                self.s3.delete_object(Bucket=self.assets_bucket, Key=prefix)
+            return
+
+        paginator = self.s3.get_paginator("list_object_versions")
+        for page in paginator.paginate(Bucket=self.assets_bucket, Prefix=prefix):
+            objects: list[dict[str, str]] = []
+            for field in ("Versions", "DeleteMarkers"):
+                for item in page.get(field) or []:
+                    if not isinstance(item, dict):
+                        continue
+                    key = item.get("Key")
+                    version_id = item.get("VersionId")
+                    if not key or not version_id:
+                        continue
+                    if exact_key and key != prefix:
+                        continue
+                    objects.append({"Key": key, "VersionId": version_id})
+            for start in range(0, len(objects), 1000):
+                chunk = objects[start : start + 1000]
+                if chunk:
+                    self.s3.delete_objects(
+                        Bucket=self.assets_bucket,
+                        Delete={"Objects": chunk, "Quiet": True},
+                    )
 
     def copy_object(self, source_key: str, target_key: str, *, content_type: str | None = None) -> None:
         extra_args: dict[str, Any] = {"ServerSideEncryption": "AES256"}

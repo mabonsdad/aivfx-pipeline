@@ -80,6 +80,13 @@ body {
   gap: 12px;
 }
 
+.api-reference-list,
+.api-reference-preview-grid,
+.api-doc-list {
+  display: grid;
+  gap: 12px;
+}
+
 .api-auth-row {
   margin-top: 14px;
 }
@@ -208,6 +215,89 @@ body {
   border-radius: 16px;
   background: rgba(255, 255, 255, 0.76);
   padding: 12px;
+}
+
+.api-preview-tile.api-preview-tile-span {
+  grid-column: 1 / -1;
+}
+
+.api-reference-item {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: 88px minmax(0, 1fr) auto;
+  align-items: center;
+  border: 1px solid rgba(28, 22, 18, 0.08);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.76);
+  padding: 12px;
+}
+
+.api-reference-thumb {
+  width: 88px;
+  height: 88px;
+  border-radius: 12px;
+  object-fit: contain;
+  background: #0c0c0c;
+}
+
+.api-reference-meta {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.api-reference-meta strong,
+.api-reference-preview-card span {
+  font-size: 0.82rem;
+  color: rgba(28, 22, 18, 0.66);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.api-reference-meta span,
+.api-reference-preview-card small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.api-reference-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.api-reference-actions .api-button {
+  padding: 8px 12px;
+}
+
+.api-reference-preview-grid {
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+}
+
+.api-reference-preview-card {
+  display: grid;
+  gap: 8px;
+}
+
+.api-doc-panel {
+  display: grid;
+  gap: 10px;
+  border: 1px solid rgba(28, 22, 18, 0.08);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.76);
+  padding: 14px;
+}
+
+.api-doc-list {
+  margin: 0;
+  padding-left: 18px;
+  color: rgba(28, 22, 18, 0.82);
+}
+
+.api-doc-list li {
+  line-height: 1.5;
 }
 
 .api-preview-media {
@@ -360,6 +450,14 @@ body {
   .api-log-entry {
     grid-template-columns: 1fr;
     gap: 4px;
+  }
+
+  .api-reference-item {
+    grid-template-columns: 1fr;
+  }
+
+  .api-reference-actions {
+    justify-content: flex-start;
   }
 }
 

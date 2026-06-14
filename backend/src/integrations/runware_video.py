@@ -85,6 +85,37 @@ def create_veo_first_last_generation(
     }
 
 
+def create_veo_video_extension(
+    *,
+    api_key: str,
+    model: str,
+    video_url: str,
+    prompt: str,
+    duration_seconds: int = 7,
+) -> dict[str, Any]:
+    task_uuid = str(uuid4())
+    payload: list[dict[str, Any]] = [
+        {
+            "taskType": "videoInference",
+            "taskUUID": task_uuid,
+            "deliveryMethod": "async",
+            "model": model,
+            "positivePrompt": prompt,
+            "duration": int(duration_seconds),
+            "inputs": {
+                "video": video_url,
+            },
+            "numberResults": 1,
+            "outputFormat": "mp4",
+        }
+    ]
+    created = _request_json(payload, api_key=api_key)
+    return {
+        "taskUUID": task_uuid,
+        "response": created,
+    }
+
+
 def create_wan22_a14b_generation(
     *,
     api_key: str,

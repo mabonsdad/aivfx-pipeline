@@ -177,7 +177,7 @@ const PROMPT_WIZARD_MODEL_CONFIGS: PromptWizardAdminModelConfig[] = [
     provider: "fal.ai",
     provider_model: "bytedance/seedance-2.0/reference-to-video",
     endpoint_used: "POST https://queue.fal.run/bytedance/seedance-2.0/reference-to-video",
-    required_markers: ["@Video1", "@Image1"],
+    required_markers: ["@Video1"],
     supports_negative_prompt: false,
     prompt_strategy: "seedance_reference_tags",
   },

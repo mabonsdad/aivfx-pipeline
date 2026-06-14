@@ -1,11 +1,13 @@
 import type { CustomReportTypeId, JobStatusId, SegmentCropAspectId, TaskStatusId } from "../lib/generated/apiContracts";
-import type { FullEditModelId, PatchEditModelId, VideoModelId } from "../lib/generated/videoContracts";
+import type { FullEditModelId, PatchEditModelId } from "../lib/generated/videoContracts";
+import type { TaskWorkflowId } from "../lib/taskWorkflows";
 
 type FrameVariantModelId = FullEditModelId | PatchEditModelId | "generated_extension_anchor" | "manual_upload";
 
 export type TaskSummary = {
   taskId: string;
   name: string;
+  workflowId: TaskWorkflowId;
   status: TaskStatusId;
   createdAt: string;
   updatedAt: string;
@@ -310,6 +312,8 @@ export type FrameRecord = {
 
 export type SegmentRecord = {
   segmentId: string;
+  kind?: "scene" | "source_range" | string | null;
+  label?: string | null;
   startFrame: number;
   endFrameExclusive: number;
   durationFrames: number;
@@ -342,6 +346,14 @@ export type EditVideoReference = {
   model?: string | null;
   prompt?: string | null;
   key: string;
+  width?: number;
+  height?: number;
+  status?: JobStatusId;
+  jobId?: string | null;
+  error?: string | null;
+  originSourceKey?: string | null;
+  originTaskId?: string | null;
+  originSourceType?: "uploaded" | "generated" | "frame_capture" | "frame_variant" | null;
   imageUrl?: string;
   createdAt: string;
   updatedAt?: string;
@@ -352,7 +364,7 @@ export type SegmentGeneration = {
   segmentId: string;
   luma: {
     provider?: "luma" | "runway" | "kling" | "runware" | "replicate" | "fal";
-    model: VideoModelId;
+    model: string;
     mode: string;
     prompt?: string;
     negativePrompt?: string;
@@ -365,12 +377,15 @@ export type SegmentGeneration = {
   jobId?: string | null;
   error?: string | null;
   outputKey?: string | null;
+  posterKey?: string | null;
+  inputAudioKey?: string | null;
   createdAt: string;
   updatedAt?: string;
   startedAt?: string;
   finishedAt?: string;
   processingDurationSec?: number;
   downloadUrl?: string;
+  posterUrl?: string;
   parentGenerationId?: string | null;
   extension?: {
     parentGenerationId?: string;
@@ -387,6 +402,7 @@ export type SegmentGeneration = {
   inputFirstFrameUrl?: string;
   inputLastFrameKey?: string | null;
   inputLastFrameUrl?: string;
+  inputAudioUrl?: string;
   sourceFirstFrameCaptureKey?: string | null;
   sourceFirstFrameCaptureUrl?: string;
   sourceFirstFrameVariantId?: string | null;
@@ -463,10 +479,44 @@ export type SegmentGeneration = {
   } | null;
   cleanupTrackId?: string;
   derivedFromGenerationId?: string;
+  origin?: {
+    workflowId?: string;
+    stepOrigin?: string;
+    toolOrigin?: string;
+    creationMode?: string | null;
+  } | null;
+  characterAnimation?: {
+    workflowId?: string;
+    mode?: "pose_video" | "audio_driven";
+    model?: string;
+    modelLabel?: string;
+    characterReferenceId?: string;
+    outputAspectRatio?: string | null;
+    omnihumanResolution?: string | null;
+    klingMode?: string | null;
+    klingCharacterOrientation?: string | null;
+    seedanceResolution?: string | null;
+    seedanceAspectRatio?: string | null;
+    bodyControl?: boolean | null;
+    expressionIntensity?: number | null;
+    prompt?: string | null;
+  } | null;
   generationSettings?: {
     provider?: string;
     model?: string;
     mode?: string;
+    workflowId?: string;
+    inputMode?: "start_video" | "start_end" | "start_only" | "edit_video" | string;
+    characterMode?: "pose_video" | "audio_driven" | string;
+    characterReferenceId?: string;
+    outputAspectRatio?: string | null;
+    omnihumanResolution?: string | null;
+    klingMode?: string | null;
+    klingCharacterOrientation?: string | null;
+    seedanceResolution?: string | null;
+    seedanceAspectRatio?: string | null;
+    bodyControl?: boolean | null;
+    expressionIntensity?: number | null;
     firstFrameResolution?: { width: number; height: number };
     mediaResolution?: { width: number; height: number } | null;
     requestedDurationSec?: number;
@@ -602,6 +652,9 @@ export type ExportRecord = {
   exportId: string;
   outputKey: string;
   sourceExportId?: string;
+  sourceGenerationId?: string;
+  workflowId?: string;
+  internalOnlySource?: boolean;
   selectedSegmentGenerationIds?: string[];
   createdAt: string;
   downloadUrl?: string;
@@ -704,14 +757,45 @@ export type TaskDetail = {
   taskId: string;
   userId: string;
   name: string;
+  workflowId: TaskWorkflowId;
+  previz?: {
+    scenePrompt?: string | null;
+    sceneAspectRatio?: string | null;
+    selectedReferenceIds?: string[];
+    frameReferenceIds?: string[];
+    selectedFrameIds?: string[];
+    syntheticSegmentId?: string | null;
+  };
   createdAt: string;
   updatedAt: string;
   status: TaskStatusId;
+  generationAudioReference?: {
+    referenceId: string;
+    filename: string;
+    originalKey: string;
+    editSourceKey: string;
+    previewKey: string;
+    waveformKey: string;
+    durationSec?: number;
+    sampleRate?: number;
+    channels?: number;
+    codec?: string;
+    bitRate?: number;
+    waveformWidth?: number;
+    waveformHeight?: number;
+    createdAt: string;
+    updatedAt?: string;
+    originalUrl?: string;
+    editSourceUrl?: string;
+    previewUrl?: string;
+    waveformUrl?: string;
+  };
   video: {
     original?: {
       s3Key: string;
       filename: string;
       sizeBytes: number;
+      contentType?: string;
       sha256?: string | null;
       downloadUrl?: string;
     };
@@ -723,6 +807,14 @@ export type TaskDetail = {
       width: number;
       height: number;
       isVfrInput: boolean;
+      mediaType?: "video" | "audio";
+      contentType?: string;
+      waveformKey?: string;
+      waveformUrl?: string;
+      waveformWidth?: number;
+      waveformHeight?: number;
+      sampleRate?: number;
+      channels?: number;
       downloadUrl?: string;
     };
     previewSource?: {
@@ -731,6 +823,52 @@ export type TaskDetail = {
       durationSec: number;
       width: number;
       height: number;
+      mediaType?: "video" | "audio";
+      contentType?: string;
+      downloadUrl?: string;
+    };
+  };
+  sourceMedia?: {
+    kind: "video" | "audio";
+    original?: {
+      s3Key: string;
+      filename: string;
+      sizeBytes: number;
+      contentType?: string;
+      sha256?: string | null;
+      downloadUrl?: string;
+    };
+    editSource?: {
+      s3Key: string;
+      contentType?: string;
+      durationSec: number;
+      frameCount?: number;
+      width?: number;
+      height?: number;
+      fps?: { num: number; den: number };
+      isVfrInput?: boolean;
+      sampleRate?: number;
+      channels?: number;
+      codec?: string;
+      waveformKey?: string;
+      waveformWidth?: number;
+      waveformHeight?: number;
+      downloadUrl?: string;
+      waveformUrl?: string;
+    };
+    previewSource?: {
+      s3Key: string;
+      contentType?: string;
+      durationSec: number;
+      frameCount?: number;
+      width?: number;
+      height?: number;
+      downloadUrl?: string;
+    };
+    waveform?: {
+      s3Key: string;
+      width?: number;
+      height?: number;
       downloadUrl?: string;
     };
   };

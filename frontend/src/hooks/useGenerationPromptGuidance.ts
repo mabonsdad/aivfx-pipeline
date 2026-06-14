@@ -36,11 +36,13 @@ function generationModelHelp(modelName: VideoModelId, modeValue: string, inputMo
       title: "Seedance 2.0 Reference to Video",
       lines: [
         inputMode === "edit_video"
-          ? "Uses the working-range video as @Video1 and up to 3 selected reference images as @Image1..@Image3."
+          ? "Uses the working-range video as @Video1, with optional reference images @Image1..@Image3 and optional audio @Audio1."
           : "Uses the working-range video as @Video1 and the selected edited start frame as @Image1.",
-        "Prompt must include both @Video1 and @Image1.",
+        inputMode === "edit_video" ? "Prompt must include @Video1. @Image1 and @Audio1 are optional." : "Prompt must include both @Video1 and @Image1.",
         "The app conforms the input to Seedance reference-video bounds, then scales the result back to the working range.",
-        'Example: "Transform the horse in @Video1 into the unicorn in @Image1. Keep motion and background the same."',
+        inputMode === "edit_video"
+          ? 'Example: "Keep the action from @Video1, shift the look toward @Image1, and sync pacing to @Audio1 where useful."'
+          : 'Example: "Transform the horse in @Video1 into the unicorn in @Image1. Keep motion and background the same."',
       ],
     };
   }
@@ -238,7 +240,7 @@ export function useGenerationPromptGuidance({
     }
     if (lumaModel === "seedance-2.0-reference-to-video") {
       return generationInputMode === "edit_video"
-        ? "Uses the selected working-range video as @Video1 and selected references as @Image1..@Image3. Prompt must reference @Video1 and at least @Image1."
+        ? "Uses the selected working-range video as @Video1, optional selected references as @Image1..@Image3, and an optional uploaded audio reference as @Audio1. Prompt must reference @Video1."
         : "Uses the selected working-range video as @Video1 and the selected edited start frame as @Image1. Prompt must reference both. The working range is conformed to Seedance's smaller reference-video bounds, then the result is upscaled back to the working-range size.";
     }
     if (lumaModel === "wan2.7-videoedit") {
@@ -287,7 +289,9 @@ export function useGenerationPromptGuidance({
       return "Transform the horse in <<<video_1>>> into the unicorn in <<<image_1>>>. Keep motion, camera movement and background the same.";
     }
     if (lumaModel === "seedance-2.0-reference-to-video") {
-      return "Transform the horse in @Video1 into the unicorn in @Image1. Keep the motion, camera movement and background the same.";
+      return generationInputMode === "edit_video"
+        ? "Keep the motion and camera from @Video1, optionally use @Image1 for look/style and @Audio1 for timing or mood."
+        : "Transform the horse in @Video1 into the unicorn in @Image1. Keep the motion, camera movement and background the same.";
     }
     if (lumaModel === "wan2.7-videoedit") {
       return "Change the horse into the white unicorn, keep the background and motion the same.";
@@ -335,10 +339,14 @@ export function useGenerationPromptGuidance({
       return null;
     }
     if (lumaModel === "seedance-2.0-reference-to-video") {
-      if (!promptValue) return "Seedance 2.0 Reference to Video requires a prompt that references both @Video1 and @Image1.";
+      if (!promptValue) {
+        return generationInputMode === "edit_video"
+          ? "Seedance 2.0 Reference to Video requires a prompt that references @Video1."
+          : "Seedance 2.0 Reference to Video requires a prompt that references both @Video1 and @Image1.";
+      }
       const missing: string[] = [];
       if (!promptValue.includes("@Video1")) missing.push("@Video1");
-      if (!promptValue.includes("@Image1")) missing.push("@Image1");
+      if (generationInputMode !== "edit_video" && !promptValue.includes("@Image1")) missing.push("@Image1");
       if (missing.length) return `Seedance 2.0 Reference to Video prompt must include ${missing.join(" and ")}.`;
       return null;
     }

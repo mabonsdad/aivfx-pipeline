@@ -3,6 +3,7 @@ import { Construct } from "constructs";
 import * as apigwv2 from "aws-cdk-lib/aws-apigatewayv2";
 import * as apigwv2Authorizers from "aws-cdk-lib/aws-apigatewayv2-authorizers";
 import * as apigwv2Integrations from "aws-cdk-lib/aws-apigatewayv2-integrations";
+import * as acm from "aws-cdk-lib/aws-certificatemanager";
 import * as cloudfront from "aws-cdk-lib/aws-cloudfront";
 import * as cognito from "aws-cdk-lib/aws-cognito";
 import * as lambda from "aws-cdk-lib/aws-lambda";
@@ -19,13 +20,18 @@ export class AivfxStack extends cdk.Stack {
     const appName = this.node.tryGetContext("appName") ?? process.env.APP_NAME ?? "aivfx";
     const webBucketOverride = process.env.WEB_BUCKET_OVERRIDE?.trim() ?? "";
     const manageAppCloudFront = (process.env.MANAGE_APP_CLOUDFRONT ?? "false").toLowerCase() === "true";
+    const appCloudFrontAliases = (process.env.APP_CLOUDFRONT_ALIASES ?? "")
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean);
+    const appCloudFrontCertArn = process.env.APP_CLOUDFRONT_CERT_ARN?.trim() ?? "";
     const webPublicBaseUrl = process.env.WEB_PUBLIC_BASE_URL?.trim() ?? "";
     const cognitoRedirectSignInRaw =
       process.env.COGNITO_REDIRECT_SIGN_IN_URLS ??
-      "https://www.shwsh.co.uk/experiments/aivfx/,https://www.shwsh.co.uk/experiments/aivfx/api-test.html,https://shwsh.co.uk/experiments/aivfx/,https://shwsh.co.uk/experiments/aivfx/api-test.html,http://localhost:5173/,http://localhost:5173/api-test.html";
+      "https://aivfx.shwsh.co.uk/,https://aivfx.shwsh.co.uk/api-test.html,https://www.shwsh.co.uk/experiments/aivfx/,https://www.shwsh.co.uk/experiments/aivfx/api-test.html,https://shwsh.co.uk/experiments/aivfx/,https://shwsh.co.uk/experiments/aivfx/api-test.html,http://localhost:5173/,http://localhost:5173/api-test.html";
     const cognitoRedirectSignOutRaw =
       process.env.COGNITO_REDIRECT_SIGN_OUT_URLS ??
-      "https://www.shwsh.co.uk/experiments/aivfx/,https://www.shwsh.co.uk/experiments/aivfx/api-test.html,https://shwsh.co.uk/experiments/aivfx/,https://shwsh.co.uk/experiments/aivfx/api-test.html,http://localhost:5173/,http://localhost:5173/api-test.html";
+      "https://aivfx.shwsh.co.uk/,https://aivfx.shwsh.co.uk/api-test.html,https://www.shwsh.co.uk/experiments/aivfx/,https://www.shwsh.co.uk/experiments/aivfx/api-test.html,https://shwsh.co.uk/experiments/aivfx/,https://shwsh.co.uk/experiments/aivfx/api-test.html,http://localhost:5173/,http://localhost:5173/api-test.html";
     const cognitoRedirectSignInUrls = cognitoRedirectSignInRaw
       .split(",")
       .map((value) => value.trim())
@@ -36,7 +42,7 @@ export class AivfxStack extends cdk.Stack {
       .filter(Boolean);
     const allowedOriginsRaw =
       process.env.ALLOWED_WEB_ORIGINS ??
-      "https://www.shwsh.co.uk,https://shwsh.co.uk,https://s3.eu-west-2.amazonaws.com";
+      "https://aivfx.shwsh.co.uk,https://www.shwsh.co.uk,https://shwsh.co.uk,https://s3.eu-west-2.amazonaws.com";
     const allowedOrigins = allowedOriginsRaw
       .split(",")
       .map((value) => value.trim())
@@ -44,6 +50,15 @@ export class AivfxStack extends cdk.Stack {
 
     if (manageAppCloudFront && webBucketOverride) {
       throw new Error("MANAGE_APP_CLOUDFRONT=true cannot be combined with WEB_BUCKET_OVERRIDE");
+    }
+    if (appCloudFrontAliases.length > 0 && !manageAppCloudFront) {
+      throw new Error("APP_CLOUDFRONT_ALIASES requires MANAGE_APP_CLOUDFRONT=true");
+    }
+    if (appCloudFrontAliases.length > 0 && !appCloudFrontCertArn) {
+      throw new Error("APP_CLOUDFRONT_CERT_ARN is required when APP_CLOUDFRONT_ALIASES is set");
+    }
+    if (appCloudFrontCertArn && appCloudFrontAliases.length === 0) {
+      throw new Error("APP_CLOUDFRONT_CERT_ARN was provided without APP_CLOUDFRONT_ALIASES");
     }
 
     const webBucket: s3.IBucket = webBucketOverride
@@ -55,6 +70,14 @@ export class AivfxStack extends cdk.Stack {
           versioned: true,
           removalPolicy: cdk.RemovalPolicy.RETAIN,
           autoDeleteObjects: false,
+          lifecycleRules: [
+            {
+              abortIncompleteMultipartUploadAfter: cdk.Duration.days(1),
+              expiredObjectDeleteMarker: true,
+              noncurrentVersionExpiration: cdk.Duration.days(14),
+              noncurrentVersionsToRetain: 3,
+            },
+          ],
         });
 
     const assetsBucket = new s3.Bucket(this, "AssetsBucket", {
@@ -63,6 +86,14 @@ export class AivfxStack extends cdk.Stack {
       enforceSSL: true,
       versioned: true,
       removalPolicy: cdk.RemovalPolicy.RETAIN,
+      lifecycleRules: [
+        {
+          abortIncompleteMultipartUploadAfter: cdk.Duration.days(1),
+          expiredObjectDeleteMarker: true,
+          noncurrentVersionExpiration: cdk.Duration.days(30),
+          noncurrentVersionsToRetain: 3,
+        },
+      ],
       cors: [
         {
           allowedMethods: [s3.HttpMethods.GET, s3.HttpMethods.PUT, s3.HttpMethods.HEAD],
@@ -80,6 +111,14 @@ export class AivfxStack extends cdk.Stack {
       enforceSSL: true,
       versioned: true,
       removalPolicy: cdk.RemovalPolicy.RETAIN,
+      lifecycleRules: [
+        {
+          abortIncompleteMultipartUploadAfter: cdk.Duration.days(1),
+          expiredObjectDeleteMarker: true,
+          noncurrentVersionExpiration: cdk.Duration.days(30),
+          noncurrentVersionsToRetain: 5,
+        },
+      ],
     });
 
     const distribution = manageAppCloudFront
@@ -95,6 +134,11 @@ export class AivfxStack extends cdk.Stack {
             { httpStatus: 403, responseHttpStatus: 200, responsePagePath: "/index.html", ttl: cdk.Duration.seconds(0) },
           ],
           minimumProtocolVersion: cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021,
+          domainNames: appCloudFrontAliases.length ? appCloudFrontAliases : undefined,
+          certificate:
+            appCloudFrontAliases.length && appCloudFrontCertArn
+              ? acm.Certificate.fromCertificateArn(this, "WebDistributionCertificate", appCloudFrontCertArn)
+              : undefined,
         })
       : undefined;
 
@@ -313,6 +357,14 @@ export class AivfxStack extends cdk.Stack {
 
     new cdk.CfnOutput(this, "CloudFrontDistributionId", {
       value: distribution?.distributionId ?? "",
+    });
+
+    new cdk.CfnOutput(this, "CloudFrontDistributionDomainName", {
+      value: distribution?.distributionDomainName ?? "",
+    });
+
+    new cdk.CfnOutput(this, "CloudFrontAliases", {
+      value: appCloudFrontAliases.join(","),
     });
 
     new cdk.CfnOutput(this, "ApiUrl", {

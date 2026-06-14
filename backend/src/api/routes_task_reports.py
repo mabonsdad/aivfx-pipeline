@@ -27,6 +27,7 @@ def handle_task_report_routes(
     cleanup_custom_reports_fn: Callable[[dict[str, Any]], bool],
     decorate_embedded_s3_keys_fn: Callable[[Any, Any], None],
     report_result_key_fn: Callable[[str, str, str], str],
+    asset_paths_for_task_fn: Callable[[dict[str, Any]], Any],
     logger,
 ) -> dict[str, Any] | None:
     if method == "POST" and len(parts) == 3 and parts[2] == "reports":
@@ -54,11 +55,34 @@ def handle_task_report_routes(
                 segment_keys.add((str(segment.get("segmentId")), int(segment.get("startFrame") or 0)))
             if len(segment_keys) != 1:
                 return error_response_fn(400, "Select generated videos from the same segment/start frame for this comparison report", origin=origin)
+        if req.reportType == "previz_review":
+            generation_refs = [item for item in asset_refs if item.get("assetType") == "segment_generation"]
+            if len(generation_refs) < 1:
+                return error_response_fn(400, "Select at least one generated previz video for this report", origin=origin)
+            for ref in generation_refs:
+                generation = task.get("segmentGenerations", {}).get(ref.get("genId"))
+                workflow_id = (
+                    generation.get("generationSettings", {}).get("workflowId")
+                    if isinstance(generation, dict) and isinstance(generation.get("generationSettings"), dict)
+                    else None
+                )
+                if not isinstance(generation, dict) or generation.get("status") != "complete" or not generation.get("outputKey"):
+                    return error_response_fn(400, "Previz review reports can only include completed generated videos", origin=origin)
+                if workflow_id != "simple_generation_workflow":
+                    return error_response_fn(400, "Previz review reports only support Previz generated videos", origin=origin)
         tests = normalize_custom_report_tests_fn(req.reportType, req.tests)
         if not tests:
             return error_response_fn(400, "No valid QC tests selected", origin=origin)
         custom_reports = task.setdefault("customReports", [])
-        report_type_label = "QC Frame" if req.reportType == "qc_frame" else "Video Compare" if req.reportType == "video_compare" else "QC Video"
+        report_type_label = (
+            "QC Frame"
+            if req.reportType == "qc_frame"
+            else "Video Compare"
+            if req.reportType == "video_compare"
+            else "Previz Review"
+            if req.reportType == "previz_review"
+            else "QC Video"
+        )
         report_name = (req.name or "").strip()
         if not report_name:
             report_name = f"{report_type_label} Report {len(custom_reports) + 1}"
@@ -124,9 +148,13 @@ def handle_task_report_routes(
     result_key = report.get("resultKey") if isinstance(report, dict) else None
     if isinstance(result_key, str) and result_key:
         try:
-            store.delete_json(result_key)
+            store.delete_json(result_key, purge_versions=True)
         except Exception:
             logger.warning("Failed to delete report result", extra={"reportId": report_id, "resultKey": result_key})
+    try:
+        asset_store.delete_prefix(f"{asset_paths_for_task_fn(task).report_prefix(report_id)}/", purge_versions=True)
+    except Exception:
+        logger.warning("Failed to delete report asset prefix", extra={"taskId": task_id, "reportId": report_id})
     removed_external_pair_ids = {
         str(asset_ref.get("pairId") or "")
         for asset_ref in (removed_report.get("assetRefs") or [])
@@ -154,7 +182,7 @@ def handle_task_report_routes(
                     key_value = pair.get(key_name)
                     if isinstance(key_value, str) and key_value:
                         try:
-                            asset_store.delete_object(key_value)
+                            asset_store.delete_object(key_value, purge_versions=True)
                         except Exception:
                             logger.warning("Failed to delete external QC asset", extra={"taskId": task_id, "pairId": pair_id, "key": key_value})
             task["externalQcPairs"] = kept_pairs
