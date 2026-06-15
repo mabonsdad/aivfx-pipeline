@@ -209,6 +209,13 @@ function statusLabel(record: ApiRequestRecord | null): string {
   return `${record.status.toUpperCase()}${typeof record.processingDurationSec === "number" ? ` · ${record.processingDurationSec.toFixed(1)}s` : ""}`;
 }
 
+function environmentLabel(): string {
+  if (typeof window === "undefined") return "Unknown";
+  if (window.location.hostname === "aivfx.shwsh.co.uk") return "Production";
+  if (window.location.pathname.startsWith("/experiments/aivfx")) return "Development";
+  return "Custom";
+}
+
 async function uploadAsset(file: File, assetType: "image" | "video"): Promise<string> {
   const init = await apiTestRequest<{ assetId: string; assetKey: string; uploadUrl: string }>("/api/v1/assets/uploads/init", {
     method: "POST",
@@ -257,6 +264,8 @@ function placeholderAssetKey(file: File | null): string | null {
 }
 
 function App() {
+  const environment = useMemo(() => environmentLabel(), []);
+  const currentPage = useMemo(() => (typeof window === "undefined" ? "" : window.location.href.split("#")[0]), []);
   const [workflow, setWorkflow] = useState<Workflow>("image_full");
   const [prompt, setPrompt] = useState("");
   const [imageModel, setImageModel] = useState<string>("nano_banana_pro");
@@ -675,7 +684,9 @@ function App() {
     <div className="api-test-shell">
       <header className="api-test-hero">
         <h1 className="api-test-title">AIVFX API Playground</h1>
-        <p className="api-test-subtitle">Use Cognito to sign in, upload assets, submit requests, and inspect the exact API schema and payload shape being used.</p>
+        <p className="api-test-subtitle">
+          Use Cognito to sign in, upload assets, submit requests, and inspect the exact API schema and payload shape being used. This page is environment-specific, so local or external API clients must use the same API base, user pool, app client, and Hosted UI domain shown here.
+        </p>
       </header>
 
       <div className="api-test-grid">
@@ -684,18 +695,26 @@ function App() {
             <div>
               <h2>Auth</h2>
               <p className="api-muted">
-                Browser auth uses Cognito Hosted UI with PKCE. The callback for this page must be allowed in the Cognito app client.
+                Browser auth uses Cognito Hosted UI with PKCE and sends the Cognito ID token as the bearer token for API calls. The callback for this page must be allowed in the Cognito app client.
               </p>
             </div>
 
             <div className="api-auth-row">
               <div className="api-preview-tile">
+                <strong>Environment</strong>
+                <span>{environment}</span>
+              </div>
+              <div className="api-preview-tile">
                 <strong>Current user</strong>
                 <span>{currentUserLabel}</span>
               </div>
               <div className="api-preview-tile">
+                <strong>Public playground</strong>
+                <span>{currentPage}</span>
+              </div>
+              <div className="api-preview-tile">
                 <strong>Callback URL</strong>
-                <span>{window.location.href.split("#")[0]}</span>
+                <span>{currentPage}</span>
               </div>
             </div>
 
@@ -710,6 +729,10 @@ function App() {
                 {isAuthenticated ? "Authenticated" : "Authentication required"}
               </span>
             </div>
+
+            <p className="api-muted">
+              If you built a local API client before the prod/dev split, repoint it to the environment values on this page. For localhost testing, `http://localhost:5173/` and `http://localhost:5173/api-test.html` are currently allowed in the production app client. Any other localhost port or callback path must be added in Cognito first.
+            </p>
           </div>
         </section>
 
@@ -720,6 +743,10 @@ function App() {
               <p className="api-muted">These are browser-safe identifiers. Do not put API keys or app client secrets in this page.</p>
             </div>
             <div className="api-kv">
+              <div className="api-kv-row">
+                <span>Bearer token</span>
+                <span>Cognito ID token</span>
+              </div>
               <div className="api-kv-row">
                 <span>API base</span>
                 <span>{config.apiBaseUrl}</span>

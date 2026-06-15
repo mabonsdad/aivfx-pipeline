@@ -9,6 +9,60 @@ This app exposes browser-tested external API routes behind Cognito auth:
 - `GET /api/v1/requests`
 - `GET /api/v1/requests/{requestId}`
 
+## Environment targets
+
+### Production
+
+- public app: `https://aivfx.shwsh.co.uk/`
+- public API playground: `https://aivfx.shwsh.co.uk/api-test.html`
+- API base: `https://36uwe4wdv1.execute-api.eu-west-2.amazonaws.com`
+- Cognito user pool: `eu-west-2_1kgY649Nr`
+- Cognito app client: `1kaeckrl0thtuvent00vfuaebm`
+- Cognito Hosted UI domain: `aivfx-prod-528323923790-eu-west-2.auth.eu-west-2.amazoncognito.com`
+
+### Development
+
+- public app: `https://www.shwsh.co.uk/experiments/aivfx/`
+- public API playground: `https://www.shwsh.co.uk/experiments/aivfx/api-test.html`
+- current dev environment values are shown live in the dev playground config panel and may diverge from production
+
+## Auth model
+
+- Browser and local clients authenticate with Cognito Hosted UI using PKCE.
+- The external API expects a Cognito `idToken` as the bearer token.
+- The playground uses the current page URL as both the sign-in and sign-out callback.
+- A local or external client must use the API base, user pool, app client, and Hosted UI domain from the same environment.
+
+## External client setup
+
+If a local client was built before the prod/dev split, repoint it explicitly to one environment. Do not mix the old shared/dev Cognito settings with the new prod API.
+
+### Production client example
+
+```env
+API_BASE_URL=https://36uwe4wdv1.execute-api.eu-west-2.amazonaws.com
+COGNITO_USER_POOL_ID=eu-west-2_1kgY649Nr
+COGNITO_USER_POOL_CLIENT_ID=1kaeckrl0thtuvent00vfuaebm
+COGNITO_DOMAIN=aivfx-prod-528323923790-eu-west-2.auth.eu-west-2.amazoncognito.com
+COGNITO_REGION=eu-west-2
+REDIRECT_SIGN_IN=http://localhost:5173/
+REDIRECT_SIGN_OUT=http://localhost:5173/
+```
+
+### Callback URLs currently allowed in the production app client
+
+- `https://aivfx.shwsh.co.uk/`
+- `https://aivfx.shwsh.co.uk/api-test.html`
+- `http://localhost:5173/`
+- `http://localhost:5173/api-test.html`
+
+If a local client needs a different port or callback path, add it to the Cognito app client before testing.
+
+### Development client guidance
+
+- Use the config values shown in the dev playground at `https://www.shwsh.co.uk/experiments/aivfx/api-test.html`.
+- Development and production use different Cognito/app/API values and should be treated as separate client targets.
+
 ## Upload flow
 
 1. Call `POST /api/v1/assets/uploads/init` with the file metadata.
