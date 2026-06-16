@@ -1,0 +1,250 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+2 0 obj
+<< /Type /Page /Parent 8 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 1 0 R >> >> /Contents 3 0 R >>
+endobj
+3 0 obj
+<< /Length 3194 >>
+stream
+BT
+/F1 18 Tf
+1 0 0 1 54 784 Tm (AIVFX Weekend DNS Cutover Plan) Tj
+/F1 13 Tf
+1 0 0 1 54 750 Tm (Purpose) Tj
+/F1 11 Tf
+1 0 0 1 54 730 Tm (This handoff covers the weekend DNS cutover needed to make aivfx.shwsh.co.uk live from) Tj
+/F1 11 Tf
+1 0 0 1 54 715 Tm (the Route53 hosted zone you can currently edit.) Tj
+/F1 11 Tf
+1 0 0 1 54 700 Tm (Do not attempt this mid-week if you cannot tolerate temporary mail or site disruption.) Tj
+/F1 11 Tf
+1 0 0 1 54 685 Tm (The domain currently appears to be delegated to an older Route53 zone, while your) Tj
+/F1 11 Tf
+1 0 0 1 54 670 Tm (editable public zone uses a different Route53 delegation set.) Tj
+/F1 13 Tf
+1 0 0 1 54 647 Tm (Recommendation 1: Fix the zone apex NS record inside the current Route53 zone) Tj
+/F1 11 Tf
+1 0 0 1 54 627 Tm (In hosted zone ZHPU4DS4ZT4ZY, replace the apex NS record for shwsh.co.uk so it matches) Tj
+/F1 11 Tf
+1 0 0 1 54 612 Tm (the hosted zone's actual assigned nameservers.) Tj
+/F1 11 Tf
+1 0 0 1 54 597 Tm (Target nameservers:) Tj
+/F1 11 Tf
+1 0 0 1 54 580 Tm (ns-750.awsdns-29.net) Tj
+/F1 11 Tf
+1 0 0 1 54 565 Tm (ns-104.awsdns-13.com) Tj
+/F1 11 Tf
+1 0 0 1 54 550 Tm (ns-1460.awsdns-54.org) Tj
+/F1 11 Tf
+1 0 0 1 54 535 Tm (ns-1759.awsdns-27.co.uk) Tj
+/F1 11 Tf
+1 0 0 1 54 520 Tm (This does not switch public traffic by itself. It only makes the hosted zone internally) Tj
+/F1 11 Tf
+1 0 0 1 54 505 Tm (consistent before registrar delegation is changed.) Tj
+/F1 13 Tf
+1 0 0 1 54 482 Tm (Exact CLI for Recommendation 1) Tj
+/F1 11 Tf
+1 0 0 1 54 462 Tm (aws route53 change-resource-record-sets --hosted-zone-id ZHPU4DS4ZT4ZY --change-batch "{) Tj
+/F1 11 Tf
+1 0 0 1 54 447 Tm (  'Comment': 'Replace apex NS record with hosted zone delegation set',) Tj
+/F1 11 Tf
+1 0 0 1 54 432 Tm (  'Changes': [) Tj
+/F1 11 Tf
+1 0 0 1 54 417 Tm (    {) Tj
+/F1 11 Tf
+1 0 0 1 54 402 Tm (      'Action': 'UPSERT',) Tj
+/F1 11 Tf
+1 0 0 1 54 387 Tm (      'ResourceRecordSet': {) Tj
+/F1 11 Tf
+1 0 0 1 54 372 Tm (        'Name': 'shwsh.co.uk.',) Tj
+/F1 11 Tf
+1 0 0 1 54 357 Tm (        'Type': 'NS',) Tj
+/F1 11 Tf
+1 0 0 1 54 342 Tm (        'TTL': 172800,) Tj
+/F1 11 Tf
+1 0 0 1 54 327 Tm (        'ResourceRecords': [) Tj
+/F1 11 Tf
+1 0 0 1 54 312 Tm (          { 'Value': 'ns-750.awsdns-29.net.' },) Tj
+/F1 11 Tf
+1 0 0 1 54 297 Tm (          { 'Value': 'ns-104.awsdns-13.com.' },) Tj
+/F1 11 Tf
+1 0 0 1 54 282 Tm (          { 'Value': 'ns-1460.awsdns-54.org.' },) Tj
+/F1 11 Tf
+1 0 0 1 54 267 Tm (          { 'Value': 'ns-1759.awsdns-27.co.uk.' }) Tj
+/F1 11 Tf
+1 0 0 1 54 252 Tm (        ]) Tj
+/F1 11 Tf
+1 0 0 1 54 237 Tm (      }) Tj
+/F1 11 Tf
+1 0 0 1 54 222 Tm (    }) Tj
+/F1 11 Tf
+1 0 0 1 54 207 Tm (  ]) Tj
+/F1 11 Tf
+1 0 0 1 54 192 Tm (}") Tj
+/F1 13 Tf
+1 0 0 1 54 169 Tm (Recommendation 2: Change the registrar delegation at Gandi) Tj
+/F1 11 Tf
+1 0 0 1 54 149 Tm (At the registrar, change the domain nameservers for shwsh.co.uk to the same four nameservers used by the hosted zone:) Tj
+/F1 11 Tf
+1 0 0 1 54 132 Tm (ns-750.awsdns-29.net) Tj
+/F1 11 Tf
+1 0 0 1 54 117 Tm (ns-104.awsdns-13.com) Tj
+/F1 11 Tf
+1 0 0 1 54 102 Tm (ns-1460.awsdns-54.org) Tj
+/F1 11 Tf
+1 0 0 1 54 87 Tm (ns-1759.awsdns-27.co.uk) Tj
+/F1 9 Tf
+1 0 0 1 54 28 Tm (Page 1 of 3) Tj
+ET
+endstream
+endobj
+4 0 obj
+<< /Type /Page /Parent 8 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 1 0 R >> >> /Contents 5 0 R >>
+endobj
+5 0 obj
+<< /Length 3557 >>
+stream
+BT
+/F1 11 Tf
+1 0 0 1 54 784 Tm (This is the actual public cutover step. Once Gandi points the domain at these) Tj
+/F1 11 Tf
+1 0 0 1 54 769 Tm (nameservers, the records in hosted zone ZHPU4DS4ZT4ZY become authoritative for the) Tj
+/F1 11 Tf
+1 0 0 1 54 754 Tm (internet.) Tj
+/F1 13 Tf
+1 0 0 1 54 731 Tm (Gandi change checklist) Tj
+/F1 11 Tf
+1 0 0 1 54 711 Tm (Before saving the nameserver change, verify the hosted zone still contains at least) Tj
+/F1 11 Tf
+1 0 0 1 54 696 Tm (these production records: apex A alias, www A alias, MX, SPF TXT, DKIM CNAME records,) Tj
+/F1 11 Tf
+1 0 0 1 54 681 Tm (blog A, oldblog A, aivfx CNAME, and any validation records you still rely on.) Tj
+/F1 11 Tf
+1 0 0 1 54 666 Tm (Because email is critical, verify mail delivery after cutover by sending inbound and) Tj
+/F1 11 Tf
+1 0 0 1 54 651 Tm (outbound tests.) Tj
+/F1 13 Tf
+1 0 0 1 54 628 Tm (Recommendation 3: Weekend cutover verification checklist) Tj
+/F1 11 Tf
+1 0 0 1 54 608 Tm (Run these checks in order after changing the registrar nameservers.) Tj
+/F1 11 Tf
+1 0 0 1 54 593 Tm (1. Confirm public delegation:) Tj
+/F1 11 Tf
+1 0 0 1 54 576 Tm (   dig shwsh.co.uk NS +short) Tj
+/F1 11 Tf
+1 0 0 1 54 561 Tm (   Expected: ns-750.awsdns-29.net, ns-104.awsdns-13.com, ns-1460.awsdns-54.org,) Tj
+/F1 11 Tf
+1 0 0 1 54 546 Tm (    ns-1759.awsdns-27.co.uk) Tj
+/F1 11 Tf
+1 0 0 1 54 531 Tm (2. Confirm root site still resolves:) Tj
+/F1 11 Tf
+1 0 0 1 54 514 Tm (   nslookup shwsh.co.uk 8.8.8.8) Tj
+/F1 11 Tf
+1 0 0 1 54 499 Tm (   nslookup www.shwsh.co.uk 8.8.8.8) Tj
+/F1 11 Tf
+1 0 0 1 54 484 Tm (3. Confirm the new app subdomain resolves:) Tj
+/F1 11 Tf
+1 0 0 1 54 467 Tm (   nslookup aivfx.shwsh.co.uk 8.8.8.8) Tj
+/F1 11 Tf
+1 0 0 1 54 452 Tm (   nslookup aivfx.shwsh.co.uk 1.1.1.1) Tj
+/F1 11 Tf
+1 0 0 1 54 437 Tm (4. Confirm mail records:) Tj
+/F1 11 Tf
+1 0 0 1 54 420 Tm (   dig shwsh.co.uk MX +short) Tj
+/F1 11 Tf
+1 0 0 1 54 405 Tm (   dig shwsh.co.uk TXT +short) Tj
+/F1 11 Tf
+1 0 0 1 54 390 Tm (   dig fm1._domainkey.shwsh.co.uk CNAME +short) Tj
+/F1 11 Tf
+1 0 0 1 54 375 Tm (5. Test websites in browser:) Tj
+/F1 11 Tf
+1 0 0 1 54 358 Tm (   https://shwsh.co.uk/) Tj
+/F1 11 Tf
+1 0 0 1 54 343 Tm (   https://www.shwsh.co.uk/) Tj
+/F1 11 Tf
+1 0 0 1 54 328 Tm (   https://aivfx.shwsh.co.uk/) Tj
+/F1 11 Tf
+1 0 0 1 54 313 Tm (6. Test Cognito login and logout on the new subdomain.) Tj
+/F1 11 Tf
+1 0 0 1 54 298 Tm (7. Send and receive at least one real email through the domain.) Tj
+/F1 13 Tf
+1 0 0 1 54 275 Tm (Expected timing) Tj
+/F1 11 Tf
+1 0 0 1 54 255 Tm (A registrar nameserver change is not the same as an ordinary Route53 record edit.) Tj
+/F1 11 Tf
+1 0 0 1 54 240 Tm (Several hours is plausible; up to 24 to 48 hours is a safe worst-case expectation for) Tj
+/F1 11 Tf
+1 0 0 1 54 225 Tm (full propagation through all recursive resolvers.) Tj
+/F1 11 Tf
+1 0 0 1 54 210 Tm (Temporary resolver disagreement is normal during that window. The key signal is the NS) Tj
+/F1 11 Tf
+1 0 0 1 54 195 Tm (delegation gradually changing to the new Route53 nameserver set.) Tj
+/F1 13 Tf
+1 0 0 1 54 172 Tm (Rollback position) Tj
+/F1 11 Tf
+1 0 0 1 54 152 Tm (If the cutover goes badly, the rollback is to restore the old nameserver set at Gandi.) Tj
+/F1 11 Tf
+1 0 0 1 54 137 Tm (Old delegated nameservers observed publicly before cutover:) Tj
+/F1 11 Tf
+1 0 0 1 54 120 Tm (ns-1196.awsdns-21.org) Tj
+/F1 11 Tf
+1 0 0 1 54 105 Tm (ns-551.awsdns-04.net) Tj
+/F1 11 Tf
+1 0 0 1 54 90 Tm (ns-418.awsdns-52.com) Tj
+/F1 11 Tf
+1 0 0 1 54 75 Tm (ns-1610.awsdns-09.co.uk) Tj
+/F1 9 Tf
+1 0 0 1 54 28 Tm (Page 2 of 3) Tj
+ET
+endstream
+endobj
+6 0 obj
+<< /Type /Page /Parent 8 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 1 0 R >> >> /Contents 7 0 R >>
+endobj
+7 0 obj
+<< /Length 592 >>
+stream
+BT
+/F1 11 Tf
+1 0 0 1 54 784 Tm (Only use rollback if the new zone is clearly missing a critical production record or) Tj
+/F1 11 Tf
+1 0 0 1 54 769 Tm (mail flow breaks.) Tj
+/F1 13 Tf
+1 0 0 1 54 746 Tm (Post-cutover note) Tj
+/F1 11 Tf
+1 0 0 1 54 726 Tm (Once aivfx.shwsh.co.uk is live, the frontend prod/dev URL split is complete for Phase 1.) Tj
+/F1 11 Tf
+1 0 0 1 54 711 Tm (Backend, API, Cognito client, worker, assets bucket, and metadata bucket are still) Tj
+/F1 11 Tf
+1 0 0 1 54 696 Tm (shared until the later production environment split.) Tj
+/F1 9 Tf
+1 0 0 1 54 28 Tm (Page 3 of 3) Tj
+ET
+endstream
+endobj
+8 0 obj
+<< /Type /Pages /Kids [ 2 0 R 4 0 R 6 0 R ] /Count 3 >>
+endobj
+9 0 obj
+<< /Type /Catalog /Pages 8 0 R >>
+endobj
+xref
+0 10
+0000000000 65535 f 
+0000000015 00000 n 
+0000000085 00000 n 
+0000000211 00000 n 
+0000003457 00000 n 
+0000003583 00000 n 
+0000007192 00000 n 
+0000007318 00000 n 
+0000007961 00000 n 
+0000008032 00000 n 
+trailer
+<< /Size 10 /Root 9 0 R >>
+startxref
+8081
+%%EOF

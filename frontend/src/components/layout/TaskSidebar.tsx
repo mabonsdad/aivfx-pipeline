@@ -7,6 +7,7 @@ type TaskSidebarProps = {
   tasks: TaskSummary[];
   selectedTaskId: string | null;
   currentWorkflowId: TaskWorkflowId | null;
+  isAdmin: boolean;
   onSignOut: () => void;
   onGoHome: () => void;
   onOpenNewTask: () => void;
@@ -14,8 +15,10 @@ type TaskSidebarProps = {
   onSelectTask: (taskId: string) => void;
   onDeleteTask: (taskId: string) => void;
   onOpenAssetLibrary: () => void;
+  onOpenAllAssetLibrary: () => void;
   onOpenCustomQc: () => void;
   onOpenApiLogs: () => void;
+  onOpenAllApiLogs: () => void;
   onOpenAdmin: () => void;
 };
 
@@ -23,6 +26,7 @@ export default function TaskSidebar({
   tasks,
   selectedTaskId,
   currentWorkflowId,
+  isAdmin,
   onSignOut,
   onGoHome,
   onOpenNewTask,
@@ -30,8 +34,10 @@ export default function TaskSidebar({
   onSelectTask,
   onDeleteTask,
   onOpenAssetLibrary,
+  onOpenAllAssetLibrary,
   onOpenCustomQc,
   onOpenApiLogs,
+  onOpenAllApiLogs,
   onOpenAdmin,
 }: TaskSidebarProps) {
   const [pendingDeleteTask, setPendingDeleteTask] = useState<TaskSummary | null>(null);
@@ -109,7 +115,14 @@ export default function TaskSidebar({
       </button>
 
       <div className="mb-3 flex items-center justify-between">
-        <h2 className="text-base font-semibold">Tasks</h2>
+        <div className="flex items-center gap-2">
+          <h2 className="text-base font-semibold">Tasks</h2>
+          {isAdmin ? (
+            <span className="rounded-full border border-accent/25 bg-accent/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-accent">
+              Admin
+            </span>
+          ) : null}
+        </div>
         <button type="button" onClick={onSignOut} className="text-xs text-ink/60 underline">
           Sign out
         </button>
@@ -156,9 +169,24 @@ export default function TaskSidebar({
         <button type="button" className="block text-xs text-accent underline" onClick={onOpenApiLogs}>
           API Logs
         </button>
-        <button type="button" className="block text-xs text-accent underline" onClick={onOpenAdmin}>
-          Admin
-        </button>
+        {isAdmin ? (
+          <>
+            <div className="pt-2">
+              <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.1em] text-ink/45">Admin Workspace</p>
+              <div className="space-y-2">
+                <button type="button" className="block text-xs text-accent underline" onClick={onOpenAllAssetLibrary}>
+                  All assets
+                </button>
+                <button type="button" className="block text-xs text-accent underline" onClick={onOpenAllApiLogs}>
+                  All API logs
+                </button>
+                <button type="button" className="block text-xs text-accent underline" onClick={onOpenAdmin}>
+                  Admin
+                </button>
+              </div>
+            </div>
+          </>
+        ) : null}
         </div>
       </div>
 

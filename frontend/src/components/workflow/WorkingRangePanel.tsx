@@ -156,15 +156,14 @@ export function CurrentWorkingReferencePanel({
   if (isSceneOnly && !segment) {
     return (
       <div className="rounded-lg border border-ink/10 bg-white p-3">
-        <div className="flex items-start justify-between gap-3">
-          <div className="flex min-w-[4.4rem] flex-col pt-1 text-sm font-semibold leading-tight text-ink">
-            <span>Current</span>
-            <span>Working</span>
-            <span>References</span>
+        <div className="flex flex-wrap items-start gap-x-3 gap-y-4">
+          <div className="flex min-h-[7.25rem] min-w-[4.4rem] items-center self-start">
+            <div className="flex flex-col text-sm font-semibold leading-tight text-ink">
+              <span>Current</span>
+              <span>Working</span>
+              <span>References</span>
+            </div>
           </div>
-          {headerAction ? <div className="shrink-0">{headerAction}</div> : null}
-        </div>
-        <div className="mt-2 flex flex-wrap items-start gap-2">
           {visibleAssets.length ? (
             visibleAssets.map((asset) => {
               const thumbClass = "h-[4.5rem] w-[6.7rem] rounded border border-ink/10 bg-bg object-contain";
@@ -214,8 +213,11 @@ export function CurrentWorkingReferencePanel({
               );
             })
           ) : (
-            <p className="mt-2 text-sm text-ink/60">No working references selected.</p>
+            <div className="flex min-h-[7.25rem] items-center">
+              <p className="text-sm text-ink/60">No working references selected.</p>
+            </div>
           )}
+          {headerAction ? <div className="flex min-h-[7.25rem] shrink-0 items-center self-start">{headerAction}</div> : null}
         </div>
         {warning ? <div className="mt-3 text-xs text-amber-700">{warning}</div> : null}
       </div>

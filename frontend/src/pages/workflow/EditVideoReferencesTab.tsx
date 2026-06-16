@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { CopyIcon, DeleteIcon, IconActionButton, PreviewIcon } from "../../components/layout/MediaActionButtons";
 import { PendingButtonLabel, Spinner, StatusNotice } from "../../components/layout/UiFeedback";
 import { copyTextToClipboard } from "../../lib/clipboard";
+import { summarizeImageGenerationError } from "../../lib/imageGenerationErrorSummary";
 
 type ReferenceLibraryItem = {
   referenceId: string;
@@ -10,6 +11,7 @@ type ReferenceLibraryItem = {
   title: string;
   subtitle: string;
   selectedForVideo: boolean;
+  model?: GenerateReferenceModel | null;
   status?: "queued" | "running" | "complete" | "failed";
   error?: string | null;
   prompt?: string | null;
@@ -187,6 +189,7 @@ export default function EditVideoReferencesTab({ ctx }: Props) {
   const selectedTokenPrefix = labels?.selectedTokenPrefix ?? "Reference";
   const maxReferenceImages = MAX_REFERENCE_IMAGES_BY_MODEL[generateModel] ?? null;
   const tooManyReferencesForModel = maxReferenceImages != null && toolSelectedReferences.length > maxReferenceImages;
+  const failedHint = labels?.failedHint ?? "Reference image generation failed.";
 
   function handleModelChange(nextModel: GenerateReferenceModel) {
     setGenerateModel(nextModel);
@@ -368,7 +371,12 @@ export default function EditVideoReferencesTab({ ctx }: Props) {
       ) : null}
 
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        {references.map((reference) => (
+        {references.map((reference) => {
+          const displayError = summarizeImageGenerationError(
+            reference.error,
+            reference.model === "nano_banana" || reference.model === "nano_banana_pro" ? "Nano Banana" : "This model",
+          );
+          return (
           <article
             key={reference.referenceId}
             role="button"
@@ -412,7 +420,7 @@ export default function EditVideoReferencesTab({ ctx }: Props) {
               ) : reference.status === "failed" ? (
                 <div className="flex aspect-video flex-col items-center justify-center gap-2 px-3 text-center text-red-700">
                   <p className="text-xs font-medium uppercase tracking-wide">Failed</p>
-                  <p className="text-xs">{reference.error?.trim() || labels?.failedHint || "Reference image generation failed."}</p>
+                  <p className="text-xs" title={reference.error?.trim() || undefined}>{displayError || failedHint}</p>
                 </div>
               ) : (
                 <div className="flex aspect-video items-center justify-center text-xs text-ink/55">Image unavailable</div>
@@ -427,7 +435,9 @@ export default function EditVideoReferencesTab({ ctx }: Props) {
                 {reference.selectedForVideo ? <span className="shrink-0 text-[11px] font-medium text-teal-700">Selected</span> : null}
               </div>
               {reference.status === "failed" ? (
-                <p className="text-xs text-red-700">{reference.error?.trim() || "Generation failed. Delete this placeholder or try again."}</p>
+                <p className="text-xs text-red-700" title={reference.error?.trim() || undefined}>
+                  {displayError || "Generation failed. Delete this placeholder or try again."}
+                </p>
               ) : null}
             </div>
             <div className="flex items-center justify-between gap-2">
@@ -486,7 +496,8 @@ export default function EditVideoReferencesTab({ ctx }: Props) {
               </div>
             </div>
           </article>
-        ))}
+          );
+        })}
       </div>
     </div>
   );

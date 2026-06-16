@@ -5,7 +5,7 @@ from typing import Any, Callable
 from src.core.http import parse_json_body
 from src.core.prompt_wizard_admin import (
     ADMIN_PROMPT_WIZARD_CONFIG_KEY,
-    is_prompt_wizard_admin_owner,
+    is_prompt_wizard_admin,
     is_valid_prompt_wizard_admin_pin,
     normalize_prompt_wizard_admin_config_for_read,
     normalize_prompt_wizard_admin_config_for_write,
@@ -39,10 +39,10 @@ def handle_admin_routes(
     if path != "/admin/prompt-wizard-config":
         return None
 
-    owner_access = is_prompt_wizard_admin_owner(claims)
+    admin_access = is_prompt_wizard_admin(claims)
     pin = _header_value(event, "x-admin-pin")
     pin_access = is_valid_prompt_wizard_admin_pin(pin)
-    has_access = owner_access or pin_access
+    has_access = admin_access or pin_access
 
     if not has_access:
         return error_response_fn(403, "Admin access required", origin=origin)
@@ -56,8 +56,8 @@ def handle_admin_routes(
             {
                 "config": config,
                 "access": {
-                    "isOwner": owner_access,
-                    "viaPin": pin_access and not owner_access,
+                    "isAdmin": admin_access,
+                    "viaPin": pin_access and not admin_access,
                 },
             },
             origin=origin,
@@ -81,8 +81,8 @@ def handle_admin_routes(
             {
                 "config": normalized,
                 "access": {
-                    "isOwner": owner_access,
-                    "viaPin": pin_access and not owner_access,
+                    "isAdmin": admin_access,
+                    "viaPin": pin_access and not admin_access,
                 },
             },
             origin=origin,

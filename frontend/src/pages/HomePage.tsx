@@ -11,11 +11,12 @@ type WorkflowHomeCard = {
 type HomePageProps = {
   cards: WorkflowHomeCard[];
   onSelectTask: (workflowId: TaskWorkflowId) => void;
+  onOpenLatestTask: (taskId: string) => void;
   onNewTask: (workflowId: TaskWorkflowId) => void;
   onSignOut: () => void;
 };
 
-export default function HomePage({ cards, onSelectTask, onNewTask, onSignOut }: HomePageProps) {
+export default function HomePage({ cards, onSelectTask, onOpenLatestTask, onNewTask, onSignOut }: HomePageProps) {
   return (
     <main className="min-h-screen bg-bg px-6 py-10 text-ink md:px-10">
       <div className="mx-auto max-w-7xl">
@@ -25,8 +26,8 @@ export default function HomePage({ cards, onSelectTask, onNewTask, onSignOut }: 
           </button>
         </div>
         <div className="mb-12 flex flex-col items-center text-center">
-          <FivefoldLogo className="h-auto w-[26rem] max-w-full" />
-          <p className="mt-4 text-sm uppercase tracking-[0.26em] text-ink/55">AIVFX Workflows</p>
+          <FivefoldLogo className="h-auto w-[22rem] max-w-full" />
+          <p className="mt-4 text-sm uppercase tracking-[0.26em] text-ink/55">AI Workflows</p>
         </div>
         <div className="grid gap-6 lg:grid-cols-3">
           {cards.map((card) => {
@@ -40,19 +41,30 @@ export default function HomePage({ cards, onSelectTask, onNewTask, onSignOut }: 
                   </div>
                 </div>
                 <div className="mt-auto space-y-4">
-                  <div className="rounded-xl border border-ink/10 bg-bg px-4 py-3">
-                    <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-ink/45">Latest task</p>
-                    {card.latestTaskThumbnailUrl ? (
-                      <img
-                        src={card.latestTaskThumbnailUrl}
-                        alt={card.latestTaskName ? `${card.latestTaskName} preview` : `${workflow.homeTitle} preview`}
-                        className="mt-2 aspect-video w-full rounded-lg border border-ink/10 bg-white object-contain"
-                        loading="lazy"
-                        decoding="async"
-                      />
-                    ) : null}
-                    <p className="mt-2 text-sm text-ink/75">{card.latestTaskName ?? "No task yet for this workflow."}</p>
-                  </div>
+                  {card.latestTaskId ? (
+                    <button
+                      type="button"
+                      className="block w-full rounded-xl border border-ink/10 bg-bg px-4 py-3 text-left transition hover:border-accent/40 hover:bg-white"
+                      onClick={() => onOpenLatestTask(card.latestTaskId!)}
+                    >
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-ink/45">Latest task</p>
+                      {card.latestTaskThumbnailUrl ? (
+                        <img
+                          src={card.latestTaskThumbnailUrl}
+                          alt={card.latestTaskName ? `${card.latestTaskName} preview` : `${workflow.homeTitle} preview`}
+                          className="mt-2 aspect-video w-full rounded-lg border border-ink/10 bg-white object-contain"
+                          loading="lazy"
+                          decoding="async"
+                        />
+                      ) : null}
+                      <p className="mt-2 text-sm text-ink/75">{card.latestTaskName}</p>
+                    </button>
+                  ) : (
+                    <div className="rounded-xl border border-ink/10 bg-bg px-4 py-3">
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-ink/45">Latest task</p>
+                      <p className="mt-2 text-sm text-ink/75">No task yet for this workflow.</p>
+                    </div>
+                  )}
                   <div className="flex items-center justify-between gap-4">
                     <button type="button" className="text-sm font-medium text-accent underline" onClick={() => onSelectTask(card.workflowId)}>
                       Select task

@@ -61,11 +61,15 @@ function AssetPreview({ label, asset }: { label: string; asset: ApiRequestAssetR
   );
 }
 
-export default function ApiLogsPage() {
+export default function ApiLogsPage({
+  scope = "mine",
+}: {
+  scope?: "mine" | "all";
+}) {
   const [selectedRequestId, setSelectedRequestId] = useState<string | null>(null);
   const requestsQuery = useQuery({
-    queryKey: ["api-requests"],
-    queryFn: async () => (await apiClient.listApiRequests({ limit: 100 })).requests,
+    queryKey: ["api-requests", scope],
+    queryFn: async () => (await apiClient.listApiRequests({ limit: 100, scope })).requests,
     refetchInterval: 5000,
     refetchOnWindowFocus: false,
   });
@@ -77,8 +81,8 @@ export default function ApiLogsPage() {
   );
 
   const detailQuery = useQuery({
-    queryKey: ["api-request", selectedRequest?.requestId],
-    queryFn: () => apiClient.getApiRequest(selectedRequest!.requestId),
+    queryKey: ["api-request", scope, selectedRequest?.requestId],
+    queryFn: () => apiClient.getApiRequest(selectedRequest!.requestId, { scope }),
     enabled: Boolean(selectedRequest?.requestId),
     refetchInterval: selectedRequest?.status === "queued" || selectedRequest?.status === "running" ? 5000 : false,
     refetchOnWindowFocus: false,
@@ -96,7 +100,9 @@ export default function ApiLogsPage() {
       <div className="rounded-xl border border-ink/10 bg-white p-4">
         <h2 className="text-base font-semibold">API Logs</h2>
         <p className="mt-1 text-sm text-ink/65">
-          External API calls run outside the task storage flow. This view shows their inputs, prepared media, outputs, timings, and failures.
+          {scope === "all"
+            ? "Admin view across all users. This shows external API inputs, prepared media, outputs, timings, and failures."
+            : "External API calls run outside the task storage flow. This view shows their inputs, prepared media, outputs, timings, and failures."}
         </p>
       </div>
 
@@ -134,6 +140,7 @@ export default function ApiLogsPage() {
                 >
                   <p className="text-sm font-medium">{apiRequestTitle(item)}</p>
                   <p className="text-xs text-ink/60">{item.model}</p>
+                  {scope === "all" ? <p className="text-[11px] text-ink/55">{item.userEmail || item.username || item.userId}</p> : null}
                   <p className="mt-1 text-[11px] uppercase tracking-wide text-ink/70">
                     {item.status} · {formatDuration(item.processingDurationSec)}
                   </p>
@@ -162,6 +169,9 @@ export default function ApiLogsPage() {
                     <p className="text-sm text-ink/60">
                       {detail.requestId} · {detail.provider ?? "provider unknown"} · {detail.model}
                     </p>
+                    {scope === "all" ? (
+                      <p className="text-xs text-ink/55">Owner: {detail.userEmail || detail.username || detail.userId}</p>
+                    ) : null}
                   </div>
                   <div className="text-right text-sm">
                     <p className="font-medium uppercase tracking-wide text-ink/80">{detail.status}</p>

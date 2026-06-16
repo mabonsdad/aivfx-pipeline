@@ -210,7 +210,8 @@ type UseTaskDataQueriesArgs = {
   isAssetLibraryTab: boolean;
   enableAssetTaskQueries: boolean;
   isPageVisible: boolean;
-  tasks: TaskSummary[];
+  assetTaskSummaries: TaskSummary[];
+  assetTaskScope?: "mine" | "all";
 };
 
 export function useTaskDataQueries({
@@ -221,7 +222,8 @@ export function useTaskDataQueries({
   isAssetLibraryTab,
   enableAssetTaskQueries,
   isPageVisible,
-  tasks,
+  assetTaskSummaries,
+  assetTaskScope = "mine",
 }: UseTaskDataQueriesArgs) {
   const queryClient = useQueryClient();
   const taskQuery = useQuery({
@@ -263,11 +265,11 @@ export function useTaskDataQueries({
   });
 
   const assetTaskQueries = useQueries({
-    queries: tasks.map((taskItem) => ({
-      queryKey: ["task", "assets", taskItem.taskId],
+    queries: assetTaskSummaries.map((taskItem) => ({
+      queryKey: ["task", "assets", assetTaskScope, taskItem.taskId],
       queryFn: async () => {
-        const nextTask = await apiClient.getTask(taskItem.taskId);
-        const previousTask = queryClient.getQueryData<TaskDetail>(["task", "assets", taskItem.taskId]);
+        const nextTask = await apiClient.getTask(taskItem.taskId, { scope: assetTaskScope });
+        const previousTask = queryClient.getQueryData<TaskDetail>(["task", "assets", assetTaskScope, taskItem.taskId]);
         return stabilizeTaskMediaUrls(previousTask, nextTask);
       },
       enabled: isAuthed && (isAssetLibraryTab || enableAssetTaskQueries) && isPageVisible,

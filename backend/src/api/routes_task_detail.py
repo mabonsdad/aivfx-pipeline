@@ -132,6 +132,8 @@ def handle_task_detail_route(
     method: str,
     path: str,
     *,
+    event: dict[str, Any],
+    claims: dict[str, Any],
     user_id: str,
     store,
     asset_store,
@@ -144,8 +146,11 @@ def handle_task_detail_route(
         return None
 
     task_id = path.split("/")[2]
+    query = event.get("queryStringParameters") or {}
+    requested_scope = str((query.get("scope") if isinstance(query, dict) else "") or "").strip().lower()
+    use_all_scope = requested_scope == "all" and helpers["is_admin_claims"](claims)
     try:
-        task = helpers["load_task_or_404"](store, user_id, task_id)
+        task = helpers["load_task_or_404_any"](store, task_id) if use_all_scope else helpers["load_task_or_404"](store, user_id, task_id)
     except KeyError:
         return error_response_fn(404, "Task not found", origin=origin)
 

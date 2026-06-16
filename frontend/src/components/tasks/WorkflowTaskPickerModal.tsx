@@ -4,6 +4,7 @@ import type { TaskSummary } from "../../types/api";
 type WorkflowTaskPickerModalProps = {
   workflowId: TaskWorkflowId | null;
   tasks: TaskSummary[];
+  taskPreviewUrlsById: Map<string, string | null>;
   onClose: () => void;
   onSelectTask: (taskId: string) => void;
   onNewTask: (workflowId: TaskWorkflowId) => void;
@@ -21,6 +22,7 @@ function formatUpdatedAt(value: string): string {
 export default function WorkflowTaskPickerModal({
   workflowId,
   tasks,
+  taskPreviewUrlsById,
   onClose,
   onSelectTask,
   onNewTask,
@@ -57,9 +59,24 @@ export default function WorkflowTaskPickerModal({
                 className="flex w-full items-start justify-between gap-4 rounded-xl border border-ink/10 bg-bg px-4 py-3 text-left transition hover:border-accent/35 hover:bg-accent/5"
                 onClick={() => onSelectTask(task.taskId)}
               >
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-medium text-ink">{task.name}</p>
-                  <p className="mt-1 text-xs text-ink/55">Updated {formatUpdatedAt(task.updatedAt)}</p>
+                <div className="flex min-w-0 items-start gap-3">
+                  {taskPreviewUrlsById.get(task.taskId) ? (
+                    <img
+                      src={taskPreviewUrlsById.get(task.taskId) ?? ""}
+                      alt={`${task.name} preview`}
+                      className="mt-0.5 h-14 w-20 shrink-0 rounded-lg border border-ink/10 bg-white object-contain"
+                      loading="lazy"
+                      decoding="async"
+                    />
+                  ) : (
+                    <div className="mt-0.5 flex h-14 w-20 shrink-0 items-center justify-center rounded-lg border border-dashed border-ink/15 bg-white text-[10px] uppercase tracking-[0.08em] text-ink/35">
+                      No preview
+                    </div>
+                  )}
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-medium text-ink">{task.name}</p>
+                    <p className="mt-1 text-xs text-ink/55">Updated {formatUpdatedAt(task.updatedAt)}</p>
+                  </div>
                 </div>
                 <div className="shrink-0 text-right">
                   <p className="text-[10px] font-semibold uppercase tracking-[0.08em] text-ink/45">{task.status}</p>

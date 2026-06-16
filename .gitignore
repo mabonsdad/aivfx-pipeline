@@ -23,7 +23,9 @@ coverage/
 *.pyc
 **/__pycache__/
 infra/cdk.out/
+infra/cdk.out.*/
 infra/cdk-outputs.json
+infra/cdk-outputs.*.json
 infra/bin/*.js
 infra/bin/*.d.ts
 infra/lib/*.js
@@ -62,3 +64,5 @@ backend/backend-full*.zip
 .DS_Store
 *.tsbuildinfo
 .claude/
+docs/handoffs/test-cutover.pdf
+docs/handoffs/test-cutover.html

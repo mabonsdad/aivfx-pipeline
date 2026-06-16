@@ -38,6 +38,7 @@ import type {
 } from "../lib/generated/videoContracts";
 import type {
   ApiRequestRecord,
+  CurrentUserInfo,
   JobStatus,
   SegmentRecord,
   TaskDetail,
@@ -151,11 +152,11 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 export const apiClient = {
-  me: () => api<{ userId: string; email?: string; username?: string }>("/me"),
+  me: () => api<CurrentUserInfo>("/me"),
   getPromptWizardAdminConfig: (pin?: string) =>
     api<{
       config: PromptWizardAdminConfig;
-      access: { isOwner: boolean; viaPin: boolean };
+      access: { isAdmin: boolean; viaPin: boolean };
     }>("/admin/prompt-wizard-config", {
       method: "GET",
       headers: pin ? { "x-admin-pin": pin } : undefined,
@@ -163,13 +164,18 @@ export const apiClient = {
   updatePromptWizardAdminConfig: (payload: PromptWizardAdminConfig, pin?: string) =>
     api<{
       config: PromptWizardAdminConfig;
-      access: { isOwner: boolean; viaPin: boolean };
+      access: { isAdmin: boolean; viaPin: boolean };
     }>("/admin/prompt-wizard-config", {
       method: "PUT",
       headers: pin ? { "x-admin-pin": pin } : undefined,
       body: JSON.stringify(payload),
     }),
-  listTasks: () => api<{ tasks: TaskSummary[] }>("/tasks"),
+  listTasks: (params?: { scope?: "mine" | "all" }) => {
+    const search = new URLSearchParams();
+    if (params?.scope && params.scope !== "mine") search.set("scope", params.scope);
+    const query = search.toString();
+    return api<{ tasks: TaskSummary[] }>(`/tasks${query ? `?${query}` : ""}`);
+  },
   createTask: (
     name: string,
     workflowId: TaskWorkflowId = DEFAULT_TASK_WORKFLOW_ID,
@@ -180,7 +186,12 @@ export const apiClient = {
       body: JSON.stringify({ name, workflowId, scenePrompt: options?.scenePrompt ?? null }),
     }),
   deleteTask: (taskId: string) => api<{ ok: true }>(`/tasks/${taskId}`, { method: "DELETE" }),
-  getTask: (taskId: string) => api<TaskDetail>(`/tasks/${taskId}`),
+  getTask: (taskId: string, params?: { scope?: "mine" | "all" }) => {
+    const search = new URLSearchParams();
+    if (params?.scope && params.scope !== "mine") search.set("scope", params.scope);
+    const query = search.toString();
+    return api<TaskDetail>(`/tasks/${taskId}${query ? `?${query}` : ""}`);
+  },
   updatePrevizTask: (
     taskId: string,
     payload: {
@@ -366,16 +377,22 @@ export const apiClient = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
-  listApiRequests: (params?: { status?: string; workflow?: string; model?: string; limit?: number }) => {
+  listApiRequests: (params?: { status?: string; workflow?: string; model?: string; limit?: number; scope?: "mine" | "all" }) => {
     const search = new URLSearchParams();
     if (params?.status) search.set("status", params.status);
     if (params?.workflow) search.set("workflow", params.workflow);
     if (params?.model) search.set("model", params.model);
     if (typeof params?.limit === "number") search.set("limit", String(params.limit));
+    if (params?.scope && params.scope !== "mine") search.set("scope", params.scope);
     const query = search.toString();
     return api<{ requests: ApiRequestRecord[] }>(`/api/v1/requests${query ? `?${query}` : ""}`);
   },
-  getApiRequest: (requestId: string) => api<ApiRequestRecord>(`/api/v1/requests/${requestId}`),
+  getApiRequest: (requestId: string, params?: { scope?: "mine" | "all" }) => {
+    const search = new URLSearchParams();
+    if (params?.scope && params.scope !== "mine") search.set("scope", params.scope);
+    const query = search.toString();
+    return api<ApiRequestRecord>(`/api/v1/requests/${requestId}${query ? `?${query}` : ""}`);
+  },
   apiFullEdit: (payload: ApiFullEditPayload) =>
     api<{ requestId: string; jobId: string }>(`/api/v1/image-edits/full`, { method: "POST", body: JSON.stringify(payload) }),
   apiPatchEdit: (payload: ApiPatchEditPayload) =>

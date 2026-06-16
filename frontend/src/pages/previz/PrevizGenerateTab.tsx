@@ -26,6 +26,7 @@ export type PrevizGenerateTabCtx = {
   selectedGenerationId: string | null;
   onGenerate: () => void;
   isGenerating: boolean;
+  error?: string | null;
   onSelectGeneration: (genId: string) => void;
   onPreviewGeneration: (generation: SegmentGeneration) => void;
   onDeleteGeneration: (generation: SegmentGeneration) => void;
@@ -90,6 +91,7 @@ export default function PrevizGenerateTab({ ctx }: Props) {
     selectedGenerationId,
     onGenerate,
     isGenerating,
+    error,
     onSelectGeneration,
     onPreviewGeneration,
     onDeleteGeneration,
@@ -180,6 +182,12 @@ export default function PrevizGenerateTab({ ctx }: Props) {
       {selectedFrames.length === 0 ? (
         <StatusNotice variant="warning">
           <p className="text-xs">Select one or more frames in the Edit step before generating a previz video.</p>
+        </StatusNotice>
+      ) : null}
+
+      {error ? (
+        <StatusNotice variant="error">
+          <p className="text-xs">{error}</p>
         </StatusNotice>
       ) : null}
 

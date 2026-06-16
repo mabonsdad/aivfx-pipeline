@@ -7,6 +7,7 @@ type WorkflowLandingPageProps = {
   latestTaskName: string | null;
   latestTaskThumbnailUrl: string | null;
   onSelectTask: (workflowId: TaskWorkflowId) => void;
+  onOpenLatestTask: (taskId: string) => void;
   onNewTask: (workflowId: TaskWorkflowId) => void;
   onGoHome: () => void;
   onSignOut: () => void;
@@ -18,6 +19,7 @@ export default function WorkflowLandingPage({
   latestTaskName,
   latestTaskThumbnailUrl,
   onSelectTask,
+  onOpenLatestTask,
   onNewTask,
   onGoHome,
   onSignOut,
@@ -41,19 +43,30 @@ export default function WorkflowLandingPage({
             <p className="text-xs font-semibold uppercase tracking-[0.14em] text-ink/45">Workflow</p>
             <h1 className="mt-2 text-3xl font-semibold text-ink">{workflow.label}</h1>
             <p className="mt-4 text-sm leading-6 text-ink/70">{workflow.description}</p>
-            <div className="mt-8 rounded-xl border border-ink/10 bg-bg px-4 py-3 text-left">
-              <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-ink/45">Latest task</p>
-              {latestTaskThumbnailUrl ? (
-                <img
-                  src={latestTaskThumbnailUrl}
-                  alt={latestTaskName ? `${latestTaskName} preview` : `${workflow.homeTitle} preview`}
-                  className="mt-2 aspect-video w-full rounded-lg border border-ink/10 bg-white object-contain"
-                  loading="lazy"
-                  decoding="async"
-                />
-              ) : null}
-              <p className="mt-2 text-sm text-ink/75">{latestTaskName ?? "No task yet for this workflow."}</p>
-            </div>
+            {latestTaskId ? (
+              <button
+                type="button"
+                className="mt-8 block w-full rounded-xl border border-ink/10 bg-bg px-4 py-3 text-left transition hover:border-accent/40 hover:bg-white"
+                onClick={() => onOpenLatestTask(latestTaskId)}
+              >
+                <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-ink/45">Latest task</p>
+                {latestTaskThumbnailUrl ? (
+                  <img
+                    src={latestTaskThumbnailUrl}
+                    alt={latestTaskName ? `${latestTaskName} preview` : `${workflow.homeTitle} preview`}
+                    className="mt-2 aspect-video w-full rounded-lg border border-ink/10 bg-white object-contain"
+                    loading="lazy"
+                    decoding="async"
+                  />
+                ) : null}
+                <p className="mt-2 text-sm text-ink/75">{latestTaskName}</p>
+              </button>
+            ) : (
+              <div className="mt-8 rounded-xl border border-ink/10 bg-bg px-4 py-3 text-left">
+                <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-ink/45">Latest task</p>
+                <p className="mt-2 text-sm text-ink/75">No task yet for this workflow.</p>
+              </div>
+            )}
             <div className="mt-8 flex items-center justify-center gap-4">
               <button type="button" className="text-sm font-medium text-accent underline" onClick={() => onSelectTask(workflowId)}>
                 Select task

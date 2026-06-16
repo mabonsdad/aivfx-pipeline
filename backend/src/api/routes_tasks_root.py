@@ -90,6 +90,7 @@ def handle_tasks_root_routes(
     event: dict[str, Any],
     origin: str | None,
     user_id: str,
+    claims: dict[str, Any],
     store,
     json_model: Callable[[Any, dict[str, Any]], Any],
     response_fn: Callable[..., dict[str, Any]],
@@ -106,6 +107,7 @@ def handle_tasks_root_routes(
     cleanup_custom_reports_fn: Callable[..., bool],
     task_summary_fn: Callable[[dict[str, Any]], dict[str, Any]],
     default_task_workflow_id: str,
+    is_admin_claims_fn: Callable[[dict[str, Any]], bool],
 ) -> dict[str, Any] | None:
     if method == "POST" and path == "/tasks":
         req = json_model(TaskCreateRequest, event)
@@ -155,7 +157,10 @@ def handle_tasks_root_routes(
         return response_fn(201, {"taskId": task_id}, origin=origin)
 
     if method == "GET" and path == "/tasks":
-        task_items = store.list_tasks(user_id)
+        query = event.get("queryStringParameters") or {}
+        requested_scope = str((query.get("scope") if isinstance(query, dict) else "") or "").strip().lower()
+        use_all_scope = requested_scope == "all" and is_admin_claims_fn(claims)
+        task_items = store.list_all_tasks() if use_all_scope else store.list_tasks(user_id)
         for item in task_items:
             changed = False
             if not item.get("workflowId"):

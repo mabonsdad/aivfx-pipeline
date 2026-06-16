@@ -70,6 +70,7 @@ import PrevizGenerateTab, { type PrevizGenerateTabCtx } from "./pages/previz/Pre
 import PrevizSelectTab, { type PrevizSelectTabCtx } from "./pages/previz/PrevizSelectTab";
 import { useUiStore } from "./store/uiStore";
 import type {
+  CurrentUserInfo,
   CustomReportOutputRef,
   EditVideoReference,
   ExportRecord,
@@ -856,6 +857,8 @@ export default function App() {
   const [isPageVisible, setIsPageVisible] = useState(
     typeof document === "undefined" ? true : document.visibilityState === "visible",
   );
+  const [assetLibraryScope, setAssetLibraryScope] = useState<"mine" | "all">("mine");
+  const [apiLogsScope, setApiLogsScope] = useState<"mine" | "all">("mine");
   const routeState = useWorkflowRouteState(location.pathname, location.hash);
   const [routeOverride, setRouteOverride] = useState<WorkflowRouteState | null>(null);
   const { reportView, activeCustomReportId } = useReportRouteState(location.search);
@@ -1108,6 +1111,23 @@ export default function App() {
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
   });
+  const meQuery = useQuery<CurrentUserInfo>({
+    queryKey: ["me"],
+    queryFn: () => apiClient.me(),
+    enabled: isAuthed,
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+  });
+  const isAdmin = Boolean(meQuery.data?.isAdmin);
+  const adminAllTasksQuery = useQuery({
+    queryKey: ["tasks", "all"],
+    queryFn: async () => (await apiClient.listTasks({ scope: "all" })).tasks,
+    enabled: isAuthed && isAdmin && assetLibraryScope === "all",
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+  });
 
   const effectiveRouteState = routeOverride ?? routeState;
   const isHomeRoute = effectiveRouteState.kind === "home";
@@ -1299,6 +1319,12 @@ export default function App() {
       })).filter((option) => option.enabled),
     [automationSelectedVideoOptionIds],
   );
+  const assetTaskSummaries =
+    tab === "asset_library" && assetLibraryScope === "all" && isAdmin
+      ? adminAllTasksQuery.data ?? []
+      : tasksQuery.data ?? [];
+  const assetTaskScope: "mine" | "all" =
+    tab === "asset_library" && assetLibraryScope === "all" && isAdmin ? "all" : "mine";
 
   const { taskQuery, reportTaskQuery, task, reportTask, assetTasks, assetsLoading, assetLibraryLoading } =
     useTaskDataQueries({
@@ -1315,7 +1341,8 @@ export default function App() {
         isPrevizGenerateReferenceImagePickerOpen ||
         isPrevizToolReferenceImagePickerOpen,
       isPageVisible,
-      tasks: tasksQuery.data ?? [],
+      assetTaskSummaries,
+      assetTaskScope,
     });
   const selectedTaskSummary = useMemo(
     () => (tasksQuery.data ?? []).find((taskItem) => taskItem.taskId === selectedTaskId) ?? null,
@@ -1444,6 +1471,28 @@ export default function App() {
     }
     return groups;
   }, [tasksQuery.data]);
+  const taskPickerPreviewTaskIds = useMemo(
+    () => (taskPickerWorkflowId ? (workflowTasksById.get(taskPickerWorkflowId) ?? []).map((taskItem) => taskItem.taskId) : []),
+    [taskPickerWorkflowId, workflowTasksById],
+  );
+  const taskPickerPreviewQueries = useQueries({
+    queries: taskPickerPreviewTaskIds.map((taskId) => ({
+      queryKey: ["task-picker-preview", taskId],
+      queryFn: () => apiClient.getTask(taskId),
+      enabled: isAuthed && Boolean(taskPickerWorkflowId),
+      staleTime: 60_000,
+      refetchOnWindowFocus: false as const,
+      refetchOnReconnect: false as const,
+    })),
+  });
+  const taskPickerPreviewUrlsById = useMemo(() => {
+    const result = new Map<string, string | null>();
+    for (const query of taskPickerPreviewQueries) {
+      if (!query.data?.taskId) continue;
+      result.set(query.data.taskId, resolveLatestTaskThumbnailUrl(query.data));
+    }
+    return result;
+  }, [taskPickerPreviewQueries]);
   const selectedMotionSyncExport = useMemo<ExportRecord | null>(() => {
     if (!motionSyncModalExportId) return null;
     return (task?.exports ?? []).find((item) => item.exportId === motionSyncModalExportId) ?? null;
@@ -1779,6 +1828,10 @@ export default function App() {
   const previzSceneAspectRatio = typeof previzState?.sceneAspectRatio === "string" && previzState.sceneAspectRatio.trim()
     ? previzState.sceneAspectRatio
     : null;
+  const previzSyntheticSegmentId =
+    typeof previzState?.syntheticSegmentId === "string" && previzState.syntheticSegmentId.trim()
+      ? previzState.syntheticSegmentId
+      : task?.segments?.find((segment) => segment.kind === "scene")?.segmentId ?? null;
   const previzSelectedReferenceIds = useMemo(
     () =>
       Array.isArray(previzState?.selectedReferenceIds)
@@ -1921,8 +1974,8 @@ export default function App() {
             task,
             workflowId: "simple_generation_workflow",
             activeInputMode: generationInputMode,
-            selectedSegmentId,
-            filterBySelectedSegment: true,
+            selectedSegmentId: previzSyntheticSegmentId,
+            filterBySelectedSegment: Boolean(previzSyntheticSegmentId),
           });
         })
         .sort(
@@ -1930,7 +1983,7 @@ export default function App() {
             new Date(b.finishedAt ?? b.updatedAt ?? b.createdAt).getTime() -
             new Date(a.finishedAt ?? a.updatedAt ?? a.createdAt).getTime(),
         ),
-    [generationInputMode, selectedSegmentId, task],
+    [generationInputMode, previzSyntheticSegmentId, task],
   );
   const referencePickerItems = useMemo<ReferencePickerItem[]>(() => {
     if (!selectedTaskId) return [];
@@ -3080,11 +3133,11 @@ export default function App() {
 
   const generatePrevizVideoMutation = useMutation({
     mutationFn: async () => {
-      if (!selectedTaskId || !selectedSegmentId) throw new Error("Select the scene segment");
+      if (!selectedTaskId || !previzSyntheticSegmentId) throw new Error("Previz scene container is not ready yet");
       const trimmedPrompt = previzGeneratePrompt.trim();
       if (!trimmedPrompt) throw new Error("Write a prompt before generating");
       if (!previzSelectedFrameIds.length) throw new Error("Select one or more frames in the Edit step");
-      return apiClient.generatePrevizVideo(selectedTaskId, selectedSegmentId, {
+      return apiClient.generatePrevizVideo(selectedTaskId, previzSyntheticSegmentId, {
         model: previzGenerateModel,
         prompt: trimmedPrompt,
         durationSec: previzGenerateDurationSec,
@@ -4524,6 +4577,14 @@ export default function App() {
   }, []);
 
   const openTaskFromPicker = useCallback(
+    (taskId: string) => {
+      setTaskPickerWorkflowId(null);
+      setTab("timeline", taskId);
+    },
+    [setTab],
+  );
+
+  const openTaskAtSelectStep = useCallback(
     (taskId: string) => {
       setTaskPickerWorkflowId(null);
       setTab("timeline", taskId);
@@ -6338,6 +6399,7 @@ export default function App() {
       selectedGenerationId: selectedPreviewGeneration?.genId ?? null,
       onGenerate: () => generatePrevizVideoMutation.mutate(),
       isGenerating: generatePrevizVideoMutation.isPending,
+      error: generatePrevizVideoMutation.error instanceof Error ? generatePrevizVideoMutation.error.message : null,
       onSelectGeneration: selectSegmentGeneration,
       onPreviewGeneration: (generation) =>
         setVideoPreviewModal({
@@ -6826,6 +6888,7 @@ export default function App() {
   const { assetsTabCtx, assetLibraryTabCtx } = useAssetsTabContexts({
     selectedTaskId,
     task,
+    assetLibraryScope,
     assetsLoading: assetsTabLoading,
     assetLibraryLoading: assetLibraryTabLoading,
     mergedVideoAssets,
@@ -6890,6 +6953,7 @@ export default function App() {
     <WorkflowTaskPickerModal
       workflowId={taskPickerWorkflowId}
       tasks={taskPickerWorkflowId ? workflowTasksById.get(taskPickerWorkflowId) ?? [] : []}
+      taskPreviewUrlsById={taskPickerPreviewUrlsById}
       onClose={() => setTaskPickerWorkflowId(null)}
       onSelectTask={openTaskFromPicker}
       onNewTask={openNewTaskWithAutomationDefaults}
@@ -6970,6 +7034,7 @@ export default function App() {
         <HomePage
           cards={workflowHomeCardsWithPreview}
           onSelectTask={openTaskPickerForWorkflow}
+          onOpenLatestTask={openTaskAtSelectStep}
           onNewTask={openNewTaskWithAutomationDefaults}
           onSignOut={() => {
             void logout();
@@ -6989,6 +7054,7 @@ export default function App() {
           latestTaskName={workflowLandingLatestTask?.name ?? null}
           latestTaskThumbnailUrl={workflowLandingLatestTaskThumbnailUrl}
           onSelectTask={openTaskPickerForWorkflow}
+          onOpenLatestTask={openTaskAtSelectStep}
           onNewTask={openNewTaskWithAutomationDefaults}
           onGoHome={() => goHome()}
           onSignOut={() => {
@@ -7007,21 +7073,32 @@ export default function App() {
           tasks={tasksQuery.data ?? []}
           selectedTaskId={selectedTaskId}
           currentWorkflowId={currentTaskWorkflowId}
+          isAdmin={isAdmin}
           onSignOut={() => {
             void logout();
           }}
           onGoHome={() => goHome()}
           onOpenNewTask={() => openNewTaskWithAutomationDefaults(currentTaskWorkflowId)}
           onOpenTaskReport={openTaskReport}
-          onSelectTask={(taskId) => setTab(tab, taskId)}
+          onSelectTask={openTaskAtSelectStep}
           onDeleteTask={(taskId) => deleteTaskMutation.mutate(taskId)}
           onOpenAssetLibrary={() => {
+            setAssetLibraryScope("mine");
+            void handleTabChange("asset_library");
+          }}
+          onOpenAllAssetLibrary={() => {
+            setAssetLibraryScope("all");
             void handleTabChange("asset_library");
           }}
           onOpenCustomQc={() => {
             void handleTabChange("custom_qc");
           }}
           onOpenApiLogs={() => {
+            setApiLogsScope("mine");
+            void handleTabChange("api_logs");
+          }}
+          onOpenAllApiLogs={() => {
+            setApiLogsScope("all");
             void handleTabChange("api_logs");
           }}
           onOpenAdmin={() => {
@@ -7069,7 +7146,7 @@ export default function App() {
                       variant="primary"
                     />
                     {showWorkflowCurrentReferences ? (
-                      <div className="mb-4">
+                      <div className={showPrevizEditTab || showPrevizGenerateTab ? "mb-6" : "mb-4"}>
                         <CurrentWorkingReferencePanel
                           segment={currentReferenceSegment}
                           startFrameImageUrl={currentReferenceStartImageUrl}
@@ -7083,7 +7160,7 @@ export default function App() {
                             showPrevizEditTab || showPrevizGenerateTab ? (
                               <button
                                 type="button"
-                                className="w-[5.5rem] rounded-md border border-ink/20 bg-white px-2 py-2 text-[11px] font-medium leading-tight text-ink"
+                                className="w-[6.75rem] rounded-md bg-accent px-4 py-2 text-sm font-medium leading-tight text-white"
                                 onClick={() => {
                                   if (showPrevizGenerateTab) {
                                     setIsPrevizGenerateReferenceImagePickerOpen(true);
@@ -7425,83 +7502,84 @@ export default function App() {
 
             {!isResolvingWorkflowShell && showPrevizPostTab && (
               <Suspense fallback={<p className="text-sm text-ink/60">Loading Post Process...</p>}>
-                <CharacterAnimatePostProcessTab
-                  generations={previzPostProcessGenerations}
-                  topazItems={previzPostProcessTopazItems}
-                  describeGeneration={describeGeneration}
-                  describeSegment={describeSegment}
-                  getSegmentForGeneration={getSegmentForGeneration}
-                  generationThumbnailUrl={generationThumbnailUrl}
-                  formatCompactTimestamp={formatCompactTimestamp}
-                  onPreviewGeneration={(generation) =>
-                    setVideoPreviewModal({
-                      url: generation.downloadUrl ?? "",
-                      label: describeGeneration(generation),
-                      taskId: task?.taskId,
-                      generationId: generation.genId,
-                    })
-                  }
-                  onPreviewTopazExport={(exportItem, sourceGeneration) =>
-                    setVideoPreviewModal({
-                      url: exportItem.downloadUrl ?? "",
-                      label: `Topaz upscale of ${describeGeneration(sourceGeneration)}`,
-                      taskId: task?.taskId,
-                    })
-                  }
-                  onDeleteGeneration={(generation) =>
-                    handleDeleteAsset({
-                      id: `generation:${task?.taskId ?? ""}:${generation.genId}`,
-                      taskId: task?.taskId ?? "",
-                      title: describeGeneration(generation),
-                      subtitle: `${generation.luma.model}/${generation.luma.mode}`,
-                      createdAt: generation.createdAt,
-                      previewUrl: generation.downloadUrl ?? generation.posterUrl ?? "",
-                      downloadUrl: generation.downloadUrl ?? "",
-                      thumbnailUrl: generation.posterUrl ?? undefined,
-                      mediaType: "video",
-                      deletePayload: { assetType: "segment_generation", genId: generation.genId },
-                    })
-                  }
-                  onDeleteTopazExport={(exportItem, sourceGeneration) =>
-                    handleDeleteAsset({
-                      id: `export:${task?.taskId ?? ""}:${exportItem.exportId}`,
-                      taskId: task?.taskId ?? "",
-                      title: `Topaz upscale of ${describeGeneration(sourceGeneration)}`,
-                      subtitle: exportItem.sourceExportId ? `Derived from export ${exportItem.sourceExportId}` : "Topaz export",
-                      createdAt: exportItem.createdAt,
-                      previewUrl: exportItem.downloadUrl ?? "",
-                      downloadUrl: exportItem.downloadUrl ?? "",
-                      mediaType: "video",
-                      deletePayload: { assetType: "export", exportId: exportItem.exportId },
-                    })
-                  }
-                  onAssetError={handleMediaAssetError}
-                  onLengthenGeneration={(payload) => lengthenSegmentGenerationMutation.mutate(payload)}
-                  isLengtheningGeneration={lengthenSegmentGenerationMutation.isPending}
-                  lengthenGenerationError={
-                    lengthenSegmentGenerationMutation.error instanceof Error ? lengthenSegmentGenerationMutation.error.message : null
-                  }
-                  onUpscaleGeneration={({ generationId, ...payload }) =>
-                    runTopazUpscaleForGenerationMutation.mutate({ generationId, payload })
-                  }
-                  isUpscalingGeneration={runTopazUpscaleForGenerationMutation.isPending}
-                  topazUpscalePendingGenerationId={topazUpscalePendingGenerationId}
-                  topazUpscaleError={
-                    runTopazUpscaleForGenerationMutation.error instanceof Error
-                      ? runTopazUpscaleForGenerationMutation.error.message
-                      : null
-                  }
-                  topazStateByGenerationId={characterTopazStateByGenerationId}
-                  labels={{
-                    sectionTitle: "Previz post-process",
-                    sectionDescription:
-                      "Review all completed previz outputs across this task. Extend uses the shared clip-lengthen flow and Upscale uses the shared Topaz path.",
-                    emptyState: "No completed previz videos yet.",
-                    extendModalTitle: "Extend previz video",
-                    upscaleModalTitle: "Upscale previz video",
-                    fallbackGenerationLabel: "Previz video",
-                  }}
-                />
+                <div className="pt-3">
+                  <CharacterAnimatePostProcessTab
+                    generations={previzPostProcessGenerations}
+                    topazItems={previzPostProcessTopazItems}
+                    describeGeneration={describeGeneration}
+                    describeSegment={describeSegment}
+                    getSegmentForGeneration={getSegmentForGeneration}
+                    generationThumbnailUrl={generationThumbnailUrl}
+                    formatCompactTimestamp={formatCompactTimestamp}
+                    onPreviewGeneration={(generation) =>
+                      setVideoPreviewModal({
+                        url: generation.downloadUrl ?? "",
+                        label: describeGeneration(generation),
+                        taskId: task?.taskId,
+                        generationId: generation.genId,
+                      })
+                    }
+                    onPreviewTopazExport={(exportItem, sourceGeneration) =>
+                      setVideoPreviewModal({
+                        url: exportItem.downloadUrl ?? "",
+                        label: `Topaz upscale of ${describeGeneration(sourceGeneration)}`,
+                        taskId: task?.taskId,
+                      })
+                    }
+                    onDeleteGeneration={(generation) =>
+                      handleDeleteAsset({
+                        id: `generation:${task?.taskId ?? ""}:${generation.genId}`,
+                        taskId: task?.taskId ?? "",
+                        title: describeGeneration(generation),
+                        subtitle: `${generation.luma.model}/${generation.luma.mode}`,
+                        createdAt: generation.createdAt,
+                        previewUrl: generation.downloadUrl ?? generation.posterUrl ?? "",
+                        downloadUrl: generation.downloadUrl ?? "",
+                        thumbnailUrl: generation.posterUrl ?? undefined,
+                        mediaType: "video",
+                        deletePayload: { assetType: "segment_generation", genId: generation.genId },
+                      })
+                    }
+                    onDeleteTopazExport={(exportItem, sourceGeneration) =>
+                      handleDeleteAsset({
+                        id: `export:${task?.taskId ?? ""}:${exportItem.exportId}`,
+                        taskId: task?.taskId ?? "",
+                        title: `Topaz upscale of ${describeGeneration(sourceGeneration)}`,
+                        subtitle: exportItem.sourceExportId ? `Derived from export ${exportItem.sourceExportId}` : "Topaz export",
+                        createdAt: exportItem.createdAt,
+                        previewUrl: exportItem.downloadUrl ?? "",
+                        downloadUrl: exportItem.downloadUrl ?? "",
+                        mediaType: "video",
+                        deletePayload: { assetType: "export", exportId: exportItem.exportId },
+                      })
+                    }
+                    onAssetError={handleMediaAssetError}
+                    onLengthenGeneration={(payload) => lengthenSegmentGenerationMutation.mutate(payload)}
+                    isLengtheningGeneration={lengthenSegmentGenerationMutation.isPending}
+                    lengthenGenerationError={
+                      lengthenSegmentGenerationMutation.error instanceof Error ? lengthenSegmentGenerationMutation.error.message : null
+                    }
+                    onUpscaleGeneration={({ generationId, ...payload }) =>
+                      runTopazUpscaleForGenerationMutation.mutate({ generationId, payload })
+                    }
+                    isUpscalingGeneration={runTopazUpscaleForGenerationMutation.isPending}
+                    topazUpscalePendingGenerationId={topazUpscalePendingGenerationId}
+                    topazUpscaleError={
+                      runTopazUpscaleForGenerationMutation.error instanceof Error
+                        ? runTopazUpscaleForGenerationMutation.error.message
+                        : null
+                    }
+                    topazStateByGenerationId={characterTopazStateByGenerationId}
+                    labels={{
+                      sectionTitle: "Previz post-process",
+                      sectionDescription: "Review completed outputs and optionally extend, upscale or edit the video.",
+                      emptyState: "No completed previz videos yet.",
+                      extendModalTitle: "Extend previz video",
+                      upscaleModalTitle: "Upscale previz video",
+                      fallbackGenerationLabel: "Previz video",
+                    }}
+                  />
+                </div>
               </Suspense>
             )}
 
@@ -7533,7 +7611,7 @@ export default function App() {
 
             {tab === "api_logs" && (
               <Suspense fallback={<p className="text-sm text-ink/60">Loading API logs...</p>}>
-                <ApiLogsPage />
+                <ApiLogsPage scope={isAdmin ? apiLogsScope : "mine"} />
               </Suspense>
             )}
 

@@ -60,6 +60,7 @@ def handle_external_api_routes(
     event: dict[str, Any],
     origin: str | None,
     user_id: str,
+    claims: dict[str, Any],
     store,
     asset_store,
     queue,
@@ -79,6 +80,7 @@ def handle_external_api_routes(
     validate_video_model_prompt_fn: Callable[[str, str | None], None],
     get_video_model_capability_fn: Callable[[str], Any],
     segment_generation_provider_name_fn: Callable[[str], str],
+    is_admin_claims_fn: Callable[[dict[str, Any]], bool],
 ) -> dict[str, Any] | None:
     if method == "POST" and path == "/api/v1/assets/uploads/init":
         req = json_model(ApiAssetUploadInitRequest, event)
@@ -108,8 +110,10 @@ def handle_external_api_routes(
         )
 
     if method == "GET" and path == "/api/v1/requests":
-        requests = store.list_api_requests(user_id)
         query = extract_query_fn(event)
+        requested_scope = str(query.get("scope") or "").strip().lower()
+        use_all_scope = requested_scope == "all" and is_admin_claims_fn(claims)
+        requests = store.list_all_api_requests() if use_all_scope else store.list_api_requests(user_id)
         status_filter = str(query.get("status") or "").strip().lower()
         workflow_filter = str(query.get("workflow") or "").strip().lower()
         model_filter = str(query.get("model") or "").strip()
@@ -129,14 +133,18 @@ def handle_external_api_routes(
         return response_fn(200, {"requests": filtered}, origin=origin)
 
     if method == "GET" and path.startswith("/api/v1/requests/"):
+        query = extract_query_fn(event)
+        requested_scope = str(query.get("scope") or "").strip().lower()
+        use_all_scope = requested_scope == "all" and is_admin_claims_fn(claims)
         request_id_value = path.split("/")[4]
-        request_record = store.load_api_request(user_id, request_id_value)
+        request_record = store.load_api_request_any(request_id_value) if use_all_scope else store.load_api_request(user_id, request_id_value)
         if not request_record:
             return error_response_fn(404, "API request not found", origin=origin)
         job = None
         job_id = request_record.get("jobId")
         if isinstance(job_id, str) and job_id:
-            job = store.load_job(user_id, job_id)
+            record_user_id = str(request_record.get("userId") or user_id)
+            job = store.load_job(record_user_id, job_id)
         return response_fn(200, api_request_response_fn(request_record, asset_store, job=job), origin=origin)
 
     if method == "POST" and path == "/api/v1/image-edits/full":
@@ -189,6 +197,8 @@ def handle_external_api_routes(
         request_record = {
             "requestId": request_id_value,
             "userId": user_id,
+            "userEmail": claims.get("email"),
+            "username": claims.get("cognito:username"),
             "workflow": "image_edit_full",
             "model": req.model,
             "provider": "luma"
@@ -294,6 +304,8 @@ def handle_external_api_routes(
         request_record = {
             "requestId": request_id_value,
             "userId": user_id,
+            "userEmail": claims.get("email"),
+            "username": claims.get("cognito:username"),
             "workflow": "image_edit_patch",
             "model": req.model,
             "provider": "runware" if req.model.startswith("runware_") else ("openai" if req.model in {"chatgpt", "chatgpt_latest"} else "gemini"),
@@ -413,6 +425,8 @@ def handle_external_api_routes(
         request_record = {
             "requestId": request_id_value,
             "userId": user_id,
+            "userEmail": claims.get("email"),
+            "username": claims.get("cognito:username"),
             "workflow": "video_generation_reference",
             "model": req.model,
             "provider": segment_generation_provider_name_fn(req.model),

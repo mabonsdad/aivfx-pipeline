@@ -89,5 +89,22 @@ export function resolveLatestTaskThumbnailUrl(task: TaskDetail | null | undefine
     const thumbnailUrl = resolveGenerationThumbnailUrl(task, generation);
     if (thumbnailUrl) return thumbnailUrl;
   }
+
+  const frameVariantThumbnail = Object.values(task.frames ?? {})
+    .flatMap((frame) => frame.variants ?? [])
+    .filter((variant) => Boolean(variant.imageUrl))
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0]?.imageUrl;
+  if (frameVariantThumbnail) return frameVariantThumbnail;
+
+  const frameThumbnail = Object.values(task.frames ?? {})
+    .filter((frame) => Boolean(frame.imageUrl))
+    .sort((a, b) => new Date(b.createdAt ?? "").getTime() - new Date(a.createdAt ?? "").getTime())[0]?.imageUrl;
+  if (frameThumbnail) return frameThumbnail;
+
+  const referenceThumbnail = [...(task.editVideoReferences ?? [])]
+    .filter((reference) => Boolean(reference.imageUrl))
+    .sort((a, b) => new Date(b.createdAt ?? "").getTime() - new Date(a.createdAt ?? "").getTime())[0]?.imageUrl;
+  if (referenceThumbnail) return referenceThumbnail;
+
   return null;
 }

@@ -66,7 +66,7 @@ export default function AdminPromptWizardPage() {
   const accessLabel = useMemo(() => {
     const access = configQuery.data?.access;
     if (!access) return null;
-    if (access.isOwner) return "Owner access";
+    if (access.isAdmin) return "Admin access";
     if (access.viaPin) return "PIN access";
     return null;
   }, [configQuery.data?.access]);
@@ -81,7 +81,7 @@ export default function AdminPromptWizardPage() {
       </div>
 
       <div className="rounded-xl border border-ink/10 bg-white p-4">
-        <label className="text-xs font-semibold uppercase tracking-wide text-ink/70">Admin PIN (optional if owner account)</label>
+        <label className="text-xs font-semibold uppercase tracking-wide text-ink/70">Admin PIN (optional if your user is not in an admin group)</label>
         <div className="mt-2 flex flex-wrap items-center gap-2">
           <input
             type="password"

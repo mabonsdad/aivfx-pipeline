@@ -68,9 +68,11 @@ export type AssetsTabCtx = {
   allowMergedVideoReports?: boolean;
   allowGeneratedVideoReports?: boolean;
   allowImageReports?: boolean;
+  allowReportSelection?: boolean;
   onNext: () => void;
   nextDisabled: boolean;
   nextWarning: string | null;
+  hideDeleteActions?: boolean;
 };
 
 type AssetsTabProps = {
@@ -146,12 +148,16 @@ function AssetCard({
   onToggleSelected,
   onDelete,
   onPreviewImage,
+  hideDeleteAction = false,
+  allowReportSelection = true,
 }: {
   item: LibraryAsset;
   isSelected: boolean;
   onToggleSelected: () => void;
   onDelete: () => void;
   onPreviewImage?: (payload: { url: string; label: string }) => void;
+  hideDeleteAction?: boolean;
+  allowReportSelection?: boolean;
 }) {
   return (
     <article className={`space-y-2 rounded-lg border p-3 transition-colors ${isSelected ? "border-teal-500 bg-teal-50" : "border-ink/10 bg-white"}`}>
@@ -181,7 +187,7 @@ function AssetCard({
         <p className="truncate text-xs text-ink/60">{item.subtitle}</p>
       </div>
       <div className="flex items-center justify-between gap-2">
-        {item.customReportRef ? (
+        {item.customReportRef && allowReportSelection ? (
           <button
             type="button"
             className={`rounded-md border px-3 py-2 text-xs font-medium transition ${
@@ -207,7 +213,7 @@ function AssetCard({
           <IconActionButton href={item.downloadUrl} download title="Download">
             <DownloadIcon />
           </IconActionButton>
-          {item.deletePayload ? (
+          {item.deletePayload && !hideDeleteAction ? (
             <IconActionButton onClick={onDelete} title="Delete" tone="danger">
               <DeleteIcon />
             </IconActionButton>
@@ -230,6 +236,8 @@ function AssetSection({
   onCreateReport,
   onPreviewImage,
   allowReports = true,
+  hideDeleteActions = false,
+  allowReportSelection = true,
 }: {
   title: string;
   items: LibraryAsset[];
@@ -242,6 +250,8 @@ function AssetSection({
   onCreateReport: () => void;
   onPreviewImage?: (payload: { url: string; label: string }) => void;
   allowReports?: boolean;
+  hideDeleteActions?: boolean;
+  allowReportSelection?: boolean;
 }) {
   return (
     <section className="space-y-3">
@@ -271,6 +281,8 @@ function AssetSection({
                   onDelete={() => {
                     void onDelete(item);
                   }}
+                  hideDeleteAction={hideDeleteActions}
+                  allowReportSelection={allowReportSelection}
                 />
               );
             })}
@@ -466,9 +478,11 @@ export default function AssetsTab({ ctx }: AssetsTabProps) {
     allowMergedVideoReports = true,
     allowGeneratedVideoReports = true,
     allowImageReports = true,
+    allowReportSelection = true,
     onNext,
     nextDisabled,
     nextWarning,
+    hideDeleteActions = false,
   } = ctx;
 
   const [createModalState, setCreateModalState] = useState<CreateReportModalState | null>(null);
@@ -553,6 +567,8 @@ export default function AssetsTab({ ctx }: AssetsTabProps) {
             onCreateReport={() => setCreateModalState({ group: "merged_videos" })}
             onPreviewImage={previewImage}
             allowReports={allowMergedVideoReports}
+            hideDeleteActions={hideDeleteActions}
+            allowReportSelection={allowReportSelection}
           />
           <div className="border-t border-ink/10" />
           <AssetSection
@@ -567,6 +583,8 @@ export default function AssetsTab({ ctx }: AssetsTabProps) {
             onCreateReport={() => setCreateModalState({ group: "generated_videos" })}
             onPreviewImage={previewImage}
             allowReports={allowGeneratedVideoReports}
+            hideDeleteActions={hideDeleteActions}
+            allowReportSelection={allowReportSelection}
           />
           {postProcessVideoAssets.length > 0 && setPostProcessAssetsVisible ? (
             <>
@@ -583,6 +601,8 @@ export default function AssetsTab({ ctx }: AssetsTabProps) {
                 onCreateReport={() => setCreateModalState({ group: "post_process_videos" })}
                 onPreviewImage={previewImage}
                 allowReports
+                hideDeleteActions={hideDeleteActions}
+                allowReportSelection={allowReportSelection}
               />
             </>
           ) : null}
@@ -599,6 +619,8 @@ export default function AssetsTab({ ctx }: AssetsTabProps) {
             onCreateReport={() => setCreateModalState({ group: "edited_frames" })}
             onPreviewImage={previewImage}
             allowReports={allowImageReports && editedFrameAssets.some((item) => Boolean(item.customReportRef))}
+            hideDeleteActions={hideDeleteActions}
+            allowReportSelection={allowReportSelection}
           />
           {secondaryImageAssets.length > 0 && setSecondaryImageAssetsVisible ? (
             <>
@@ -615,6 +637,8 @@ export default function AssetsTab({ ctx }: AssetsTabProps) {
                 onCreateReport={() => undefined}
                 onPreviewImage={previewImage}
                 allowReports={false}
+                hideDeleteActions={hideDeleteActions}
+                allowReportSelection={false}
               />
             </>
           ) : null}
@@ -633,6 +657,8 @@ export default function AssetsTab({ ctx }: AssetsTabProps) {
                 onCreateReport={() => undefined}
                 onPreviewImage={previewImage}
                 allowReports={false}
+                hideDeleteActions={hideDeleteActions}
+                allowReportSelection={false}
               />
             </>
           ) : null}
@@ -651,6 +677,8 @@ export default function AssetsTab({ ctx }: AssetsTabProps) {
                 onCreateReport={() => undefined}
                 onPreviewImage={previewImage}
                 allowReports={false}
+                hideDeleteActions={hideDeleteActions}
+                allowReportSelection={false}
               />
             </>
           ) : null}

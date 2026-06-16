@@ -9,6 +9,7 @@ type VisibilitySetter = (update: number | ((count: number) => number)) => void;
 type UseAssetsTabContextsArgs = {
   selectedTaskId: string | null;
   task: TaskDetail | undefined;
+  assetLibraryScope?: "mine" | "all";
   assetsLoading: boolean;
   assetLibraryLoading: boolean;
   mergedVideoAssets: LibraryAsset[];
@@ -68,6 +69,7 @@ type UseAssetsTabContextsArgs = {
 export function useAssetsTabContexts({
   selectedTaskId,
   task,
+  assetLibraryScope = "mine",
   assetsLoading,
   assetLibraryLoading,
   mergedVideoAssets,
@@ -169,6 +171,7 @@ export function useAssetsTabContexts({
       allowMergedVideoReports: !isPrevizWorkflow,
       allowGeneratedVideoReports: true,
       allowImageReports: !isPrevizWorkflow,
+      allowReportSelection: true,
       formatAssetDate,
       onNext: () => {
         if (selectedTaskId) {
@@ -225,8 +228,11 @@ export function useAssetsTabContexts({
       task,
       workflowId: task?.workflowId,
       assetsLoading: assetLibraryLoading,
-      pageTitle: "Asset Library",
-      pageDescription: "Latest merged videos, generated videos, image assets, and audio assets across all tasks for this account.",
+      pageTitle: assetLibraryScope === "all" ? "All Assets" : "Asset Library",
+      pageDescription:
+        assetLibraryScope === "all"
+          ? "Admin view across all users."
+          : "Latest merged videos, generated videos, image assets, and audio assets across all tasks for this account.",
       showNext: false,
       imageAssetsTitle,
       secondaryImageAssetsTitle,
@@ -260,14 +266,17 @@ export function useAssetsTabContexts({
       createCustomReport,
       isCreatingCustomReport,
       allowMergedVideoReports: !isPrevizWorkflow,
-      allowGeneratedVideoReports: true,
-      allowImageReports: !isPrevizWorkflow,
+      allowGeneratedVideoReports: assetLibraryScope !== "all",
+      allowImageReports: assetLibraryScope !== "all" && !isPrevizWorkflow,
+      allowReportSelection: assetLibraryScope !== "all",
       formatAssetDate,
       onNext: () => undefined,
       nextDisabled: true,
       nextWarning: null,
+      hideDeleteActions: false,
     }),
     [
+      assetLibraryScope,
       assetLibraryLoading,
       imageAssetsTitle,
       libraryAudioAssets,

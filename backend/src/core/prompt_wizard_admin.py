@@ -3,11 +3,10 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+from src.core.auth import is_admin_claims
 from src.integrations.openai_prompt_wizard import VIDEO_PROMPT_WIZARD_SYSTEM_PROMPT
 
 ADMIN_PROMPT_WIZARD_CONFIG_KEY = "admin/prompt_wizard_config.json"
-ADMIN_OWNER_USERNAME = "robin.moore@shwsh.co.uk"
-ADMIN_OWNER_EMAIL = "robin.moore@shwsh.co.uk"
 ADMIN_PIN = "246810"
 
 _ALLOWED_PROVIDERS = {"Luma", "fal.ai", "Runway", "Replicate", "Runware"}
@@ -384,10 +383,8 @@ def resolve_prompt_wizard_model_config(config: dict[str, Any], selected_model: s
     return None
 
 
-def is_prompt_wizard_admin_owner(claims: dict[str, Any]) -> bool:
-    email = str(claims.get("email") or "").strip().lower()
-    username = str(claims.get("cognito:username") or "").strip().lower()
-    return email == ADMIN_OWNER_EMAIL or username == ADMIN_OWNER_USERNAME
+def is_prompt_wizard_admin(claims: dict[str, Any]) -> bool:
+    return is_admin_claims(claims)
 
 
 def is_valid_prompt_wizard_admin_pin(pin: str | None) -> bool:

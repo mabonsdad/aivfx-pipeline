@@ -226,6 +226,12 @@ class S3JsonStore:
 
     def list_tasks(self, user_id: str) -> list[dict[str, Any]]:
         prefix = self.user_tasks_prefix(user_id)
+        return self._list_tasks_by_prefix(prefix)
+
+    def list_all_tasks(self) -> list[dict[str, Any]]:
+        return self._list_tasks_by_prefix("users/")
+
+    def _list_tasks_by_prefix(self, prefix: str) -> list[dict[str, Any]]:
         paginator = self.s3.get_paginator("list_objects_v2")
         tasks: list[dict[str, Any]] = []
         for page in paginator.paginate(Bucket=self.metadata_bucket, Prefix=prefix):
@@ -238,6 +244,19 @@ class S3JsonStore:
                     tasks.append(payload)
         tasks.sort(key=lambda t: t.get("updatedAt", ""), reverse=True)
         return tasks
+
+    def load_task_any(self, task_id: str) -> dict[str, Any] | None:
+        suffix = f"/tasks/{task_id}/task.json"
+        paginator = self.s3.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=self.metadata_bucket, Prefix="users/"):
+            for item in page.get("Contents", []):
+                key = str(item.get("Key") or "")
+                if not key.endswith(suffix):
+                    continue
+                payload = self.get_json(key)
+                if payload:
+                    return payload
+        return None
 
     def load_job(self, user_id: str, job_id: str) -> dict[str, Any] | None:
         return self.get_json(self.job_key(user_id, job_id))
@@ -257,6 +276,12 @@ class S3JsonStore:
 
     def list_api_requests(self, user_id: str) -> list[dict[str, Any]]:
         prefix = self.user_api_requests_prefix(user_id)
+        return self._list_api_requests_by_prefix(prefix)
+
+    def list_all_api_requests(self) -> list[dict[str, Any]]:
+        return self._list_api_requests_by_prefix("users/")
+
+    def _list_api_requests_by_prefix(self, prefix: str) -> list[dict[str, Any]]:
         paginator = self.s3.get_paginator("list_objects_v2")
         requests: list[dict[str, Any]] = []
         for page in paginator.paginate(Bucket=self.metadata_bucket, Prefix=prefix):
@@ -269,3 +294,16 @@ class S3JsonStore:
                     requests.append(payload)
         requests.sort(key=lambda item: item.get("updatedAt", ""), reverse=True)
         return requests
+
+    def load_api_request_any(self, request_id: str) -> dict[str, Any] | None:
+        suffix = f"/api_requests/{request_id}.json"
+        paginator = self.s3.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=self.metadata_bucket, Prefix="users/"):
+            for item in page.get("Contents", []):
+                key = str(item.get("Key") or "")
+                if not key.endswith(suffix):
+                    continue
+                payload = self.get_json(key)
+                if payload:
+                    return payload
+        return None

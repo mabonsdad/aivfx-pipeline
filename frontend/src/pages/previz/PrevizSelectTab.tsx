@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { CopyIcon, DeleteIcon, DownloadIcon, IconActionButton, PreviewIcon } from "../../components/layout/MediaActionButtons";
 import { PendingButtonLabel, Spinner, StatusNotice } from "../../components/layout/UiFeedback";
 import { copyTextToClipboard } from "../../lib/clipboard";
+import { summarizeImageGenerationError } from "../../lib/imageGenerationErrorSummary";
 
 type GenerateReferenceModel = "chatgpt" | "chatgpt_latest" | "nano_banana" | "nano_banana_pro" | "luma_uni_1" | "luma_uni_1_max";
 type PrevizReferenceMode = "image" | "sheet";
@@ -14,6 +15,7 @@ type ReferenceLibraryItem = {
   title: string;
   subtitle: string;
   selected: boolean;
+  model?: GenerateReferenceModel | null;
   status?: "queued" | "running" | "complete" | "failed";
   error?: string | null;
   prompt?: string | null;
@@ -322,7 +324,12 @@ export default function PrevizSelectTab({ ctx }: Props) {
 
     return (
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        {items.map((reference) => (
+        {items.map((reference) => {
+          const displayError = summarizeImageGenerationError(
+            reference.error,
+            reference.model === "nano_banana" || reference.model === "nano_banana_pro" ? "Nano Banana" : "This model",
+          );
+          return (
           <article
             key={reference.referenceId}
             className={`space-y-2 rounded-lg border p-3 ${
@@ -352,7 +359,7 @@ export default function PrevizSelectTab({ ctx }: Props) {
               ) : reference.status === "failed" ? (
                 <div className="flex aspect-video flex-col items-center justify-center gap-2 px-3 text-center text-red-700">
                   <p className="text-xs font-medium uppercase tracking-wide">Failed</p>
-                  <p className="text-xs">{reference.error?.trim() || "Reference image generation failed."}</p>
+                  <p className="text-xs" title={reference.error?.trim() || undefined}>{displayError || "Reference image generation failed."}</p>
                 </div>
               ) : (
                 <div className="flex aspect-video items-center justify-center text-xs text-ink/55">Image unavailable</div>
@@ -362,7 +369,9 @@ export default function PrevizSelectTab({ ctx }: Props) {
               <p className="truncate text-sm font-medium text-ink">{reference.title}</p>
               <p className="truncate text-xs text-ink/60">{reference.subtitle}</p>
               {reference.status === "failed" ? (
-                <p className="text-xs text-red-700">{reference.error?.trim() || "Reference image generation failed. Delete this placeholder or try again."}</p>
+                <p className="text-xs text-red-700" title={reference.error?.trim() || undefined}>
+                  {displayError || "Reference image generation failed. Delete this placeholder or try again."}
+                </p>
               ) : null}
             </div>
             <div className="flex items-center justify-between gap-2">
@@ -413,7 +422,8 @@ export default function PrevizSelectTab({ ctx }: Props) {
               </div>
             </div>
           </article>
-        ))}
+          );
+        })}
       </div>
     );
   }
@@ -446,16 +456,18 @@ export default function PrevizSelectTab({ ctx }: Props) {
       </div>
 
       <div className="rounded-xl border border-ink/15 bg-white p-4">
-        <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="space-y-3">
           <div className="space-y-1">
             <p className="text-sm font-semibold text-ink">Upload reference images</p>
-            <p className="text-sm text-ink/70">
-              Upload new images or choose existing images you want available as scene references for this task.
+          </div>
+          <div className="flex flex-wrap items-start gap-3">
+            <button type="button" className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-white" onClick={openSceneReferencePicker}>
+              Choose from picker / library
+            </button>
+            <p className="max-w-2xl flex-1 text-sm text-ink/70">
+              Select images to use as references for this scene - you can upload, select from your library or capture from video.
             </p>
           </div>
-          <button type="button" className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-white" onClick={openSceneReferencePicker}>
-            Choose from picker / library
-          </button>
         </div>
         {warning ? <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">{warning}</div> : null}
         <div className="mt-4">{renderReferenceGrid(uploadReferences, "No uploaded or library references yet.")}</div>
@@ -492,6 +504,7 @@ export default function PrevizSelectTab({ ctx }: Props) {
               Sheet
             </button>
           </div>
+          {referenceMode === "sheet" ? <p className="text-xs text-amber-700">Reference Sheet creation is experimental</p> : null}
           <select
             value={generateModel}
             onChange={(event) => handleModelChange(event.target.value as GenerateReferenceModel)}

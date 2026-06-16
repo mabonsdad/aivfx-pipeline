@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { DeleteIcon, DownloadIcon, IconActionButton, PreviewIcon } from "../../components/layout/MediaActionButtons";
-import { PendingButtonLabel, StatusNotice } from "../../components/layout/UiFeedback";
+import { PendingButtonLabel, Spinner, StatusNotice } from "../../components/layout/UiFeedback";
 import type { ExportRecord, SegmentGeneration, SegmentRecord } from "../../types/api";
 
 type TopazUpscaleSettings = {
@@ -357,54 +357,67 @@ export default function CharacterAnimatePostProcessTab({
       <div className="rounded-xl border border-ink/15 bg-white p-4">
         <p className="text-sm font-semibold text-ink">{resolvedLabels.sectionTitle}</p>
         <p className="mt-1 text-sm text-ink/70">{resolvedLabels.sectionDescription}</p>
-      </div>
-
-      {!gridItems.length ? (
-        <div className="rounded-xl border border-dashed border-ink/20 bg-white p-6 text-sm text-ink/60">
-          {resolvedLabels.emptyState}
-        </div>
-      ) : (
-        <div className="grid gap-4 lg:grid-cols-2 xl:grid-cols-3">
-          {gridItems.map((item) => {
-            if (item.kind === "topaz") {
-              const topazState = item.topazState;
-              const resultExport = item.resultExport;
-              const sourceGeneration = item.sourceGeneration;
-              const thumbnailUrl = generationThumbnailUrl(sourceGeneration);
-              const status = topazState?.status ?? "queued";
-              const isReady = status === "complete" && Boolean(resultExport?.downloadUrl);
-              const statusTone =
-                status === "failed" ? "text-rose-700" : status === "complete" ? "text-teal-700" : "text-amber-700";
-              return (
-                <article key={item.itemId} className="overflow-hidden rounded-xl border border-ink/15 bg-white shadow-sm">
-                  <div className="aspect-video bg-bg/70">
-                    {thumbnailUrl ? (
-                      <img
-                        src={thumbnailUrl}
-                        alt={`Topaz upscale of ${describeGeneration(sourceGeneration)}`}
-                        className={`h-full w-full ${isReady ? "object-cover" : "object-contain opacity-75"}`}
-                        loading="lazy"
-                        decoding="async"
-                        onError={() => onAssetError(thumbnailUrl)}
-                      />
-                    ) : (
-                      <div className="flex h-full items-center justify-center text-xs text-ink/45">
-                        {isReady ? "Topaz result ready" : "Topaz pass pending"}
-                      </div>
-                    )}
-                  </div>
-                  <div className="space-y-3 p-3">
+        {!gridItems.length ? (
+          <div className="mt-4 rounded-xl border border-dashed border-ink/20 bg-white p-6 text-sm text-ink/60">
+            {resolvedLabels.emptyState}
+          </div>
+        ) : (
+          <div className="mt-4 grid gap-4 lg:grid-cols-2 xl:grid-cols-3">
+            {gridItems.map((item) => {
+              if (item.kind === "topaz") {
+                const topazState = item.topazState;
+                const resultExport = item.resultExport;
+                const sourceGeneration = item.sourceGeneration;
+                const thumbnailUrl = generationThumbnailUrl(sourceGeneration);
+                const status = topazState?.status ?? "queued";
+                const isReady = status === "complete" && Boolean(resultExport?.downloadUrl);
+                return (
+                  <article
+                    key={item.itemId}
+                    className={`space-y-3 rounded-xl border p-3 ${
+                      status === "failed"
+                        ? "border-red-200 bg-red-50"
+                        : status === "queued" || status === "running"
+                          ? "border-amber-200 bg-amber-50"
+                          : "border-ink/10 bg-white"
+                    }`}
+                  >
+                    <div className="block w-full overflow-hidden rounded-lg border border-ink/10 bg-bg aspect-video">
+                      {thumbnailUrl ? (
+                        <img
+                          src={thumbnailUrl}
+                          alt={`Topaz upscale of ${describeGeneration(sourceGeneration)}`}
+                          className={`h-full w-full ${isReady ? "object-cover" : "object-contain opacity-75"}`}
+                          loading="lazy"
+                          decoding="async"
+                          onError={() => onAssetError(thumbnailUrl)}
+                        />
+                      ) : status === "queued" || status === "running" ? (
+                        <div className="flex h-full w-full flex-col items-center justify-center gap-2 text-amber-800">
+                          <Spinner className="h-5 w-5" />
+                          <p className="text-xs font-medium uppercase tracking-wide">{status}</p>
+                          <p className="text-xs text-amber-900/80">Waiting for processed video...</p>
+                        </div>
+                      ) : status === "failed" ? (
+                        <div className="flex h-full w-full flex-col items-center justify-center gap-2 px-3 text-center text-red-700">
+                          <p className="text-xs font-medium uppercase tracking-wide">Failed</p>
+                          <p className="text-xs">Video post-process failed.</p>
+                        </div>
+                      ) : (
+                        <div className="flex h-full w-full items-center justify-center px-4 text-xs text-ink/55">Preview unavailable</div>
+                      )}
+                    </div>
                     <div className="space-y-1">
                       <p className="text-sm font-medium text-ink">Topaz upscale</p>
                       <p className="text-xs text-ink/60">{describeGeneration(sourceGeneration)}</p>
-                      <p className={`text-[11px] ${statusTone}`}>
-                        Topaz: {status}
-                        {topazState?.model ? ` · ${topazState.model}` : ""}
-                        {typeof topazState?.upscaleFactor === "number" ? ` · ${topazState.upscaleFactor}x` : ""}
-                      </p>
                       <p className="text-[11px] text-ink/45">
                         {resultExport?.exportId ?? topazState?.resultExportId ?? item.sourceExport.exportId} ·{" "}
                         {formatCompactTimestamp(resultExport?.createdAt ?? topazState?.updatedAt ?? sourceGeneration.createdAt)}
+                      </p>
+                      <p className="text-xs text-ink/60">
+                        {status === "complete"
+                          ? `${topazState?.model ?? "Topaz"}${typeof topazState?.upscaleFactor === "number" ? ` · ${topazState.upscaleFactor}x` : ""}`
+                          : status}
                       </p>
                     </div>
                     {topazState?.error ? <p className="text-[11px] text-rose-700">{topazState.error}</p> : null}
@@ -434,78 +447,75 @@ export default function CharacterAnimatePostProcessTab({
                         <DeleteIcon />
                       </IconActionButton>
                     </div>
-                  </div>
-                </article>
-              );
-            }
+                  </article>
+                );
+              }
 
-            const generation = item.generation;
-            const segment = getSegmentForGeneration(generation);
-            const thumbnailUrl = generationThumbnailUrl(generation);
-            const topazState = topazStateByGenerationId[generation.genId];
-            const topazPending = isUpscalingGeneration && topazUpscalePendingGenerationId === generation.genId;
-            const isGenerationReady = generation.status === "complete" && Boolean(generation.downloadUrl);
-            return (
-              <article key={item.itemId} className="overflow-hidden rounded-xl border border-ink/15 bg-white shadow-sm">
-                <div className="aspect-video bg-bg/70">
-                  {thumbnailUrl && isGenerationReady ? (
-                    <img
-                      src={thumbnailUrl}
-                      alt={describeGeneration(generation)}
-                      className="h-full w-full object-cover"
-                      loading="lazy"
-                      decoding="async"
-                      onError={() => onAssetError(thumbnailUrl)}
-                    />
-                  ) : (
-                    <div className="flex h-full flex-col items-center justify-center gap-2 text-center text-xs text-ink/45">
-                      <span className={generation.status === "running" ? "animate-pulse" : ""}>
-                        {generation.status === "queued"
-                          ? "Clip extension queued"
-                          : generation.status === "running"
-                            ? "Clip extension running"
-                            : generation.status === "failed"
-                              ? "Clip extension failed"
-                              : "No thumbnail yet"}
-                      </span>
-                    </div>
-                  )}
-                </div>
-                <div className="space-y-3 p-3">
+              const generation = item.generation;
+              const segment = getSegmentForGeneration(generation);
+              const thumbnailUrl = generationThumbnailUrl(generation);
+              const topazState = topazStateByGenerationId[generation.genId];
+              const topazPending = isUpscalingGeneration && topazUpscalePendingGenerationId === generation.genId;
+              const isGenerationReady = generation.status === "complete" && Boolean(generation.downloadUrl);
+              return (
+                <article
+                  key={item.itemId}
+                  className={`space-y-3 rounded-xl border p-3 ${
+                    generation.status === "failed"
+                      ? "border-red-200 bg-red-50"
+                      : generation.status === "queued" || generation.status === "running"
+                        ? "border-amber-200 bg-amber-50"
+                        : "border-ink/10 bg-white"
+                  }`}
+                >
+                  <div className="block w-full overflow-hidden rounded-lg border border-ink/10 bg-bg aspect-video">
+                    {thumbnailUrl && isGenerationReady ? (
+                      <img
+                        src={thumbnailUrl}
+                        alt={describeGeneration(generation)}
+                        className="h-full w-full object-cover"
+                        loading="lazy"
+                        decoding="async"
+                        onError={() => onAssetError(thumbnailUrl)}
+                      />
+                    ) : generation.status === "queued" || generation.status === "running" ? (
+                      <div className="flex h-full w-full flex-col items-center justify-center gap-2 text-amber-800">
+                        <Spinner className="h-5 w-5" />
+                        <p className="text-xs font-medium uppercase tracking-wide">{generation.status}</p>
+                        <p className="text-xs text-amber-900/80">Waiting for generated video...</p>
+                      </div>
+                    ) : generation.status === "failed" ? (
+                      <div className="flex h-full w-full flex-col items-center justify-center gap-2 px-3 text-center text-red-700">
+                        <p className="text-xs font-medium uppercase tracking-wide">Failed</p>
+                        <p className="text-xs">Video generation failed.</p>
+                      </div>
+                    ) : (
+                      <div className="flex h-full w-full items-center justify-center px-4 text-xs text-ink/55">Preview unavailable</div>
+                    )}
+                  </div>
                   <div className="space-y-1">
                     <p className="text-sm font-medium text-ink">{describeGeneration(generation)}</p>
                     <p className="text-xs text-ink/60">
                       {formatModelLabel(generation, resolvedLabels.fallbackGenerationLabel)}
                       {segment ? ` · ${describeSegment(segment)}` : ""}
                     </p>
-                    <p className="text-[11px] text-ink/45">{generation.genId} · {formatCompactTimestamp(generation.finishedAt ?? generation.updatedAt ?? generation.createdAt)}</p>
+                    <p className="text-[11px] text-ink/45">
+                      {generation.genId} · {formatCompactTimestamp(generation.finishedAt ?? generation.updatedAt ?? generation.createdAt)}
+                    </p>
+                    <p className="text-xs text-ink/60">
+                      {generation.status === "complete" ? formatModelLabel(generation, resolvedLabels.fallbackGenerationLabel) : generation.status}
+                    </p>
                   </div>
 
-                  {generation.status !== "complete" ? (
-                    <p
-                      className={`text-[11px] ${
-                        generation.status === "failed"
-                          ? "text-rose-700"
-                          : generation.status === "running"
-                            ? "text-amber-700"
-                            : "text-ink/55"
-                      }`}
-                    >
-                      Status: {generation.status}
-                    </p>
-                  ) : null}
                   {generation.error ? <p className="text-[11px] text-rose-700">{generation.error}</p> : null}
-
-                  {topazState?.resultExportId ? (
-                    <p className="text-[11px] text-ink/55">Latest Topaz export: {topazState.resultExportId}</p>
-                  ) : null}
+                  {topazState?.resultExportId ? <p className="text-[11px] text-ink/55">Latest Topaz export: {topazState.resultExportId}</p> : null}
                   {topazState?.error ? <p className="text-[11px] text-rose-700">{topazState.error}</p> : null}
 
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="flex flex-wrap items-center gap-2">
                       <button
                         type="button"
-                        className="rounded border border-ink/20 bg-white px-3 py-1.5 text-xs font-medium text-ink"
+                        className="rounded border border-ink/20 bg-white px-3 py-1.5 text-xs font-medium text-ink disabled:cursor-not-allowed disabled:opacity-60"
                         disabled={!isGenerationReady}
                         onClick={() => setLengthenModal({ generation })}
                       >
@@ -532,12 +542,12 @@ export default function CharacterAnimatePostProcessTab({
                       </IconActionButton>
                     </div>
                   </div>
-                </div>
-              </article>
-            );
-          })}
-        </div>
-      )}
+                </article>
+              );
+            })}
+          </div>
+        )}
+      </div>
 
       {lengthenModal ? (
         <div className="fixed inset-0 z-[90] flex items-center justify-center bg-ink/70 px-4 py-6">

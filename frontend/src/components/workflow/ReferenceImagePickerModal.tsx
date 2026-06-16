@@ -124,6 +124,71 @@ function isCropSupportedMimeType(mimeType: string): boolean {
   return ["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"].includes(mimeType);
 }
 
+function sanitizeFilenameSegment(value: string): string {
+  const cleaned = value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return cleaned || "reference";
+}
+
+async function waitForVideoEvent(video: HTMLVideoElement, eventName: "loadedmetadata" | "seeked"): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const handleSuccess = () => {
+      cleanup();
+      resolve();
+    };
+    const handleError = () => {
+      cleanup();
+      reject(new Error("The selected video could not be prepared for frame capture."));
+    };
+    const cleanup = () => {
+      video.removeEventListener(eventName, handleSuccess);
+      video.removeEventListener("error", handleError);
+    };
+    video.addEventListener(eventName, handleSuccess, { once: true });
+    video.addEventListener("error", handleError, { once: true });
+  });
+}
+
+async function captureVideoFrameFile(params: {
+  src: string;
+  timeSec: number;
+  filenameBase: string;
+}): Promise<File> {
+  const video = document.createElement("video");
+  video.preload = "auto";
+  video.muted = true;
+  video.playsInline = true;
+  video.crossOrigin = "anonymous";
+  video.src = params.src;
+  await waitForVideoEvent(video, "loadedmetadata");
+  const duration = Number.isFinite(video.duration) ? video.duration : 0;
+  const targetTime = duration > 0 ? Math.min(Math.max(0, params.timeSec), Math.max(0, duration - 0.01)) : 0;
+  if (Math.abs(video.currentTime - targetTime) > 0.01) {
+    video.currentTime = targetTime;
+    await waitForVideoEvent(video, "seeked");
+  }
+
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, video.videoWidth);
+  canvas.height = Math.max(1, video.videoHeight);
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    throw new Error("Frame capture canvas could not be prepared.");
+  }
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  const blob = await new Promise<Blob | null>((resolve) => {
+    canvas.toBlob((value) => resolve(value), "image/png");
+  });
+  if (!blob) {
+    throw new Error("Failed to render the selected video frame.");
+  }
+  return new File([blob], `${sanitizeFilenameSegment(params.filenameBase)}-frame-${Math.round(targetTime * 100) / 100}.png`, {
+    type: "image/png",
+  });
+}
+
 async function prepareCropSourceFile(file: File): Promise<File> {
   if (["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
     return file;
@@ -184,8 +249,23 @@ export default function ReferenceImagePickerModal({
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const cropImageRef = useRef<HTMLImageElement | null>(null);
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
+  const videoUploadInputRef = useRef<HTMLInputElement | null>(null);
   const cropUploadInputRef = useRef<HTMLInputElement | null>(null);
   const wasOpenRef = useRef(isOpen);
+  const skipNextAutoVideoSelectionRef = useRef(false);
+  const [localVideoItems, setLocalVideoItems] = useState<ReferencePickerVideoItem[]>([]);
+  const localVideoItemsRef = useRef<ReferencePickerVideoItem[]>([]);
+
+  function clearLocalVideoItems() {
+    setLocalVideoItems((previous) => {
+      for (const item of previous) {
+        if (item.previewUrl.startsWith("blob:")) {
+          URL.revokeObjectURL(item.previewUrl);
+        }
+      }
+      return [];
+    });
+  }
 
   useEffect(() => {
     if (isOpen && !wasOpenRef.current) {
@@ -206,9 +286,27 @@ export default function ReferenceImagePickerModal({
       setCrop(undefined);
       setCompletedCrop(null);
       setCropImageSize(null);
+      clearLocalVideoItems();
+    }
+    if (!isOpen && wasOpenRef.current) {
+      clearLocalVideoItems();
     }
     wasOpenRef.current = isOpen;
   }, [defaultScope, initialTab, isOpen, selectedIds]);
+
+  useEffect(() => {
+    localVideoItemsRef.current = localVideoItems;
+  }, [localVideoItems]);
+
+  useEffect(() => {
+    return () => {
+      for (const item of localVideoItemsRef.current) {
+        if (item.previewUrl.startsWith("blob:")) {
+          URL.revokeObjectURL(item.previewUrl);
+        }
+      }
+    };
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -219,7 +317,7 @@ export default function ReferenceImagePickerModal({
   }, [cropSource]);
 
   const sortedItems = useMemo(() => sortNewestFirst(items), [items]);
-  const sortedVideoItems = useMemo(() => sortNewestFirst(videoItems), [videoItems]);
+  const sortedVideoItems = useMemo(() => sortNewestFirst([...localVideoItems, ...videoItems]), [localVideoItems, videoItems]);
 
   const uploadTabItems = useMemo(
     () => sortedItems.filter((item) => item.sourceGroup === "upload"),
@@ -251,6 +349,10 @@ export default function ReferenceImagePickerModal({
 
   useEffect(() => {
     if (!selectedVideoId || !scopedVideoItems.some((item) => item.id === selectedVideoId)) {
+      if (skipNextAutoVideoSelectionRef.current) {
+        skipNextAutoVideoSelectionRef.current = false;
+        return;
+      }
       setSelectedVideoId(scopedVideoItems[0]?.id ?? null);
       setSelectedVideoProgress(0.5);
       setSelectedVideoCurrentTimeSec(0);
@@ -323,23 +425,60 @@ export default function ReferenceImagePickerModal({
     setCropImageSize(null);
   }
 
+  function appendUploadedIdsToSelection(uploadedIds: string[]) {
+    setDraftSelection((previous) => {
+      const additions = uploadedIds.filter((id) => !previous.includes(id));
+      if (!additions.length) return previous;
+      const merged = [...previous, ...additions];
+      if (merged.length <= maxSelected) return merged;
+      const keepExistingCount = Math.max(0, maxSelected - additions.length);
+      return [...previous.slice(0, keepExistingCount), ...additions.slice(-maxSelected)];
+    });
+  }
+
+  function addLocalUploadedVideos(files: File[]) {
+    if (!files.length) return;
+    const createdAt = new Date().toISOString();
+    const nextItems = files.map<ReferencePickerVideoItem>((file, index) => ({
+      id: `local-upload-video:${file.name}:${file.lastModified}:${index}:${Date.now()}`,
+      taskId: "local-upload-video",
+      title: file.name,
+      subtitle: "Uploaded in picker · capture frames locally",
+      previewUrl: URL.createObjectURL(file),
+      createdAt,
+      sourceKind: "uploaded",
+      isCurrentTaskAsset: true,
+      matchesCurrentContext: true,
+      canCaptureFrame: true,
+      durationSec: null,
+      width: null,
+      height: null,
+    }));
+    skipNextAutoVideoSelectionRef.current = true;
+    setLocalVideoItems((previous) => [...nextItems, ...previous]);
+    setActiveTab("capture_video_frame");
+    setVideoKindFilter("uploaded");
+    setCaptureError(null);
+  }
+
   async function handleUploadChange(event: ChangeEvent<HTMLInputElement>) {
     const files = Array.from(event.target.files ?? []);
     event.target.value = "";
     if (!files.length) return;
 
     setUploadError(null);
+    const imageFiles = files.filter((file) => file.type.startsWith("image/"));
+    const videoFiles = files.filter((file) => file.type.startsWith("video/"));
+
+    if (videoFiles.length) {
+      addLocalUploadedVideos(videoFiles);
+    }
+    if (!imageFiles.length) return;
+
     setIsUploading(true);
     try {
-      const uploadedIds = await onUpload(files);
-      setDraftSelection((previous) => {
-        const additions = uploadedIds.filter((id) => !previous.includes(id));
-        if (!additions.length) return previous;
-        const merged = [...previous, ...additions];
-        if (merged.length <= maxSelected) return merged;
-        const keepExistingCount = Math.max(0, maxSelected - additions.length);
-        return [...previous.slice(0, keepExistingCount), ...additions.slice(-maxSelected)];
-      });
+      const uploadedIds = await onUpload(imageFiles);
+      appendUploadedIdsToSelection(uploadedIds);
     } catch (error) {
       setUploadError(error instanceof Error ? error.message : "Upload failed");
     } finally {
@@ -401,14 +540,7 @@ export default function ReferenceImagePickerModal({
         mimeType: cropSource.file.type,
       });
       const uploadedIds = await onUpload([croppedFile]);
-      setDraftSelection((previous) => {
-        const additions = uploadedIds.filter((id) => !previous.includes(id));
-        if (!additions.length) return previous;
-        const merged = [...previous, ...additions];
-        if (merged.length <= maxSelected) return merged;
-        const keepExistingCount = Math.max(0, maxSelected - additions.length);
-        return [...previous.slice(0, keepExistingCount), ...additions.slice(-maxSelected)];
-      });
+      appendUploadedIdsToSelection(uploadedIds);
       clearCropper();
     } catch (error) {
       setCropError(error instanceof Error ? error.message : "Crop upload failed");
@@ -417,22 +549,50 @@ export default function ReferenceImagePickerModal({
     }
   }
 
+  async function captureVideoFrameLocally(videoItem: ReferencePickerVideoItem, timeSec: number): Promise<string[]> {
+    let fetchedObjectUrl: string | null = null;
+    try {
+      let src = videoItem.previewUrl;
+      if (!src.startsWith("blob:")) {
+        const response = await fetch(src);
+        if (!response.ok) {
+          throw new Error(`Video download failed: ${response.status}`);
+        }
+        const blob = await response.blob();
+        fetchedObjectUrl = URL.createObjectURL(blob);
+        src = fetchedObjectUrl;
+      }
+      const frameFile = await captureVideoFrameFile({
+        src,
+        timeSec,
+        filenameBase: videoItem.title,
+      });
+      return onUpload([frameFile]);
+    } finally {
+      if (fetchedObjectUrl) {
+        URL.revokeObjectURL(fetchedObjectUrl);
+      }
+    }
+  }
+
   async function handleCaptureVideoFrame() {
-    if (!selectedVideo || !onCaptureVideoFrame) return;
+    if (!selectedVideo) return;
     setCaptureError(null);
     setIsCapturing(true);
     try {
-      const selectedIds = await onCaptureVideoFrame(selectedVideo, selectedVideoProgress);
-      setDraftSelection((previous) => {
-        const additions = selectedIds.filter((id) => !previous.includes(id));
-        if (!additions.length) return previous;
-        const merged = [...previous, ...additions];
-        if (merged.length <= maxSelected) return merged;
-        const keepExistingCount = Math.max(0, maxSelected - additions.length);
-        return [...previous.slice(0, keepExistingCount), ...additions.slice(-maxSelected)];
-      });
-      setActiveTab("generated");
-      setGeneratedScope("task");
+      const captureTimeSec =
+        selectedVideoCurrentTimeSec || (selectedVideoDurationSec || selectedVideo.durationSec || 0) * selectedVideoProgress;
+      const shouldUseServerCapture =
+        selectedVideo.sourceKind === "uploaded" &&
+        !selectedVideo.id.startsWith("local-upload-video:") &&
+        selectedVideo.canCaptureFrame &&
+        Boolean(onCaptureVideoFrame);
+      const serverCapture = onCaptureVideoFrame;
+      const selectedIds = shouldUseServerCapture
+        ? await serverCapture!(selectedVideo, selectedVideoProgress)
+        : await captureVideoFrameLocally(selectedVideo, captureTimeSec);
+      appendUploadedIdsToSelection(selectedIds);
+      setActiveTab(shouldUseServerCapture ? "generated" : "upload");
     } catch (error) {
       setCaptureError(error instanceof Error ? error.message : "Frame capture failed");
     } finally {
@@ -546,6 +706,7 @@ export default function ReferenceImagePickerModal({
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
                   <input ref={uploadInputRef} type="file" accept="image/*" multiple className="hidden" onChange={(event) => void handleUploadChange(event)} />
+                  <input ref={videoUploadInputRef} type="file" accept="video/*" multiple className="hidden" onChange={(event) => void handleUploadChange(event)} />
                   <input
                     ref={cropUploadInputRef}
                     type="file"
@@ -565,6 +726,14 @@ export default function ReferenceImagePickerModal({
                     type="button"
                     className="rounded-md border border-ink/20 bg-white px-4 py-2 text-sm font-medium text-ink disabled:cursor-not-allowed disabled:opacity-50"
                     disabled={isUploading || isCropUploading}
+                    onClick={() => videoUploadInputRef.current?.click()}
+                  >
+                    Upload video
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded-md border border-ink/20 bg-white px-4 py-2 text-sm font-medium text-ink disabled:cursor-not-allowed disabled:opacity-50"
+                    disabled={isUploading || isCropUploading}
                     onClick={() => cropUploadInputRef.current?.click()}
                   >
                     <PendingButtonLabel isPending={isCropUploading} idle="Upload & crop" pending="Preparing..." />
@@ -572,7 +741,7 @@ export default function ReferenceImagePickerModal({
                 </div>
               </div>
               {uploadError ? <p className="text-xs text-red-700">{uploadError}</p> : null}
-              {!cropSource ? <p className="text-xs text-ink/55">Crop supports JPEG, PNG, WebP, HEIC, and HEIF. HEIC/HEIF files are converted in the browser before cropping.</p> : null}
+              {!cropSource ? <p className="text-xs text-ink/55">Crop supports JPEG, PNG, WebP, HEIC, and HEIF. Video uploads stay in the picker for frame capture and are not selected directly.</p> : null}
               {cropSource ? (
                 <div className="rounded-xl border border-ink/15 bg-white p-4 shadow-sm">
                   <div className="flex flex-wrap items-start justify-between gap-3">
@@ -664,9 +833,16 @@ export default function ReferenceImagePickerModal({
                 <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-ink/15 bg-white p-3">
                   <div className="space-y-1">
                     <p className="text-sm font-medium text-ink">Choose a video</p>
-                    <p className="text-xs text-ink/60">Capture from uploaded task source videos now. Generated videos are listed for future reuse but are not yet capturable here.</p>
+                    <p className="text-xs text-ink/60">Select a task video, generated output, or upload a video into this picker, then capture a frame into your image references.</p>
                   </div>
                   <div className="flex flex-wrap items-center gap-2 text-sm">
+                    <button
+                      type="button"
+                      className="rounded-md border border-ink/20 bg-white px-3 py-2 text-sm font-medium text-ink"
+                      onClick={() => videoUploadInputRef.current?.click()}
+                    >
+                      Upload video
+                    </button>
                     <span className="text-ink/60">Filter by</span>
                     <select
                       className="rounded-md border border-ink/15 bg-white px-3 py-2 text-sm text-ink"
@@ -797,16 +973,11 @@ export default function ReferenceImagePickerModal({
                         Duration: <span className="font-medium text-ink">{(selectedVideoDurationSec || selectedVideo.durationSec || 0).toFixed(2)}s</span>
                       </div>
                     </div>
-                    {!selectedVideo.canCaptureFrame ? (
-                      <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-                        Frame capture in this picker currently supports uploaded task source videos. Generated videos are listed here for browsing and future reuse.
-                      </p>
-                    ) : null}
                     {captureError ? <p className="text-xs text-red-700">{captureError}</p> : null}
                     <button
                       type="button"
                       className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
-                      disabled={!selectedVideo.canCaptureFrame || !onCaptureVideoFrame || isCapturing}
+                      disabled={isCapturing}
                       onClick={() => void handleCaptureVideoFrame()}
                     >
                       <PendingButtonLabel isPending={isCapturing} idle="Capture frame" pending="Capturing..." />

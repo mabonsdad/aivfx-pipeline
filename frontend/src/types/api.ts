@@ -14,6 +14,14 @@ export type TaskSummary = {
   video?: Record<string, unknown>;
 };
 
+export type CurrentUserInfo = {
+  userId: string;
+  email?: string;
+  username?: string;
+  groups?: string[];
+  isAdmin: boolean;
+};
+
 export type FrameVariant = {
   variantId: string;
   type: "full" | "patch" | "extension_anchor";
@@ -924,6 +932,8 @@ export type ApiRequestAssetRecord = {
 export type ApiRequestRecord = {
   requestId: string;
   userId: string;
+  userEmail?: string;
+  username?: string;
   workflow: "image_edit_full" | "image_edit_patch" | "video_generation_reference";
   model: string;
   provider?: string;

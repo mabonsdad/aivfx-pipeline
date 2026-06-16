@@ -41,7 +41,7 @@ from src.api.routes_task_segments import handle_task_segment_routes
 from src.api.routes_tasks_root import handle_tasks_root_routes
 from src.api.routes_user import handle_me
 from src.core.assets import ApiAssetPaths, AssetPaths, AssetStore
-from src.core.auth import UnauthorizedError, get_user_claims, get_user_id
+from src.core.auth import UnauthorizedError, get_user_claims, get_user_groups, get_user_id, is_admin_claims
 from src.core.config import load_settings
 from src.core.ffmpeg import (
     extract_frame_png,
@@ -904,6 +904,13 @@ def _load_task_or_404(store: S3JsonStore, user_id: str, task_id: str) -> dict[st
     return task
 
 
+def _load_task_or_404_any(store: S3JsonStore, task_id: str) -> dict[str, Any]:
+    task = store.load_task_any(task_id)
+    if not task or task.get("deletedAt"):
+        raise KeyError("Task not found")
+    return task
+
+
 def _capture_frame_sync(
     *,
     task: dict[str, Any],
@@ -1157,6 +1164,11 @@ def _api_request_response(request_record: dict[str, Any], asset_store: AssetStor
     _decorate_embedded_s3_keys(payload, asset_store, decorate_plain_key=True)
     if isinstance(job, dict):
         payload["job"] = job
+    payload["userId"] = request_record.get("userId")
+    if request_record.get("userEmail"):
+        payload["userEmail"] = request_record.get("userEmail")
+    if request_record.get("username"):
+        payload["username"] = request_record.get("username")
     return payload
 
 
@@ -1544,7 +1556,16 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
     request_id = event.get("requestContext", {}).get("requestId")
     logger.append_keys(requestId=request_id, userId=user_id)
 
-    me_response = handle_me(method, path, user_id=user_id, claims=claims, origin=origin, response_fn=response)
+    me_response = handle_me(
+        method,
+        path,
+        user_id=user_id,
+        claims=claims,
+        origin=origin,
+        response_fn=response,
+        get_user_groups_fn=get_user_groups,
+        is_admin_claims_fn=is_admin_claims,
+    )
     if me_response is not None:
         return me_response
 
@@ -1568,6 +1589,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
         event=event,
         origin=origin,
         user_id=user_id,
+        claims=claims,
         store=store,
         asset_store=asset_store,
         queue=queue,
@@ -1587,6 +1609,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
         validate_video_model_prompt_fn=validate_video_model_prompt,
         get_video_model_capability_fn=get_video_model_capability,
         segment_generation_provider_name_fn=_segment_generation_provider_name,
+        is_admin_claims_fn=is_admin_claims,
     )
     if external_api_response is not None:
         return external_api_response
@@ -1597,6 +1620,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
         event=event,
         origin=origin,
         user_id=user_id,
+        claims=claims,
         store=store,
         json_model=_json_model,
         response_fn=response,
@@ -1613,6 +1637,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
         cleanup_custom_reports_fn=_cleanup_custom_reports,
         task_summary_fn=_task_summary,
         default_task_workflow_id=DEFAULT_TASK_WORKFLOW_ID,
+        is_admin_claims_fn=is_admin_claims,
     )
     if tasks_root_response is not None:
         return tasks_root_response
@@ -1620,6 +1645,8 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
     task_detail_response = handle_task_detail_route(
         method,
         path,
+        event=event,
+        claims=claims,
         user_id=user_id,
         store=store,
         asset_store=asset_store,
@@ -1628,6 +1655,8 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
         error_response_fn=error_response,
         helpers={
             "load_task_or_404": _load_task_or_404,
+            "load_task_or_404_any": _load_task_or_404_any,
+            "is_admin_claims": is_admin_claims,
             "maintain_segment_generations": _maintain_segment_generations,
             "cleanup_legacy_generation_qc": _cleanup_legacy_generation_qc,
             "cleanup_custom_reports": _cleanup_custom_reports,
@@ -1663,8 +1692,9 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
         task_id, parts = task_path
         if len(parts) < 2:
             return error_response(404, "Not found", origin=origin)
+        allow_admin_any_task = method == "DELETE" and len(parts) == 3 and parts[2] == "assets" and is_admin_claims(claims)
         try:
-            task = _load_task_or_404(store, user_id, task_id)
+            task = _load_task_or_404_any(store, task_id) if allow_admin_any_task else _load_task_or_404(store, user_id, task_id)
         except KeyError:
             return error_response(404, "Task not found", origin=origin)
 
@@ -1707,7 +1737,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             error_response_fn=error_response,
             new_id_fn=new_id,
             now_iso_fn=now_iso,
-            queue_job_fn=_queue_job,
+            queue_job_fn=lambda **kwargs: _queue_job(queue=queue, **kwargs),
             sanitize_prompt_fn=_sanitize_prompt,
         )
         if task_previz_generate_response is not None:
