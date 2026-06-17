@@ -25,6 +25,7 @@ export default function WorkflowLandingPage({
   onSignOut,
 }: WorkflowLandingPageProps) {
   const workflow = getTaskWorkflowConfig(workflowId);
+  const isUserFacing = workflow.userFacing;
 
   return (
     <main className="min-h-screen bg-bg px-6 py-10 text-ink md:px-10">
@@ -43,6 +44,15 @@ export default function WorkflowLandingPage({
             <p className="text-xs font-semibold uppercase tracking-[0.14em] text-ink/45">Workflow</p>
             <h1 className="mt-2 text-3xl font-semibold text-ink">{workflow.label}</h1>
             <p className="mt-4 text-sm leading-6 text-ink/70">{workflow.description}</p>
+            {!isUserFacing ? (
+              <div className="mt-6 rounded-xl border border-dashed border-ink/15 bg-bg px-4 py-4 text-left">
+                <p className="text-sm font-medium text-ink">This workflow is reserved for a separate canvas surface.</p>
+                <p className="mt-2 text-sm leading-6 text-ink/65">
+                  The shared app already recognises its tasks, auth, and asset metadata, but task creation and workflow-specific
+                  editing are intentionally not exposed from this landing page.
+                </p>
+              </div>
+            ) : null}
             {latestTaskId ? (
               <button
                 type="button"
@@ -67,15 +77,23 @@ export default function WorkflowLandingPage({
                 <p className="mt-2 text-sm text-ink/75">No task yet for this workflow.</p>
               </div>
             )}
-            <div className="mt-8 flex items-center justify-center gap-4">
-              <button type="button" className="text-sm font-medium text-accent underline" onClick={() => onSelectTask(workflowId)}>
-                Select task
-              </button>
-              <button type="button" className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-white" onClick={() => onNewTask(workflowId)}>
-                New task
-              </button>
-            </div>
-            {latestTaskId ? null : <p className="mt-4 text-xs text-ink/50">Create the first task in this workflow to start building a reusable library of outputs and references.</p>}
+            {isUserFacing ? (
+              <>
+                <div className="mt-8 flex items-center justify-center gap-4">
+                  <button type="button" className="text-sm font-medium text-accent underline" onClick={() => onSelectTask(workflowId)}>
+                    Select task
+                  </button>
+                  <button type="button" className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-white" onClick={() => onNewTask(workflowId)}>
+                    New task
+                  </button>
+                </div>
+                {latestTaskId ? null : <p className="mt-4 text-xs text-ink/50">Create the first task in this workflow to start building a reusable library of outputs and references.</p>}
+              </>
+            ) : latestTaskId ? (
+              <p className="mt-4 text-xs text-ink/50">Open an existing canvas task above to inspect shared assets and outputs.</p>
+            ) : (
+              <p className="mt-4 text-xs text-ink/50">Canvas tasks will appear here once they are created from the separate canvas surface.</p>
+            )}
           </div>
         </div>
       </div>

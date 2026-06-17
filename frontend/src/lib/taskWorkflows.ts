@@ -80,3 +80,7 @@ export function normalizeTaskWorkflowId(value: string | null | undefined): TaskW
 export function getTaskWorkflowConfig(value: string | null | undefined): TaskWorkflowConfig {
   return TASK_WORKFLOW_CONFIGS[normalizeTaskWorkflowId(value)];
 }
+
+export function isUserFacingTaskWorkflowId(value: string | null | undefined): value is UserFacingTaskWorkflowId {
+  return value === "source_video_flow" || value === "character_animate_workflow" || value === "simple_generation_workflow";
+}

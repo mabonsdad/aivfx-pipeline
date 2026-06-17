@@ -7231,11 +7231,27 @@ export default function App() {
 
             {!isResolvingWorkflowShell && !isCurrentWorkflowImplemented && !showPrevizSelectTab && !showPrevizEditTab && !showPrevizGenerateTab && !showPrevizPostTab && !isGlobalUtilityTab ? (
               <div className="rounded-xl border border-dashed border-ink/15 bg-bg p-4">
-                <p className="text-sm font-medium text-ink">{currentTaskWorkflow.label} is scaffolded but not implemented yet.</p>
-                <p className="mt-1 text-sm text-ink/65">
-                  The shared task shell, assets library, and reports infrastructure can already recognise this workflow. The
-                  workflow-specific step content will be added next.
-                </p>
+                {currentTaskWorkflowId === "canvas_workflow" ? (
+                  <>
+                    <p className="text-sm font-medium text-ink">Canvas workflow tasks are recognised but authored in a separate surface.</p>
+                    <p className="mt-1 text-sm text-ink/65">
+                      This app will preserve the shared task shell, auth, asset library, and report compatibility for canvas tasks
+                      without exposing the canvas authoring UI here.
+                    </p>
+                    <p className="mt-3 text-xs leading-5 text-ink/55">
+                      Use the shared Assets and Reports tabs to inspect outputs linked to this task. Workflow-specific creation and
+                      editing controls will be added in the dedicated canvas surface.
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <p className="text-sm font-medium text-ink">{currentTaskWorkflow.label} is scaffolded but not implemented yet.</p>
+                    <p className="mt-1 text-sm text-ink/65">
+                      The shared task shell, assets library, and reports infrastructure can already recognise this workflow. The
+                      workflow-specific step content will be added next.
+                    </p>
+                  </>
+                )}
               </div>
             ) : null}
 
