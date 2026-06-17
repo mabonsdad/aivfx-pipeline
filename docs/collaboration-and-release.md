@@ -139,6 +139,10 @@ Use the repo PR template:
 
 - [`.github/pull_request_template.md`](../.github/pull_request_template.md)
 
+Canvas-specific implementation guidance lives here:
+
+- [`docs/canvas-workflow-integration.md`](./canvas-workflow-integration.md)
+
 ## GitHub Settings To Apply
 
 Apply these branch protection rules to `main` in GitHub:

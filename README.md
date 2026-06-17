@@ -178,6 +178,7 @@ Start here if you are reorienting yourself to the current app:
 4. [Implementation and Registries](./docs/implementation-and-registries.md)
 5. [Environments and Deployment](./docs/environments-and-deployment.md)
 6. [Collaboration and Release](./docs/collaboration-and-release.md)
+7. [Canvas Workflow Integration](./docs/canvas-workflow-integration.md)
 
 ### Product / app documentation
 - [App Overview](./docs/app-overview.md)
@@ -187,6 +188,7 @@ Start here if you are reorienting yourself to the current app:
 - [Implementation and Registries](./docs/implementation-and-registries.md)
 - [Environments and Deployment](./docs/environments-and-deployment.md)
 - [Collaboration and Release](./docs/collaboration-and-release.md)
+- [Canvas Workflow Integration](./docs/canvas-workflow-integration.md)
 
 ### Supporting documentation
 - [External API Reference](./docs/external-api-reference.md)

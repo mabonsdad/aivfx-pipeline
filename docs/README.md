@@ -13,6 +13,7 @@ If you need to understand how the app works today, read these in order:
 5. [Implementation and Registries](./implementation-and-registries.md)
 6. [Environments and Deployment](./environments-and-deployment.md)
 7. [Collaboration and Release](./collaboration-and-release.md)
+8. [Canvas Workflow Integration](./canvas-workflow-integration.md)
 
 ## What Each Document Covers
 
@@ -28,6 +29,7 @@ If you need to understand how the app works today, read these in order:
 - [Implementation and Registries](./implementation-and-registries.md): how workflows, modes, model capabilities, tasks, assets, and reports are wired
 - [Environments and Deployment](./environments-and-deployment.md): shared, dev, and prod environments plus deploy and migration commands
 - [Collaboration and Release](./collaboration-and-release.md): branch policy, shared-contract rules, PR expectations, and owner-controlled dev/prod promotion
+- [Canvas Workflow Integration](./canvas-workflow-integration.md): collaborator-facing seam for the separate canvas workflow, including shared metadata rules and a code-assistant brief
 
 ### Reference and operational docs
 
