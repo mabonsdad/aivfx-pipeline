@@ -37,9 +37,11 @@ import type {
   HappyHorseResolutionId,
 } from "../lib/generated/videoContracts";
 import type {
+  AdminUserSummary,
   ApiRequestRecord,
   CurrentUserInfo,
   JobStatus,
+  ProjectSummary,
   SegmentRecord,
   TaskDetail,
   TaskSummary,
@@ -170,9 +172,26 @@ export const apiClient = {
       headers: pin ? { "x-admin-pin": pin } : undefined,
       body: JSON.stringify(payload),
     }),
-  listTasks: (params?: { scope?: "mine" | "all" }) => {
+  listAdminProjects: () => api<{ projects: ProjectSummary[] }>("/admin/projects"),
+  createAdminProject: (payload: { name: string; description?: string | null; memberUserIds: string[] }) =>
+    api<{ project: ProjectSummary }>("/admin/projects", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  updateAdminProject: (projectId: string, payload: { name: string; description?: string | null; memberUserIds: string[] }) =>
+    api<{ project: ProjectSummary }>(`/admin/projects/${projectId}`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    }),
+  listAdminUsers: () =>
+    api<{
+      users: AdminUserSummary[];
+      projects: ProjectSummary[];
+    }>("/admin/users"),
+  listTasks: (params?: { scope?: "mine" | "all" | "project"; projectId?: string | null }) => {
     const search = new URLSearchParams();
     if (params?.scope && params.scope !== "mine") search.set("scope", params.scope);
+    if (params?.projectId) search.set("projectId", params.projectId);
     const query = search.toString();
     return api<{ tasks: TaskSummary[] }>(`/tasks${query ? `?${query}` : ""}`);
   },
@@ -185,10 +204,16 @@ export const apiClient = {
       method: "POST",
       body: JSON.stringify({ name, workflowId, scenePrompt: options?.scenePrompt ?? null }),
     }),
+  setTaskProject: (taskId: string, payload: { projectId?: string | null }) =>
+    api<{ taskId: string; projectId?: string | null; projectName?: string | null }>(`/tasks/${taskId}/project`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
   deleteTask: (taskId: string) => api<{ ok: true }>(`/tasks/${taskId}`, { method: "DELETE" }),
-  getTask: (taskId: string, params?: { scope?: "mine" | "all" }) => {
+  getTask: (taskId: string, params?: { scope?: "mine" | "all" | "project"; projectId?: string | null }) => {
     const search = new URLSearchParams();
     if (params?.scope && params.scope !== "mine") search.set("scope", params.scope);
+    if (params?.projectId) search.set("projectId", params.projectId);
     const query = search.toString();
     return api<TaskDetail>(`/tasks/${taskId}${query ? `?${query}` : ""}`);
   },

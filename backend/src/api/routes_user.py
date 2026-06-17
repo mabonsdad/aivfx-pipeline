@@ -9,13 +9,22 @@ def handle_me(
     *,
     user_id: str,
     claims: dict[str, Any],
+    store,
     origin: str | None,
     response_fn,
     get_user_groups_fn,
     is_admin_claims_fn,
+    project_summary_fn,
+    can_access_project_fn,
 ) -> dict[str, Any] | None:
     if method != "GET" or path != "/me":
         return None
+    is_admin = is_admin_claims_fn(claims)
+    projects = [
+        project_summary_fn(project)
+        for project in store.list_projects()
+        if can_access_project_fn(project, user_id=user_id, is_admin=is_admin)
+    ]
     return response_fn(
         200,
         {
@@ -23,7 +32,8 @@ def handle_me(
             "email": claims.get("email"),
             "username": claims.get("cognito:username"),
             "groups": get_user_groups_fn(claims),
-            "isAdmin": is_admin_claims_fn(claims),
+            "isAdmin": is_admin,
+            "projects": projects,
         },
         origin=origin,
     )

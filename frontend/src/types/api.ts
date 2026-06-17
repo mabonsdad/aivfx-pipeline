@@ -13,10 +13,41 @@ export type AssetOrigin = {
   [key: string]: unknown;
 };
 
+export type ProjectSummary = {
+  projectId: string;
+  name: string;
+  description?: string | null;
+  memberUserIds: string[];
+  memberCount: number;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+  createdBy?: string | null;
+  updatedBy?: string | null;
+};
+
+export type AdminUserSummary = {
+  userId?: string | null;
+  username?: string | null;
+  email?: string | null;
+  enabled: boolean;
+  status?: string | null;
+  groups: string[];
+  createdAt?: string | null;
+  updatedAt?: string | null;
+  taskCount: number;
+  projectIds: string[];
+  imageGenerationsTotal: number;
+  videoGenerationsTotal: number;
+  imageGenerationsByTool: Record<string, number>;
+  videoGenerationsByTool: Record<string, number>;
+};
+
 export type TaskSummary = {
   taskId: string;
   name: string;
   workflowId: TaskWorkflowId;
+  projectId?: string | null;
+  projectName?: string | null;
   status: TaskStatusId;
   createdAt: string;
   updatedAt: string;
@@ -29,6 +60,7 @@ export type CurrentUserInfo = {
   username?: string;
   groups?: string[];
   isAdmin: boolean;
+  projects?: ProjectSummary[];
 };
 
 export type FrameVariant = {
@@ -770,6 +802,8 @@ export type TaskDetail = {
   userId: string;
   name: string;
   workflowId: TaskWorkflowId;
+  projectId?: string | null;
+  projectName?: string | null;
   previz?: {
     scenePrompt?: string | null;
     sceneAspectRatio?: string | null;

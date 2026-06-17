@@ -38,12 +38,22 @@ class TaskCreateRequest(BaseModel):
     scenePrompt: str | None = Field(default=None, max_length=4000)
 
 
+class TaskProjectUpdateRequest(BaseModel):
+    projectId: str | None = Field(default=None, max_length=120)
+
+
 class PrevizUpdateRequest(BaseModel):
     scenePrompt: str | None = Field(default=None, max_length=4000)
     sceneAspectRatio: str | None = Field(default=None, max_length=16)
     selectedReferenceIds: list[str] | None = Field(default=None, max_length=24)
     frameReferenceIds: list[str] | None = Field(default=None, max_length=48)
     selectedFrameIds: list[str] | None = Field(default=None, max_length=24)
+
+
+class AdminProjectUpsertRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    description: str | None = Field(default=None, max_length=400)
+    memberUserIds: list[str] = Field(default_factory=list, max_length=200)
 
 
 class PrevizGenerateRequest(BaseModel):

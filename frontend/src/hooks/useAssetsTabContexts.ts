@@ -9,7 +9,7 @@ type VisibilitySetter = (update: number | ((count: number) => number)) => void;
 type UseAssetsTabContextsArgs = {
   selectedTaskId: string | null;
   task: TaskDetail | undefined;
-  assetLibraryScope?: "mine" | "all";
+  assetLibraryScope?: "mine" | "project" | "all";
   assetsLoading: boolean;
   assetLibraryLoading: boolean;
   mergedVideoAssets: LibraryAsset[];
@@ -228,10 +228,12 @@ export function useAssetsTabContexts({
       task,
       workflowId: task?.workflowId,
       assetsLoading: assetLibraryLoading,
-      pageTitle: assetLibraryScope === "all" ? "All Assets" : "Asset Library",
+      pageTitle: assetLibraryScope === "all" ? "All Assets" : assetLibraryScope === "project" ? "Project Assets" : "Asset Library",
       pageDescription:
         assetLibraryScope === "all"
           ? "Admin view across all users."
+          : assetLibraryScope === "project"
+            ? "Assets from every task linked to the current project, including work created by other project members."
           : "Latest merged videos, generated videos, image assets, and audio assets across all tasks for this account.",
       showNext: false,
       imageAssetsTitle,

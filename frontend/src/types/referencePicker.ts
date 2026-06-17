@@ -5,7 +5,7 @@ export type ReferencePickerSourceType =
   | "frame_capture"
   | "frame_variant";
 
-export type ReferencePickerGeneratedScope = "current_mode_task" | "task" | "all_tasks";
+export type ReferencePickerGeneratedScope = "current_mode_task" | "task" | "project" | "all_tasks";
 export type ReferencePickerAssetKind = "uploaded" | "generated_image" | "captured_frame";
 export type ReferencePickerInitialTab = "upload" | "generated" | "capture_video_frame";
 
@@ -22,6 +22,7 @@ export type ReferencePickerItem = {
   referenceId?: string;
   referenceType?: "uploaded" | "generated";
   isCurrentTaskAsset: boolean;
+  isProjectAsset: boolean;
   matchesCurrentContext: boolean;
   assetKind: ReferencePickerAssetKind;
 };
@@ -46,6 +47,7 @@ export type ReferencePickerVideoItem = {
   createdAt: string;
   sourceKind: ReferencePickerVideoSourceKind;
   isCurrentTaskAsset: boolean;
+  isProjectAsset: boolean;
   matchesCurrentContext: boolean;
   canCaptureFrame: boolean;
   frameCount?: number | null;

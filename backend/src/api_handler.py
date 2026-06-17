@@ -62,6 +62,7 @@ from src.core.prompt_wizard_admin import (
     ADMIN_PROMPT_WIZARD_CONFIG_KEY,
     normalize_prompt_wizard_admin_config_for_read,
 )
+from src.core.projects import can_access_project, project_summary
 from src.generation import (
     LUMA_API_ALLOWED_MODES,
     get_video_model_capability,
@@ -630,6 +631,8 @@ def _task_summary(task: dict[str, Any]) -> dict[str, Any]:
         "taskId": task["taskId"],
         "name": task["name"],
         "workflowId": task.get("workflowId", DEFAULT_TASK_WORKFLOW_ID),
+        "projectId": task.get("projectId"),
+        "projectName": task.get("projectName"),
         "status": status,
         "createdAt": task["createdAt"],
         "updatedAt": task["updatedAt"],
@@ -1562,10 +1565,13 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
         path,
         user_id=user_id,
         claims=claims,
+        store=store,
         origin=origin,
         response_fn=response,
         get_user_groups_fn=get_user_groups,
         is_admin_claims_fn=is_admin_claims,
+        project_summary_fn=project_summary,
+        can_access_project_fn=can_access_project,
     )
     if me_response is not None:
         return me_response
@@ -1580,6 +1586,8 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
         response_fn=response,
         error_response_fn=error_response,
         now_iso_fn=now_iso,
+        json_model=_json_model,
+        new_id_fn=new_id,
     )
     if admin_response is not None:
         return admin_response

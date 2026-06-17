@@ -9,6 +9,7 @@ import boto3
 
 from src.core.assets import AssetPaths
 from src.core.ffmpeg import extract_frame_png, ffprobe_video
+from src.core.projects import can_access_project, project_summary
 
 
 def _backfill_generation_posters(task: dict[str, Any], asset_store, *, assets_bucket: str, max_per_request: int = 6) -> bool:
@@ -148,9 +149,20 @@ def handle_task_detail_route(
     task_id = path.split("/")[2]
     query = event.get("queryStringParameters") or {}
     requested_scope = str((query.get("scope") if isinstance(query, dict) else "") or "").strip().lower()
+    requested_project_id = str((query.get("projectId") if isinstance(query, dict) else "") or "").strip()
     use_all_scope = requested_scope == "all" and helpers["is_admin_claims"](claims)
     try:
-        task = helpers["load_task_or_404_any"](store, task_id) if use_all_scope else helpers["load_task_or_404"](store, user_id, task_id)
+        if requested_scope == "project":
+            if not requested_project_id:
+                return error_response_fn(400, "projectId is required for project task scope", origin=origin)
+            task = helpers["load_task_or_404_any"](store, task_id)
+            if str(task.get("projectId") or "").strip() != requested_project_id:
+                return error_response_fn(404, "Task not found", origin=origin)
+            project = store.load_project(requested_project_id)
+            if not can_access_project(project, user_id=user_id, is_admin=helpers["is_admin_claims"](claims)):
+                return error_response_fn(403, "Project access denied", origin=origin)
+        else:
+            task = helpers["load_task_or_404_any"](store, task_id) if use_all_scope else helpers["load_task_or_404"](store, user_id, task_id)
     except KeyError:
         return error_response_fn(404, "Task not found", origin=origin)
 
@@ -180,6 +192,12 @@ def handle_task_detail_route(
         store.save_task(task)
 
     decorated = json.loads(json.dumps(task))
+    project_id = str(decorated.get("projectId") or "").strip()
+    if project_id:
+        project = store.load_project(project_id)
+        if isinstance(project, dict):
+            decorated["projectId"] = project_id
+            decorated["projectName"] = project_summary(project).get("name")
     if decorated.get("status") == "error" and decorated.get("video", {}).get("editSource", {}).get("s3Key"):
         decorated["status"] = "ready"
     if decorated.get("video", {}).get("original", {}).get("s3Key"):

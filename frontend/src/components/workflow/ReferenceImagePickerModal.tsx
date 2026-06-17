@@ -19,6 +19,7 @@ type ReferenceImagePickerModalProps = {
   videoItems?: ReferencePickerVideoItem[];
   initialTab?: ReferencePickerInitialTab;
   generatedScopeDefault?: ReferencePickerGeneratedScope;
+  hasProjectScope?: boolean;
   isSaving?: boolean;
   onClose: () => void;
   onConfirm: (selectedIds: string[]) => Promise<void> | void;
@@ -217,6 +218,7 @@ export default function ReferenceImagePickerModal({
   videoItems = [],
   initialTab = "upload",
   generatedScopeDefault = "task",
+  hasProjectScope = false,
   isSaving = false,
   onClose,
   onConfirm,
@@ -224,7 +226,7 @@ export default function ReferenceImagePickerModal({
   onCaptureVideoFrame,
 }: ReferenceImagePickerModalProps) {
   const [activeTab, setActiveTab] = useState<ReferencePickerInitialTab>(initialTab);
-  const defaultScope: ReferencePickerGeneratedScope = generatedScopeDefault === "all_tasks" ? "all_tasks" : "all_tasks";
+  const defaultScope: ReferencePickerGeneratedScope = generatedScopeDefault;
   const [generatedScope, setGeneratedScope] = useState<ReferencePickerGeneratedScope>(defaultScope);
   const [videoScope, setVideoScope] = useState<ReferencePickerGeneratedScope>(defaultScope);
   const [videoKindFilter, setVideoKindFilter] = useState<"all" | "generated" | "uploaded">("all");
@@ -323,6 +325,16 @@ export default function ReferenceImagePickerModal({
     () => sortedItems.filter((item) => item.sourceGroup === "upload"),
     [sortedItems],
   );
+  const scopedUploadItems = useMemo(
+    () =>
+      uploadTabItems.filter((item) => {
+        if (generatedScope === "all_tasks") return true;
+        if (generatedScope === "project") return item.isProjectAsset;
+        if (generatedScope === "task") return item.isCurrentTaskAsset;
+        return item.matchesCurrentContext;
+      }),
+    [generatedScope, uploadTabItems],
+  );
   const generatedItems = useMemo(
     () => sortedItems.filter((item) => item.sourceGroup === "generated"),
     [sortedItems],
@@ -331,6 +343,7 @@ export default function ReferenceImagePickerModal({
     () =>
       generatedItems.filter((item) => {
         if (generatedScope === "all_tasks") return true;
+        if (generatedScope === "project") return item.isProjectAsset;
         if (generatedScope === "task") return item.isCurrentTaskAsset;
         return item.matchesCurrentContext;
       }),
@@ -340,6 +353,7 @@ export default function ReferenceImagePickerModal({
   const scopedVideoItems = useMemo(() => {
     const scopeMatchedItems = sortedVideoItems.filter((item) => {
       if (videoScope === "all_tasks") return true;
+      if (videoScope === "project") return item.isProjectAsset;
       if (videoScope === "task") return item.isCurrentTaskAsset;
       return item.matchesCurrentContext;
     });
@@ -448,6 +462,7 @@ export default function ReferenceImagePickerModal({
       createdAt,
       sourceKind: "uploaded",
       isCurrentTaskAsset: true,
+      isProjectAsset: false,
       matchesCurrentContext: true,
       canCaptureFrame: true,
       durationSec: null,
@@ -606,12 +621,13 @@ export default function ReferenceImagePickerModal({
 
   if (!isOpen) return null;
 
-  const gridItems = activeTab === "upload" ? uploadTabItems : scopedGeneratedItems;
+  const gridItems = activeTab === "upload" ? scopedUploadItems : scopedGeneratedItems;
   const visibleGridItems = gridItems.slice(0, visibleImageCount);
   const visibleScopedVideoItems = scopedVideoItems.slice(0, visibleVideoCount);
 
   const scopeOptions: Array<{ value: ReferencePickerGeneratedScope; label: string }> = [
     { value: "all_tasks", label: "All tasks" },
+    ...(hasProjectScope ? [{ value: "project" as const, label: "Project" }] : []),
     { value: "task", label: "Task" },
     { value: "current_mode_task", label: "Current mode + task" },
   ];
@@ -739,6 +755,20 @@ export default function ReferenceImagePickerModal({
                     <PendingButtonLabel isPending={isCropUploading} idle="Upload & crop" pending="Preparing..." />
                   </button>
                 </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-2 text-sm">
+                <span className="text-ink/60">Filter by</span>
+                <select
+                  className="rounded-md border border-ink/15 bg-white px-3 py-2 text-sm text-ink"
+                  value={generatedScope}
+                  onChange={(event) => setGeneratedScope(event.target.value as ReferencePickerGeneratedScope)}
+                >
+                  {scopeOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
               </div>
               {uploadError ? <p className="text-xs text-red-700">{uploadError}</p> : null}
               {!cropSource ? <p className="text-xs text-ink/55">Crop supports JPEG, PNG, WebP, HEIC, and HEIF. Video uploads stay in the picker for frame capture and are not selected directly.</p> : null}

@@ -137,6 +137,14 @@ class S3JsonStore:
     def user_api_requests_prefix(user_id: str) -> str:
         return f"users/{user_id}/api_requests/"
 
+    @staticmethod
+    def projects_prefix() -> str:
+        return "admin/projects/"
+
+    @staticmethod
+    def project_key(project_id: str) -> str:
+        return f"admin/projects/{project_id}.json"
+
     def get_json(self, key: str) -> dict[str, Any] | None:
         try:
             data = self.s3.get_object(Bucket=self.metadata_bucket, Key=key)["Body"].read()
@@ -257,6 +265,38 @@ class S3JsonStore:
                 if payload:
                     return payload
         return None
+
+    def list_tasks_for_project(self, project_id: str) -> list[dict[str, Any]]:
+        normalized_project_id = str(project_id or "").strip()
+        if not normalized_project_id:
+            return []
+        return [
+            task
+            for task in self.list_all_tasks()
+            if str(task.get("projectId") or "").strip() == normalized_project_id
+        ]
+
+    def load_project(self, project_id: str) -> dict[str, Any] | None:
+        return self.get_json(self.project_key(project_id))
+
+    def save_project(self, project: dict[str, Any]) -> dict[str, Any]:
+        project["updatedAt"] = now_iso()
+        self.put_json(self.project_key(str(project["projectId"])), project)
+        return project
+
+    def list_projects(self) -> list[dict[str, Any]]:
+        paginator = self.s3.get_paginator("list_objects_v2")
+        projects: list[dict[str, Any]] = []
+        for page in paginator.paginate(Bucket=self.metadata_bucket, Prefix=self.projects_prefix()):
+            for item in page.get("Contents", []):
+                key = str(item.get("Key") or "")
+                if not key.endswith(".json"):
+                    continue
+                payload = self.get_json(key)
+                if payload and not payload.get("deletedAt"):
+                    projects.append(payload)
+        projects.sort(key=lambda item: item.get("updatedAt", item.get("createdAt", "")), reverse=True)
+        return projects
 
     def load_job(self, user_id: str, job_id: str) -> dict[str, Any] | None:
         return self.get_json(self.job_key(user_id, job_id))

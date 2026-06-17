@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from src.models.schemas import TaskCreateRequest
+from src.core.projects import can_access_project, project_summary
+from src.models.schemas import TaskCreateRequest, TaskProjectUpdateRequest
 
 
 def _ensure_previz_bootstrap(task: dict[str, Any], *, new_id_fn: Callable[[str], str]) -> bool:
@@ -132,6 +133,8 @@ def handle_tasks_root_routes(
             "userId": user_id,
             "name": unique_name,
             "workflowId": req.workflowId,
+            "projectId": None,
+            "projectName": None,
             "filePrefix": file_prefix,
             "createdAt": now,
             "updatedAt": now,
@@ -159,8 +162,17 @@ def handle_tasks_root_routes(
     if method == "GET" and path == "/tasks":
         query = event.get("queryStringParameters") or {}
         requested_scope = str((query.get("scope") if isinstance(query, dict) else "") or "").strip().lower()
+        requested_project_id = str((query.get("projectId") if isinstance(query, dict) else "") or "").strip()
         use_all_scope = requested_scope == "all" and is_admin_claims_fn(claims)
-        task_items = store.list_all_tasks() if use_all_scope else store.list_tasks(user_id)
+        if requested_scope == "project":
+            if not requested_project_id:
+                return error_response_fn(400, "projectId is required for project task scope", origin=origin)
+            project = store.load_project(requested_project_id)
+            if not can_access_project(project, user_id=user_id, is_admin=is_admin_claims_fn(claims)):
+                return error_response_fn(403, "Project access denied", origin=origin)
+            task_items = store.list_tasks_for_project(requested_project_id)
+        else:
+            task_items = store.list_all_tasks() if use_all_scope else store.list_tasks(user_id)
         for item in task_items:
             changed = False
             if not item.get("workflowId"):
@@ -174,6 +186,41 @@ def handle_tasks_root_routes(
                 store.save_task(item)
         tasks = [task_summary_fn(item) for item in task_items]
         return response_fn(200, {"tasks": tasks}, origin=origin)
+
+    if method == "PATCH" and path.startswith("/tasks/") and path.endswith("/project") and path.count("/") == 3:
+        task_id = path.split("/")[2]
+        try:
+            task = load_task_or_404_fn(store, user_id, task_id)
+        except KeyError:
+            if not is_admin_claims_fn(claims):
+                return error_response_fn(404, "Task not found", origin=origin)
+            task = store.load_task_any(task_id)
+            if not isinstance(task, dict) or task.get("deletedAt"):
+                return error_response_fn(404, "Task not found", origin=origin)
+
+        req = json_model(TaskProjectUpdateRequest, event)
+        next_project_id = str(req.projectId or "").strip() or None
+        if next_project_id:
+            project = store.load_project(next_project_id)
+            if not isinstance(project, dict):
+                return error_response_fn(404, "Project not found", origin=origin)
+            if not can_access_project(project, user_id=user_id, is_admin=is_admin_claims_fn(claims)):
+                return error_response_fn(403, "Project access denied", origin=origin)
+            task["projectId"] = next_project_id
+            task["projectName"] = project_summary(project).get("name")
+        else:
+            task["projectId"] = None
+            task["projectName"] = None
+        store.save_task(task, merge_on_conflict=True)
+        return response_fn(
+            200,
+            {
+                "taskId": task["taskId"],
+                "projectId": task.get("projectId"),
+                "projectName": task.get("projectName"),
+            },
+            origin=origin,
+        )
 
     if method == "DELETE" and path.startswith("/tasks/") and path.count("/") == 2:
         task_id = path.split("/")[2]

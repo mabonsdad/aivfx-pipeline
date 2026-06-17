@@ -208,7 +208,7 @@ type PendingGenerationCard = {
 const ReportsPage = lazy(() => import("./pages/ReportsPage"));
 const CustomQcPage = lazy(() => import("./pages/CustomQcPage"));
 const ApiLogsPage = lazy(() => import("./pages/ApiLogsPage"));
-const AdminPromptWizardPage = lazy(() => import("./pages/AdminPromptWizardPage"));
+const AdminWorkspacePage = lazy(() => import("./pages/AdminWorkspacePage"));
 const PickFrameTab = lazy(() => import("./pages/workflow/PickFrameTab"));
 const EditFrameTab = lazy(() => import("./pages/workflow/EditFrameTab"));
 const EditVideoReferencesTab = lazy(() => import("./pages/workflow/EditVideoReferencesTab"));
@@ -863,7 +863,7 @@ export default function App() {
   const [isPageVisible, setIsPageVisible] = useState(
     typeof document === "undefined" ? true : document.visibilityState === "visible",
   );
-  const [assetLibraryScope, setAssetLibraryScope] = useState<"mine" | "all">("mine");
+  const [assetLibraryScope, setAssetLibraryScope] = useState<"mine" | "project" | "all">("mine");
   const [apiLogsScope, setApiLogsScope] = useState<"mine" | "all">("mine");
   const routeState = useWorkflowRouteState(location.pathname, location.hash);
   const [routeOverride, setRouteOverride] = useState<WorkflowRouteState | null>(null);
@@ -1125,6 +1125,7 @@ export default function App() {
     refetchOnReconnect: false,
   });
   const isAdmin = Boolean(meQuery.data?.isAdmin);
+  const availableProjects = useMemo(() => meQuery.data?.projects ?? [], [meQuery.data?.projects]);
   const adminAllTasksQuery = useQuery({
     queryKey: ["tasks", "all"],
     queryFn: async () => (await apiClient.listTasks({ scope: "all" })).tasks,
@@ -1144,6 +1145,42 @@ export default function App() {
   const selectedTaskId =
     isHomeRoute || isWorkflowLandingRoute ? null : effectiveRouteState.taskId ?? storeSelectedTaskId;
   const reportTaskId = selectedTaskId;
+  const selectedTaskSummary = useMemo(
+    () => (tasksQuery.data ?? []).find((taskItem) => taskItem.taskId === selectedTaskId) ?? null,
+    [selectedTaskId, tasksQuery.data],
+  );
+  const currentProjectId = useMemo(
+    () => {
+      const resolved = String((selectedTaskSummary?.projectId ?? "") || "").trim();
+      return resolved || null;
+    },
+    [selectedTaskSummary?.projectId],
+  );
+  const currentProject = useMemo(
+    () => availableProjects.find((project) => project.projectId === currentProjectId) ?? null,
+    [availableProjects, currentProjectId],
+  );
+  const isProjectScopeAvailable = Boolean(currentProjectId && currentProject);
+  useEffect(() => {
+    if (assetLibraryScope === "project" && !isProjectScopeAvailable) {
+      setAssetLibraryScope("mine");
+    }
+  }, [assetLibraryScope, isProjectScopeAvailable]);
+  const enableReferenceAssetTaskQueries =
+    isReferenceImagePickerOpen ||
+    isToolReferenceImagePickerOpen ||
+    isPrevizReferenceImagePickerOpen ||
+    isPrevizEditReferenceImagePickerOpen ||
+    isPrevizGenerateReferenceImagePickerOpen ||
+    isPrevizToolReferenceImagePickerOpen;
+  const projectTasksQuery = useQuery({
+    queryKey: ["tasks", "project", currentProjectId ?? "none"],
+    queryFn: async () => (await apiClient.listTasks({ scope: "project", projectId: currentProjectId })).tasks,
+    enabled: isAuthed && Boolean(currentProjectId) && (assetLibraryScope === "project" || enableReferenceAssetTaskQueries),
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+  });
 
   useEffect(() => {
     if (!routeOverride) return;
@@ -1327,9 +1364,15 @@ export default function App() {
   const assetTaskSummaries =
     tab === "asset_library" && assetLibraryScope === "all" && isAdmin
       ? adminAllTasksQuery.data ?? []
-      : tasksQuery.data ?? [];
-  const assetTaskScope: "mine" | "all" =
-    tab === "asset_library" && assetLibraryScope === "all" && isAdmin ? "all" : "mine";
+      : (isProjectScopeAvailable && (assetLibraryScope === "project" || enableReferenceAssetTaskQueries))
+        ? projectTasksQuery.data ?? []
+        : tasksQuery.data ?? [];
+  const assetTaskScope: "mine" | "all" | "project" =
+    tab === "asset_library" && assetLibraryScope === "all" && isAdmin
+      ? "all"
+      : (isProjectScopeAvailable && (assetLibraryScope === "project" || enableReferenceAssetTaskQueries))
+        ? "project"
+        : "mine";
 
   const { taskQuery, reportTaskQuery, task, reportTask, assetTasks, assetsLoading, assetLibraryLoading } =
     useTaskDataQueries({
@@ -1338,27 +1381,40 @@ export default function App() {
       reportTaskId,
       isReportTab,
       isAssetLibraryTab: tab === "asset_library",
-      enableAssetTaskQueries:
-        isReferenceImagePickerOpen ||
-        isToolReferenceImagePickerOpen ||
-        isPrevizReferenceImagePickerOpen ||
-        isPrevizEditReferenceImagePickerOpen ||
-        isPrevizGenerateReferenceImagePickerOpen ||
-        isPrevizToolReferenceImagePickerOpen,
+      enableAssetTaskQueries: enableReferenceAssetTaskQueries,
       isPageVisible,
       assetTaskSummaries,
       assetTaskScope,
+      assetProjectId: assetTaskScope === "project" ? currentProjectId : null,
     });
-  const selectedTaskSummary = useMemo(
-    () => (tasksQuery.data ?? []).find((taskItem) => taskItem.taskId === selectedTaskId) ?? null,
-    [selectedTaskId, tasksQuery.data],
-  );
   const resolvedTaskWorkflowId =
     effectiveRouteState.workflowId ?? task?.workflowId ?? selectedTaskSummary?.workflowId ?? null;
   const currentTaskWorkflowId = normalizeTaskWorkflowId(
     resolvedTaskWorkflowId ?? DEFAULT_TASK_WORKFLOW_ID,
   );
+  const effectiveCurrentProjectId = useMemo(
+    () => String((task?.projectId ?? currentProjectId ?? "") || "").trim() || null,
+    [currentProjectId, task?.projectId],
+  );
+  const effectiveCurrentProject = useMemo(
+    () => availableProjects.find((project) => project.projectId === effectiveCurrentProjectId) ?? null,
+    [availableProjects, effectiveCurrentProjectId],
+  );
+  const hasEffectiveProjectScope = Boolean(effectiveCurrentProjectId && effectiveCurrentProject);
   const currentTaskWorkflow = useMemo(() => getTaskWorkflowConfig(currentTaskWorkflowId), [currentTaskWorkflowId]);
+  const updateTaskProjectMutation = useMutation({
+    mutationFn: async (projectId: string | null) => {
+      if (!selectedTaskId) throw new Error("No task selected");
+      return apiClient.setTaskProject(selectedTaskId, { projectId });
+    },
+    onSuccess: async () => {
+      if (selectedTaskId) {
+        await queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
+      }
+      await queryClient.invalidateQueries({ queryKey: ["tasks"] });
+      await queryClient.invalidateQueries({ queryKey: ["tasks", "project"] });
+    },
+  });
   const isCurrentWorkflowImplemented = currentTaskWorkflow.implemented;
   const isSourceVideoWorkflow = currentTaskWorkflowId === "source_video_flow";
   const isCharacterAnimateWorkflow = currentTaskWorkflowId === "character_animate_workflow";
@@ -2016,6 +2072,7 @@ export default function App() {
         referenceId: reference.referenceId,
         referenceType: reference.type,
         isCurrentTaskAsset: true,
+        isProjectAsset: Boolean(effectiveCurrentProjectId),
         matchesCurrentContext: true,
         assetKind: reference.type === "generated" ? "generated_image" : "uploaded",
       });
@@ -2026,6 +2083,7 @@ export default function App() {
 
     for (const assetTask of assetTasks) {
       const isCurrentTask = assetTask.taskId === currentTaskId;
+      const isProjectAsset = Boolean(effectiveCurrentProjectId) && assetTask.projectId === effectiveCurrentProjectId;
       for (const reference of assetTask.editVideoReferences ?? []) {
         if (!reference.imageUrl) continue;
         if (isCurrentTask) continue;
@@ -2042,6 +2100,7 @@ export default function App() {
           referenceId: reference.referenceId,
           referenceType: reference.type,
           isCurrentTaskAsset: false,
+          isProjectAsset,
           matchesCurrentContext: false,
           assetKind: reference.type === "generated" ? "generated_image" : "uploaded",
         });
@@ -2060,6 +2119,7 @@ export default function App() {
             sourceType: "frame_variant",
             sourceKey: variant.outputKey,
             isCurrentTaskAsset: isCurrentTask,
+            isProjectAsset,
             matchesCurrentContext: isCurrentTask,
             assetKind: "generated_image",
           });
@@ -2080,13 +2140,14 @@ export default function App() {
         sourceType: "frame_capture",
         sourceKey: frame.captureKey,
         isCurrentTaskAsset: true,
+        isProjectAsset: Boolean(effectiveCurrentProjectId),
         matchesCurrentContext: true,
         assetKind: "captured_frame",
       });
     }
 
     return output.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-  }, [assetTasks, editVideoReferences, selectedTaskId, task]);
+  }, [assetTasks, editVideoReferences, effectiveCurrentProjectId, selectedTaskId, task]);
   const referencePickerVideoItems = useMemo<ReferencePickerVideoItem[]>(() => {
     if (!selectedTaskId) return [];
     const output: ReferencePickerVideoItem[] = [];
@@ -2120,6 +2181,7 @@ export default function App() {
     };
 
     const addTaskSourceVideo = (assetTask: TaskDetail) => {
+      const isProjectAsset = Boolean(effectiveCurrentProjectId) && assetTask.projectId === effectiveCurrentProjectId;
       const sourceKind = assetTask.sourceMedia?.kind ?? assetTask.video?.editSource?.mediaType ?? "video";
       if (sourceKind !== "video") return;
       const previewUrl =
@@ -2151,6 +2213,7 @@ export default function App() {
         createdAt: assetTask.updatedAt,
         sourceKind: "uploaded",
         isCurrentTaskAsset: assetTask.taskId === currentTaskId,
+        isProjectAsset,
         matchesCurrentContext: assetTask.taskId === currentTaskId,
         canCaptureFrame: true,
         frameCount: assetTask.sourceMedia?.editSource?.frameCount ?? assetTask.video?.editSource?.frameCount ?? null,
@@ -2161,6 +2224,7 @@ export default function App() {
     };
 
     const addGeneratedVideos = (assetTask: TaskDetail) => {
+      const isProjectAsset = Boolean(effectiveCurrentProjectId) && assetTask.projectId === effectiveCurrentProjectId;
       for (const generation of Object.values(assetTask.segmentGenerations ?? {})) {
         if (generation.isChunkInternal || generation.status !== "complete" || !generation.downloadUrl) continue;
         const origin = getGenerationOrigin(generation, assetTask);
@@ -2180,6 +2244,7 @@ export default function App() {
           createdAt: generation.createdAt,
           sourceKind: "generated",
           isCurrentTaskAsset: assetTask.taskId === currentTaskId,
+          isProjectAsset,
           matchesCurrentContext: matchesCurrentVideoContext(assetTask, generation),
           canCaptureFrame: false,
           durationSec: generation.providerDurationSec ?? generation.requestedDurationSec ?? null,
@@ -2196,6 +2261,7 @@ export default function App() {
           createdAt: exportItem.createdAt,
           sourceKind: "generated",
           isCurrentTaskAsset: assetTask.taskId === currentTaskId,
+          isProjectAsset,
           matchesCurrentContext: assetTask.taskId === currentTaskId,
           canCaptureFrame: false,
         });
@@ -2216,6 +2282,7 @@ export default function App() {
   }, [
     assetTasks,
     characterAnimateMode,
+    effectiveCurrentProjectId,
     currentTaskWorkflowId,
     describeGeneration,
     generationInputMode,
@@ -7120,6 +7187,30 @@ export default function App() {
                       <div>
                         <p className="text-xs font-semibold uppercase tracking-[0.12em] text-ink/45">Workflow</p>
                         <p className="text-sm text-ink/70">{currentTaskWorkflow.label}</p>
+                        {selectedTaskId && (availableProjects.length > 0 || effectiveCurrentProjectId) ? (
+                          <div className="mt-3 flex flex-wrap items-center gap-2">
+                            <label className="text-xs font-semibold uppercase tracking-[0.12em] text-ink/45">Project</label>
+                            <select
+                              className="rounded-md border border-ink/15 bg-white px-3 py-2 text-sm text-ink"
+                              value={effectiveCurrentProjectId ?? ""}
+                              disabled={updateTaskProjectMutation.isPending}
+                              onChange={(event) => {
+                                const nextProjectId = event.target.value || null;
+                                void updateTaskProjectMutation.mutateAsync(nextProjectId).catch((error) => {
+                                  setAppUiError(error instanceof Error ? error.message : "Failed to update task project");
+                                });
+                              }}
+                            >
+                              <option value="">No project</option>
+                              {availableProjects.map((project) => (
+                                <option key={project.projectId} value={project.projectId}>
+                                  {project.name}
+                                </option>
+                              ))}
+                            </select>
+                            {effectiveCurrentProject ? <p className="text-xs text-ink/55">{effectiveCurrentProject.memberCount} member{effectiveCurrentProject.memberCount === 1 ? "" : "s"}</p> : null}
+                          </div>
+                        ) : null}
                       </div>
                       {!isCurrentWorkflowImplemented ? (
                         <span className="rounded-full border border-ink/10 bg-bg px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-ink/55">
@@ -7597,7 +7688,30 @@ export default function App() {
 
             {tab === "asset_library" && (
               <Suspense fallback={<p className="text-sm text-ink/60">Loading Asset Library...</p>}>
-                <AssetsTab ctx={assetLibraryTabCtx} />
+                <div className="space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-ink/10 bg-white p-4">
+                    <div>
+                      <p className="text-sm font-semibold text-ink">Asset scope</p>
+                      <p className="text-xs text-ink/60">
+                        {assetLibraryScope === "all"
+                          ? "Admin view across all users."
+                          : assetLibraryScope === "project"
+                            ? `Assets from tasks linked to ${effectiveCurrentProject?.name ?? "the current project"}.`
+                            : "Your own tasks only."}
+                      </p>
+                    </div>
+                    <select
+                      className="rounded-md border border-ink/15 bg-white px-3 py-2 text-sm text-ink"
+                      value={assetLibraryScope}
+                      onChange={(event) => setAssetLibraryScope(event.target.value as "mine" | "project" | "all")}
+                    >
+                      <option value="mine">My assets</option>
+                      {hasEffectiveProjectScope ? <option value="project">Current project</option> : null}
+                      {isAdmin ? <option value="all">All assets</option> : null}
+                    </select>
+                  </div>
+                  <AssetsTab ctx={assetLibraryTabCtx} />
+                </div>
               </Suspense>
             )}
 
@@ -7623,7 +7737,7 @@ export default function App() {
 
             {tab === "admin" && (
               <Suspense fallback={<p className="text-sm text-ink/60">Loading admin...</p>}>
-                <AdminPromptWizardPage />
+                <AdminWorkspacePage />
               </Suspense>
             )}
           </div>
@@ -7638,6 +7752,7 @@ export default function App() {
         videoItems={referencePickerVideoItems}
         initialTab="upload"
         generatedScopeDefault="task"
+        hasProjectScope={hasEffectiveProjectScope}
         isSaving={isReferenceImagePickerSaving}
         onClose={() => setIsReferenceImagePickerOpen(false)}
         onUpload={uploadEditVideoReferenceImages}
@@ -7662,6 +7777,7 @@ export default function App() {
         videoItems={referencePickerVideoItems}
         initialTab="generated"
         generatedScopeDefault="current_mode_task"
+        hasProjectScope={hasEffectiveProjectScope}
         isSaving={isToolReferenceImagePickerSaving}
         onClose={() => setIsToolReferenceImagePickerOpen(false)}
         onUpload={uploadEditVideoReferenceImages}
@@ -7686,6 +7802,7 @@ export default function App() {
         videoItems={referencePickerVideoItems}
         initialTab="upload"
         generatedScopeDefault="task"
+        hasProjectScope={hasEffectiveProjectScope}
         isSaving={isPrevizReferenceImagePickerSaving}
         onClose={() => setIsPrevizReferenceImagePickerOpen(false)}
         onUpload={uploadEditVideoReferenceImages}
@@ -7710,6 +7827,7 @@ export default function App() {
         videoItems={referencePickerVideoItems}
         initialTab="generated"
         generatedScopeDefault="current_mode_task"
+        hasProjectScope={hasEffectiveProjectScope}
         isSaving={isPrevizToolReferenceImagePickerSaving}
         onClose={() => setIsPrevizToolReferenceImagePickerOpen(false)}
         onUpload={uploadEditVideoReferenceImages}
@@ -7734,6 +7852,7 @@ export default function App() {
         videoItems={referencePickerVideoItems}
         initialTab="generated"
         generatedScopeDefault="current_mode_task"
+        hasProjectScope={hasEffectiveProjectScope}
         isSaving={isPrevizEditReferenceImagePickerSaving}
         onClose={() => setIsPrevizEditReferenceImagePickerOpen(false)}
         onUpload={uploadEditVideoReferenceImages}
@@ -7758,6 +7877,7 @@ export default function App() {
         videoItems={referencePickerVideoItems}
         initialTab="generated"
         generatedScopeDefault="current_mode_task"
+        hasProjectScope={hasEffectiveProjectScope}
         isSaving={isPrevizGenerateReferenceImagePickerSaving}
         onClose={() => setIsPrevizGenerateReferenceImagePickerOpen(false)}
         onUpload={uploadEditVideoReferenceImages}
