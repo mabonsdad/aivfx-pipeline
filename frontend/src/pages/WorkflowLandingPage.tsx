@@ -1,10 +1,12 @@
 import FivefoldLogo from "../components/branding/FivefoldLogo";
+import ProjectBadge from "../components/tasks/ProjectBadge";
 import { getTaskWorkflowConfig, type TaskWorkflowId } from "../lib/taskWorkflows";
 
 type WorkflowLandingPageProps = {
   workflowId: TaskWorkflowId;
   latestTaskId: string | null;
   latestTaskName: string | null;
+  latestTaskProjectName: string | null;
   latestTaskThumbnailUrl: string | null;
   onSelectTask: (workflowId: TaskWorkflowId) => void;
   onOpenLatestTask: (taskId: string) => void;
@@ -17,6 +19,7 @@ export default function WorkflowLandingPage({
   workflowId,
   latestTaskId,
   latestTaskName,
+  latestTaskProjectName,
   latestTaskThumbnailUrl,
   onSelectTask,
   onOpenLatestTask,
@@ -69,7 +72,10 @@ export default function WorkflowLandingPage({
                     decoding="async"
                   />
                 ) : null}
-                <p className="mt-2 text-sm text-ink/75">{latestTaskName}</p>
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <p className="text-sm text-ink/75">{latestTaskName}</p>
+                  {latestTaskProjectName ? <ProjectBadge name={latestTaskProjectName} /> : null}
+                </div>
               </button>
             ) : (
               <div className="mt-8 rounded-xl border border-ink/10 bg-bg px-4 py-3 text-left">

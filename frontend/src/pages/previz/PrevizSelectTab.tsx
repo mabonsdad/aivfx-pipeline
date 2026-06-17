@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 
+import TaskProjectAssignmentCard from "../../components/tasks/TaskProjectAssignmentCard";
 import { CopyIcon, DeleteIcon, DownloadIcon, IconActionButton, PreviewIcon } from "../../components/layout/MediaActionButtons";
 import { PendingButtonLabel, Spinner, StatusNotice } from "../../components/layout/UiFeedback";
 import { copyTextToClipboard } from "../../lib/clipboard";
 import { summarizeImageGenerationError } from "../../lib/imageGenerationErrorSummary";
+import type { ProjectSummary } from "../../types/api";
 
 type GenerateReferenceModel = "chatgpt" | "chatgpt_latest" | "nano_banana" | "nano_banana_pro" | "luma_uni_1" | "luma_uni_1_max";
 type PrevizReferenceMode = "image" | "sheet";
@@ -30,6 +32,10 @@ type ToolSelectedReferenceItem = {
 
 export type PrevizSelectTabCtx = {
   taskId?: string | null;
+  availableProjects: ProjectSummary[];
+  currentProjectId: string | null;
+  isUpdatingProject: boolean;
+  assignProjectToTask: (projectId: string | null) => Promise<void>;
   sceneAspectRatio: string | null;
   onSceneAspectRatioChange: (aspectRatio: string) => Promise<void>;
   uploadReferences: ReferenceLibraryItem[];
@@ -175,6 +181,10 @@ function sheetTypePromptPrefix(sheetType: PrevizSheetType): string {
 export default function PrevizSelectTab({ ctx }: Props) {
   const {
     taskId,
+    availableProjects,
+    currentProjectId,
+    isUpdatingProject,
+    assignProjectToTask,
     sceneAspectRatio,
     onSceneAspectRatioChange,
     uploadReferences,
@@ -430,6 +440,12 @@ export default function PrevizSelectTab({ ctx }: Props) {
 
   return (
     <div className="space-y-4 pt-4">
+      <TaskProjectAssignmentCard
+        projects={availableProjects}
+        currentProjectId={currentProjectId}
+        isSaving={isUpdatingProject}
+        onAssignProject={assignProjectToTask}
+      />
       <div className="rounded-xl border border-ink/15 bg-white p-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="space-y-1">

@@ -1455,13 +1455,18 @@ export default function App() {
     setPrevizGeneratePrompt(typeof task?.previz?.scenePrompt === "string" ? task.previz.scenePrompt : "");
   }, [currentTaskWorkflowId, selectedTaskId]);
   const latestTaskByWorkflow = useMemo(() => {
-    const latest = new Map<TaskWorkflowId, { taskId: string; name: string; updatedAtMs: number }>();
+    const latest = new Map<TaskWorkflowId, { taskId: string; name: string; projectName: string | null; updatedAtMs: number }>();
     for (const taskItem of tasksQuery.data ?? []) {
       const workflowId = normalizeTaskWorkflowId(taskItem.workflowId);
       const updatedAtMs = new Date(taskItem.updatedAt).getTime();
       const existing = latest.get(workflowId);
       if (!existing || updatedAtMs > existing.updatedAtMs) {
-        latest.set(workflowId, { taskId: taskItem.taskId, name: taskItem.name, updatedAtMs });
+        latest.set(workflowId, {
+          taskId: taskItem.taskId,
+          name: taskItem.name,
+          projectName: taskItem.projectName ?? null,
+          updatedAtMs,
+        });
       }
     }
     return latest;
@@ -1474,6 +1479,7 @@ export default function App() {
           workflowId,
           latestTaskId: latestTask?.taskId ?? null,
           latestTaskName: latestTask?.name ?? null,
+          latestTaskProjectName: latestTask?.projectName ?? null,
           latestTaskThumbnailUrl: null,
         };
       }),
@@ -6084,6 +6090,14 @@ export default function App() {
     () => ({
       timelinePlaybackUrl,
       timelineVideoRef,
+      availableProjects,
+      currentProjectId: effectiveCurrentProjectId,
+      isUpdatingProject: updateTaskProjectMutation.isPending,
+      assignProjectToTask: async (projectId) => {
+        await updateTaskProjectMutation.mutateAsync(projectId).catch((error) => {
+          throw error instanceof Error ? error : new Error("Failed to update task project");
+        });
+      },
       sourceMediaKind,
       sourceWaveformUrl,
       frameCount,
@@ -6127,6 +6141,8 @@ export default function App() {
     }),
     [
       timelinePlaybackUrl,
+      availableProjects,
+      effectiveCurrentProjectId,
       sourceMediaKind,
       sourceWaveformUrl,
       task,
@@ -6157,6 +6173,7 @@ export default function App() {
       saveSegmentCropMutation.isPending,
       setCurrentFrameIndex,
       setSelectedSegmentId,
+      updateTaskProjectMutation,
     ],
   );
 
@@ -6369,6 +6386,14 @@ export default function App() {
   const previzSelectTabCtx = useMemo<PrevizSelectTabCtx>(
     () => ({
       taskId: selectedTaskId,
+      availableProjects,
+      currentProjectId: effectiveCurrentProjectId,
+      isUpdatingProject: updateTaskProjectMutation.isPending,
+      assignProjectToTask: async (projectId) => {
+        await updateTaskProjectMutation.mutateAsync(projectId).catch((error) => {
+          throw error instanceof Error ? error : new Error("Failed to update task project");
+        });
+      },
       sceneAspectRatio: previzSceneAspectRatio,
       onSceneAspectRatioChange: async (aspectRatio) => {
         await updatePrevizTask({ sceneAspectRatio: aspectRatio });
@@ -6395,6 +6420,8 @@ export default function App() {
     }),
     [
       selectedTaskId,
+      availableProjects,
+      effectiveCurrentProjectId,
       generatePrevizReferenceImage,
       moveToolSelectedPrevizReference,
       previzCreatedReferenceLibraryItems,
@@ -6407,6 +6434,7 @@ export default function App() {
       setImagePreviewModal,
       toggleSelectedPrevizReferenceId,
       updatePrevizTask,
+      updateTaskProjectMutation,
     ],
   );
 
@@ -7109,6 +7137,7 @@ export default function App() {
           workflowId={currentTaskWorkflowId}
           latestTaskId={workflowLandingLatestTask?.taskId ?? null}
           latestTaskName={workflowLandingLatestTask?.name ?? null}
+          latestTaskProjectName={workflowLandingLatestTask?.projectName ?? null}
           latestTaskThumbnailUrl={workflowLandingLatestTaskThumbnailUrl}
           onSelectTask={openTaskPickerForWorkflow}
           onOpenLatestTask={openTaskAtSelectStep}
@@ -7187,30 +7216,6 @@ export default function App() {
                       <div>
                         <p className="text-xs font-semibold uppercase tracking-[0.12em] text-ink/45">Workflow</p>
                         <p className="text-sm text-ink/70">{currentTaskWorkflow.label}</p>
-                        {selectedTaskId && (availableProjects.length > 0 || effectiveCurrentProjectId) ? (
-                          <div className="mt-3 flex flex-wrap items-center gap-2">
-                            <label className="text-xs font-semibold uppercase tracking-[0.12em] text-ink/45">Project</label>
-                            <select
-                              className="rounded-md border border-ink/15 bg-white px-3 py-2 text-sm text-ink"
-                              value={effectiveCurrentProjectId ?? ""}
-                              disabled={updateTaskProjectMutation.isPending}
-                              onChange={(event) => {
-                                const nextProjectId = event.target.value || null;
-                                void updateTaskProjectMutation.mutateAsync(nextProjectId).catch((error) => {
-                                  setAppUiError(error instanceof Error ? error.message : "Failed to update task project");
-                                });
-                              }}
-                            >
-                              <option value="">No project</option>
-                              {availableProjects.map((project) => (
-                                <option key={project.projectId} value={project.projectId}>
-                                  {project.name}
-                                </option>
-                              ))}
-                            </select>
-                            {effectiveCurrentProject ? <p className="text-xs text-ink/55">{effectiveCurrentProject.memberCount} member{effectiveCurrentProject.memberCount === 1 ? "" : "s"}</p> : null}
-                          </div>
-                        ) : null}
                       </div>
                       {!isCurrentWorkflowImplemented ? (
                         <span className="rounded-full border border-ink/10 bg-bg px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-ink/55">

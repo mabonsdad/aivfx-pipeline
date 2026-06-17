@@ -1,3 +1,4 @@
+import ProjectBadge from "./ProjectBadge";
 import { getTaskWorkflowConfig, type TaskWorkflowId } from "../../lib/taskWorkflows";
 import type { TaskSummary } from "../../types/api";
 
@@ -75,6 +76,11 @@ export default function WorkflowTaskPickerModal({
                   )}
                   <div className="min-w-0">
                     <p className="truncate text-sm font-medium text-ink">{task.name}</p>
+                    {task.projectName ? (
+                      <div className="mt-1">
+                        <ProjectBadge name={task.projectName} />
+                      </div>
+                    ) : null}
                     <p className="mt-1 text-xs text-ink/55">Updated {formatUpdatedAt(task.updatedAt)}</p>
                   </div>
                 </div>

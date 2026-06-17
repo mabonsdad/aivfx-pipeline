@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import FivefoldLogo from "../branding/FivefoldLogo";
+import ProjectBadge from "../tasks/ProjectBadge";
 import { getTaskWorkflowConfig, normalizeTaskWorkflowId, type TaskWorkflowId } from "../../lib/taskWorkflows";
 import type { TaskSummary } from "../../types/api";
 
@@ -97,6 +98,11 @@ export default function TaskSidebar({
           <p className="mt-0.5 text-[10px] uppercase tracking-[0.08em] text-ink/45">
             {getTaskWorkflowConfig(taskItem.workflowId).shortLabel}
           </p>
+          {taskItem.projectName ? (
+            <div className="mt-1">
+              <ProjectBadge name={taskItem.projectName} />
+            </div>
+          ) : null}
           {taskItem.status === "error" ? <p className="text-[10px] font-semibold uppercase tracking-wide text-red-600">ERROR</p> : null}
         </button>
       </div>

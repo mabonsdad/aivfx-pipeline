@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType, type PointerEvent, type RefObject } from "react";
 
+import TaskProjectAssignmentCard from "../../components/tasks/TaskProjectAssignmentCard";
 import { HelpInfoButton, PendingButtonLabel, StatusNotice } from "../../components/layout/UiFeedback";
 import FrameLimitInfoButton from "../../components/workflow/FrameLimitInfoButton";
-import type { SegmentRecord, TaskDetail } from "../../types/api";
+import type { ProjectSummary, SegmentRecord, TaskDetail } from "../../types/api";
 
 type CropAspect = "16:9" | "9:16";
 type CropHandle = "move" | "nw" | "ne" | "sw" | "se";
@@ -143,6 +144,10 @@ function resizeFromCorner(
 }
 
 export type PickFrameTabCtx = {
+  availableProjects: ProjectSummary[];
+  currentProjectId: string | null;
+  isUpdatingProject: boolean;
+  assignProjectToTask: (projectId: string | null) => Promise<void>;
   timelinePlaybackUrl: string;
   timelineVideoRef: RefObject<HTMLMediaElement | null>;
   sourceMediaKind?: "video" | "audio";
@@ -205,6 +210,10 @@ type PickFrameTabProps = {
 export default function PickFrameTab({ ctx }: PickFrameTabProps) {
   const {
     timelinePlaybackUrl,
+    availableProjects,
+    currentProjectId,
+    isUpdatingProject,
+    assignProjectToTask,
     frameCount,
     sourceMediaKind = "video",
     sourceWaveformUrl,
@@ -576,6 +585,12 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
           <p>{uiError}</p>
         </StatusNotice>
       ) : null}
+      <TaskProjectAssignmentCard
+        projects={availableProjects}
+        currentProjectId={currentProjectId}
+        isSaving={isUpdatingProject}
+        onAssignProject={assignProjectToTask}
+      />
       <div className="rounded-2xl border border-ink/10 bg-card p-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="flex items-start gap-2">

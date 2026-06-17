@@ -1,10 +1,12 @@
 import FivefoldLogo from "../components/branding/FivefoldLogo";
+import ProjectBadge from "../components/tasks/ProjectBadge";
 import { getTaskWorkflowConfig, type TaskWorkflowId } from "../lib/taskWorkflows";
 
 type WorkflowHomeCard = {
   workflowId: TaskWorkflowId;
   latestTaskId: string | null;
   latestTaskName: string | null;
+  latestTaskProjectName: string | null;
   latestTaskThumbnailUrl: string | null;
 };
 
@@ -57,7 +59,10 @@ export default function HomePage({ cards, onSelectTask, onOpenLatestTask, onNewT
                           decoding="async"
                         />
                       ) : null}
-                      <p className="mt-2 text-sm text-ink/75">{card.latestTaskName}</p>
+                      <div className="mt-2 flex flex-wrap items-center gap-2">
+                        <p className="text-sm text-ink/75">{card.latestTaskName}</p>
+                        {card.latestTaskProjectName ? <ProjectBadge name={card.latestTaskProjectName} /> : null}
+                      </div>
                     </button>
                   ) : (
                     <div className="rounded-xl border border-ink/10 bg-bg px-4 py-3">
