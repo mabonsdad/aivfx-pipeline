@@ -1059,7 +1059,6 @@ export default function App() {
   const [isReferenceImagePickerSaving, setIsReferenceImagePickerSaving] = useState(false);
   const [isToolReferenceImagePickerOpen, setIsToolReferenceImagePickerOpen] = useState(false);
   const [isToolReferenceImagePickerSaving, setIsToolReferenceImagePickerSaving] = useState(false);
-  const [previzToolSelectedReferenceIds, setPrevizToolSelectedReferenceIds] = useState<string[]>([]);
   const [isPrevizReferenceImagePickerOpen, setIsPrevizReferenceImagePickerOpen] = useState(false);
   const [isPrevizReferenceImagePickerSaving, setIsPrevizReferenceImagePickerSaving] = useState(false);
   const [isPrevizEditReferenceImagePickerOpen, setIsPrevizEditReferenceImagePickerOpen] = useState(false);
@@ -1861,7 +1860,7 @@ export default function App() {
   );
   const previzToolReferencePreview = useMemo<WorkingReferencePreviewItem[]>(
     () =>
-      previzToolSelectedReferenceIds.flatMap((id, index) => {
+      previzSelectedReferenceIds.flatMap((id, index) => {
         const reference = editVideoReferences.find((item) => item.referenceId === id);
         if (!reference) return [];
         const title = humanizeFilename(reference.filename || keyBasenameFromS3Key(reference.key || reference.referenceId));
@@ -1875,7 +1874,7 @@ export default function App() {
           },
         ];
       }),
-    [editVideoReferences, previzToolSelectedReferenceIds],
+    [editVideoReferences, previzSelectedReferenceIds],
   );
   const previzReferencePreview = useMemo<WorkingReferencePreviewItem[]>(
     () =>
@@ -2239,26 +2238,13 @@ export default function App() {
         .filter((itemId) => referencePickerItemById.has(itemId)),
     [previzSelectedReferenceIds, referencePickerItemById],
   );
-  const selectedPrevizToolReferencePickerItemIds = useMemo(
-    () =>
-      previzToolSelectedReferenceIds
-        .map((referenceId) => `reference:${referenceId}`)
-        .filter((itemId) => referencePickerItemById.has(itemId)),
-    [previzToolSelectedReferenceIds, referencePickerItemById],
-  );
+  const selectedPrevizToolReferencePickerItemIds = selectedPrevizReferencePickerItemIds;
   const selectedPrevizFramePickerItemIds = useMemo(
     () =>
       previzSelectedFrameIds
         .map((referenceId) => `reference:${referenceId}`)
         .filter((itemId) => referencePickerItemById.has(itemId)),
     [previzSelectedFrameIds, referencePickerItemById],
-  );
-  const previzFrameReferencePickerItems = useMemo(
-    () =>
-      referencePickerItems.filter(
-        (item) => item.taskId === selectedTaskId && Boolean(item.referenceId) && previzFrameReferenceIds.includes(item.referenceId as string),
-      ),
-    [previzFrameReferenceIds, referencePickerItems, selectedTaskId],
   );
   const totalVideoFrames = frameCount(task);
   const defaultVideoSegment = useMemo(
@@ -5554,21 +5540,21 @@ export default function App() {
   }, [currentTaskWorkflowId, editVideoReferenceLimitByModel]);
 
   const moveToolSelectedPrevizReference = useCallback((referenceId: string, direction: -1 | 1): void => {
-    setPrevizToolSelectedReferenceIds((previous) => {
-      const index = previous.indexOf(referenceId);
-      if (index < 0) return previous;
-      const nextIndex = index + direction;
-      if (nextIndex < 0 || nextIndex >= previous.length) return previous;
-      const updated = [...previous];
-      const [moved] = updated.splice(index, 1);
-      updated.splice(nextIndex, 0, moved);
-      return updated;
-    });
-  }, []);
+    const index = previzSelectedReferenceIds.indexOf(referenceId);
+    if (index < 0) return;
+    const nextIndex = index + direction;
+    if (nextIndex < 0 || nextIndex >= previzSelectedReferenceIds.length) return;
+    const updated = [...previzSelectedReferenceIds];
+    const [moved] = updated.splice(index, 1);
+    updated.splice(nextIndex, 0, moved);
+    void updatePrevizTask({ selectedReferenceIds: updated });
+  }, [previzSelectedReferenceIds, updatePrevizTask]);
 
   const removeToolSelectedPrevizReference = useCallback((referenceId: string): void => {
-    setPrevizToolSelectedReferenceIds((previous) => previous.filter((id) => id !== referenceId));
-  }, []);
+    void updatePrevizTask({
+      selectedReferenceIds: previzSelectedReferenceIds.filter((id) => id !== referenceId),
+    });
+  }, [previzSelectedReferenceIds, updatePrevizTask]);
 
   const moveToolSelectedEditVideoReference = useCallback((referenceId: string, direction: -1 | 1): void => {
     setEditVideoToolSelectedReferenceIds((previous) => {
@@ -5649,7 +5635,7 @@ export default function App() {
       if (!selectedTaskId) throw new Error("No task selected");
       const created = await apiClient.generateEditVideoReference(selectedTaskId, {
         ...payload,
-        selectedReferenceIds: previzToolSelectedReferenceIds.slice(0, 9),
+        selectedReferenceIds: previzSelectedReferenceIds.slice(0, 9),
       });
       if (created.jobId) {
         setJobIds((previous) => (previous.includes(created.jobId as string) ? previous : [...previous, created.jobId as string]));
@@ -5667,7 +5653,6 @@ export default function App() {
     [
       appendEditVideoReferencesToTaskCache,
       previzSelectedReferenceIds,
-      previzToolSelectedReferenceIds,
       queryClient,
       selectedTaskId,
       updatePrevizTask,
@@ -5822,13 +5807,12 @@ export default function App() {
 
   async function applyPrevizFramePickerSelection(selectedItemIds: string[]): Promise<void> {
     const resolvedReferenceIds = await resolveReferencePickerSelection(selectedItemIds);
-    const allowedReferenceIds = resolvedReferenceIds.filter((referenceId) => previzFrameReferenceIds.includes(referenceId));
-    await updatePrevizTask({ selectedFrameIds: allowedReferenceIds });
+    await updatePrevizTask({ selectedFrameIds: resolvedReferenceIds });
   }
 
   async function applyPrevizToolReferencePickerSelection(selectedItemIds: string[]): Promise<void> {
     const resolvedReferenceIds = await resolveReferencePickerSelection(selectedItemIds);
-    setPrevizToolSelectedReferenceIds(resolvedReferenceIds);
+    await updatePrevizTask({ selectedReferenceIds: resolvedReferenceIds });
   }
 
   const captureReferenceFrameFromVideo = useCallback(
@@ -7748,13 +7732,14 @@ export default function App() {
         isOpen={isPrevizGenerateReferenceImagePickerOpen}
         maxSelected={12}
         selectedIds={selectedPrevizFramePickerItemIds}
-        items={previzFrameReferencePickerItems}
-        videoItems={[]}
+        items={referencePickerItems}
+        videoItems={referencePickerVideoItems}
         initialTab="generated"
-        generatedScopeDefault="task"
+        generatedScopeDefault="current_mode_task"
         isSaving={isPrevizGenerateReferenceImagePickerSaving}
         onClose={() => setIsPrevizGenerateReferenceImagePickerOpen(false)}
         onUpload={uploadEditVideoReferenceImages}
+        onCaptureVideoFrame={captureReferenceFrameFromVideo}
         onConfirm={async (selectedItemIds) => {
           setIsPrevizGenerateReferenceImagePickerSaving(true);
           try {
