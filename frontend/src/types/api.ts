@@ -4,6 +4,15 @@ import type { TaskWorkflowId } from "../lib/taskWorkflows";
 
 type FrameVariantModelId = FullEditModelId | PatchEditModelId | "generated_extension_anchor" | "manual_upload";
 
+export type AssetOrigin = {
+  workflowId?: string;
+  stepOrigin?: string;
+  toolOrigin?: string;
+  creationMode?: string | null;
+  appSurface?: string | null;
+  [key: string]: unknown;
+};
+
 export type TaskSummary = {
   taskId: string;
   name: string;
@@ -487,12 +496,7 @@ export type SegmentGeneration = {
   } | null;
   cleanupTrackId?: string;
   derivedFromGenerationId?: string;
-  origin?: {
-    workflowId?: string;
-    stepOrigin?: string;
-    toolOrigin?: string;
-    creationMode?: string | null;
-  } | null;
+  origin?: AssetOrigin | null;
   characterAnimation?: {
     workflowId?: string;
     mode?: "pose_video" | "audio_driven";

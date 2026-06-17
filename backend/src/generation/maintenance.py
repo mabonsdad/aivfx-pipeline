@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+from src.core.asset_origin import build_asset_origin, merge_asset_origin
+
 _START_END_MODES = frozenset({"kling_start_end", "veo_start_end", "ltx23_i2v_start_end"})
 _START_ONLY_MODES = frozenset({"kling_start_only", "veo_start_only", "runway_i2v", "sora_i2v", "happy_horse_i2v", "wan_a14b_i2v"})
 
@@ -82,12 +84,12 @@ def _infer_generation_origin(task: dict[str, Any], generation: dict[str, Any]) -
     else:
         creation_mode = _infer_source_generation_input_mode(task, generation)
 
-    return {
-        "workflowId": workflow_id,
-        "stepOrigin": step_origin,
-        "toolOrigin": tool_origin,
-        "creationMode": creation_mode,
-    }
+    return build_asset_origin(
+        workflow_id=workflow_id,
+        step_origin=step_origin,
+        tool_origin=tool_origin,
+        creation_mode=creation_mode,
+    )
 
 
 def backfill_segment_generation_origin(task: dict[str, Any]) -> bool:
@@ -100,13 +102,7 @@ def backfill_segment_generation_origin(task: dict[str, Any]) -> bool:
             continue
         existing_origin = generation.get("origin") if isinstance(generation.get("origin"), dict) else {}
         inferred_origin = _infer_generation_origin(task, generation)
-        next_origin = {
-            "workflowId": str(existing_origin.get("workflowId") or inferred_origin.get("workflowId") or "").strip() or None,
-            "stepOrigin": str(existing_origin.get("stepOrigin") or inferred_origin.get("stepOrigin") or "").strip() or None,
-            "toolOrigin": str(existing_origin.get("toolOrigin") or inferred_origin.get("toolOrigin") or "").strip() or None,
-            "creationMode": str(existing_origin.get("creationMode") or inferred_origin.get("creationMode") or "").strip() or None,
-        }
-        normalized_origin = {key: value for key, value in next_origin.items() if value}
+        normalized_origin = merge_asset_origin(existing_origin, inferred_origin)
         if normalized_origin != existing_origin:
             generation["origin"] = normalized_origin
             changed = True

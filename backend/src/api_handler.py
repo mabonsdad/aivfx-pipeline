@@ -40,6 +40,7 @@ from src.api.routes_task_reports import handle_task_report_routes
 from src.api.routes_task_segments import handle_task_segment_routes
 from src.api.routes_tasks_root import handle_tasks_root_routes
 from src.api.routes_user import handle_me
+from src.core.asset_origin import build_asset_origin
 from src.core.assets import ApiAssetPaths, AssetPaths, AssetStore
 from src.core.auth import UnauthorizedError, get_user_claims, get_user_groups, get_user_id, is_admin_claims
 from src.core.config import load_settings
@@ -600,12 +601,12 @@ def _create_manual_uploaded_segment_generation(
             "requestedDurationSec": segment.get("durationSec"),
             "providerDurationSec": segment.get("durationSec"),
         },
-        "origin": {
-            "workflowId": str(task.get("workflowId") or DEFAULT_TASK_WORKFLOW_ID),
-            "stepOrigin": "generate",
-            "toolOrigin": "manual_upload",
-            "creationMode": input_mode,
-        },
+        "origin": build_asset_origin(
+            workflow_id=str(task.get("workflowId") or DEFAULT_TASK_WORKFLOW_ID),
+            step_origin="generate",
+            tool_origin="manual_upload",
+            creation_mode=input_mode,
+        ),
     }
     if isinstance(start_frame, dict):
         generation_record["sourceFirstFrameCaptureKey"] = start_frame.get("captureKey")
@@ -1352,11 +1353,11 @@ def _queue_segment_generation_record(
             "workflowId": str(task.get("workflowId") or DEFAULT_TASK_WORKFLOW_ID),
             "preserveFrames": bool(preserve_frames),
         },
-        "origin": {
-            "workflowId": str(task.get("workflowId") or DEFAULT_TASK_WORKFLOW_ID),
-            "stepOrigin": "post_process" if extension_metadata and extension_metadata.get("type") == "clip_lengthen" else "generate",
-            "toolOrigin": "clip_lengthen" if extension_metadata and extension_metadata.get("type") == "clip_lengthen" else "segment_generate",
-        },
+        "origin": build_asset_origin(
+            workflow_id=str(task.get("workflowId") or DEFAULT_TASK_WORKFLOW_ID),
+            step_origin="post_process" if extension_metadata and extension_metadata.get("type") == "clip_lengthen" else "generate",
+            tool_origin="clip_lengthen" if extension_metadata and extension_metadata.get("type") == "clip_lengthen" else "segment_generate",
+        ),
         "status": "queued",
         "outputKey": None,
         "jobId": job_id,

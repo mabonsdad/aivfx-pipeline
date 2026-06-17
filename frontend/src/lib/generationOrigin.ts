@@ -11,6 +11,8 @@ export type GenerationOrigin = {
   stepOrigin: string;
   toolOrigin: string;
   creationMode?: string | null;
+  appSurface?: string | null;
+  [key: string]: unknown;
 };
 
 function inferLegacySourceInputMode(
@@ -56,6 +58,8 @@ export function getGenerationOrigin(
       stepOrigin: persisted.stepOrigin,
       toolOrigin: persisted.toolOrigin,
       creationMode: persisted.creationMode ?? null,
+      appSurface: typeof persisted.appSurface === "string" ? persisted.appSurface : null,
+      ...Object.fromEntries(Object.entries(persisted).filter(([key]) => !["workflowId", "stepOrigin", "toolOrigin", "creationMode", "appSurface"].includes(key))),
     };
   }
 
@@ -101,6 +105,7 @@ export function getGenerationOrigin(
     stepOrigin,
     toolOrigin,
     creationMode,
+    appSurface: "main_app",
   };
 }
 

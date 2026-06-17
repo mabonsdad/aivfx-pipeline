@@ -50,7 +50,13 @@ import type {
 } from "./lib/generated/videoContracts";
 import { getGenerationModeConfig, type GenerateInputMode } from "./lib/generationModeRegistry";
 import { getGenerationOrigin, isPostProcessDerivedGeneration, matchesGenerateStepGrid } from "./lib/generationOrigin";
-import { DEFAULT_TASK_WORKFLOW_ID, getTaskWorkflowConfig, normalizeTaskWorkflowId, type TaskWorkflowId } from "./lib/taskWorkflows";
+import {
+  DEFAULT_TASK_WORKFLOW_ID,
+  USER_FACING_TASK_WORKFLOW_IDS,
+  getTaskWorkflowConfig,
+  normalizeTaskWorkflowId,
+  type TaskWorkflowId,
+} from "./lib/taskWorkflows";
 import { resolveLatestTaskThumbnailUrl } from "./lib/taskPreview";
 import { type PrimaryWorkflowSection } from "./lib/workflowSections";
 import { currentUser, login, logout } from "./lib/auth";
@@ -1406,7 +1412,7 @@ export default function App() {
   }, [tasksQuery.data]);
   const workflowHomeCards = useMemo(
     () =>
-      (["simple_generation_workflow", "character_animate_workflow", "source_video_flow"] as TaskWorkflowId[]).map((workflowId) => {
+      USER_FACING_TASK_WORKFLOW_IDS.map((workflowId) => {
         const latestTask = latestTaskByWorkflow.get(workflowId) ?? null;
         return {
           workflowId,

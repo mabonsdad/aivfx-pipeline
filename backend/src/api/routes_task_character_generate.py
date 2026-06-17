@@ -5,6 +5,7 @@ from typing import Any, Callable
 
 from PIL import Image, ImageOps
 
+from src.core.asset_origin import build_asset_origin
 from src.models.schemas import CharacterAnimateGenerateRequest
 
 
@@ -218,12 +219,12 @@ def handle_task_character_generate_routes(
             "expressionIntensity": int(req.expressionIntensity) if req.mode == "pose_video" else None,
             "requestedDurationSec": round(duration_sec, 3),
         },
-        "origin": {
-            "workflowId": "character_animate_workflow",
-            "stepOrigin": "generate",
-            "toolOrigin": "character_generate",
-            "creationMode": req.mode,
-        },
+        "origin": build_asset_origin(
+            workflow_id="character_animate_workflow",
+            step_origin="generate",
+            tool_origin="character_generate",
+            creation_mode=req.mode,
+        ),
         "status": "queued",
         "outputKey": None,
         "posterKey": None,

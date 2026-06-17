@@ -79,8 +79,10 @@ Important points:
 - Sign out and sign back in after Cognito group changes so the refreshed token includes updated `cognito:groups` claims.
 - New prod users created via Cognito admin flows may start in `FORCE_CHANGE_PASSWORD` state.
 - Use the manual smoke checklist after deploys or major refactors.
+- Collaborators should not deploy shared dev or prod directly; merge and deploy remain owner-controlled from `main`.
 
 ## Related Docs
 
 - [Manual Smoke Checklist](./manual-smoke-checklist.md)
+- [Collaboration and Release](./collaboration-and-release.md)
 - [Production Subdomain Cutover](./subdomain-prod-cutover.md)

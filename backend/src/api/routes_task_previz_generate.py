@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from src.core.asset_origin import build_asset_origin
 from src.models.schemas import PrevizGenerateRequest
 
 
@@ -118,12 +119,12 @@ def handle_task_previz_generate_routes(
             "requestedDurationSec": duration_sec,
             "scenePrompt": str(previz.get("scenePrompt") or "").strip() or None,
         },
-        "origin": {
-            "workflowId": "simple_generation_workflow",
-            "stepOrigin": "generate",
-            "toolOrigin": "previz_generate",
-            "creationMode": "previz",
-        },
+        "origin": build_asset_origin(
+            workflow_id="simple_generation_workflow",
+            step_origin="generate",
+            tool_origin="previz_generate",
+            creation_mode="previz",
+        ),
         "status": "queued",
         "outputKey": None,
         "posterKey": None,

@@ -5,6 +5,7 @@ from typing import Any, Callable
 
 from botocore.exceptions import ClientError
 
+from src.core.asset_origin import build_asset_origin
 from src.core.http import parse_json_body
 from src.core.prompt_wizard_admin import resolve_prompt_wizard_model_config
 from src.models.schemas import (
@@ -252,12 +253,12 @@ def handle_task_segment_routes(
                 "selectedReferenceIds": list(req.selectedReferenceIds or []),
                 "audioReferenceId": req.audioReferenceId,
             },
-            "origin": {
-                "workflowId": str(task.get("workflowId") or "source_video_flow"),
-                "stepOrigin": "generate",
-                "toolOrigin": "segment_generate",
-                "creationMode": req.inputMode,
-            },
+            "origin": build_asset_origin(
+                workflow_id=str(task.get("workflowId") or "source_video_flow"),
+                step_origin="generate",
+                tool_origin="segment_generate",
+                creation_mode=req.inputMode,
+            ),
             "status": "queued",
             "outputKey": None,
             "jobId": job_id,

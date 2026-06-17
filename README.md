@@ -123,6 +123,12 @@ The workflow controls:
 - which generation routes are valid
 - how outputs are interpreted in reports and asset views
 
+There is also a reserved shared-contract workflow id:
+
+- `canvas_workflow`
+
+This is recognized by the backend and the current app so canvas-authored tasks can coexist in the same metadata and asset store, but it is not yet exposed as a user-facing workflow in the main shell.
+
 ### Mode
 A `mode` defines a generation route within a workflow.
 
@@ -171,6 +177,7 @@ Start here if you are reorienting yourself to the current app:
 3. workflow-specific pages
 4. [Implementation and Registries](./docs/implementation-and-registries.md)
 5. [Environments and Deployment](./docs/environments-and-deployment.md)
+6. [Collaboration and Release](./docs/collaboration-and-release.md)
 
 ### Product / app documentation
 - [App Overview](./docs/app-overview.md)
@@ -179,6 +186,7 @@ Start here if you are reorienting yourself to the current app:
 - [Previz Workflow](./docs/workflows/previz-workflow.md)
 - [Implementation and Registries](./docs/implementation-and-registries.md)
 - [Environments and Deployment](./docs/environments-and-deployment.md)
+- [Collaboration and Release](./docs/collaboration-and-release.md)
 
 ### Supporting documentation
 - [External API Reference](./docs/external-api-reference.md)

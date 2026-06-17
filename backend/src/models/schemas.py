@@ -34,7 +34,7 @@ def _validate_choice(value: str, *, field_name: str, allowed: tuple[str, ...]) -
 
 class TaskCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=15)
-    workflowId: Literal["source_video_flow", "character_animate_workflow", "simple_generation_workflow"] = "source_video_flow"
+    workflowId: Literal["source_video_flow", "character_animate_workflow", "simple_generation_workflow", "canvas_workflow"] = "source_video_flow"
     scenePrompt: str | None = Field(default=None, max_length=4000)
 
 

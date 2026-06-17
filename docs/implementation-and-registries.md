@@ -38,6 +38,7 @@ Current workflow ids:
 - `source_video_flow`
 - `character_animate_workflow`
 - `simple_generation_workflow`
+- `canvas_workflow` (recognized for shared-contract compatibility, not yet user-facing in the main shell)
 
 ## Generation Mode Registry
 
@@ -133,6 +134,22 @@ Generation assets use persisted origin metadata so the app can reason about:
 - which workflow created an asset
 - which step/tool created it
 - which creation mode or route it belongs to
+- which app surface registered it
+
+Current standard origin fields are:
+
+- `workflowId`
+- `stepOrigin`
+- `toolOrigin`
+- `creationMode`
+- `appSurface`
+
+Future workflow-specific origin extensions should be namespaced rather than flattened into new shared top-level fields.
+
+Shared helper files:
+
+- [`backend/src/core/asset_origin.py`](../backend/src/core/asset_origin.py)
+- [`frontend/src/lib/generationOrigin.ts`](../frontend/src/lib/generationOrigin.ts)
 
 That origin data is important for consistent asset-grid behavior and report scoping.
 
@@ -176,4 +193,5 @@ Background workers handle:
 
 - [App Overview](./app-overview.md)
 - [Environments and Deployment](./environments-and-deployment.md)
+- [Collaboration and Release](./collaboration-and-release.md)
 - [External API Reference](./external-api-reference.md)
