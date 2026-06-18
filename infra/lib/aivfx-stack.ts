@@ -6,6 +6,7 @@ import * as apigwv2Integrations from "aws-cdk-lib/aws-apigatewayv2-integrations"
 import * as acm from "aws-cdk-lib/aws-certificatemanager";
 import * as cloudfront from "aws-cdk-lib/aws-cloudfront";
 import * as cognito from "aws-cdk-lib/aws-cognito";
+import * as iam from "aws-cdk-lib/aws-iam";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as lambdaEventSources from "aws-cdk-lib/aws-lambda-event-sources";
 import * as s3 from "aws-cdk-lib/aws-s3";
@@ -277,6 +278,12 @@ export class AivfxStack extends cdk.Stack {
     metadataBucket.grantReadWrite(workerFn);
     apiKeysSecret.grantRead(apiFn);
     apiKeysSecret.grantRead(workerFn);
+    apiFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["cognito-idp:ListUsers", "cognito-idp:AdminListGroupsForUser"],
+        resources: [userPool.userPoolArn],
+      }),
+    );
 
     const integration = new apigwv2Integrations.HttpLambdaIntegration("ApiIntegration", apiFn);
     const jwtAuthorizer = new apigwv2Authorizers.HttpJwtAuthorizer(

@@ -258,7 +258,10 @@ def handle_admin_routes(
         user_pool_id = _claim_pool_id(claims)
         if not user_pool_id:
             return error_response_fn(500, "User pool could not be resolved from claims", origin=origin)
-        cognito_users = _list_cognito_users(user_pool_id)
+        try:
+            cognito_users = _list_cognito_users(user_pool_id)
+        except Exception as exc:
+            return error_response_fn(500, f"Could not list Cognito users: {exc}", origin=origin)
         projects = store.list_projects()
         user_projects: dict[str, list[str]] = {}
         for project in projects:

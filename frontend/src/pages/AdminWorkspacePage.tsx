@@ -38,6 +38,7 @@ export default function AdminWorkspacePage() {
     [projectsQuery.data?.projects, usersQuery.data?.projects],
   );
   const users = useMemo(() => usersQuery.data?.users ?? [], [usersQuery.data?.users]);
+  const isCreatingProject = selectedProjectId == null;
   const selectedProject = useMemo(
     () => projects.find((project) => project.projectId === selectedProjectId) ?? null,
     [projects, selectedProjectId],
@@ -105,23 +106,37 @@ export default function AdminWorkspacePage() {
         </StatusNotice>
       ) : null}
 
+      {projectsQuery.error ? (
+        <StatusNotice variant="error">
+          <p>Could not load projects: {projectsQuery.error.message}</p>
+        </StatusNotice>
+      ) : null}
+
+      {usersQuery.error ? (
+        <StatusNotice variant="error">
+          <p>Could not load users: {usersQuery.error.message}</p>
+        </StatusNotice>
+      ) : null}
+
       <section className="grid gap-4 lg:grid-cols-[320px_minmax(0,1fr)]">
         <div className="rounded-xl border border-ink/10 bg-white p-4">
           <div className="flex items-center justify-between gap-3">
             <h3 className="text-sm font-semibold">Projects</h3>
-            <button
-              type="button"
-              className="rounded border border-ink/20 bg-white px-3 py-1.5 text-xs"
-              onClick={() => {
-                setSelectedProjectId(null);
-                setDraftName("");
-                setDraftDescription("");
-                setDraftMemberUserIds([]);
-                setSaveMessage(null);
-              }}
-            >
-              New project
-            </button>
+            {!isCreatingProject ? (
+              <button
+                type="button"
+                className="rounded border border-ink/20 bg-white px-3 py-1.5 text-xs"
+                onClick={() => {
+                  setSelectedProjectId(null);
+                  setDraftName("");
+                  setDraftDescription("");
+                  setDraftMemberUserIds([]);
+                  setSaveMessage(null);
+                }}
+              >
+                New project
+              </button>
+            ) : null}
           </div>
           <div className="mt-3 space-y-2">
             {projectsQuery.isLoading ? <p className="text-sm text-ink/60">Loading projects...</p> : null}
@@ -146,6 +161,7 @@ export default function AdminWorkspacePage() {
         <div className="rounded-xl border border-ink/10 bg-white p-4">
           <div className="flex items-center justify-between gap-3">
             <h3 className="text-sm font-semibold">{selectedProjectId ? "Edit project" : "Create project"}</h3>
+            {isCreatingProject ? <p className="text-xs text-ink/55">Fill in the form below to create a project.</p> : null}
             {saveProjectMutation.error ? <p className="text-xs text-red-700">{saveProjectMutation.error.message}</p> : null}
           </div>
           <div className="mt-4 grid gap-4">
@@ -159,6 +175,9 @@ export default function AdminWorkspacePage() {
             </label>
             <div className="space-y-2">
               <p className="text-xs font-semibold uppercase tracking-wide text-ink/70">Members</p>
+              {!usersQuery.isLoading && !selectableUsers.length ? (
+                <p className="text-sm text-ink/60">No users available yet.</p>
+              ) : null}
               <div className="grid gap-2 md:grid-cols-2">
                 {selectableUsers.map((user) => {
                   const checked = draftMemberUserIds.includes(user.userId);
@@ -186,7 +205,7 @@ export default function AdminWorkspacePage() {
               <button
                 type="button"
                 className="rounded bg-accent px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
-                disabled={saveProjectMutation.isPending}
+                disabled={saveProjectMutation.isPending || !selectableUsers.length}
                 onClick={() => {
                   setSaveMessage(null);
                   void saveProjectMutation.mutateAsync();
