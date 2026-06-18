@@ -23,6 +23,8 @@ export default function TaskProjectAssignmentCard({
     setError(null);
   }, [currentProjectId]);
 
+  if (!projects.length) return null;
+
   return (
     <div className="rounded-xl border border-ink/15 bg-white p-4">
       <div className="flex flex-wrap items-end justify-between gap-3">
@@ -60,7 +62,6 @@ export default function TaskProjectAssignmentCard({
         </div>
       </div>
       {error ? <p className="mt-3 text-xs text-red-700">{error}</p> : null}
-      {!projects.length ? <p className="mt-3 text-xs text-ink/55">No shared projects are available for this account yet.</p> : null}
     </div>
   );
 }

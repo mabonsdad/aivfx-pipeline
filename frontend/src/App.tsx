@@ -1361,18 +1361,63 @@ export default function App() {
       })).filter((option) => option.enabled),
     [automationSelectedVideoOptionIds],
   );
-  const assetTaskSummaries =
-    tab === "asset_library" && assetLibraryScope === "all" && isAdmin
-      ? adminAllTasksQuery.data ?? []
-      : (isProjectScopeAvailable && (assetLibraryScope === "project" || enableReferenceAssetTaskQueries))
-        ? projectTasksQuery.data ?? []
-        : tasksQuery.data ?? [];
-  const assetTaskScope: "mine" | "all" | "project" =
-    tab === "asset_library" && assetLibraryScope === "all" && isAdmin
-      ? "all"
-      : (isProjectScopeAvailable && (assetLibraryScope === "project" || enableReferenceAssetTaskQueries))
-        ? "project"
-        : "mine";
+  const assetTaskRequests = useMemo(() => {
+    if (tab === "asset_library" && assetLibraryScope === "all" && isAdmin) {
+      return (adminAllTasksQuery.data ?? []).map((taskSummary) => ({
+        taskSummary,
+        scope: "all" as const,
+        projectId: null,
+      }));
+    }
+
+    if (tab === "asset_library" && assetLibraryScope === "project" && isProjectScopeAvailable) {
+      return (projectTasksQuery.data ?? []).map((taskSummary) => ({
+        taskSummary,
+        scope: "project" as const,
+        projectId: currentProjectId,
+      }));
+    }
+
+    const requests = new Map<
+      string,
+      {
+        taskSummary: TaskSummary;
+        scope: "mine" | "all" | "project";
+        projectId?: string | null;
+      }
+    >();
+
+    for (const taskSummary of tasksQuery.data ?? []) {
+      requests.set(taskSummary.taskId, {
+        taskSummary,
+        scope: "mine",
+        projectId: null,
+      });
+    }
+
+    if (enableReferenceAssetTaskQueries && isProjectScopeAvailable) {
+      for (const taskSummary of projectTasksQuery.data ?? []) {
+        if (requests.has(taskSummary.taskId)) continue;
+        requests.set(taskSummary.taskId, {
+          taskSummary,
+          scope: "project",
+          projectId: currentProjectId,
+        });
+      }
+    }
+
+    return Array.from(requests.values());
+  }, [
+    adminAllTasksQuery.data,
+    assetLibraryScope,
+    currentProjectId,
+    enableReferenceAssetTaskQueries,
+    isAdmin,
+    isProjectScopeAvailable,
+    projectTasksQuery.data,
+    tab,
+    tasksQuery.data,
+  ]);
 
   const { taskQuery, reportTaskQuery, task, reportTask, assetTasks, assetsLoading, assetLibraryLoading } =
     useTaskDataQueries({
@@ -1383,9 +1428,7 @@ export default function App() {
       isAssetLibraryTab: tab === "asset_library",
       enableAssetTaskQueries: enableReferenceAssetTaskQueries,
       isPageVisible,
-      assetTaskSummaries,
-      assetTaskScope,
-      assetProjectId: assetTaskScope === "project" ? currentProjectId : null,
+      assetTaskRequests,
     });
   const resolvedTaskWorkflowId =
     effectiveRouteState.workflowId ?? task?.workflowId ?? selectedTaskSummary?.workflowId ?? null;
