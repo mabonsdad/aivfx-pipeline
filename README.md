@@ -213,6 +213,8 @@ npm run deploy:frontend:dev
 npm run deploy:frontend:prod
 ```
 
+For routine branch testing without deploying, use the local frontend workflow documented in [README-local.md](./README-local.md).
+
 Data migration helpers:
 
 ```bash
