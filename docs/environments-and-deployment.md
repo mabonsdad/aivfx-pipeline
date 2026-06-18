@@ -46,6 +46,36 @@ npm run deploy:frontend:dev
 npm run deploy:frontend:prod
 ```
 
+## Local Frontend Commands
+
+Use local frontend development for most branch testing. This keeps day-to-day UI iteration off the shared dev URL while still using the selected environment's API, Cognito, and shared storage.
+
+Default local workflow against the current dev environment:
+
+```bash
+npm run local:frontend:dev
+```
+
+Optional local targets:
+
+```bash
+npm run local:frontend:prod
+npm run local:frontend:shared
+```
+
+If you only want to write `frontend/.env.local` and start Vite yourself later:
+
+```bash
+npm run setup:frontend:local:dev
+```
+
+Important points:
+
+- the local runner uses `http://localhost:5173/` because that callback is already allowed in Cognito
+- if you want another localhost port or callback path, add it to the Cognito app client first
+- `frontend/.env.local` is gitignored and can be safely rewritten per environment
+- shared dev should be deployed from reviewed `main`, not from routine feature branches
+
 ## Migration Tools
 
 ### Clone one prod task into dev

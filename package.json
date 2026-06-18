@@ -4,6 +4,12 @@
   "packageManager": "npm@10",
   "scripts": {
     "dev:frontend": "cd frontend && npm run dev",
+    "local:frontend:dev": "node scripts/run_frontend_local.mjs dev",
+    "local:frontend:prod": "node scripts/run_frontend_local.mjs prod",
+    "local:frontend:shared": "node scripts/run_frontend_local.mjs shared",
+    "setup:frontend:local:dev": "node scripts/run_frontend_local.mjs dev --env-only",
+    "setup:frontend:local:prod": "node scripts/run_frontend_local.mjs prod --env-only",
+    "setup:frontend:local:shared": "node scripts/run_frontend_local.mjs shared --env-only",
     "build:frontend": "cd frontend && npm run build",
     "build:frontend:dev": "cd frontend && npm run build:devhosted",
     "build:frontend:prod": "cd frontend && npm run build:prod",

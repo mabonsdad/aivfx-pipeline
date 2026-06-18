@@ -101,6 +101,33 @@ Current recognized workflow ids are:
 - Owner reviews and merges
 - Owner deploys shared dev
 
+Local-first workflow for branch testing:
+
+- run branch work locally against shared dev by default
+- do not overwrite the shared dev URL for routine UI iteration
+- only deploy shared dev when a reviewed branch is ready to become the team-visible integration state
+
+Local commands:
+
+```bash
+npm run local:frontend:dev
+```
+
+This writes `frontend/.env.local` from `infra/cdk-outputs.dev.json` and starts Vite on `http://localhost:5173/`.
+
+Optional variants:
+
+```bash
+npm run local:frontend:prod
+npm run local:frontend:shared
+```
+
+If you only want to refresh local env vars without starting the dev server:
+
+```bash
+npm run setup:frontend:local:dev
+```
+
 Deploy commands:
 
 ```bash
