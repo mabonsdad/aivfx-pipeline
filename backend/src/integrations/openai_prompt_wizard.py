@@ -245,13 +245,40 @@ def _validate_wizard_result(result: dict[str, Any], required_markers: list[str])
     return result
 
 
+# USD per 1,000,000 tokens. Estimate only — set to real pricing per model.
+_OPENAI_PRICE_PER_MTOK: dict[str, dict[str, float]] = {
+    "gpt-5.5": {"input": 1.25, "output": 10.0},
+}
+
+
+def _usage_from_payload(payload: dict[str, Any], model: str) -> dict[str, Any]:
+    usage = payload.get("usage") if isinstance(payload, dict) else None
+    if not isinstance(usage, dict):
+        usage = {}
+    input_tokens = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
+    output_tokens = int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
+    price = _OPENAI_PRICE_PER_MTOK.get(model)
+    estimated_cost_usd: float | None = None
+    if price:
+        estimated_cost_usd = round(
+            (input_tokens * price["input"] + output_tokens * price["output"]) / 1_000_000, 6
+        )
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "estimated_cost_usd": estimated_cost_usd,
+    }
+
+
 def improve_video_prompt(
     *,
     api_key: str,
     request_payload: dict[str, Any],
     system_prompt: str | None = None,
     edited_first_frame_url: str | None = None,
-) -> dict[str, Any]:
+    temperature: float | None = None,
+    return_usage: bool = False,
+) -> dict[str, Any] | tuple[dict[str, Any], dict[str, Any]]:
     prompt = str(request_payload.get("user_draft_prompt") or "").strip()
     if not prompt:
         raise OpenAIPromptWizardError("Prompt is required")
@@ -266,23 +293,27 @@ def improve_video_prompt(
     ]
     if edited_first_frame_url:
         content.append({"type": "input_image", "image_url": edited_first_frame_url})
+    model = "gpt-5.5"
+    request_body: dict[str, Any] = {
+        "model": model,
+        "instructions": system_prompt or VIDEO_PROMPT_WIZARD_SYSTEM_PROMPT,
+        "input": [
+            {
+                "role": "user",
+                "content": content,
+            }
+        ],
+        "text": {"format": VIDEO_PROMPT_WIZARD_JSON_SCHEMA},
+    }
+    if temperature is not None:
+        request_body["temperature"] = temperature
     response = requests.post(
         "https://api.openai.com/v1/responses",
         headers={
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         },
-        json={
-            "model": "gpt-5.5",
-            "instructions": system_prompt or VIDEO_PROMPT_WIZARD_SYSTEM_PROMPT,
-            "input": [
-                {
-                    "role": "user",
-                    "content": content,
-                }
-            ],
-            "text": {"format": VIDEO_PROMPT_WIZARD_JSON_SCHEMA},
-        },
+        json=request_body,
         timeout=120,
     )
     if response.status_code >= 400:
@@ -296,4 +327,7 @@ def improve_video_prompt(
         raise OpenAIPromptWizardError("Prompt Wizard returned invalid JSON") from exc
     if not isinstance(parsed, dict):
         raise OpenAIPromptWizardError("Prompt Wizard returned an invalid response shape")
-    return _validate_wizard_result(parsed, [str(marker) for marker in required_markers if str(marker).strip()])
+    result = _validate_wizard_result(parsed, [str(marker) for marker in required_markers if str(marker).strip()])
+    if return_usage:
+        return result, _usage_from_payload(payload, model)
+    return result
