@@ -95,6 +95,13 @@ from src.integrations.openai_images import (
     generate_image_from_references as generate_openai_image_from_references,
 )
 from src.integrations.openai_prompt_wizard import improve_video_prompt as improve_openai_video_prompt
+from src.integrations.openai_lookdev_wizard import improve_lookdev_prompt as improve_openai_lookdev_prompt
+from src.api.routes_canvas import handle_canvas_routes
+from src.core.canvas_prompt_admin import (
+    ADMIN_CANVAS_PROMPT_PROFILES_KEY,
+    normalize_canvas_prompt_profiles_for_read,
+    resolve_canvas_system_prompt,
+)
 from src.models.schemas import (
     ChunkedSegmentGenerateRequest,
     EditVideoReferenceGenerateRequest,
@@ -1575,6 +1582,27 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
     )
     if me_response is not None:
         return me_response
+
+    canvas_response = handle_canvas_routes(
+        method,
+        path,
+        event=event,
+        origin=origin,
+        user_id=user_id,
+        claims=claims,
+        json_model=_json_model,
+        response_fn=response,
+        error_response_fn=error_response,
+        get_openai_api_key_fn=lambda: str(load_secret(settings.secrets_arn).get("OPENAI_API_KEY") or ""),
+        get_canvas_system_prompt_fn=lambda profile: resolve_canvas_system_prompt(
+            normalize_canvas_prompt_profiles_for_read(store.get_json(ADMIN_CANVAS_PROMPT_PROFILES_KEY)),
+            profile,
+        ),
+        improve_lookdev_prompt_fn=improve_openai_lookdev_prompt,
+        logger=logger,
+    )
+    if canvas_response is not None:
+        return canvas_response
 
     admin_response = handle_admin_routes(
         method,

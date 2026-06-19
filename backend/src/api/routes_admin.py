@@ -14,6 +14,11 @@ from src.core.prompt_wizard_admin import (
     normalize_prompt_wizard_admin_config_for_read,
     normalize_prompt_wizard_admin_config_for_write,
 )
+from src.core.canvas_prompt_admin import (
+    ADMIN_CANVAS_PROMPT_PROFILES_KEY,
+    normalize_canvas_prompt_profiles_for_read,
+    normalize_canvas_prompt_profiles_for_write,
+)
 from src.models.schemas import AdminProjectUpsertRequest
 
 
@@ -200,6 +205,44 @@ def handle_admin_routes(
                         "isAdmin": admin_access,
                         "viaPin": pin_access and not admin_access,
                     },
+                },
+                origin=origin,
+            )
+
+        return error_response_fn(405, "Method not allowed", origin=origin)
+
+    if path == "/admin/canvas-prompt-profiles":
+        has_access = admin_access or pin_access
+        if not has_access:
+            return error_response_fn(403, "Admin access required", origin=origin)
+
+        raw = store.get_json(ADMIN_CANVAS_PROMPT_PROFILES_KEY)
+        config = normalize_canvas_prompt_profiles_for_read(raw)
+
+        if method == "GET":
+            return response_fn(
+                200,
+                {
+                    "config": config,
+                    "access": {"isAdmin": admin_access, "viaPin": pin_access and not admin_access},
+                },
+                origin=origin,
+            )
+
+        if method == "PUT":
+            try:
+                normalized = normalize_canvas_prompt_profiles_for_write(parse_json_body(event))
+            except ValueError as exc:
+                return error_response_fn(400, str(exc), origin=origin)
+
+            normalized["updatedAt"] = now_iso_fn()
+            normalized["updatedBy"] = str(claims.get("email") or claims.get("cognito:username") or claims.get("sub") or "unknown")
+            store.put_json(ADMIN_CANVAS_PROMPT_PROFILES_KEY, normalized)
+            return response_fn(
+                200,
+                {
+                    "config": normalized,
+                    "access": {"isAdmin": admin_access, "viaPin": pin_access and not admin_access},
                 },
                 origin=origin,
             )
