@@ -6,6 +6,7 @@ from typing import Any, Callable
 from PIL import Image, ImageOps
 
 from src.core.asset_origin import build_asset_origin
+from src.core.task_workflows import is_character_animate_workflow_id
 from src.models.schemas import CharacterAnimateGenerateRequest
 
 
@@ -76,7 +77,8 @@ def handle_task_character_generate_routes(
     if method != "POST" or len(parts) != 5 or parts[2] != "segments" or parts[4] != "character-generate":
         return None
 
-    if str(task.get("workflowId") or "source_video_flow") != "character_animate_workflow":
+    task_workflow_id = str(task.get("workflowId") or "source_video_flow")
+    if not is_character_animate_workflow_id(task_workflow_id):
         return error_response_fn(409, "Character animation generation is only available on character workflow tasks", origin=origin)
 
     segment_id = parts[3]
@@ -162,7 +164,7 @@ def handle_task_character_generate_routes(
             "mode": req.mode,
             "prompt": prompt,
             "characterAnimateMetadata": {
-                "workflowId": "character_animate_workflow",
+                "workflowId": task_workflow_id,
                 "mode": req.mode,
                 "model": req.model,
                 "characterReferenceId": req.characterReferenceId,
@@ -191,7 +193,7 @@ def handle_task_character_generate_routes(
             "lumaGenerationId": None,
         },
         "characterAnimation": {
-            "workflowId": "character_animate_workflow",
+            "workflowId": task_workflow_id,
             "mode": req.mode,
             "model": req.model,
             "characterReferenceId": req.characterReferenceId,
@@ -206,7 +208,7 @@ def handle_task_character_generate_routes(
             "prompt": prompt,
         },
         "generationSettings": {
-            "workflowId": "character_animate_workflow",
+            "workflowId": task_workflow_id,
             "characterMode": req.mode,
             "characterReferenceId": req.characterReferenceId,
             "outputAspectRatio": ratio if req.mode == "pose_video" else None,
@@ -220,7 +222,7 @@ def handle_task_character_generate_routes(
             "requestedDurationSec": round(duration_sec, 3),
         },
         "origin": build_asset_origin(
-            workflow_id="character_animate_workflow",
+            workflow_id=task_workflow_id,
             step_origin="generate",
             tool_origin="character_generate",
             creation_mode=req.mode,

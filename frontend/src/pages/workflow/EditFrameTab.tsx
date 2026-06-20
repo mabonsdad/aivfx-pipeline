@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ChangeEvent, type PointerEvent, type RefObject } from "react";
+import { useEffect, useMemo, useState, type PointerEvent, type RefObject } from "react";
 
 import { apiClient } from "../../api/client";
 
@@ -64,8 +64,8 @@ export type EditFrameTabCtx = {
   setImagePreviewModal: (value: { url: string; label: string } | null) => void;
   setImageCompareModal: (value: { originalUrl: string; compareUrl: string; label: string } | null) => void;
   setEditSourceCandidate: (tabKey: "first" | "last", candidate: EditFrameCandidate) => void;
+  openEditFrameReferencePicker: () => void;
   selectedTaskId: string | null;
-  uploadManualEditedFrame: (tabKey: "first" | "last", file: File) => Promise<string>;
   handleDeleteAsset: (item: {
     id: string;
     taskId: string;
@@ -147,8 +147,8 @@ export default function EditFrameTab({ ctx }: EditFrameTabProps) {
     setImagePreviewModal,
     setImageCompareModal,
     setEditSourceCandidate,
+    openEditFrameReferencePicker,
     selectedTaskId,
-    uploadManualEditedFrame,
     handleDeleteAsset,
     activeFrameDimensions,
     patchOverlayCanvasRef,
@@ -189,9 +189,7 @@ export default function EditFrameTab({ ctx }: EditFrameTabProps) {
   const [downloadCandidate, setDownloadCandidate] = useState<EditFrameCandidate | null>(null);
   const [downloadBusy, setDownloadBusy] = useState<"psd" | "png_zip" | null>(null);
   const [downloadError, setDownloadError] = useState<string | null>(null);
-  const [manualUploadPending, setManualUploadPending] = useState(false);
   const [cancellingPendingJobIds, setCancellingPendingJobIds] = useState<Record<string, boolean>>({});
-  const uploadInputRef = useRef<HTMLInputElement | null>(null);
 
   const canDownloadSourceFrame = Boolean(activeEditFrame?.imageUrl);
 
@@ -367,23 +365,8 @@ export default function EditFrameTab({ ctx }: EditFrameTabProps) {
     }
   }
 
-  async function handleManualEditedFrameUpload(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    event.target.value = "";
-    if (!file) return;
-    setManualUploadPending(true);
-    try {
-      await uploadManualEditedFrame(editFrameTab, file);
-    } catch (error) {
-      setDownloadError(error instanceof Error ? error.message : "Failed to upload edited frame");
-    } finally {
-      setManualUploadPending(false);
-    }
-  }
-
   return (
               <div className="space-y-4">
-                <input ref={uploadInputRef} type="file" accept="image/*" className="hidden" onChange={(event) => void handleManualEditedFrameUpload(event)} />
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div className="flex gap-2">
                   <button
@@ -416,10 +399,13 @@ export default function EditFrameTab({ ctx }: EditFrameTabProps) {
                     <button
                       type="button"
                       className="rounded-md border border-ink/20 bg-white px-4 py-2 text-sm font-medium text-ink disabled:cursor-not-allowed disabled:opacity-50"
-                      disabled={!activeEditFrame || manualUploadPending}
-                      onClick={() => uploadInputRef.current?.click()}
+                      disabled={!activeEditFrame}
+                      onClick={() => {
+                        setDownloadError(null);
+                        openEditFrameReferencePicker();
+                      }}
                     >
-                      <PendingButtonLabel isPending={manualUploadPending} idle="Upload Edited Frame" pending="Uploading frame..." />
+                      Choose / Upload Edited Frame
                     </button>
                   </div>
                 </div>

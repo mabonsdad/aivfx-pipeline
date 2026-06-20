@@ -46,6 +46,12 @@ npm run deploy:frontend:dev
 npm run deploy:frontend:prod
 ```
 
+Frontend deploys now include an automatic hosted-page verification step. After upload and CloudFront invalidation, the deploy script checks that:
+
+- the public `index.html` is reachable
+- local bundle references use the expected base path for that environment
+- the referenced JS/CSS assets return `200`
+
 ## Local Frontend Commands
 
 Use local frontend development for most branch testing. This keeps day-to-day UI iteration off the shared dev URL while still using the selected environment's API, Cognito, and shared storage.

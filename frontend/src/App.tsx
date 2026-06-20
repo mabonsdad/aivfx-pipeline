@@ -12,8 +12,6 @@ import MotionSyncModal from "./components/quality/MotionSyncModal";
 import QualityMatchModal from "./components/quality/QualityMatchModal";
 import NewTaskModal from "./components/tasks/NewTaskModal";
 import WorkflowTaskPickerModal from "./components/tasks/WorkflowTaskPickerModal";
-import CharacterAnimateModePicker from "./components/workflow/CharacterAnimateModePicker";
-import CreateRoutePicker from "./components/workflow/CreateRoutePicker";
 import ReferenceImagePickerModal from "./components/workflow/ReferenceImagePickerModal";
 import { CurrentWorkingReferencePanel } from "./components/workflow/WorkingRangePanel";
 import {
@@ -52,8 +50,13 @@ import { getGenerationModeConfig, type GenerateInputMode } from "./lib/generatio
 import { getGenerationOrigin, isPostProcessDerivedGeneration, matchesGenerateStepGrid } from "./lib/generationOrigin";
 import {
   DEFAULT_TASK_WORKFLOW_ID,
-  USER_FACING_TASK_WORKFLOW_IDS,
+  HOME_TASK_WORKFLOW_IDS,
+  getFixedCharacterAnimateModeForWorkflow,
+  getFixedGenerationInputModeForWorkflow,
   getTaskWorkflowConfig,
+  isCharacterAnimateWorkflowId,
+  isPrevizWorkflowId,
+  isSourceVideoWorkflowId,
   normalizeTaskWorkflowId,
   type TaskWorkflowId,
 } from "./lib/taskWorkflows";
@@ -1073,6 +1076,8 @@ export default function App() {
   const [isPrevizGenerateReferenceImagePickerSaving, setIsPrevizGenerateReferenceImagePickerSaving] = useState(false);
   const [isPrevizToolReferenceImagePickerOpen, setIsPrevizToolReferenceImagePickerOpen] = useState(false);
   const [isPrevizToolReferenceImagePickerSaving, setIsPrevizToolReferenceImagePickerSaving] = useState(false);
+  const [isEditFrameReferenceImagePickerOpen, setIsEditFrameReferenceImagePickerOpen] = useState(false);
+  const [isEditFrameReferenceImagePickerSaving, setIsEditFrameReferenceImagePickerSaving] = useState(false);
   const [previzReferencePromptDraft, setPrevizReferencePromptDraft] = useState("");
   const [previzFramePromptDraft, setPrevizFramePromptDraft] = useState("");
   const [previzGenerateModel, setPrevizGenerateModel] = useState<"veo_3_1" | "happy_horse_1_0" | "seedance_2_0">("veo_3_1");
@@ -1169,6 +1174,7 @@ export default function App() {
   const enableReferenceAssetTaskQueries =
     isReferenceImagePickerOpen ||
     isToolReferenceImagePickerOpen ||
+    isEditFrameReferenceImagePickerOpen ||
     isPrevizReferenceImagePickerOpen ||
     isPrevizEditReferenceImagePickerOpen ||
     isPrevizGenerateReferenceImagePickerOpen ||
@@ -1459,9 +1465,11 @@ export default function App() {
     },
   });
   const isCurrentWorkflowImplemented = currentTaskWorkflow.implemented;
-  const isSourceVideoWorkflow = currentTaskWorkflowId === "source_video_flow";
-  const isCharacterAnimateWorkflow = currentTaskWorkflowId === "character_animate_workflow";
-  const isPrevizWorkflow = currentTaskWorkflowId === "simple_generation_workflow";
+  const isSourceVideoWorkflow = isSourceVideoWorkflowId(currentTaskWorkflowId);
+  const isCharacterAnimateWorkflow = isCharacterAnimateWorkflowId(currentTaskWorkflowId);
+  const isPrevizWorkflow = isPrevizWorkflowId(currentTaskWorkflowId);
+  const fixedGenerationInputMode = getFixedGenerationInputModeForWorkflow(currentTaskWorkflowId);
+  const fixedCharacterAnimateMode = getFixedCharacterAnimateModeForWorkflow(currentTaskWorkflowId);
   const isGlobalUtilityTab = tab === "asset_library" || tab === "custom_qc" || tab === "api_logs" || tab === "admin";
   const isResolvingWorkflowShell = Boolean(
     selectedTaskId &&
@@ -1490,7 +1498,21 @@ export default function App() {
     showPrevizEditTab ||
     showPrevizGenerateTab
   );
-  const showWorkflowSourceControls = !isResolvingWorkflowShell && isCurrentWorkflowImplemented && activeWorkflowSection === "source" && (isSourceVideoWorkflow || isCharacterAnimateWorkflow);
+  const workflowContentTopGapClass =
+    !isGlobalUtilityTab && !isResolvingWorkflowShell && !showWorkflowCurrentReferences ? "mt-4" : "";
+
+  useEffect(() => {
+    if (!fixedGenerationInputMode) return;
+    if (generationInputMode === fixedGenerationInputMode) return;
+    setGenerationInputMode(fixedGenerationInputMode);
+  }, [fixedGenerationInputMode, generationInputMode, setGenerationInputMode]);
+
+  useEffect(() => {
+    if (!fixedCharacterAnimateMode) return;
+    if (characterAnimateMode === fixedCharacterAnimateMode) return;
+    setCharacterAnimateMode(fixedCharacterAnimateMode);
+  }, [characterAnimateMode, fixedCharacterAnimateMode, setCharacterAnimateMode]);
+
   useEffect(() => {
     if (currentTaskWorkflowId !== "simple_generation_workflow") return;
     setPrevizGenerateModel("veo_3_1");
@@ -1516,7 +1538,7 @@ export default function App() {
   }, [tasksQuery.data]);
   const workflowHomeCards = useMemo(
     () =>
-      USER_FACING_TASK_WORKFLOW_IDS.map((workflowId) => {
+      HOME_TASK_WORKFLOW_IDS.map((workflowId) => {
         const latestTask = latestTaskByWorkflow.get(workflowId) ?? null;
         return {
           workflowId,
@@ -1799,7 +1821,7 @@ export default function App() {
   const assetsTabLoading = tab === "assets" && assetsLoading;
   const assetLibraryTabLoading = tab === "asset_library" && assetLibraryLoading;
   const sourceMediaKind = (task?.sourceMedia?.kind ?? task?.video?.editSource?.mediaType ?? "video") as "video" | "audio";
-  const isCharacterAudioSource = currentTaskWorkflowId === "character_animate_workflow" && sourceMediaKind === "audio";
+  const isCharacterAudioSource = isCharacterAnimateWorkflow && sourceMediaKind === "audio";
   const sourceWaveformUrl = task?.sourceMedia?.waveform?.downloadUrl ?? task?.video?.editSource?.waveformUrl ?? null;
   const generationAudioReference = task?.generationAudioReference ?? null;
   const selectedSegment = task?.segments.find((s) => s.segmentId === selectedSegmentId) ?? null;
@@ -1813,18 +1835,18 @@ export default function App() {
   );
   const editVideoReferenceLimitByModel = useMemo(() => editVideoReferenceLimitForModel(lumaModel), [lumaModel]);
   const editVideoReferenceWarning = useMemo(() => {
-    if (currentTaskWorkflowId === "character_animate_workflow") return null;
+    if (isCharacterAnimateWorkflow) return null;
     if (generationInputMode !== "edit_video") return null;
     if (!editVideoReferenceLimitByModel) return null;
     if (editVideoSelectedReferenceIds.length > editVideoReferenceLimitByModel) {
       return `This model will use only the first ${editVideoReferenceLimitByModel} selected reference image${editVideoReferenceLimitByModel > 1 ? "s" : ""}.`;
     }
     return null;
-  }, [currentTaskWorkflowId, editVideoReferenceLimitByModel, editVideoSelectedReferenceIds.length, generationInputMode]);
+  }, [editVideoReferenceLimitByModel, editVideoSelectedReferenceIds.length, generationInputMode, isCharacterAnimateWorkflow]);
   const generationModelOptionsForInput = useMemo(() => generationModelOptions, [generationModelOptions]);
   const editVideoReferencePreview = useMemo<WorkingReferencePreviewItem[]>(() => {
     const useReferencePreview =
-      generationInputMode === "edit_video" || currentTaskWorkflowId === "character_animate_workflow";
+      generationInputMode === "edit_video" || isCharacterAnimateWorkflow;
     if (!useReferencePreview) return [];
     const output: WorkingReferencePreviewItem[] = [];
     for (let index = 0; index < editVideoSelectedReferenceIds.length; index += 1) {
@@ -1835,13 +1857,13 @@ export default function App() {
       output.push({
         referenceId: id,
         imageUrl: reference.imageUrl,
-        token: currentTaskWorkflowId === "character_animate_workflow" ? `Character ${index + 1}` : `Ref Img ${index + 1}`,
+        token: isCharacterAnimateWorkflow ? `Character ${index + 1}` : `Ref Img ${index + 1}`,
         title,
         subtitle: reference.type === "generated" ? "generated reference" : "uploaded reference",
       });
     }
     return output;
-  }, [currentTaskWorkflowId, editVideoReferences, editVideoSelectedReferenceIds, generationInputMode]);
+  }, [editVideoReferences, editVideoSelectedReferenceIds, generationInputMode, isCharacterAnimateWorkflow]);
   const editVideoToolReferencePreview = useMemo<WorkingReferencePreviewItem[]>(
     () =>
       editVideoToolSelectedReferenceIds.flatMap((id, index) => {
@@ -2208,10 +2230,10 @@ export default function App() {
       if (!generation) return true;
       const origin = getGenerationOrigin(generation, assetTask);
       if (!origin || origin.workflowId !== currentTaskWorkflowId) return false;
-      if (currentTaskWorkflowId === "character_animate_workflow") {
+      if (isCharacterAnimateWorkflow) {
         return origin.creationMode === characterAnimateMode;
       }
-      if (currentTaskWorkflowId === "simple_generation_workflow") {
+      if (isPrevizWorkflow) {
         return true;
       }
       return origin.creationMode === generationInputMode;
@@ -3884,7 +3906,7 @@ export default function App() {
   }, [activeEditFrame?.frameId, sortedJobs]);
 
   const pendingGenerations = useMemo<PendingGenerationCard[]>(() => {
-    const showTaskWideEditVideoGenerations = currentTaskWorkflowId === "source_video_flow" && generationInputMode === "edit_video";
+    const showTaskWideEditVideoGenerations = isSourceVideoWorkflow && generationInputMode === "edit_video";
     if (!selectedSegmentId && !showTaskWideEditVideoGenerations) return [];
     const cards: PendingGenerationCard[] = [];
     for (const job of sortedJobs) {
@@ -4666,11 +4688,7 @@ export default function App() {
     setAutomationVideoPrompt("");
     setAutomationSelectedVideoOptionIds(AUTOMATION_VIDEO_OPTIONS.map((option) => option.id));
     setAutomationUiError(null);
-    if (
-      workflowId === "source_video_flow" ||
-      workflowId === "character_animate_workflow" ||
-      workflowId === "simple_generation_workflow"
-    ) {
+    if (workflowId !== "canvas_workflow") {
       goHome();
       setTaskPickerWorkflowId(null);
       openNewTaskModal(workflowId);
@@ -5492,36 +5510,6 @@ export default function App() {
     setRefineSourceVariantIds((previous) => ({ ...previous, [tabKey]: variantId }));
   }
 
-  async function uploadManualEditedFrame(tabKey: "first" | "last", file: File): Promise<string> {
-    if (!selectedTaskId) throw new Error("No task selected");
-    const frameRecord = tabKey === "first" ? editFirstFrame : editLastFrame;
-    if (!frameRecord?.frameId) throw new Error("No source frame selected");
-    const init = await apiClient.initManualFrameUpload(selectedTaskId, frameRecord.frameId, {
-      filename: file.name,
-      contentType: file.type || "image/png",
-    });
-    const uploadResponse = await fetch(init.uploadUrl, {
-      method: "PUT",
-      headers: {
-        "content-type": file.type || "application/octet-stream",
-      },
-      body: file,
-    });
-    if (!uploadResponse.ok) {
-      throw new Error(`Upload failed: ${uploadResponse.status}`);
-    }
-    const completed = await apiClient.completeManualFrameUpload(selectedTaskId, frameRecord.frameId, {
-      uploadKey: init.uploadKey,
-      filename: file.name,
-    });
-    setCompareVariantIds((previous) => ({ ...previous, [tabKey]: completed.variant.variantId ?? previous[tabKey] }));
-    setRefineSourceVariantIds((previous) => ({ ...previous, [tabKey]: null }));
-    setEditSourceVariantIds((previous) => ({ ...previous, [tabKey]: completed.variant.variantId ?? previous[tabKey] }));
-    await queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
-    await queryClient.invalidateQueries({ queryKey: ["task", "assets", selectedTaskId] });
-    return completed.variant.variantId;
-  }
-
   async function uploadManualGeneratedVideo(file: File): Promise<string> {
     if (!selectedTaskId) throw new Error("No task selected");
     if (!selectedSegmentId) throw new Error("No working range selected");
@@ -5645,7 +5633,7 @@ export default function App() {
 
   const toggleSelectedEditVideoReferenceId = useCallback((referenceId: string): void => {
     setEditVideoSelectedReferenceIds((previous) => {
-      if (currentTaskWorkflowId === "character_animate_workflow") {
+      if (isCharacterAnimateWorkflow) {
         return previous.includes(referenceId) ? [] : [referenceId];
       }
       if (previous.includes(referenceId)) {
@@ -5659,7 +5647,7 @@ export default function App() {
       }
       return [...previous, referenceId];
     });
-  }, [currentTaskWorkflowId, editVideoReferenceLimitByModel]);
+  }, [editVideoReferenceLimitByModel, isCharacterAnimateWorkflow]);
 
   const moveToolSelectedPrevizReference = useCallback((referenceId: string, direction: -1 | 1): void => {
     const index = previzSelectedReferenceIds.indexOf(referenceId);
@@ -5913,8 +5901,40 @@ export default function App() {
   async function applyReferencePickerSelection(selectedItemIds: string[]): Promise<void> {
     const resolvedReferenceIds = await resolveReferencePickerSelection(selectedItemIds);
     setEditVideoSelectedReferenceIds(
-      currentTaskWorkflowId === "character_animate_workflow" ? resolvedReferenceIds.slice(0, 1) : resolvedReferenceIds,
+      isCharacterAnimateWorkflow ? resolvedReferenceIds.slice(0, 1) : resolvedReferenceIds,
     );
+  }
+
+  async function applyEditFramePickerSelection(selectedItemIds: string[]): Promise<void> {
+    if (!selectedTaskId) throw new Error("No task selected");
+    const frameRecord = editFrameTab === "first" ? editFirstFrame : editLastFrame;
+    if (!frameRecord?.frameId) throw new Error("No source frame selected");
+    const selectedItemId = selectedItemIds[0];
+    if (!selectedItemId) throw new Error("Choose one image to apply");
+    const item = referencePickerItemById.get(selectedItemId);
+    if (!item) throw new Error("Selected image is no longer available");
+    const sourceType =
+      item.sourceType === "frame_capture" || item.sourceType === "frame_variant"
+        ? item.sourceType
+        : item.sourceGroup === "upload"
+          ? "uploaded"
+          : "generated";
+    const imported = await apiClient.importManualFrameVariant(selectedTaskId, frameRecord.frameId, {
+      sources: [
+        {
+          sourceKey: item.sourceKey,
+          filename: keyBasenameFromS3Key(item.sourceKey),
+          sourceType,
+          originTaskId: item.taskId,
+        },
+      ],
+    });
+    const variantId = imported.variant.variantId;
+    setCompareVariantIds((previous) => ({ ...previous, [editFrameTab]: variantId || previous[editFrameTab] }));
+    setRefineSourceVariantIds((previous) => ({ ...previous, [editFrameTab]: null }));
+    setEditSourceVariantIds((previous) => ({ ...previous, [editFrameTab]: variantId || previous[editFrameTab] }));
+    await queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
+    await queryClient.invalidateQueries({ queryKey: ["task", "assets", selectedTaskId] });
   }
 
   async function applyToolReferencePickerSelection(selectedItemIds: string[]): Promise<void> {
@@ -6220,12 +6240,6 @@ export default function App() {
     ],
   );
 
-  useEffect(() => {
-    if (!isCharacterAudioSource) return;
-    if (characterAnimateMode === "audio_driven") return;
-    setCharacterAnimateMode("audio_driven");
-  }, [characterAnimateMode, isCharacterAudioSource, setCharacterAnimateMode]);
-
   const editFrameTabCtx = useMemo<EditFrameTabCtx>(
     () => ({
       setEditFrameTab,
@@ -6253,8 +6267,8 @@ export default function App() {
       setImagePreviewModal,
       setImageCompareModal,
       setEditSourceCandidate,
+      openEditFrameReferencePicker: () => setIsEditFrameReferenceImagePickerOpen(true),
       selectedTaskId,
-      uploadManualEditedFrame,
       handleDeleteAsset,
       activeFrameDimensions,
       patchOverlayCanvasRef,
@@ -6305,8 +6319,8 @@ export default function App() {
       pendingEditJobs,
       selectCompareCandidate,
       setImageCompareModal,
+      setIsEditFrameReferenceImagePickerOpen,
       selectedTaskId,
-      uploadManualEditedFrame,
       handleDeleteAsset,
       activeFrameDimensions,
       patchEngine,
@@ -6386,7 +6400,7 @@ export default function App() {
       previewReference: ({ url, label }) => setImagePreviewModal({ url, label }),
       generateReferenceImage: generateEditVideoReferenceImage,
       labels:
-        currentTaskWorkflowId === "character_animate_workflow"
+        isCharacterAnimateWorkflow
           ? {
               selectTitle: "Select character image",
               selectDescription:
@@ -6406,14 +6420,14 @@ export default function App() {
               failedHint: "Character image generation failed.",
             }
           : undefined,
-      preferredAspectRatio: currentTaskWorkflowId === "character_animate_workflow" ? characterImagePreferredAspectRatio : null,
-      addTopSpacing: currentTaskWorkflowId === "character_animate_workflow",
+      preferredAspectRatio: isCharacterAnimateWorkflow ? characterImagePreferredAspectRatio : null,
+      addTopSpacing: isCharacterAnimateWorkflow,
     }),
     [
       editVideoReferencePromptDraft,
       selectedTaskId,
       characterImagePreferredAspectRatio,
-      currentTaskWorkflowId,
+      isCharacterAnimateWorkflow,
       editVideoReferenceLibraryItems,
       editVideoReferenceWarning,
       editVideoToolReferencePreview,
@@ -7105,7 +7119,7 @@ export default function App() {
       canSubmit={
         !newTaskName.trim()
           ? false
-          : newTaskWorkflowId === "simple_generation_workflow"
+          : isPrevizWorkflowId(newTaskWorkflowId)
             ? Boolean(normalizedNewTaskName && newTaskScenePrompt.trim())
             : Boolean(normalizedNewTaskName && newTaskFile)
       }
@@ -7345,29 +7359,12 @@ export default function App() {
                         />
                       </div>
                     ) : null}
-                    {showWorkflowSourceControls ? (
-                      <div className="rounded-xl border border-ink/10 bg-bg p-3">
-                        {isCharacterAnimateWorkflow ? (
-                          <CharacterAnimateModePicker
-                            activeMode={characterAnimateMode}
-                            onSelect={setCharacterAnimateMode}
-                            sourceMediaKind={sourceMediaKind}
-                          />
-                        ) : (
-                          <CreateRoutePicker
-                            activeMode={generationInputMode}
-                            onSelect={(mode) => {
-                              setGenerationInputMode(mode);
-                            }}
-                          />
-                        )}
-                      </div>
-                    ) : null}
                   </>
                 )}
               </div>
             ) : null}
 
+            <div className={workflowContentTopGapClass}>
             {!isResolvingWorkflowShell && !isCurrentWorkflowImplemented && !showPrevizSelectTab && !showPrevizEditTab && !showPrevizGenerateTab && !showPrevizPostTab && !isGlobalUtilityTab ? (
               <div className="rounded-xl border border-dashed border-ink/15 bg-bg p-4">
                 {currentTaskWorkflowId === "canvas_workflow" ? (
@@ -7788,13 +7785,39 @@ export default function App() {
                 <AdminWorkspacePage />
               </Suspense>
             )}
+            </div>
           </div>
 
         </section>
       </div>
       <ReferenceImagePickerModal
+        isOpen={isEditFrameReferenceImagePickerOpen}
+        maxSelected={1}
+        selectedIds={[]}
+        items={referencePickerItems}
+        videoItems={referencePickerVideoItems}
+        initialTab="upload"
+        generatedScopeDefault="task"
+        hasProjectScope={hasEffectiveProjectScope}
+        isSaving={isEditFrameReferenceImagePickerSaving}
+        onClose={() => setIsEditFrameReferenceImagePickerOpen(false)}
+        onUpload={uploadEditVideoReferenceImages}
+        onCaptureVideoFrame={captureReferenceFrameFromVideo}
+        onConfirm={async (selectedItemIds) => {
+          setIsEditFrameReferenceImagePickerSaving(true);
+          try {
+            await applyEditFramePickerSelection(selectedItemIds);
+            setIsEditFrameReferenceImagePickerOpen(false);
+          } catch (error) {
+            setAppUiError(error instanceof Error ? error.message : "Failed to apply edited frame");
+          } finally {
+            setIsEditFrameReferenceImagePickerSaving(false);
+          }
+        }}
+      />
+      <ReferenceImagePickerModal
         isOpen={isReferenceImagePickerOpen}
-        maxSelected={currentTaskWorkflowId === "character_animate_workflow" ? 1 : editVideoReferenceLimitByModel}
+        maxSelected={isCharacterAnimateWorkflow ? 1 : editVideoReferenceLimitByModel}
         selectedIds={selectedReferencePickerItemIds}
         items={referencePickerItems}
         videoItems={referencePickerVideoItems}

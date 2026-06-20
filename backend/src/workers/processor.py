@@ -5603,7 +5603,7 @@ def _handle_segment_generate_character_animate(
                     "lumaGenerationId": generation_id,
                 },
                 "characterAnimation": {
-                    "workflowId": "character_animate_workflow",
+                    "workflowId": str(task.get("workflowId") or "character_animate_workflow"),
                     "mode": mode,
                     "model": model_name,
                     "modelLabel": _character_animate_model_label(model_name),
@@ -5627,7 +5627,7 @@ def _handle_segment_generate_character_animate(
                 "requestedDurationSec": round(float(segment.get("durationSec") or 0.0), 3),
                 "providerDurationSec": provider_duration_sec,
                 "generationSettings": {
-                    "workflowId": "character_animate_workflow",
+                    "workflowId": str(task.get("workflowId") or "character_animate_workflow"),
                     "provider": provider_name,
                     "requestedModel": model_name,
                     "model": used_provider_model or model_name,

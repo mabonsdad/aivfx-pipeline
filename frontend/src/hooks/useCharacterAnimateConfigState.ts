@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { CHARACTER_ANIMATE_MODEL_OPTIONS, type CharacterAnimateMode } from "../lib/characterAnimate/characterAnimateModeRegistry";
 
@@ -11,8 +11,8 @@ function readStoredCharacterAnimateMode(): CharacterAnimateMode | null {
   return null;
 }
 
-export function useCharacterAnimateConfigState() {
-  const [characterAnimateMode, setCharacterAnimateMode] = useState<CharacterAnimateMode>(
+export function useCharacterAnimateConfigState(forcedMode: CharacterAnimateMode | null = null) {
+  const [storedCharacterAnimateMode, setStoredCharacterAnimateMode] = useState<CharacterAnimateMode>(
     () => readStoredCharacterAnimateMode() ?? "pose_video",
   );
   const [characterAnimateModelByMode, setCharacterAnimateModelByMode] = useState<Record<CharacterAnimateMode, string>>({
@@ -20,10 +20,18 @@ export function useCharacterAnimateConfigState() {
     audio_driven: "omnihuman_v1_5",
   });
 
+  const characterAnimateMode = forcedMode ?? storedCharacterAnimateMode;
+
+  const setCharacterAnimateMode = useCallback((nextMode: CharacterAnimateMode) => {
+    if (forcedMode) return;
+    setStoredCharacterAnimateMode(nextMode);
+  }, [forcedMode]);
+
   useEffect(() => {
+    if (forcedMode) return;
     if (typeof window === "undefined") return;
     window.sessionStorage.setItem(CHARACTER_ANIMATE_MODE_STORAGE_KEY, characterAnimateMode);
-  }, [characterAnimateMode]);
+  }, [characterAnimateMode, forcedMode]);
 
   const characterAnimateModelOptions = useMemo(
     () => CHARACTER_ANIMATE_MODEL_OPTIONS[characterAnimateMode],

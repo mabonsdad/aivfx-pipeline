@@ -3,6 +3,7 @@ import { useMemo } from "react";
 import type { AssetsTabCtx } from "../pages/workflow/AssetsTab";
 import type { CustomReportOutputRef, TaskDetail } from "../types/api";
 import type { LibraryAsset } from "../types/libraryAsset";
+import { isCharacterAnimateWorkflowId, isPrevizWorkflowId } from "../lib/taskWorkflows";
 
 type VisibilitySetter = (update: number | ((count: number) => number)) => void;
 
@@ -125,8 +126,8 @@ export function useAssetsTabContexts({
   formatAssetDate,
   goToReport,
 }: UseAssetsTabContextsArgs) {
-  const isCharacterWorkflow = task?.workflowId === "character_animate_workflow";
-  const isPrevizWorkflow = task?.workflowId === "simple_generation_workflow";
+  const isCharacterWorkflow = isCharacterAnimateWorkflowId(task?.workflowId);
+  const isPrevizWorkflow = isPrevizWorkflowId(task?.workflowId);
   const imageAssetsTitle = isCharacterWorkflow ? "Characters" : isPrevizWorkflow ? "Generated Frames" : "Edited Frames";
   const taskImageAssets = isCharacterWorkflow ? referenceImageAssets : editedFrameAssets;
   const libraryImageAssets = isCharacterWorkflow ? libraryReferenceImageAssets : libraryEditedFrameAssets;

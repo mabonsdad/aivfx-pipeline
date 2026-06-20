@@ -1,4 +1,5 @@
 import type { ExportRecord, SegmentGeneration, TaskDetail } from "../types/api";
+import { isCharacterAnimateWorkflowId, isPrevizWorkflowId } from "./taskWorkflows";
 
 function resolveReferenceImageUrl(task: TaskDetail, referenceId: string | null | undefined): string | null {
   if (!referenceId) return null;
@@ -9,7 +10,7 @@ function resolveReferenceImageUrl(task: TaskDetail, referenceId: string | null |
 export function resolveGenerationThumbnailUrl(task: TaskDetail, generation: SegmentGeneration): string | null {
   if (generation.posterUrl) return generation.posterUrl;
 
-  if (task.workflowId === "simple_generation_workflow") {
+  if (isPrevizWorkflowId(task.workflowId)) {
     const selectedFrameIds = Array.isArray(generation.generationSettings?.selectedFrameIds)
       ? generation.generationSettings.selectedFrameIds
       : [];
@@ -22,7 +23,7 @@ export function resolveGenerationThumbnailUrl(task: TaskDetail, generation: Segm
     );
   }
 
-  if (task.workflowId === "character_animate_workflow") {
+  if (isCharacterAnimateWorkflowId(task.workflowId)) {
     const characterReferenceId =
       generation.characterAnimation?.characterReferenceId ??
       generation.generationSettings?.characterReferenceId ??
