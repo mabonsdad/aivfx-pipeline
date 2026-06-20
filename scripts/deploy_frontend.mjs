@@ -76,6 +76,8 @@ writeFileSync(localEnvPath, `${localEnv}\n`, "utf8");
 
 const destination =
   target === "prod" ? `s3://${bucket}/` : `s3://${bucket}/${config.syncPrefix}`;
+const htmlDestination =
+  target === "prod" ? `s3://${bucket}` : `s3://${bucket}/${config.syncPrefix.replace(/\/$/, "")}`;
 
 const run = (command) => {
   execSync(command, {
@@ -87,5 +89,7 @@ const run = (command) => {
 
 run(`npm run ${config.buildScript}`);
 run(`aws s3 sync frontend/dist ${destination} --delete`);
+run(`aws s3 cp frontend/dist/index.html ${htmlDestination}/index.html`);
+run(`aws s3 cp frontend/dist/api-test.html ${htmlDestination}/api-test.html`);
 run(`aws cloudfront create-invalidation --distribution-id ${distributionId} --paths "${config.invalidatePath}"`);
 run(`node scripts/verify_frontend_deploy.mjs ${target}`);
