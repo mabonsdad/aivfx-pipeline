@@ -46,6 +46,18 @@ npm run deploy:frontend:dev
 npm run deploy:frontend:prod
 ```
 
+Frontend deploys now include an automatic hosted-page verification step. After upload and CloudFront invalidation, the deploy script checks that:
+
+- the public `index.html` is reachable
+- local bundle references use the expected base path for that environment
+- the referenced JS/CSS assets return `200`
+
+Infra deploys now build Lambda Python dependencies from `backend/requirements.txt` inside Docker during CDK asset bundling. This means:
+
+- Docker must be running before `npm run deploy:infra:*`
+- clean checkouts deploy correctly without local vendored Python folders under `backend/`
+- Lambda package contents are driven by tracked backend source plus `requirements.txt`, not untracked local artifacts
+
 ## Local Frontend Commands
 
 Use local frontend development for most branch testing. This keeps day-to-day UI iteration off the shared dev URL while still using the selected environment's API, Cognito, and shared storage.

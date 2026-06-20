@@ -88,3 +88,4 @@ const run = (command) => {
 run(`npm run ${config.buildScript}`);
 run(`aws s3 sync frontend/dist ${destination} --delete`);
 run(`aws cloudfront create-invalidation --distribution-id ${distributionId} --paths "${config.invalidatePath}"`);
+run(`node scripts/verify_frontend_deploy.mjs ${target}`);

@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 
-import type { TaskWorkflowId } from "../lib/taskWorkflows";
+import { isCharacterAnimateWorkflowId, isPrevizWorkflowId, isSourceVideoWorkflowId, type TaskWorkflowId } from "../lib/taskWorkflows";
 import type { GenerateInputMode } from "../lib/generationModeRegistry";
 import type { PrimaryWorkflowSection } from "../lib/workflowSections";
 import type { SegmentGeneration, SegmentRecord, TaskDetail } from "../types/api";
@@ -111,7 +111,7 @@ export function useCurrentWorkingReferenceState({
   previzFramePreview = [],
 }: UseCurrentWorkingReferenceStateArgs) {
   const currentReferenceSegment = selectedSegment ?? defaultVideoSegment ?? null;
-  const isPrevizWorkflow = workflowId === "simple_generation_workflow";
+  const isPrevizWorkflow = isPrevizWorkflowId(workflowId);
   const fallbackWaveformUrl = sourceMediaKind === "audio" ? sourceWaveformUrl ?? null : null;
   const currentReferenceStartImageUrl = isPrevizWorkflow
     ? null
@@ -126,7 +126,7 @@ export function useCurrentWorkingReferenceState({
 
   const currentReferenceAssets = useMemo<WorkingReferenceAsset[]>(() => {
     const assets: WorkingReferenceAsset[] = [];
-    const isCharacterWorkflow = workflowId === "character_animate_workflow";
+    const isCharacterWorkflow = isCharacterAnimateWorkflowId(workflowId);
     if (isPrevizWorkflow) {
       const useFramePreview = activeWorkflowSection === "outputs";
       const activePreviewItems = useFramePreview ? previzFramePreview : previzReferencePreview;
@@ -217,7 +217,7 @@ export function useCurrentWorkingReferenceState({
           actionId: "edit-video-reference-picker",
         });
       }
-      if (workflowId === "source_video_flow" && task?.generationAudioReference?.previewUrl) {
+      if (isSourceVideoWorkflowId(workflowId) && task?.generationAudioReference?.previewUrl) {
         assets.push({
           label: "Audio1",
           audioUrl: task.generationAudioReference.previewUrl,
@@ -321,7 +321,7 @@ export function useCurrentWorkingReferenceState({
   ]);
 
   const currentReferenceWarning =
-    workflowId === "source_video_flow" &&
+    isSourceVideoWorkflowId(workflowId) &&
     sourceMediaKind !== "audio" &&
     wholeVideoNeedsChunking &&
     currentReferenceSegment?.segmentId === defaultVideoSegment?.segmentId

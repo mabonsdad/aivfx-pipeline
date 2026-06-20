@@ -1,19 +1,59 @@
 import type { CharacterAnimateMode } from "./characterAnimate/characterAnimateModeRegistry";
 import type { GenerateInputMode } from "./generationModeRegistry";
-import type { TaskWorkflowId } from "./taskWorkflows";
+import {
+  isCharacterAnimateWorkflowId,
+  isPrevizWorkflowId,
+  isSourceVideoWorkflowId,
+  type TaskWorkflowId,
+  workflowForCharacterAnimateMode,
+  workflowForSourceVideoMode,
+} from "./taskWorkflows";
 import type { SegmentGeneration, TaskDetail } from "../types/api";
 
 const START_END_MODES = new Set(["kling_start_end", "veo_start_end", "ltx23_i2v_start_end"]);
 const START_ONLY_MODES = new Set(["kling_start_only", "veo_start_only", "runway_i2v", "sora_i2v", "happy_horse_i2v", "wan_a14b_i2v"]);
 
 export type GenerationOrigin = {
-  workflowId: string;
+  workflowId: TaskWorkflowId;
   stepOrigin: string;
   toolOrigin: string;
   creationMode?: string | null;
   appSurface?: string | null;
   [key: string]: unknown;
 };
+
+function resolveWorkflowIdForOrigin(
+  workflowId: string,
+  {
+    taskWorkflowId,
+    sourceCreationMode,
+    characterMode,
+  }: {
+    taskWorkflowId?: string | null;
+    sourceCreationMode?: string | null;
+    characterMode?: string | null;
+  },
+): TaskWorkflowId {
+  if (workflowId === "character_animate_workflow") {
+    if (isCharacterAnimateWorkflowId(taskWorkflowId)) return taskWorkflowId;
+    return workflowForCharacterAnimateMode(characterMode === "audio_driven" ? "audio_driven" : "pose_video");
+  }
+  if (workflowId === "character_animate_audio_workflow") return "character_animate_audio_workflow";
+  if (workflowId === "source_video_flow") {
+    if (isSourceVideoWorkflowId(taskWorkflowId)) return taskWorkflowId;
+    return workflowForSourceVideoMode(
+      sourceCreationMode === "start_end" || sourceCreationMode === "edit_video" ? sourceCreationMode : "start_video",
+    );
+  }
+  if (workflowId === "source_video_start_end_workflow") return "source_video_start_end_workflow";
+  if (workflowId === "source_video_edit_workflow") return "source_video_edit_workflow";
+  if (workflowId === "simple_generation_workflow") return "simple_generation_workflow";
+  if (workflowId === "canvas_workflow") return "canvas_workflow";
+  if (isSourceVideoWorkflowId(workflowId) || isCharacterAnimateWorkflowId(workflowId) || isPrevizWorkflowId(workflowId)) {
+    return workflowId;
+  }
+  return "source_video_flow";
+}
 
 function inferLegacySourceInputMode(
   generation: SegmentGeneration | null | undefined,
@@ -53,17 +93,23 @@ export function getGenerationOrigin(
   if (!generation) return null;
   const persisted = generation.origin;
   if (persisted?.workflowId && persisted?.stepOrigin && persisted?.toolOrigin) {
+    const persistedCreationMode = String(persisted.creationMode ?? "").trim() || null;
+    const normalizedWorkflowId = resolveWorkflowIdForOrigin(String(persisted.workflowId), {
+      taskWorkflowId: task?.workflowId,
+      sourceCreationMode: persistedCreationMode,
+      characterMode: persistedCreationMode,
+    });
     return {
-      workflowId: persisted.workflowId,
+      workflowId: normalizedWorkflowId,
       stepOrigin: persisted.stepOrigin,
       toolOrigin: persisted.toolOrigin,
-      creationMode: persisted.creationMode ?? null,
+      creationMode: persistedCreationMode,
       appSurface: typeof persisted.appSurface === "string" ? persisted.appSurface : null,
       ...Object.fromEntries(Object.entries(persisted).filter(([key]) => !["workflowId", "stepOrigin", "toolOrigin", "creationMode", "appSurface"].includes(key))),
     };
   }
 
-  const workflowId =
+  const rawWorkflowId =
     String(
       persisted?.workflowId ??
         generation.generationSettings?.workflowId ??
@@ -90,15 +136,21 @@ export function getGenerationOrigin(
     toolOrigin = "extension_chain_stitch";
   }
 
-  if (workflowId === "character_animate_workflow") {
+  if (rawWorkflowId === "character_animate_workflow" || isCharacterAnimateWorkflowId(rawWorkflowId)) {
     toolOrigin = toolOrigin === "segment_generate" ? "character_generate" : toolOrigin;
     creationMode = String(generation.characterAnimation?.mode ?? generation.generationSettings?.characterMode ?? "").trim() || null;
-  } else if (workflowId === "simple_generation_workflow") {
+  } else if (rawWorkflowId === "simple_generation_workflow") {
     toolOrigin = toolOrigin === "segment_generate" ? "previz_generate" : toolOrigin;
     creationMode = "previz";
   } else {
     creationMode = inferLegacySourceInputMode(generation, task);
   }
+
+  const workflowId = resolveWorkflowIdForOrigin(rawWorkflowId, {
+    taskWorkflowId: task?.workflowId,
+    sourceCreationMode: creationMode,
+    characterMode: creationMode,
+  });
 
   return {
     workflowId,
@@ -160,10 +212,10 @@ export function matchesGenerateStepGrid(
   if (!origin) return false;
   if (origin.workflowId !== workflowId) return false;
   if (origin.stepOrigin !== "generate") return false;
-  if (workflowId === "character_animate_workflow") {
+  if (isCharacterAnimateWorkflowId(workflowId)) {
     return !activeCharacterMode || origin.creationMode === activeCharacterMode;
   }
-  if (workflowId === "simple_generation_workflow") {
+  if (isPrevizWorkflowId(workflowId)) {
     return true;
   }
   return origin.creationMode === activeInputMode;

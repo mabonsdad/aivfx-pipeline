@@ -7,6 +7,7 @@ import { StatusNotice } from "../components/layout/UiFeedback";
 import WaveformPreview from "../components/workflow/WaveformPreview";
 import { classifyGenerationAssetRole } from "../lib/generationOrigin";
 import { resolveExportThumbnailUrl, resolveGenerationThumbnailUrl } from "../lib/taskPreview";
+import { isCharacterAnimateWorkflowId, isPrevizWorkflowId } from "../lib/taskWorkflows";
 import {
   FRAME_TEST_OPTIONS,
   HeatmapLegend,
@@ -109,7 +110,7 @@ type PrevizGenerationFrame = {
 function generationPreviewImageUrl(task: TaskDetail, row: VideoOutputRow, previzFrames: PrevizGenerationFrame[]): string {
   const generationThumbnailUrl = resolveGenerationThumbnailUrl(task, row.generation);
   if (generationThumbnailUrl) return generationThumbnailUrl;
-  if (task.workflowId === "simple_generation_workflow") {
+  if (isPrevizWorkflowId(task.workflowId)) {
     return previzFrames[0]?.imageUrl ?? "";
   }
   return row.startVariant?.imageUrl ?? row.startFrame?.imageUrl ?? "";
@@ -127,7 +128,7 @@ function reportVideoPreviewImageUrl(task: TaskDetail, row: VideoReportRow): stri
     if (generationThumbnailUrl) return generationThumbnailUrl;
   }
 
-  if (task.workflowId === "simple_generation_workflow") {
+  if (isPrevizWorkflowId(task.workflowId)) {
     return row.previzFrames?.[0]?.imageUrl ?? "";
   }
 
@@ -527,7 +528,7 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
       .sort((a, b) => safeTimestamp(b.generation.createdAt) - safeTimestamp(a.generation.createdAt));
   }, [reportTask]);
 
-  const isPrevizWorkflow = reportTask?.workflowId === "simple_generation_workflow";
+  const isPrevizWorkflow = isPrevizWorkflowId(reportTask?.workflowId);
   const previzReferenceLookup = useMemo(() => {
     const mapping = new Map<string, { imageUrl: string; createdAt?: string; title: string; subtitle: string }>();
     for (const reference of reportTask?.editVideoReferences ?? []) {
@@ -742,10 +743,10 @@ export default function ReportsPage({ ctx }: ReportsPageProps) {
   );
   const reportSourceMediaLabel = isPrevizWorkflow
     ? "Scene"
-    : reportTask?.workflowId === "character_animate_workflow" && reportTask?.sourceMedia?.kind === "audio"
+    : isCharacterAnimateWorkflowId(reportTask?.workflowId) && reportTask?.sourceMedia?.kind === "audio"
       ? "Source audio"
       : "Source video";
-  const isAudioSourceTask = reportTask?.workflowId === "character_animate_workflow" && reportTask?.sourceMedia?.kind === "audio";
+  const isAudioSourceTask = isCharacterAnimateWorkflowId(reportTask?.workflowId) && reportTask?.sourceMedia?.kind === "audio";
   const reportSourceAudioUrl = reportTask?.sourceMedia?.previewSource?.downloadUrl ?? reportTask?.sourceMedia?.editSource?.downloadUrl ?? null;
   const reportSourceWaveformUrl = reportTask?.sourceMedia?.waveform?.downloadUrl ?? reportTask?.video?.editSource?.waveformUrl ?? null;
   const reportSourceFrameCount = reportTask?.sourceMedia?.editSource?.frameCount ?? reportTask?.video?.editSource?.frameCount ?? 0;

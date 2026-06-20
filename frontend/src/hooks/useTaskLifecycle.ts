@@ -2,7 +2,13 @@ import { useEffect, useMemo, useState } from "react";
 import { useQuery, type QueryClient } from "@tanstack/react-query";
 
 import { apiClient } from "../api/client";
-import { DEFAULT_TASK_WORKFLOW_ID, type TaskWorkflowId } from "../lib/taskWorkflows";
+import {
+  DEFAULT_TASK_WORKFLOW_ID,
+  getFixedCharacterAnimateModeForWorkflow,
+  isCharacterAnimateWorkflowId,
+  isPrevizWorkflowId,
+  type TaskWorkflowId,
+} from "../lib/taskWorkflows";
 import type { TabId } from "./useWorkflowRouting";
 
 export type NewTaskStage = "idle" | "creating" | "uploading" | "ingesting" | "error";
@@ -193,7 +199,7 @@ export function useTaskLifecycle({
   }, [newTaskStage, pendingCreateJobQuery.data, pendingCreatedTaskId, pendingIngestCompleteHook, queryClient, selectedTaskId, setTab]);
 
   function openNewTaskModal(workflowId: TaskWorkflowId = DEFAULT_TASK_WORKFLOW_ID) {
-    setNewTaskName(workflowId === "simple_generation_workflow" ? "New Scene" : "New Video");
+    setNewTaskName(isPrevizWorkflowId(workflowId) ? "New Scene" : "New Video");
     setNewTaskFile(null);
     setNewTaskScenePrompt("");
     setNewTaskWorkflowId(workflowId);
@@ -208,7 +214,7 @@ export function useTaskLifecycle({
 
   async function handleCreateTaskWithUpload(options?: { onIngestComplete?: IngestCompleteHook }) {
     if (!newTaskName.trim()) return;
-    if (newTaskWorkflowId !== "simple_generation_workflow" && !newTaskFile) return;
+    if (!isPrevizWorkflowId(newTaskWorkflowId) && !newTaskFile) return;
     try {
       setNewTaskError(null);
       setNewTaskUploadPercent(0);
@@ -226,7 +232,7 @@ export function useTaskLifecycle({
       setNewTaskStage("creating");
       setNewTaskName(normalizedTaskName);
       const created = await apiClient.createTask(normalizedTaskName, newTaskWorkflowId, {
-        scenePrompt: newTaskWorkflowId === "simple_generation_workflow" ? newTaskScenePrompt.trim() : null,
+        scenePrompt: isPrevizWorkflowId(newTaskWorkflowId) ? newTaskScenePrompt.trim() : null,
       });
       setPendingCreatedTaskId(created.taskId);
       setPendingIngestCompleteHook(() => options?.onIngestComplete ?? null);
@@ -234,7 +240,7 @@ export function useTaskLifecycle({
       setTab("timeline", created.taskId, true);
       await queryClient.invalidateQueries({ queryKey: ["tasks"] });
 
-      if (newTaskWorkflowId === "simple_generation_workflow") {
+      if (isPrevizWorkflowId(newTaskWorkflowId)) {
         setNewTaskStage("idle");
         setPendingCreatedTaskId(null);
         setPendingIngestCompleteHook(null);
@@ -279,7 +285,14 @@ export function useTaskLifecycle({
     try {
       const isAudioFile = (file.type || "").startsWith("audio/");
       const isVideoFile = (file.type || "").startsWith("video/");
-      if (newTaskWorkflowId === "character_animate_workflow" && isAudioFile) {
+      const fixedCharacterMode = getFixedCharacterAnimateModeForWorkflow(newTaskWorkflowId);
+      if (fixedCharacterMode === "audio_driven") {
+        if (!isAudioFile) {
+          setNewTaskFile(null);
+          setNewTaskStage("idle");
+          setNewTaskError("Choose an audio file for this workflow.");
+          return;
+        }
         const durationSec = await readLocalAudioDuration(file);
         if (durationSec > MAX_CHARACTER_AUDIO_DURATION_SECONDS + 1e-3) {
           setNewTaskFile(null);
@@ -289,11 +302,25 @@ export function useTaskLifecycle({
           );
           return;
         }
+      } else if (isCharacterAnimateWorkflowId(newTaskWorkflowId) && fixedCharacterMode === "pose_video") {
+        if (!isVideoFile) {
+          setNewTaskFile(null);
+          setNewTaskStage("idle");
+          setNewTaskError("Choose a video file for this workflow.");
+          return;
+        }
+        const durationSec = await readLocalVideoDuration(file);
+        if (durationSec > MAX_SOURCE_VIDEO_DURATION_SECONDS + 1e-3) {
+          setNewTaskFile(null);
+          setNewTaskStage("idle");
+          setNewTaskError(`Source video is ${durationSec.toFixed(2)}s. Uploaded source videos must be 120.00s or shorter.`);
+          return;
+        }
       } else {
         if (!isVideoFile) {
           setNewTaskFile(null);
           setNewTaskStage("idle");
-          setNewTaskError("Choose a video file, or for Character workflow an audio file.");
+          setNewTaskError("Choose a video file.");
           return;
         }
         const durationSec = await readLocalVideoDuration(file);

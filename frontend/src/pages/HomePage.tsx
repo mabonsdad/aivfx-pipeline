@@ -28,12 +28,13 @@ export default function HomePage({ cards, onSelectTask, onOpenLatestTask, onNewT
           </button>
         </div>
         <div className="mb-12 flex flex-col items-center text-center">
-          <FivefoldLogo className="h-auto w-[22rem] max-w-full" />
+          <FivefoldLogo className="h-auto w-[18rem] max-w-full" />
           <p className="mt-4 text-sm uppercase tracking-[0.26em] text-ink/55">AI Workflows</p>
         </div>
-        <div className="grid gap-6 lg:grid-cols-3">
+        <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-3">
           {cards.map((card) => {
             const workflow = getTaskWorkflowConfig(card.workflowId);
+            const canCreateTasks = workflow.userFacing;
             return (
               <section key={card.workflowId} className="flex min-h-[20rem] flex-col rounded-2xl border border-ink/10 bg-card p-6 shadow-sm">
                 <div className="mb-4 flex items-start justify-between gap-3">
@@ -71,12 +72,20 @@ export default function HomePage({ cards, onSelectTask, onOpenLatestTask, onNewT
                     </div>
                   )}
                   <div className="flex items-center justify-between gap-4">
-                    <button type="button" className="text-sm font-medium text-accent underline" onClick={() => onSelectTask(card.workflowId)}>
-                      Select task
-                    </button>
-                    <button type="button" className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-white" onClick={() => onNewTask(card.workflowId)}>
-                      New task
-                    </button>
+                    {canCreateTasks ? (
+                      <>
+                        <button type="button" className="text-sm font-medium text-accent underline" onClick={() => onSelectTask(card.workflowId)}>
+                          Select task
+                        </button>
+                        <button type="button" className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-white" onClick={() => onNewTask(card.workflowId)}>
+                          New task
+                        </button>
+                      </>
+                    ) : (
+                      <div className="rounded-md border border-dashed border-ink/15 px-3 py-2 text-xs text-ink/60">
+                        Placeholder for the separate canvas workflow surface.
+                      </div>
+                    )}
                   </div>
                 </div>
               </section>

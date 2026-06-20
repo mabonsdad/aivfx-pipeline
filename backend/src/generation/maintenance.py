@@ -4,9 +4,13 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from src.core.asset_origin import build_asset_origin, merge_asset_origin
-
-_START_END_MODES = frozenset({"kling_start_end", "veo_start_end", "ltx23_i2v_start_end"})
-_START_ONLY_MODES = frozenset({"kling_start_only", "veo_start_only", "runway_i2v", "sora_i2v", "happy_horse_i2v", "wan_a14b_i2v"})
+from src.core.task_workflows import (
+    infer_source_generation_input_mode,
+    is_character_animate_workflow_id,
+    is_previz_workflow_id,
+    workflow_for_character_mode,
+    workflow_for_source_video_mode,
+)
 
 
 def _generation_context(task: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any], dict[str, dict[str, Any]]]:
@@ -17,39 +21,11 @@ def _generation_context(task: dict[str, Any]) -> tuple[dict[str, Any] | None, di
         return None, frames, segments
     return generations, frames, segments
 
-
-def _infer_source_generation_input_mode(task: dict[str, Any], generation: dict[str, Any]) -> str | None:
-    generation_settings = generation.get("generationSettings") if isinstance(generation.get("generationSettings"), dict) else {}
-    explicit_input_mode = str(generation_settings.get("inputMode") or "").strip()
-    if explicit_input_mode in {"start_video", "start_end", "start_only", "edit_video"}:
-        return explicit_input_mode
-    selected_reference_ids = generation_settings.get("selectedReferenceIds")
-    if isinstance(selected_reference_ids, list) and selected_reference_ids:
-        return "edit_video"
-    prompt = str((generation.get("luma") or {}).get("prompt") or "").lower()
-    audio_reference_id = str(generation_settings.get("audioReferenceId") or "").strip()
-    if audio_reference_id or "@image" in prompt or "@audio" in prompt:
-        return "edit_video"
-    mode = str((generation.get("luma") or {}).get("mode") or "").strip()
-    if mode in _START_END_MODES:
-        return "start_end"
-    if mode in _START_ONLY_MODES:
-        return "start_only"
-    if mode in {"happy_horse_video_edit", "runway_aleph_v2v", "kling_v3_omni_video_edit", "seedance_reference_to_video", "flex_1"}:
-        has_edit_references = isinstance(task.get("editVideoReferences"), list) and len(task.get("editVideoReferences")) > 0
-        if mode == "seedance_reference_to_video" and "@video1" in prompt and has_edit_references:
-            return "edit_video"
-        return "start_video"
-    if str((generation.get("luma") or {}).get("model") or "").strip() == "wan2.7-videoedit":
-        return "edit_video"
-    return None
-
-
 def _infer_generation_origin(task: dict[str, Any], generation: dict[str, Any]) -> dict[str, Any]:
     generation_settings = generation.get("generationSettings") if isinstance(generation.get("generationSettings"), dict) else {}
     character_animation = generation.get("characterAnimation") if isinstance(generation.get("characterAnimation"), dict) else {}
     task_workflow_id = str(task.get("workflowId") or "source_video_flow").strip() or "source_video_flow"
-    workflow_id = str(
+    raw_workflow_id = str(
         generation_settings.get("workflowId")
         or character_animation.get("workflowId")
         or task_workflow_id
@@ -73,16 +49,19 @@ def _infer_generation_origin(task: dict[str, Any], generation: dict[str, Any]) -
     elif workflow_marker == "extension_chain_stitch":
         tool_origin = "extension_chain_stitch"
 
-    if workflow_id == "character_animate_workflow":
+    if is_character_animate_workflow_id(raw_workflow_id):
         creation_mode = str(character_animation.get("mode") or generation_settings.get("characterMode") or "").strip() or None
+        workflow_id = workflow_for_character_mode(creation_mode)
         if tool_origin == "segment_generate":
             tool_origin = "character_generate"
-    elif workflow_id == "simple_generation_workflow":
+    elif is_previz_workflow_id(raw_workflow_id):
+        workflow_id = "simple_generation_workflow"
         creation_mode = "previz"
         if tool_origin == "segment_generate":
             tool_origin = "previz_generate"
     else:
-        creation_mode = _infer_source_generation_input_mode(task, generation)
+        creation_mode = infer_source_generation_input_mode(task, generation)
+        workflow_id = workflow_for_source_video_mode(creation_mode)
 
     return build_asset_origin(
         workflow_id=workflow_id,

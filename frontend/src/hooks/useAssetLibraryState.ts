@@ -2,6 +2,7 @@ import { useMemo } from "react";
 
 import { classifyGenerationAssetRole, getGenerationOrigin } from "../lib/generationOrigin";
 import { resolveExportThumbnailUrl, resolveGenerationThumbnailUrl } from "../lib/taskPreview";
+import { isCharacterAnimateWorkflowId, isPrevizWorkflowId } from "../lib/taskWorkflows";
 import type { TaskDetail } from "../types/api";
 import type { LibraryAsset } from "../types/libraryAsset";
 
@@ -16,8 +17,8 @@ function keyBasenameFromS3Key(key: string): string {
 }
 
 function referenceAssetLabel(task: TaskDetail): string {
-  if (task.workflowId === "character_animate_workflow") return "character";
-  if (task.workflowId === "simple_generation_workflow") return "scene reference";
+  if (isCharacterAnimateWorkflowId(task.workflowId)) return "character";
+  if (isPrevizWorkflowId(task.workflowId)) return "scene reference";
   return "reference image";
 }
 
@@ -37,7 +38,7 @@ function sortByCreatedDesc(assets: LibraryAsset[]): LibraryAsset[] {
 function collectEditedFrameAssets(tasks: TaskAssetContext[]): LibraryAsset[] {
   const assets: LibraryAsset[] = [];
   for (const { taskId, task } of tasks) {
-    if (task.workflowId === "simple_generation_workflow") {
+    if (isPrevizWorkflowId(task.workflowId)) {
       const frameIds = previzFrameReferenceIds(task);
       for (const reference of task.editVideoReferences ?? []) {
         if (!frameIds.has(reference.referenceId) || !reference.imageUrl) continue;
@@ -83,7 +84,7 @@ function collectEditedFrameAssets(tasks: TaskAssetContext[]): LibraryAsset[] {
 function collectReferenceImageAssets(tasks: TaskAssetContext[]): LibraryAsset[] {
   const assets: LibraryAsset[] = [];
   for (const { taskId, task } of tasks) {
-    const previzFrameIds = task.workflowId === "simple_generation_workflow" ? previzFrameReferenceIds(task) : null;
+    const previzFrameIds = isPrevizWorkflowId(task.workflowId) ? previzFrameReferenceIds(task) : null;
     for (const reference of task.editVideoReferences ?? []) {
       if (previzFrameIds?.has(reference.referenceId)) continue;
       if (!reference.imageUrl) continue;
@@ -100,7 +101,7 @@ function collectReferenceImageAssets(tasks: TaskAssetContext[]): LibraryAsset[] 
         previewUrl: reference.imageUrl,
         downloadUrl: reference.imageUrl,
         mediaType: "image",
-        assetRole: task.workflowId === "character_animate_workflow" ? "character" : "reference_image",
+        assetRole: isCharacterAnimateWorkflowId(task.workflowId) ? "character" : "reference_image",
         deletePayload: { assetType: "edit_video_reference", referenceId: reference.referenceId },
       });
     }

@@ -586,6 +586,22 @@ export const apiClient = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
+  importManualFrameVariant: (
+    taskId: string,
+    frameId: string,
+    payload: {
+      sources: Array<{
+        sourceKey: string;
+        filename?: string | null;
+        sourceType: "uploaded" | "generated" | "frame_capture" | "frame_variant";
+        originTaskId?: string | null;
+      }>;
+    },
+  ) =>
+    api<{ variant: { variantId: string; imageUrl?: string } }>(`/tasks/${taskId}/frames/${frameId}/manual-upload/import`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
   initManualSegmentGenerationUpload: (
     taskId: string,
     segmentId: string,

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { GenerateInputMode } from "../lib/generationModeRegistry";
-import type { TaskWorkflowId } from "../lib/taskWorkflows";
+import { isCharacterAnimateWorkflowId, isPrevizWorkflowId, isSourceVideoWorkflowId, type TaskWorkflowId } from "../lib/taskWorkflows";
 import type { CharacterAnimateMode } from "../lib/characterAnimate/characterAnimateModeRegistry";
 import { getGenerationOrigin, isPostProcessDerivedGeneration, matchesGenerateStepGrid } from "../lib/generationOrigin";
 import type { SegmentGeneration, SegmentRecord, TaskDetail } from "../types/api";
@@ -64,7 +64,7 @@ export function useGenerationMergeState({ task, selectedSegmentId, segmentsById,
   const [mergeTrimEndFrames, setMergeTrimEndFrames] = useState(0);
   const [mergeConfiguredGenId, setMergeConfiguredGenId] = useState("");
 
-  const filterBySelectedSegment = !(workflowId === "source_video_flow" && activeInputMode === "edit_video");
+  const filterBySelectedSegment = !(isSourceVideoWorkflowId(workflowId) && activeInputMode === "edit_video");
   const segmentGenerations = useMemo(
     () =>
       Object.values(task?.segmentGenerations ?? {})
@@ -87,9 +87,9 @@ export function useGenerationMergeState({ task, selectedSegmentId, segmentsById,
               filterBySelectedSegment,
             }) &&
             !(
-              workflowId === "character_animate_workflow"
+              isCharacterAnimateWorkflowId(workflowId)
                 ? isCharacterPostProcessDerivedGeneration(gen)
-                : workflowId === "simple_generation_workflow"
+                : isPrevizWorkflowId(workflowId)
                   ? isPrevizPostProcessDerivedGeneration(gen)
                   : getGenerationOrigin(gen, task)?.stepOrigin === "post_process"
             ),

@@ -1,3 +1,6 @@
+import { execFileSync } from "node:child_process";
+import { copyFileSync, cpSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
+import { join } from "node:path";
 import * as cdk from "aws-cdk-lib";
 import { Construct } from "constructs";
 import * as apigwv2 from "aws-cdk-lib/aws-apigatewayv2";
@@ -207,6 +210,78 @@ export class AivfxStack extends cdk.Stack {
     });
 
     const backendCodePath = `${__dirname}/../../backend`;
+    const cleanupPyArtifacts = (targetPath: string): void => {
+      for (const entry of readdirSync(targetPath)) {
+        const entryPath = join(targetPath, entry);
+        const stats = statSync(entryPath);
+        if (stats.isDirectory()) {
+          if (entry === "__pycache__") {
+            rmSync(entryPath, { force: true, recursive: true });
+            continue;
+          }
+          cleanupPyArtifacts(entryPath);
+          continue;
+        }
+        if (entry.endsWith(".pyc")) {
+          rmSync(entryPath, { force: true });
+        }
+      }
+    };
+    const backendBundlingCommand = [
+      "set -euo pipefail",
+      "python -m pip install --upgrade pip",
+      "python -m pip install --no-cache-dir --platform manylinux2014_aarch64 --implementation cp --python-version 3.10 --only-binary=:all: -r /asset-input/requirements.txt -t /asset-output",
+      "cp -a /asset-input/src /asset-output/src",
+      "cp /asset-input/requirements.txt /asset-output/requirements.txt",
+      "cp /asset-input/pyproject.toml /asset-output/pyproject.toml",
+      "find /asset-output -name '__pycache__' -type d -prune -exec rm -rf {} +",
+      "find /asset-output -name '*.pyc' -delete",
+    ].join(" && ");
+    const bundledBackendCode = lambda.Code.fromAsset(backendCodePath, {
+      bundling: {
+        local: {
+          tryBundle(outputDir: string): boolean {
+            try {
+              mkdirSync(outputDir, { recursive: true });
+              execFileSync(
+                "python3",
+                [
+                  "-m",
+                  "pip",
+                  "install",
+                  "--no-cache-dir",
+                  "--platform",
+                  "manylinux2014_aarch64",
+                  "--implementation",
+                  "cp",
+                  "--python-version",
+                  "3.10",
+                  "--only-binary=:all:",
+                  "-r",
+                  join(backendCodePath, "requirements.txt"),
+                  "-t",
+                  outputDir,
+                ],
+                {
+                  stdio: "inherit",
+                },
+              );
+              cpSync(join(backendCodePath, "src"), join(outputDir, "src"), { recursive: true });
+              copyFileSync(join(backendCodePath, "requirements.txt"), join(outputDir, "requirements.txt"));
+              copyFileSync(join(backendCodePath, "pyproject.toml"), join(outputDir, "pyproject.toml"));
+              cleanupPyArtifacts(outputDir);
+              return true;
+            } catch (error) {
+              console.warn("Local backend bundling failed, falling back to Docker bundling.", error);
+              return false;
+            }
+          },
+        },
+        image: lambda.Runtime.PYTHON_3_10.bundlingImage,
+        command: ["bash", "-lc", backendBundlingCommand],
+        platform: "linux/arm64",
+      },
+    });
 
     const defaultFfmpegLayerArn = `arn:aws:lambda:${this.region}:${this.account}:layer:ffmpeg-mini-arm64-python39:1`;
     const configuredFfmpegLayerArn = process.env.FFMPEG_LAYER_ARN?.trim();
@@ -219,10 +294,7 @@ export class AivfxStack extends cdk.Stack {
       runtime: lambda.Runtime.PYTHON_3_10,
       architecture: lambda.Architecture.ARM_64,
       handler: "src/api_handler.handler",
-      code: lambda.Code.fromAsset(backendCodePath, {
-        ignoreMode: cdk.IgnoreMode.GLOB,
-        exclude: ["tests", "__pycache__", ".pytest_cache", "*.pyc"],
-      }),
+      code: bundledBackendCode,
       timeout: cdk.Duration.seconds(29),
       memorySize: 2048,
       environment: {
@@ -242,10 +314,7 @@ export class AivfxStack extends cdk.Stack {
       runtime: lambda.Runtime.PYTHON_3_10,
       architecture: lambda.Architecture.ARM_64,
       handler: "src/worker_handler.handler",
-      code: lambda.Code.fromAsset(backendCodePath, {
-        ignoreMode: cdk.IgnoreMode.GLOB,
-        exclude: ["tests", "__pycache__", ".pytest_cache", "*.pyc"],
-      }),
+      code: bundledBackendCode,
       timeout: cdk.Duration.minutes(15),
       memorySize: 10240,
       ephemeralStorageSize: cdk.Size.gibibytes(10),

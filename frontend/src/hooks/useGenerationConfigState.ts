@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import type {
   HappyHorseResolutionId,
@@ -64,8 +64,8 @@ export const GENERATION_MODELS_BY_INPUT: Record<GenerateInputMode, GenerationMod
   ],
 };
 
-export function useGenerationConfigState() {
-  const [generationInputMode, setGenerationInputMode] = useState<GenerateInputMode>(() => readStoredGenerationInputMode() ?? "start_video");
+export function useGenerationConfigState(forcedInputMode: GenerateInputMode | null = null) {
+  const [storedGenerationInputMode, setStoredGenerationInputMode] = useState<GenerateInputMode>(() => readStoredGenerationInputMode() ?? "start_video");
   const [generationModelByInput, setGenerationModelByInput] = useState<Record<GenerateInputMode, VideoModelId>>({
     start_video: "ray-flash-2",
     start_end: "kling-2.6",
@@ -83,6 +83,13 @@ export function useGenerationConfigState() {
   const [happyHorseResolution, setHappyHorseResolution] = useState<HappyHorseResolutionId>("1080p");
   const [wan27NegativePrompt, setWan27NegativePrompt] = useState("");
   const [sora2Resolution, setSora2Resolution] = useState<Sora2ResolutionId>("auto");
+
+  const generationInputMode = forcedInputMode ?? storedGenerationInputMode;
+
+  const setGenerationInputMode = useCallback((nextMode: GenerateInputMode) => {
+    if (forcedInputMode) return;
+    setStoredGenerationInputMode(nextMode);
+  }, [forcedInputMode]);
 
   useEffect(() => {
     const modelForInput = generationModelByInput[generationInputMode];
@@ -104,9 +111,10 @@ export function useGenerationConfigState() {
   }, [generationInputMode, generationModelOptions, lumaModel]);
 
   useEffect(() => {
+    if (forcedInputMode) return;
     if (typeof window === "undefined") return;
     window.sessionStorage.setItem(GENERATION_INPUT_MODE_STORAGE_KEY, generationInputMode);
-  }, [generationInputMode]);
+  }, [forcedInputMode, generationInputMode]);
 
   return {
     generationInputMode,

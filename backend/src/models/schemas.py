@@ -34,7 +34,15 @@ def _validate_choice(value: str, *, field_name: str, allowed: tuple[str, ...]) -
 
 class TaskCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=15)
-    workflowId: Literal["source_video_flow", "character_animate_workflow", "simple_generation_workflow", "canvas_workflow"] = "source_video_flow"
+    workflowId: Literal[
+        "source_video_flow",
+        "source_video_start_end_workflow",
+        "source_video_edit_workflow",
+        "character_animate_workflow",
+        "character_animate_audio_workflow",
+        "simple_generation_workflow",
+        "canvas_workflow",
+    ] = "source_video_flow"
     scenePrompt: str | None = Field(default=None, max_length=4000)
 
 
@@ -672,6 +680,17 @@ class ManualFrameUploadInitRequest(BaseModel):
 class ManualFrameUploadCompleteRequest(BaseModel):
     uploadKey: str = Field(min_length=1)
     filename: str = Field(min_length=1, max_length=255)
+
+
+class ManualFrameImportItem(BaseModel):
+    sourceKey: str = Field(min_length=1)
+    filename: str | None = Field(default=None, min_length=1, max_length=255)
+    sourceType: Literal["uploaded", "generated", "frame_capture", "frame_variant"] = "uploaded"
+    originTaskId: str | None = Field(default=None, max_length=120)
+
+
+class ManualFrameImportRequest(BaseModel):
+    sources: list[ManualFrameImportItem] = Field(min_length=1, max_length=1)
 
 
 class ManualSegmentGenerationUploadInitRequest(BaseModel):

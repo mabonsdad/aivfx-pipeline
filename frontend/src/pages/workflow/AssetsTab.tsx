@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { DeleteIcon, DownloadIcon, IconActionButton, PreviewIcon } from "../../components/layout/MediaActionButtons";
 import { PendingButtonLabel, StatusNotice } from "../../components/layout/UiFeedback";
 import { FRAME_TEST_OPTIONS, VIDEO_COMPARE_TEST_OPTIONS, VIDEO_TEST_OPTIONS } from "../../components/reports/QcReportShared";
+import { isPrevizWorkflowId } from "../../lib/taskWorkflows";
 import type { CustomReportOutputRef, TaskDetail } from "../../types/api";
 import type { LibraryAsset } from "../../types/libraryAsset";
 
@@ -100,7 +101,7 @@ function reportOptionsForGroup(group: AssetReportGroup, workflowId?: string): Re
   if (group === "post_process_videos") {
     return [{ type: "qc_video", label: "Video QC", description: "Analyze selected post-process videos." }];
   }
-  if (workflowId === "simple_generation_workflow") {
+  if (isPrevizWorkflowId(workflowId)) {
     return [
       {
         type: "previz_review",

@@ -63,6 +63,7 @@ from src.core.prompt_wizard_admin import (
     normalize_prompt_wizard_admin_config_for_read,
 )
 from src.core.projects import can_access_project, project_summary
+from src.core.task_workflows import is_source_video_workflow_id
 from src.generation import (
     LUMA_API_ALLOWED_MODES,
     get_video_model_capability,
@@ -113,6 +114,7 @@ from src.models.schemas import (
     GenerationAudioReferenceUploadRequest,
     FullEditRequest,
     ManualFrameUploadCompleteRequest,
+    ManualFrameImportRequest,
     ManualFrameUploadInitRequest,
     ManualRefineExportRequest,
     ManualRefineUploadCompleteRequest,
@@ -548,6 +550,13 @@ def _create_manual_uploaded_frame_variant(
             "uploadedFilename": filename,
         },
     }
+
+
+def _parse_task_identity_from_asset_key(asset_key: str) -> tuple[str, str] | None:
+    match = re.match(r"^users/([^/]+)/tasks/([^/]+)/", str(asset_key or "").strip())
+    if not match:
+        return None
+    return match.group(1), match.group(2)
 
 
 def _create_manual_uploaded_segment_generation(
@@ -2507,6 +2516,86 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
                 origin=origin,
             )
 
+        if method == "POST" and len(parts) == 6 and parts[2] == "frames" and parts[4] == "manual-upload" and parts[5] == "import":
+            frame_id = parts[3]
+            frame = task.get("frames", {}).get(frame_id)
+            if not frame:
+                return error_response(404, "Frame not found", origin=origin)
+            req = _json_model(ManualFrameImportRequest, event)
+            source = req.sources[0]
+            source_key = str(source.sourceKey or "").strip()
+            if not source_key.startswith("users/"):
+                return error_response(400, "Imported frame source must come from the asset library", origin=origin)
+
+            source_identity = _parse_task_identity_from_asset_key(source_key)
+            if not source_identity:
+                return error_response(400, "Imported frame source must belong to a task asset", origin=origin)
+            source_user_id, source_task_id = source_identity
+            is_same_user_asset = source_user_id == str(task.get("userId") or "").strip()
+            if not is_same_user_asset:
+                source_task = store.load_task(source_user_id, source_task_id)
+                if not isinstance(source_task, dict):
+                    return error_response(404, "Imported frame source task not found", origin=origin)
+                source_project_id = str(source_task.get("projectId") or "").strip()
+                if not source_project_id:
+                    return error_response(403, "Imported frame source is not available to this user", origin=origin)
+                source_project = store.load_project(source_project_id)
+                if not can_access_project(source_project, user_id=user_id, is_admin=is_admin_claims(claims)):
+                    return error_response(403, "Imported frame source is outside your accessible asset library", origin=origin)
+
+            try:
+                original_bytes = asset_store.read_bytes(frame["captureKey"])
+                source_bytes = asset_store.read_bytes(source_key)
+            except ClientError:
+                return error_response(404, "Imported frame source file not found", origin=origin)
+
+            normalized_png = _normalize_uploaded_refine_image(original_bytes=original_bytes, uploaded_bytes=source_bytes)
+            requested_filename = str(source.filename or "").strip()
+            source_filename = requested_filename or Path(source_key).name or "imported_frame.png"
+            variant = _create_manual_uploaded_frame_variant(
+                task=task,
+                frame_id=frame_id,
+                filename=source_filename,
+            )
+            variant_generation_settings = dict(variant.get("generationSettings") or {})
+            variant_generation_settings.update(
+                {
+                    "workflow": "manual_frame_import",
+                    "importedSourceKey": source_key,
+                    "importedSourceType": str(source.sourceType or "uploaded"),
+                    "originTaskId": source.originTaskId or source_task_id,
+                }
+            )
+            variant["generationSettings"] = variant_generation_settings
+            asset_store.put_bytes(variant["outputKey"], normalized_png, content_type="image/png")
+            frame.setdefault("variants", []).append(variant)
+            frame["selectedVariantId"] = variant["variantId"]
+            task.setdefault("history", []).append(
+                {
+                    "type": "MANUAL_FRAME_IMPORT_APPLIED",
+                    "frameId": frame_id,
+                    "timestamp": now_iso(),
+                    "userId": user_id,
+                    "details": {
+                        "variantId": variant["variantId"],
+                        "sourceKey": source_key,
+                        "sourceType": str(source.sourceType or "uploaded"),
+                        "originTaskId": source.originTaskId or source_task_id,
+                    },
+                }
+            )
+            store.save_task(task)
+            return response(
+                201,
+                {
+                    "variant": {
+                        "variantId": variant["variantId"],
+                        "imageUrl": asset_store.presign_get(variant["outputKey"], expires=PRESIGNED_GET_TTL_SECONDS),
+                    }
+                },
+                origin=origin,
+            )
+
         if method == "POST" and len(parts) == 7 and parts[2] == "frames" and parts[4] == "manual-refine" and parts[5] == "upload" and parts[6] == "complete":
             frame_id = parts[3]
             frame = task.get("frames", {}).get(frame_id)
@@ -2619,7 +2708,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             )
 
         if method == "POST" and len(parts) == 5 and parts[2] == "generation-audio-reference" and parts[3] == "upload" and parts[4] == "init":
-            if str(task.get("workflowId") or DEFAULT_TASK_WORKFLOW_ID) != "source_video_flow":
+            if not is_source_video_workflow_id(str(task.get("workflowId") or DEFAULT_TASK_WORKFLOW_ID)):
                 return error_response(400, "Generation audio references are only available in the source video workflow", origin=origin)
             req = _json_model(GenerationAudioReferenceUploadRequest, event)
             if not req.contentType.lower().startswith("audio/"):
@@ -2638,7 +2727,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             )
 
         if method == "POST" and len(parts) == 5 and parts[2] == "generation-audio-reference" and parts[3] == "upload" and parts[4] == "complete":
-            if str(task.get("workflowId") or DEFAULT_TASK_WORKFLOW_ID) != "source_video_flow":
+            if not is_source_video_workflow_id(str(task.get("workflowId") or DEFAULT_TASK_WORKFLOW_ID)):
                 return error_response(400, "Generation audio references are only available in the source video workflow", origin=origin)
             req = _json_model(GenerationAudioReferenceUploadCompleteRequest, event)
             key = req.uploadKey

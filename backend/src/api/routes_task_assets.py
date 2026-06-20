@@ -4,6 +4,7 @@ from typing import Any, Callable
 
 from botocore.exceptions import ClientError
 
+from src.core.task_workflows import is_character_animate_workflow_id
 from src.models.schemas import AssetDeleteRequest, ExternalQcPairUploadRequest, UploadVideoRequest
 
 
@@ -34,7 +35,7 @@ def handle_task_asset_routes(
             return error_response_fn(400, f"Upload too large (max={max_upload_bytes})", origin=origin)
         is_video = req.contentType.startswith("video/")
         is_audio = req.contentType.startswith("audio/")
-        if not is_video and not (is_audio and str(task.get("workflowId") or "") == "character_animate_workflow"):
+        if not is_video and not (is_audio and is_character_animate_workflow_id(str(task.get("workflowId") or ""))):
             return error_response_fn(400, "Invalid content type", origin=origin)
 
         key = asset_paths_for_task_fn(task).original_video(req.filename)

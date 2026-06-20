@@ -1,6 +1,11 @@
 import type { ChangeEvent } from "react";
 import { PendingButtonLabel, StatusNotice } from "../layout/UiFeedback";
-import type { TaskWorkflowId } from "../../lib/taskWorkflows";
+import {
+  getFixedCharacterAnimateModeForWorkflow,
+  isCharacterAnimateWorkflowId,
+  isPrevizWorkflowId,
+  type TaskWorkflowId,
+} from "../../lib/taskWorkflows";
 
 type NewTaskStage = "idle" | "creating" | "uploading" | "ingesting" | "error";
 
@@ -70,7 +75,9 @@ export default function NewTaskModal({
   if (!isOpen) return null;
 
   const isBusy = stage === "creating" || stage === "uploading" || stage === "ingesting";
-  const isPrevizWorkflow = workflowId === "simple_generation_workflow";
+  const isPrevizWorkflow = isPrevizWorkflowId(workflowId);
+  const fixedCharacterMode = getFixedCharacterAnimateModeForWorkflow(workflowId);
+  const isCharacterWorkflow = isCharacterAnimateWorkflowId(workflowId);
 
   const submitLabel =
     stage === "creating"
@@ -90,7 +97,13 @@ export default function NewTaskModal({
       <div className="w-full max-w-xl rounded-2xl border border-ink/10 bg-card p-5 shadow-xl">
         <div className="mb-4 flex items-center justify-between">
           <h3 className="text-lg font-semibold">
-            {isPrevizWorkflow ? "Create New Previz Scene" : "Upload New Video"}
+            {isPrevizWorkflow
+              ? "Create New Previz Scene"
+              : fixedCharacterMode === "audio_driven"
+                ? "Upload Source Audio"
+                : isCharacterWorkflow
+                  ? "Upload Source Video"
+                  : "Upload New Video"}
           </h3>
           <button
             type="button"
@@ -142,16 +155,20 @@ export default function NewTaskModal({
             <>
               <div>
                 <label className="mb-1 block text-sm font-medium">
-                  {workflowId === "character_animate_workflow" ? "Source media file" : "Video file"}
+                  {fixedCharacterMode === "audio_driven" ? "Audio file" : isCharacterWorkflow ? "Source video file" : "Video file"}
                 </label>
                 <input
                   type="file"
-                  accept={workflowId === "character_animate_workflow" ? "video/*,audio/*" : "video/*"}
+                  accept={fixedCharacterMode === "audio_driven" ? "audio/*" : "video/*"}
                   onChange={(event: ChangeEvent<HTMLInputElement>) => onFileSelect(event.target.files?.[0] ?? null)}
                   disabled={isBusy}
                 />
-                {workflowId === "character_animate_workflow" ? (
-                  <p className="mt-1 text-xs text-ink/60">Character workflow accepts either a driving video or an audio file.</p>
+                {isCharacterWorkflow ? (
+                  <p className="mt-1 text-xs text-ink/60">
+                    {fixedCharacterMode === "audio_driven"
+                      ? "This workflow expects an audio upload to drive lip sync and motion."
+                      : "This workflow expects a driving video upload."}
+                  </p>
                 ) : null}
               </div>
               <details className="rounded-md border border-ink/15 bg-bg px-3 py-2">
@@ -256,8 +273,10 @@ export default function NewTaskModal({
               idle={
                 isPrevizWorkflow
                   ? "Create Scene Task"
-                  : workflowId === "character_animate_workflow"
-                    ? "Upload Source Media"
+                  : isCharacterWorkflow
+                    ? fixedCharacterMode === "audio_driven"
+                      ? "Upload Source Audio"
+                      : "Upload Source Video"
                     : "Upload Video"
               }
               pending={submitLabel}
