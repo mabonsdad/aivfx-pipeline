@@ -62,6 +62,11 @@ from src.core.prompt_wizard_admin import (
     ADMIN_PROMPT_WIZARD_CONFIG_KEY,
     normalize_prompt_wizard_admin_config_for_read,
 )
+from src.core.pricing_admin import (
+    ADMIN_PRICING_CONFIG_KEY,
+    normalize_pricing_admin_config_for_read,
+    resolve_openai_token_pricing,
+)
 from src.core.projects import can_access_project, project_summary
 from src.generation import (
     LUMA_API_ALLOWED_MODES,
@@ -1597,6 +1602,10 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
         get_canvas_system_prompt_fn=lambda profile: resolve_canvas_system_prompt(
             normalize_canvas_prompt_profiles_for_read(store.get_json(ADMIN_CANVAS_PROMPT_PROFILES_KEY)),
             profile,
+        ),
+        get_openai_pricing_rates_fn=lambda model: resolve_openai_token_pricing(
+            normalize_pricing_admin_config_for_read(store.get_json(ADMIN_PRICING_CONFIG_KEY)),
+            model,
         ),
         improve_lookdev_prompt_fn=improve_openai_lookdev_prompt,
         logger=logger,

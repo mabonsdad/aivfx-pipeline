@@ -50,6 +50,7 @@ def improve_lookdev_prompt(
     reference_image_url: str | None = None,
     system_prompt: str | None = None,
     temperature: float | None = 0.2,
+    pricing_rates: dict[str, float] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Rewrite a lookdev/image draft prompt via the shared OpenAI engine.
 
@@ -70,5 +71,6 @@ def improve_lookdev_prompt(
         system_prompt=system_prompt or LOOKDEV_PROMPT_WIZARD_SYSTEM_PROMPT,
         edited_first_frame_url=reference_image_url,
         temperature=temperature,
+        pricing_rates=pricing_rates,
         return_usage=True,
     )

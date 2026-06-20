@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { apiClient } from "../api/client";
 import { StatusNotice } from "../components/layout/UiFeedback";
+import AdminPricingConfigPanel from "../components/admin/AdminPricingConfigPanel";
 import AdminPromptWizardPage from "./AdminPromptWizardPage";
 
 function summarizeToolCounts(counts: Record<string, number>): string {
@@ -96,7 +97,7 @@ export default function AdminWorkspacePage() {
       <div className="rounded-xl border border-ink/10 bg-white p-4">
         <h2 className="text-base font-semibold">Admin Workspace</h2>
         <p className="mt-1 text-sm text-ink/65">
-          Manage project sharing, review user activity, and maintain prompt-wizard configuration.
+          Manage project sharing, review user activity, and maintain prompt and pricing configuration.
         </p>
       </div>
 
@@ -257,6 +258,13 @@ export default function AdminWorkspacePage() {
           </table>
         </div>
       </section>
+
+      <details className="rounded-xl border border-ink/10 bg-white p-4">
+        <summary className="cursor-pointer text-sm font-semibold text-ink">Pricing Config</summary>
+        <div className="mt-4">
+          <AdminPricingConfigPanel />
+        </div>
+      </details>
 
       <details className="rounded-xl border border-ink/10 bg-white p-4">
         <summary className="cursor-pointer text-sm font-semibold text-ink">Prompt Wizard Config</summary>

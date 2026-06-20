@@ -37,6 +37,7 @@ def handle_canvas_routes(
     error_response_fn: Callable[..., dict[str, Any]],
     get_openai_api_key_fn: Callable[[], str],
     get_canvas_system_prompt_fn: Callable[[str], str | None],
+    get_openai_pricing_rates_fn: Callable[[str], dict[str, float] | None],
     improve_lookdev_prompt_fn: Callable[..., dict[str, Any]],
     logger,
 ) -> dict[str, Any] | None:
@@ -53,6 +54,7 @@ def handle_canvas_routes(
         # Load the brain (system prompt) from the editable server-side profile config.
         # Falls back to the built-in default inside improve_lookdev_prompt if absent.
         system_prompt = get_canvas_system_prompt_fn(req.profile)
+        pricing_rates = get_openai_pricing_rates_fn("gpt-5.5")
 
         temperature = req.temperature if req.temperature is not None else 0.2
 
@@ -65,6 +67,7 @@ def handle_canvas_routes(
                 reference_image_url=req.reference_image_url,
                 system_prompt=system_prompt,
                 temperature=temperature,
+                pricing_rates=pricing_rates,
             )
         except Exception as exc:
             logger.warning("Lookdev prompt wizard failed", extra={"userId": user_id, "error": str(exc)})

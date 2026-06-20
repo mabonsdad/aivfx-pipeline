@@ -6,6 +6,7 @@ import type {
   PromptWizardRequest,
   PromptWizardResult,
 } from "../lib/promptWizardConfig";
+import type { PricingAdminConfig } from "../lib/pricingConfig";
 import type {
   ApiAssetUploadInitPayload,
   ApiImageEditFullPayload,
@@ -168,6 +169,23 @@ export const apiClient = {
       config: PromptWizardAdminConfig;
       access: { isAdmin: boolean; viaPin: boolean };
     }>("/admin/prompt-wizard-config", {
+      method: "PUT",
+      headers: pin ? { "x-admin-pin": pin } : undefined,
+      body: JSON.stringify(payload),
+    }),
+  getPricingAdminConfig: (pin?: string) =>
+    api<{
+      config: PricingAdminConfig;
+      access: { isAdmin: boolean; viaPin: boolean };
+    }>("/admin/pricing-config", {
+      method: "GET",
+      headers: pin ? { "x-admin-pin": pin } : undefined,
+    }),
+  updatePricingAdminConfig: (payload: PricingAdminConfig, pin?: string) =>
+    api<{
+      config: PricingAdminConfig;
+      access: { isAdmin: boolean; viaPin: boolean };
+    }>("/admin/pricing-config", {
       method: "PUT",
       headers: pin ? { "x-admin-pin": pin } : undefined,
       body: JSON.stringify(payload),
