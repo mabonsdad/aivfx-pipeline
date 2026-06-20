@@ -245,19 +245,20 @@ def _validate_wizard_result(result: dict[str, Any], required_markers: list[str])
     return result
 
 
-# USD per 1,000,000 tokens. Estimate only — set to real pricing per model.
+# USD per 1,000,000 tokens. Fallback only when no centralized pricing config is
+# supplied by the caller.
 _OPENAI_PRICE_PER_MTOK: dict[str, dict[str, float]] = {
-    "gpt-5.5": {"input": 1.25, "output": 10.0},
+    "gpt-5.5": {"input": 5.0, "output": 30.0},
 }
 
 
-def _usage_from_payload(payload: dict[str, Any], model: str) -> dict[str, Any]:
+def _usage_from_payload(payload: dict[str, Any], model: str, pricing_rates: dict[str, float] | None = None) -> dict[str, Any]:
     usage = payload.get("usage") if isinstance(payload, dict) else None
     if not isinstance(usage, dict):
         usage = {}
     input_tokens = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
     output_tokens = int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
-    price = _OPENAI_PRICE_PER_MTOK.get(model)
+    price = pricing_rates or _OPENAI_PRICE_PER_MTOK.get(model)
     estimated_cost_usd: float | None = None
     if price:
         estimated_cost_usd = round(
@@ -277,6 +278,7 @@ def improve_video_prompt(
     system_prompt: str | None = None,
     edited_first_frame_url: str | None = None,
     temperature: float | None = None,
+    pricing_rates: dict[str, float] | None = None,
     return_usage: bool = False,
 ) -> dict[str, Any] | tuple[dict[str, Any], dict[str, Any]]:
     prompt = str(request_payload.get("user_draft_prompt") or "").strip()
@@ -329,5 +331,5 @@ def improve_video_prompt(
         raise OpenAIPromptWizardError("Prompt Wizard returned an invalid response shape")
     result = _validate_wizard_result(parsed, [str(marker) for marker in required_markers if str(marker).strip()])
     if return_usage:
-        return result, _usage_from_payload(payload, model)
+        return result, _usage_from_payload(payload, model, pricing_rates)
     return result
