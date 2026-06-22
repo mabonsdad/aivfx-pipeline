@@ -32,6 +32,17 @@ class CanvasPromptWizardRequest(BaseModel):
     # single one first, before being handed to the wizard.
     reference_image_url: ReferenceImage | None = Field(default=None)
     reference_image_urls: list[ReferenceImage] = Field(default_factory=list, max_length=4)
+    # Project context (Layer 4 of the brain): facts about THIS film (world, characters,
+    # props, per-shot look). The brain's system prompt treats this as ground truth. The
+    # frontend assembles it from the shot's script/shotlist/profile. Kept out of the
+    # shared system prompt so general and project knowledge stay separate.
+    project_context: str | None = Field(default=None, max_length=20000)
+
+
+class CanvasStateRequest(BaseModel):
+    # Arbitrary canvas state blob (graph, layout, wiring, prompts, manifests). Stored
+    # verbatim per task so the canvas can live on Robin's S3 instead of the Fivefold node.
+    state: dict[str, Any] = Field(default_factory=dict)
 
 
 def handle_canvas_routes(
@@ -83,6 +94,7 @@ def handle_canvas_routes(
                 user_visible_model_name=req.user_visible_model_name,
                 aspect_ratio=req.aspect_ratio,
                 reference_image_urls=reference_images,
+                project_context=req.project_context,
                 system_prompt=system_prompt,
                 pricing_rates=pricing_rates,
             )
@@ -111,5 +123,33 @@ def handle_canvas_routes(
         except Exception as exc:
             logger.warning("Canvas prompt wizard usage tracking failed", extra={"userId": user_id, "error": str(exc)})
         return response_fn(200, {"result": result, "usage": usage}, origin=origin)
+
+    # --- Canvas state storage ---------------------------------------------------------
+    # One JSON blob per task on Robin's S3 (via S3JsonStore), so the canvas graph/layout/
+    # wiring/prompts/manifests no longer depend on the Fivefold node being reachable.
+    # GET  /canvas/{taskId}/state  -> { taskId, state, updatedAt }
+    # PUT  /canvas/{taskId}/state  -> stores { state } verbatim
+    if path.startswith("/canvas/") and path.endswith("/state"):
+        task_id = path[len("/canvas/") : -len("/state")]
+        if not task_id or "/" in task_id:
+            return error_response_fn(400, "Invalid canvas task id", origin=origin)
+        state_key = f"users/{user_id}/tasks/{task_id}/canvas_state.json"
+        if method == "GET":
+            stored = store.get_json(state_key) or {}
+            return response_fn(
+                200,
+                {"taskId": task_id, "state": stored.get("state", {}), "updatedAt": stored.get("updatedAt")},
+                origin=origin,
+            )
+        if method == "PUT":
+            req = json_model(CanvasStateRequest, event)
+            payload = {
+                "state": req.state,
+                "updatedAt": now_iso_fn(),
+                "userId": user_id,
+                "taskId": task_id,
+            }
+            store.put_json(state_key, payload)
+            return response_fn(200, {"ok": True, "taskId": task_id, "updatedAt": payload["updatedAt"]}, origin=origin)
 
     return None

@@ -49,6 +49,7 @@ def improve_lookdev_prompt(
     aspect_ratio: str | None = None,
     reference_image_url: str | None = None,
     reference_image_urls: list[str] | None = None,
+    project_context: str | None = None,
     system_prompt: str | None = None,
     pricing_rates: dict[str, float] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -75,6 +76,10 @@ def improve_lookdev_prompt(
         "aspect_ratio": aspect_ratio,
         "user_visible_model_name": user_visible_model_name,
     }
+    # Layer 4: deliver project facts in the request. The brain's system prompt says it
+    # receives project_context and treats it as ground truth. Omitted when not provided.
+    if project_context and project_context.strip():
+        request_payload["project_context"] = project_context.strip()
     return improve_video_prompt(
         api_key=api_key,
         request_payload=request_payload,
