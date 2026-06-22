@@ -49,12 +49,13 @@ def improve_lookdev_prompt(
     aspect_ratio: str | None = None,
     reference_image_url: str | None = None,
     system_prompt: str | None = None,
-    temperature: float | None = 0.2,
     pricing_rates: dict[str, float] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Rewrite a lookdev/image draft prompt via the shared OpenAI engine.
 
     No required markers are passed, so the engine skips all video-marker validation.
+    Temperature is intentionally not forwarded: the underlying model (gpt-5.5, a
+    reasoning model on the Responses API) rejects the temperature parameter.
     Returns (result, usage) where usage holds token counts + estimated cost.
     """
     request_payload: dict[str, Any] = {
@@ -70,7 +71,6 @@ def improve_lookdev_prompt(
         request_payload=request_payload,
         system_prompt=system_prompt or LOOKDEV_PROMPT_WIZARD_SYSTEM_PROMPT,
         edited_first_frame_url=reference_image_url,
-        temperature=temperature,
         pricing_rates=pricing_rates,
         return_usage=True,
     )
