@@ -133,11 +133,25 @@ def normalize_canvas_prompt_profiles_for_write(payload: dict[str, Any]) -> dict[
     return {"schemaVersion": 1, "profiles": profiles}
 
 
-def resolve_canvas_system_prompt(config: dict[str, Any], profile: str) -> str | None:
+def resolve_canvas_system_prompt(
+    config: dict[str, Any],
+    profile: str,
+    *,
+    fallback_profile: str | None = "lookdev",
+) -> str | None:
+    """Resolve a profile's system prompt from the editable admin config.
+
+    By default an unknown profile falls back to the ``lookdev`` (prompt-wizard) brain.
+    Pass ``fallback_profile=None`` for surfaces that have their own built-in default
+    (the chat / skills brains) so a missing key returns None instead of the wrong
+    (wizard) brain.
+    """
     profiles = config.get("profiles") if isinstance(config, dict) else None
     if not isinstance(profiles, dict):
         return None
-    entry = profiles.get(profile) or profiles.get("lookdev")
+    entry = profiles.get(profile)
+    if not isinstance(entry, dict) and fallback_profile:
+        entry = profiles.get(fallback_profile)
     if not isinstance(entry, dict):
         return None
     system_prompt = str(entry.get("system_prompt") or "").strip()

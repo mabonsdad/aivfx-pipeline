@@ -309,6 +309,7 @@ def handle_canvas_routes(
     assets_s3_client=None,
     assets_bucket: str | None = None,
     run_canvas_chat_fn: Callable[..., tuple[dict[str, Any], dict[str, Any]]] | None = None,
+    get_canvas_brain_fn: Callable[[str], str | None] | None = None,
 ) -> dict[str, Any] | None:
     if method == "POST" and path == "/canvas/prompt-wizard":
         req = json_model(CanvasPromptWizardRequest, event)
@@ -663,12 +664,10 @@ def handle_canvas_routes(
         if not openai_api_key:
             return error_response_fn(500, "OPENAI_API_KEY is required for the canvas chat", origin=origin)
 
-        # Brain: the chat engine's built-in conversational system prompt. We do NOT route
-        # this through get_canvas_system_prompt_fn, because that resolver falls back to the
-        # lookdev *prompt-wizard* profile (JSON-only rewriter), which is the wrong brain for
-        # a chat. (To make the chat brain live-tunable later: add a dedicated admin key with
-        # no lookdev fallback.)
-        system_prompt = None
+        # Brain: live-tunable via the admin profile key `canvas_chat` (no fallback to the
+        # lookdev wizard brain). When the key is absent, get_canvas_brain_fn returns None and
+        # the chat engine uses its built-in conversational default.
+        system_prompt = get_canvas_brain_fn("canvas_chat") if get_canvas_brain_fn else None
         pricing_entry = get_openai_pricing_entry_fn("gpt-5.5")
         pricing_rates = get_openai_pricing_rates_fn("gpt-5.5")
 
@@ -794,6 +793,9 @@ def handle_canvas_routes(
         memory_doc = memory_record.get("memory", {}) if isinstance(memory_record, dict) else {}
         project_context = render_project_context(memory_doc)
 
+        # Live-tunable skill brain via admin profile key `skill_{name}` (no wizard fallback).
+        skill_brain_override = get_canvas_brain_fn(f"skill_{skill_name}") if get_canvas_brain_fn else None
+
         try:
             result, usage = run_canvas_skill(
                 api_key=openai_api_key,
@@ -801,6 +803,7 @@ def handle_canvas_routes(
                 payload=req.payload,
                 project_context=project_context,
                 pricing_rates=pricing_rates,
+                system_prompt_override=skill_brain_override,
             )
         except Exception as exc:
             logger.warning("Canvas skill failed", extra={"userId": user_id, "skill": skill_name, "error": str(exc)})

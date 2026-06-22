@@ -1616,6 +1616,14 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             normalize_canvas_prompt_profiles_for_read(store.get_json(ADMIN_CANVAS_PROMPT_PROFILES_KEY)),
             profile,
         ),
+        # Chat / skill brains: same editable admin config, but NO fallback to the lookdev
+        # wizard brain (these surfaces have their own built-in default). Returns None when
+        # the key is absent, so the code default is used; set the key to tune them live.
+        get_canvas_brain_fn=lambda profile: resolve_canvas_system_prompt(
+            normalize_canvas_prompt_profiles_for_read(store.get_json(ADMIN_CANVAS_PROMPT_PROFILES_KEY)),
+            profile,
+            fallback_profile=None,
+        ),
         get_openai_pricing_entry_fn=lambda model: resolve_openai_prompt_wizard_pricing_entry(load_pricing_admin_config(store), model),
         get_openai_pricing_rates_fn=lambda model: resolve_openai_prompt_wizard_rates(load_pricing_admin_config(store), model),
         improve_lookdev_prompt_fn=improve_openai_lookdev_prompt,

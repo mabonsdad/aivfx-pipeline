@@ -118,12 +118,15 @@ def run_canvas_skill(
     payload: dict[str, Any],
     project_context: str | None = None,
     pricing_rates: dict[str, float] | None = None,
+    system_prompt_override: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Run a skill: instructions = skill brain, input = payload + project context.
 
     Returns (result, usage). The result matches the skill's json_schema. Temperature
-    is not sent (gpt-5.5 rejects it).
+    is not sent (gpt-5.5 rejects it). ``system_prompt_override`` lets a live admin
+    profile replace the skill's built-in brain without a redeploy.
     """
+    instructions = system_prompt_override.strip() if (system_prompt_override and system_prompt_override.strip()) else skill.system_prompt
     input_text_parts: list[str] = []
     if project_context and project_context.strip():
         input_text_parts.append("PROJECT MEMORY (ground truth):\n" + project_context.strip())
@@ -131,7 +134,7 @@ def run_canvas_skill(
 
     request_body: dict[str, Any] = {
         "model": _SKILL_MODEL,
-        "instructions": skill.system_prompt,
+        "instructions": instructions,
         "input": [
             {
                 "role": "user",
