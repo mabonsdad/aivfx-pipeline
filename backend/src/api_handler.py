@@ -1619,6 +1619,12 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
         get_openai_pricing_rates_fn=lambda model: resolve_openai_prompt_wizard_rates(load_pricing_admin_config(store), model),
         improve_lookdev_prompt_fn=improve_openai_lookdev_prompt,
         logger=logger,
+        # --- New additive kwargs for project-scoped canvas routes ---
+        can_access_project_fn=can_access_project,
+        is_admin_claims_fn=is_admin_claims,
+        asset_store=asset_store,
+        assets_s3_client=boto3.client("s3"),
+        assets_bucket=settings.assets_bucket,
     )
     if canvas_response is not None:
         return canvas_response
