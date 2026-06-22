@@ -23,7 +23,6 @@ class CanvasPromptWizardRequest(BaseModel):
     user_visible_model_name: str = Field(default="Lookdev", min_length=1, max_length=120)
     aspect_ratio: str | None = Field(default=None, max_length=16)
     reference_image_url: str | None = Field(default=None, max_length=2000)
-    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
 
 
 def handle_canvas_routes(
@@ -63,8 +62,6 @@ def handle_canvas_routes(
         pricing_entry = get_openai_pricing_entry_fn("gpt-5.5")
         pricing_rates = get_openai_pricing_rates_fn("gpt-5.5")
 
-        temperature = req.temperature if req.temperature is not None else 0.2
-
         try:
             result, usage = improve_lookdev_prompt_fn(
                 api_key=openai_api_key,
@@ -73,7 +70,6 @@ def handle_canvas_routes(
                 aspect_ratio=req.aspect_ratio,
                 reference_image_url=req.reference_image_url,
                 system_prompt=system_prompt,
-                temperature=temperature,
                 pricing_rates=pricing_rates,
             )
         except Exception as exc:
