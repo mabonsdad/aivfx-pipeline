@@ -99,6 +99,26 @@ class AssetPaths:
         ext = Path(filename).suffix or ".png"
         return f"{self.task_prefix()}/external_qc/{pair_id}/{self._filename('edited', ext)}"
 
+    def document_original(self, document_id: str, filename: str) -> str:
+        ext = Path(filename).suffix or ".pdf"
+        return f"{self.task_prefix()}/documents/{document_id}/original/{self._filename('source', ext)}"
+
+    def document_ingest_result(self, document_id: str, ingest_id: str) -> str:
+        return f"{self.task_prefix()}/documents/{document_id}/ingests/{ingest_id}/{self._filename('result', '.json')}"
+
+    def document_ingest_image(self, document_id: str, ingest_id: str, asset_id: str, ext: str) -> str:
+        short_asset = re.sub(r"[^a-zA-Z0-9]+", "", asset_id)[-10:]
+        safe_ext = ext if ext.startswith(".") else f".{ext}"
+        return (
+            f"{self.task_prefix()}/documents/{document_id}/ingests/{ingest_id}/images/"
+            f"{self._filename(f'image{short_asset}', safe_ext)}"
+        )
+
+    def canvas_media_asset(self, asset_id: str, filename: str) -> str:
+        short_asset = re.sub(r"[^a-zA-Z0-9]+", "", asset_id)[-10:]
+        ext = Path(filename).suffix or ".bin"
+        return f"{self.task_prefix()}/canvas/media/{asset_id}/{self._filename(f'asset{short_asset}', ext)}"
+
     def segment_original(self, segment_id: str) -> str:
         short_seg = re.sub(r"[^a-zA-Z0-9]+", "", segment_id)[-8:]
         return f"{self.task_prefix()}/segments/{segment_id}/{self._filename(f'seg{short_seg}_orig', '.mp4')}"

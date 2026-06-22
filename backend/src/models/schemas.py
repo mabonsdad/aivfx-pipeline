@@ -78,6 +78,23 @@ class UploadVideoRequest(BaseModel):
     sizeBytes: int = Field(gt=0)
 
 
+class DocumentUploadInitRequest(BaseModel):
+    filename: str = Field(min_length=1, max_length=255)
+    contentType: str = Field(min_length=1, max_length=120)
+    sizeBytes: int = Field(gt=0)
+    documentKind: Literal["pdf"] = "pdf"
+
+
+class DocumentUploadCompleteRequest(BaseModel):
+    documentId: str = Field(min_length=1, max_length=120)
+    uploadKey: str = Field(min_length=1, max_length=1024)
+    filename: str = Field(min_length=1, max_length=255)
+
+
+class PdfIngestRequest(BaseModel):
+    mode: Literal["text_tables", "images", "all"] = "all"
+
+
 class ExternalQcPairUploadRequest(BaseModel):
     originalFilename: str = Field(min_length=1, max_length=255)
     originalContentType: str = Field(min_length=1, max_length=120)

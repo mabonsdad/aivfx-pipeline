@@ -539,6 +539,62 @@ def trim_video_to_duration(
     return cmd
 
 
+def trim_video_segment(
+    input_path: str,
+    output_path: str,
+    *,
+    start_sec: float,
+    duration_sec: float,
+    target_fps: Fraction | None = None,
+    target_width: int | None = None,
+    target_height: int | None = None,
+    resize_mode: str = "pad",
+    crf: int = 16,
+    preset: str = "medium",
+    audio_bitrate: str = "192k",
+) -> list[str]:
+    effective_start = max(0.0, float(start_sec))
+    effective_duration = max(0.01, float(duration_sec))
+    probe = ffprobe_video(input_path)
+    vf_parts: list[str] = []
+    if target_fps and target_fps.numerator > 0 and target_fps.denominator > 0:
+        vf_parts.append(f"fps={target_fps.numerator}/{target_fps.denominator}")
+    if target_width and target_height:
+        vf_parts.append(_resize_filter(target_width, target_height, mode=resize_mode))
+    vf_parts.append("setsar=1")
+    cmd = [
+        FFMPEG_BIN,
+        "-y",
+        "-ss",
+        _format_seconds(effective_start),
+        "-i",
+        input_path,
+        "-t",
+        _format_seconds(effective_duration),
+    ]
+    if vf_parts:
+        cmd.extend(["-vf", ",".join(vf_parts)])
+    cmd.extend(
+        [
+            "-c:v",
+            "libx264",
+            "-preset",
+            preset,
+            "-crf",
+            str(crf),
+            "-pix_fmt",
+            "yuv420p",
+        ]
+    )
+    if bool(probe.get("has_audio")):
+        cmd.extend(["-c:a", "aac", "-b:a", audio_bitrate])
+    else:
+        cmd.append("-an")
+    cmd.append(output_path)
+    _run(cmd)
+    return cmd
+
+
 def extract_frame_png(
     input_path: str,
     frame_index: int,

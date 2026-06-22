@@ -243,6 +243,10 @@ def handle_task_detail_route(
         decorated["generationAudioReference"]["waveformUrl"] = asset_store.presign_get(
             decorated["generationAudioReference"]["waveformKey"], expires=helpers["presigned_get_ttl_seconds"]
         )
+    helpers["decorate_embedded_s3_keys"](decorated.get("documents", []), asset_store)
+    helpers["decorate_embedded_s3_keys"](decorated.get("documentIngests", []), asset_store)
+    helpers["decorate_embedded_s3_keys"](decorated.get("documentImageAssets", []), asset_store)
+    helpers["decorate_embedded_s3_keys"](decorated.get("canvasMediaAssets", []), asset_store)
     for _, frame in decorated.get("frames", {}).items():
         frame["imageUrl"] = asset_store.presign_get(frame["captureKey"], expires=helpers["presigned_get_ttl_seconds"])
         for variant in frame.get("variants", []):

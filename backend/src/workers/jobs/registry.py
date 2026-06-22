@@ -15,6 +15,7 @@ def build_job_handlers(
     handle_api_video_generate_reference_fn: Callable[..., Any],
     handle_edit_video_reference_generate_fn: Callable[..., Any],
     handle_previz_generate_fn: Callable[..., Any],
+    handle_pdf_ingest_fn: Callable[..., Any],
     handle_quality_match_apply_fn: Callable[..., Any],
     handle_quality_match_sam_fn: Callable[..., Any],
     handle_segment_generate_fn: Callable[..., Any],
@@ -62,6 +63,13 @@ def build_job_handlers(
             settings=kwargs["settings"],
         ),
         "previz_generate": lambda **kwargs: handle_previz_generate_fn(
+            job=kwargs["job"],
+            store=kwargs["store"],
+            asset_store=kwargs["asset_store"],
+            task=kwargs["task"],
+            settings=kwargs["settings"],
+        ),
+        "pdf_ingest": lambda **kwargs: handle_pdf_ingest_fn(
             job=kwargs["job"],
             store=kwargs["store"],
             asset_store=kwargs["asset_store"],

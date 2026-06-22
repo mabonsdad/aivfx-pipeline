@@ -58,6 +58,10 @@ body {
   backdrop-filter: blur(12px);
 }
 
+.api-card.api-card-full {
+  margin-top: 20px;
+}
+
 .api-card-inner {
   padding: 20px;
 }
@@ -82,7 +86,12 @@ body {
 
 .api-reference-list,
 .api-reference-preview-grid,
-.api-doc-list {
+.api-doc-list,
+.api-canvas-result-grid,
+.api-pdf-result-grid,
+.api-pdf-image-grid,
+.api-pdf-page-list,
+.api-pdf-table-list {
   display: grid;
   gap: 12px;
 }
@@ -158,6 +167,10 @@ body {
   .api-button-row {
     grid-template-columns: auto auto 1fr;
     align-items: center;
+  }
+
+  .api-button-row.api-button-row-canvas {
+    grid-template-columns: repeat(4, auto) 1fr;
   }
 }
 
@@ -288,6 +301,73 @@ body {
   border-radius: 16px;
   background: rgba(255, 255, 255, 0.76);
   padding: 14px;
+}
+
+.api-pdf-result-grid {
+  gap: 16px;
+}
+
+.api-canvas-result-grid {
+  gap: 16px;
+}
+
+.api-pdf-image-grid {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.api-pdf-image-card,
+.api-pdf-page-card,
+.api-pdf-table-card {
+  display: grid;
+  gap: 10px;
+  border: 1px solid rgba(28, 22, 18, 0.08);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.82);
+  padding: 12px;
+}
+
+.api-pdf-image-placeholder {
+  display: grid;
+  place-items: center;
+  min-height: 160px;
+  color: rgba(243, 237, 229, 0.72);
+}
+
+.api-pdf-pages-panel {
+  gap: 14px;
+}
+
+.api-pdf-page-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.api-pdf-page-header span {
+  color: rgba(28, 22, 18, 0.58);
+  font-size: 0.82rem;
+}
+
+.api-pdf-page-text {
+  max-height: 320px;
+  overflow: auto;
+}
+
+.api-pdf-table-scroll {
+  overflow: auto;
+}
+
+.api-pdf-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+
+.api-pdf-table td {
+  padding: 8px 10px;
+  border: 1px solid rgba(28, 22, 18, 0.1);
+  vertical-align: top;
 }
 
 .api-doc-list {

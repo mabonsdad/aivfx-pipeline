@@ -19,6 +19,7 @@ import boto3
 import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageOps, ImageStat
 
+from src.core.asset_origin import build_asset_origin
 from src.core.assets import ApiAssetPaths, AssetPaths, AssetStore
 from src.core.cost_tracking import (
     attach_usage_summary,
@@ -51,6 +52,7 @@ from src.core.ffmpeg import (
 )
 from src.core.ids import new_id, prompt_hash
 from src.core.logger import Logger
+from src.core.pdf import extract_pdf_contents
 from src.core.secrets import load_secret
 from src.core.store import S3JsonStore, now_iso
 from src.generation import (
@@ -2006,6 +2008,237 @@ def _handle_ingest(
     store.save_task(task)
     _job_progress(job, store, 100, "complete", "Ingest completed")
     job["resultRefs"] = {"taskId": task["taskId"], "manifestKey": manifest_key}
+    store.save_job(job)
+    return job
+
+
+def _find_task_document(task: dict[str, Any], document_id: str) -> dict[str, Any] | None:
+    return next(
+        (
+            item
+            for item in task.get("documents", [])
+            if isinstance(item, dict) and str(item.get("documentId") or "") == str(document_id)
+        ),
+        None,
+    )
+
+
+def _find_task_document_ingest(task: dict[str, Any], ingest_id: str) -> dict[str, Any] | None:
+    return next(
+        (
+            item
+            for item in task.get("documentIngests", [])
+            if isinstance(item, dict) and str(item.get("ingestId") or "") == str(ingest_id)
+        ),
+        None,
+    )
+
+
+def _handle_pdf_ingest(
+    *,
+    job: dict[str, Any],
+    store: S3JsonStore,
+    asset_store: AssetStore,
+    task: dict[str, Any],
+    settings: Any,
+) -> dict[str, Any]:
+    payload = job.get("payload") or {}
+    document_id = str(payload.get("documentId") or "").strip()
+    ingest_id = str(payload.get("ingestId") or "").strip()
+    ingest_mode = str(payload.get("mode") or "all").strip() or "all"
+    result_key = str(payload.get("resultKey") or "").strip()
+    if not document_id or not ingest_id or not result_key:
+        raise RuntimeError("PDF ingest payload is incomplete")
+
+    document = _find_task_document(task, document_id)
+    if not isinstance(document, dict):
+        raise RuntimeError("Document not found")
+    ingest_record = _find_task_document_ingest(task, ingest_id)
+    if not isinstance(ingest_record, dict):
+        raise RuntimeError("Document ingest record not found")
+
+    original_key = str(document.get("originalKey") or "").strip()
+    if not original_key:
+        raise RuntimeError("Document source file is missing")
+
+    now = now_iso()
+    ingest_record["status"] = "running"
+    ingest_record["updatedAt"] = now
+    ingest_record["startedAt"] = str(ingest_record.get("startedAt") or now)
+    ingest_record["jobId"] = job.get("jobId")
+    document["updatedAt"] = now
+    store.save_task(task, merge_on_conflict=True)
+    document = _find_task_document(task, document_id)
+    ingest_record = _find_task_document_ingest(task, ingest_id)
+    if not isinstance(document, dict) or not isinstance(ingest_record, dict):
+        raise RuntimeError("Document ingest state became unavailable")
+
+    _job_progress(job, store, 10, "running", "Downloading PDF document")
+    pdf_bytes = asset_store.read_bytes(original_key)
+
+    extract_text_tables = ingest_mode in {"text_tables", "all"}
+    extract_images = ingest_mode in {"images", "all"}
+    _job_progress(job, store, 40, "running", "Extracting PDF contents")
+    result_payload, extracted_images = extract_pdf_contents(
+        pdf_bytes,
+        extract_text_tables=extract_text_tables,
+        extract_images=extract_images,
+    )
+
+    image_assets: list[dict[str, Any]] = []
+    image_assets_by_digest: dict[str, dict[str, Any]] = {}
+    if extract_images and extracted_images:
+        _job_progress(job, store, 70, "running", "Saving extracted PDF images")
+        paths = _asset_paths(task)
+        task_document_image_assets = task.setdefault("documentImageAssets", [])
+        existing_assets_by_digest = {
+            str(item.get("digest") or ""): item
+            for item in task_document_image_assets
+            if isinstance(item, dict)
+            and str(item.get("sourceDocumentId") or "") == document_id
+            and str(item.get("digest") or "")
+        }
+        workflow_id = str(task.get("workflowId") or "")
+        for extracted_image in extracted_images:
+            existing_asset = existing_assets_by_digest.get(extracted_image.digest)
+            created_at = now_iso()
+            if isinstance(existing_asset, dict) and str(existing_asset.get("imageKey") or "").strip():
+                ingest_ids = [
+                    str(value)
+                    for value in (existing_asset.get("ingestIds") or [])
+                    if isinstance(value, str) and value.strip()
+                ]
+                if ingest_id not in ingest_ids:
+                    ingest_ids.append(ingest_id)
+                existing_asset["ingestIds"] = ingest_ids
+                existing_asset["latestIngestId"] = ingest_id
+                existing_asset["pageNumbers"] = sorted({*existing_asset.get("pageNumbers", []), *extracted_image.page_numbers})
+                existing_asset["occurrenceCount"] = max(
+                    int(existing_asset.get("occurrenceCount") or 0),
+                    len(extracted_image.occurrences),
+                )
+                existing_asset["updatedAt"] = created_at
+                image_asset_record = existing_asset
+            else:
+                asset_id = new_id("docimg")
+                image_key = paths.document_ingest_image(document_id, ingest_id, asset_id, extracted_image.ext)
+                asset_store.put_bytes(image_key, extracted_image.bytes_data, content_type=extracted_image.mime_type)
+                image_asset_record = {
+                    "assetId": asset_id,
+                    "assetKind": "document_image",
+                    "documentId": document_id,
+                    "sourceDocumentId": document_id,
+                    "ingestId": ingest_id,
+                    "latestIngestId": ingest_id,
+                    "ingestIds": [ingest_id],
+                    "filename": f"{document_id}_{asset_id}.{extracted_image.ext}",
+                    "imageKey": image_key,
+                    "contentType": extracted_image.mime_type,
+                    "width": extracted_image.width,
+                    "height": extracted_image.height,
+                    "digest": extracted_image.digest,
+                    "pageNumbers": list(extracted_image.page_numbers),
+                    "occurrenceCount": len(extracted_image.occurrences),
+                    "createdAt": created_at,
+                    "updatedAt": created_at,
+                    "origin": build_asset_origin(
+                        workflow_id=workflow_id,
+                        step_origin="documents",
+                        tool_origin="pdf_ingest",
+                        extension={
+                            "documentId": document_id,
+                            "ingestId": ingest_id,
+                            "documentKind": "pdf",
+                        },
+                    ),
+                }
+                task_document_image_assets.append(image_asset_record)
+            image_assets.append(image_asset_record)
+            image_assets_by_digest[extracted_image.digest] = image_asset_record
+
+        for page in result_payload.get("pages", []):
+            if not isinstance(page, dict):
+                continue
+            resolved_refs: list[dict[str, Any]] = []
+            for image_ref in page.get("imageRefs", []) or []:
+                if not isinstance(image_ref, dict):
+                    continue
+                resolved_ref = dict(image_ref)
+                image_asset = image_assets_by_digest.get(str(image_ref.get("digest") or ""))
+                if isinstance(image_asset, dict):
+                    resolved_ref["assetId"] = image_asset["assetId"]
+                    resolved_ref["imageKey"] = image_asset["imageKey"]
+                resolved_refs.append(resolved_ref)
+            page["imageRefs"] = resolved_refs
+
+    result_payload["documentId"] = document_id
+    result_payload["ingestId"] = ingest_id
+    result_payload["mode"] = ingest_mode
+    result_payload["imageAssets"] = [
+        {
+            "assetId": item["assetId"],
+            "imageKey": item["imageKey"],
+            "filename": item["filename"],
+            "contentType": item["contentType"],
+            "width": item["width"],
+            "height": item["height"],
+            "digest": item["digest"],
+            "pageNumbers": item["pageNumbers"],
+            "occurrenceCount": item["occurrenceCount"],
+        }
+        for item in image_assets
+    ]
+    asset_store.put_bytes(
+        result_key,
+        json.dumps(result_payload, separators=(",", ":"), default=str).encode("utf-8"),
+        content_type="application/json",
+    )
+
+    finished_at = now_iso()
+    document = _find_task_document(task, document_id)
+    ingest_record = _find_task_document_ingest(task, ingest_id)
+    if not isinstance(document, dict) or not isinstance(ingest_record, dict):
+        raise RuntimeError("Document ingest state became unavailable before completion")
+    ingest_record["status"] = "complete"
+    ingest_record["updatedAt"] = finished_at
+    ingest_record["finishedAt"] = finished_at
+    ingest_record["error"] = None
+    ingest_record["resultKey"] = result_key
+    ingest_record["summary"] = dict(result_payload.get("summary") or {})
+    ingest_record["warnings"] = list(result_payload.get("warnings") or [])
+    ingest_record["imageAssets"] = [
+        {
+            "assetId": item["assetId"],
+            "imageKey": item["imageKey"],
+            "filename": item["filename"],
+            "contentType": item["contentType"],
+            "width": item["width"],
+            "height": item["height"],
+            "pageNumbers": item["pageNumbers"],
+            "occurrenceCount": item["occurrenceCount"],
+        }
+        for item in image_assets
+    ]
+    document["latestIngestId"] = ingest_id
+    document["updatedAt"] = finished_at
+    task.setdefault("history", []).append(
+        {
+            "at": finished_at,
+            "event": "document.ingest.complete",
+            "jobId": job.get("jobId"),
+            "documentId": document_id,
+            "ingestId": ingest_id,
+            "mode": ingest_mode,
+        }
+    )
+    store.save_task(task, merge_on_conflict=True)
+    _job_progress(job, store, 100, "complete", "PDF ingest completed")
+    job["resultRefs"] = {
+        "documentId": document_id,
+        "ingestId": ingest_id,
+        "resultKey": result_key,
+        "imageAssetIds": [item["assetId"] for item in image_assets],
+    }
     store.save_job(job)
     return job
 
@@ -12644,6 +12877,7 @@ def process_job_record(record: dict[str, Any], *, settings: Any) -> None:
             handle_api_video_generate_reference_fn=_handle_api_video_generate_reference,
             handle_edit_video_reference_generate_fn=_handle_edit_video_reference_generate,
             handle_previz_generate_fn=_handle_previz_generate,
+            handle_pdf_ingest_fn=_handle_pdf_ingest,
             handle_quality_match_apply_fn=_handle_quality_match_apply,
             handle_quality_match_sam_fn=_handle_quality_match_sam,
             handle_segment_generate_fn=_handle_segment_generate,

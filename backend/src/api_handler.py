@@ -30,6 +30,7 @@ from src.api.routes_task_character_generate import handle_task_character_generat
 from src.api.routes_task_chunked_controls import handle_task_chunked_control_routes
 from src.api.routes_task_cleanup import handle_task_cleanup_routes
 from src.api.routes_task_detail import handle_task_detail_route
+from src.api.routes_task_documents import handle_task_document_routes
 from src.api.routes_task_generation_extend import handle_task_generation_extend_route
 from src.api.routes_task_generation_lengthen import handle_task_generation_lengthen_route
 from src.api.routes_task_generation_post import handle_task_generation_post_routes
@@ -1608,8 +1609,10 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
         response_fn=response,
         error_response_fn=error_response,
         store=store,
+        asset_store=asset_store,
         new_id_fn=new_id,
         now_iso_fn=now_iso,
+        asset_paths_for_task_fn=_asset_paths_for_task,
         get_openai_api_key_fn=lambda: str(load_secret(settings.secrets_arn).get("OPENAI_API_KEY") or ""),
         get_canvas_system_prompt_fn=lambda profile: resolve_canvas_system_prompt(
             normalize_canvas_prompt_profiles_for_read(store.get_json(ADMIN_CANVAS_PROMPT_PROFILES_KEY)),
@@ -1844,6 +1847,29 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
         )
         if task_character_generate_response is not None:
             return task_character_generate_response
+
+        task_document_response = handle_task_document_routes(
+            method,
+            task_id=task_id,
+            parts=parts,
+            event=event,
+            origin=origin,
+            user_id=user_id,
+            task=task,
+            store=store,
+            asset_store=asset_store,
+            json_model=_json_model,
+            response_fn=response,
+            error_response_fn=error_response,
+            new_id_fn=new_id,
+            now_iso_fn=now_iso,
+            queue_job_fn=lambda **kwargs: _queue_job(queue=queue, **kwargs),
+            max_upload_bytes=settings.max_upload_bytes,
+            asset_paths_for_task_fn=_asset_paths_for_task,
+            decorate_embedded_s3_keys_fn=_decorate_embedded_s3_keys,
+        )
+        if task_document_response is not None:
+            return task_document_response
 
         task_segment_response = handle_task_segment_routes(
             method,

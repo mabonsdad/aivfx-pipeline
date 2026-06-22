@@ -74,6 +74,28 @@ def handle_job_failure(
             store.save_task(latest_task, merge_on_conflict=True)
         return True
 
+    if job_type == "pdf_ingest":
+        ingest_id = str((job.get("payload") or {}).get("ingestId") or "")
+        ingests = latest_task.get("documentIngests", [])
+        ingest_record = next((item for item in ingests if isinstance(item, dict) and item.get("ingestId") == ingest_id), None)
+        if isinstance(ingest_record, dict):
+            ingest_record["status"] = "failed"
+            ingest_record["updatedAt"] = now_iso_fn()
+            ingest_record["finishedAt"] = now_iso_fn()
+            ingest_record["error"] = str(error)
+            ingest_record["jobId"] = job_id
+            latest_task.setdefault("history", []).append(
+                {
+                    "at": now_iso_fn(),
+                    "event": "document.ingest.failed",
+                    "jobId": job_id,
+                    "ingestId": ingest_id,
+                    "documentId": ingest_record.get("documentId"),
+                }
+            )
+            store.save_task(latest_task, merge_on_conflict=True)
+        return True
+
     if job_type == "edit_video_reference_generate":
         reference_id = str((job.get("payload") or {}).get("referenceId") or "")
         references = latest_task.get("editVideoReferences", [])

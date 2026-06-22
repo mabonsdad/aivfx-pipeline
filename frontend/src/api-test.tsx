@@ -21,6 +21,119 @@ type PreviewAsset = {
   label: string;
 };
 
+type PdfIngestMode = "all" | "text_tables" | "images";
+
+type PdfDocumentRecord = {
+  documentId: string;
+  filename: string;
+  contentType?: string;
+  originalKey: string;
+  originalUrl?: string;
+  sizeBytes?: number;
+  latestIngestId?: string | null;
+};
+
+type PdfImageAssetRecord = {
+  assetId: string;
+  imageKey: string;
+  imageUrl?: string;
+  filename: string;
+  contentType?: string;
+  width?: number;
+  height?: number;
+  pageNumbers?: number[];
+  occurrenceCount?: number;
+};
+
+type PdfIngestRecord = {
+  ingestId: string;
+  documentId: string;
+  mode: PdfIngestMode;
+  status: "queued" | "running" | "complete" | "failed";
+  jobId?: string;
+  resultKey?: string;
+  resultUrl?: string;
+  warnings?: string[];
+  error?: string | null;
+  summary?: {
+    textPageCount?: number;
+    textCharCount?: number;
+    tableCount?: number;
+    imageCount?: number;
+  };
+  imageAssets?: PdfImageAssetRecord[];
+  createdAt?: string;
+  updatedAt?: string;
+  startedAt?: string;
+  finishedAt?: string;
+};
+
+type PdfTableRecord = {
+  tableIndex: number;
+  rowCount?: number;
+  colCount?: number;
+  rows?: Array<Array<string | null>>;
+};
+
+type PdfPageResult = {
+  pageNumber: number;
+  text?: string;
+  tables?: PdfTableRecord[];
+  imageRefs?: Array<{
+    digest?: string;
+    pageNumber?: number;
+    assetId?: string;
+    imageKey?: string;
+    imageUrl?: string;
+    width?: number;
+    height?: number;
+  }>;
+};
+
+type PdfIngestResult = {
+  documentId: string;
+  ingestId: string;
+  mode: PdfIngestMode;
+  pageCount: number;
+  pages: PdfPageResult[];
+  warnings?: string[];
+  summary?: {
+    textPageCount?: number;
+    textCharCount?: number;
+    tableCount?: number;
+    imageCount?: number;
+  };
+  imageAssets?: PdfImageAssetRecord[];
+};
+
+type CanvasMediaProbeResponse = {
+  mediaKind: "audio" | "video";
+  assetKey: string;
+  contentType?: string;
+  probe: Record<string, unknown>;
+};
+
+type CanvasMediaAssetRecord = {
+  assetId: string;
+  operation: string;
+  mediaKind: "image" | "video" | "audio";
+  sourceKey: string;
+  outputKey: string;
+  outputUrl?: string;
+  filename: string;
+  contentType?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  metadata?: Record<string, unknown>;
+};
+
+type CanvasMediaOperationResponse = {
+  asset: CanvasMediaAssetRecord;
+  probe?: Record<string, unknown>;
+  frameIndex?: number;
+  requestedFrameIndex?: number | null;
+};
+
 type VideoModelOption = {
   value: string;
   apiModel?: string;
@@ -251,6 +364,66 @@ async function uploadAsset(file: File, assetType: "image" | "video"): Promise<st
   return init.assetKey;
 }
 
+async function uploadTaskPdf(taskId: string, file: File): Promise<{ taskId: string; documentId: string }> {
+  const init = await apiTestRequest<{ documentId: string; uploadKey: string; uploadUrl: string }>(`/tasks/${taskId}/documents/upload/init`, {
+    method: "POST",
+    body: JSON.stringify({
+      filename: file.name,
+      contentType: file.type || "application/pdf",
+      sizeBytes: file.size,
+      documentKind: "pdf",
+    }),
+  });
+
+  const uploadResponse = await fetch(init.uploadUrl, {
+    method: "PUT",
+    headers: {
+      "Content-Type": file.type || "application/pdf",
+    },
+    body: file,
+  });
+
+  if (!uploadResponse.ok) {
+    throw new Error(`PDF upload failed for ${file.name}: ${uploadResponse.status}`);
+  }
+
+  await apiTestRequest<{ document: PdfDocumentRecord }>(`/tasks/${taskId}/documents/upload/complete`, {
+    method: "POST",
+    body: JSON.stringify({
+      documentId: init.documentId,
+      uploadKey: init.uploadKey,
+      filename: file.name,
+    }),
+  });
+
+  return { taskId, documentId: init.documentId };
+}
+
+async function uploadTaskVideo(taskId: string, file: File): Promise<{ taskId: string; assetKey: string }> {
+  const init = await apiTestRequest<{ uploadUrl: string; s3Key: string }>(`/tasks/${taskId}/uploads/video`, {
+    method: "POST",
+    body: JSON.stringify({
+      filename: file.name,
+      contentType: file.type || "video/mp4",
+      sizeBytes: file.size,
+    }),
+  });
+
+  const uploadResponse = await fetch(init.uploadUrl, {
+    method: "PUT",
+    headers: {
+      "Content-Type": file.type || "video/mp4",
+    },
+    body: file,
+  });
+
+  if (!uploadResponse.ok) {
+    throw new Error(`Video upload failed for ${file.name}: ${uploadResponse.status}`);
+  }
+
+  return { taskId, assetKey: init.s3Key };
+}
+
 function createUploadPreview(file: File): UploadPreview {
   return {
     id: crypto.randomUUID(),
@@ -308,6 +481,30 @@ function App() {
   const [requestId, setRequestId] = useState<string | null>(null);
   const [requestDetail, setRequestDetail] = useState<ApiRequestRecord | null>(null);
   const [previewAsset, setPreviewAsset] = useState<PreviewAsset | null>(null);
+  const [pdfFile, setPdfFile] = useState<File | null>(null);
+  const [pdfMode, setPdfMode] = useState<PdfIngestMode>("all");
+  const [pdfTaskId, setPdfTaskId] = useState<string | null>(null);
+  const [pdfDocument, setPdfDocument] = useState<PdfDocumentRecord | null>(null);
+  const [pdfIngest, setPdfIngest] = useState<PdfIngestRecord | null>(null);
+  const [pdfResult, setPdfResult] = useState<PdfIngestResult | null>(null);
+  const [pdfActivity, setPdfActivity] = useState<string>("Idle");
+  const [pdfError, setPdfError] = useState<string | null>(null);
+  const [pdfSuccessMessage, setPdfSuccessMessage] = useState<string | null>(null);
+  const [isPdfSubmitting, setIsPdfSubmitting] = useState(false);
+  const [canvasVideoFile, setCanvasVideoFile] = useState<File | null>(null);
+  const [canvasVideoPreview, setCanvasVideoPreview] = useState<UploadPreview | null>(null);
+  const [canvasTaskId, setCanvasTaskId] = useState<string | null>(null);
+  const [canvasSourceAssetKey, setCanvasSourceAssetKey] = useState<string | null>(null);
+  const [canvasProbe, setCanvasProbe] = useState<CanvasMediaProbeResponse | null>(null);
+  const [canvasFrameResult, setCanvasFrameResult] = useState<CanvasMediaOperationResponse | null>(null);
+  const [canvasTrimResult, setCanvasTrimResult] = useState<CanvasMediaOperationResponse | null>(null);
+  const [canvasFrameIndex, setCanvasFrameIndex] = useState<number>(0);
+  const [canvasTrimStartSec, setCanvasTrimStartSec] = useState<number>(0);
+  const [canvasTrimDurationSec, setCanvasTrimDurationSec] = useState<number>(2);
+  const [canvasActivity, setCanvasActivity] = useState<string>("Idle");
+  const [canvasError, setCanvasError] = useState<string | null>(null);
+  const [canvasSuccessMessage, setCanvasSuccessMessage] = useState<string | null>(null);
+  const [isCanvasSubmitting, setIsCanvasSubmitting] = useState(false);
 
   const selectedVideoModel = useMemo(
     () => VIDEO_MODELS.find((model) => model.value === videoModel) ?? VIDEO_MODELS[0],
@@ -500,9 +697,49 @@ function App() {
       if (videoPreview) URL.revokeObjectURL(videoPreview.url);
       if (lastFramePreview) URL.revokeObjectURL(lastFramePreview.url);
       if (maskPreview) URL.revokeObjectURL(maskPreview.url);
+      if (canvasVideoPreview) URL.revokeObjectURL(canvasVideoPreview.url);
       for (const preview of referenceImagePreviews) URL.revokeObjectURL(preview.url);
     };
-  }, [imagePreview, lastFramePreview, maskPreview, referenceImagePreviews, videoPreview]);
+  }, [canvasVideoPreview, imagePreview, lastFramePreview, maskPreview, referenceImagePreviews, videoPreview]);
+
+  useEffect(() => {
+    if (!pdfTaskId || !pdfDocument?.documentId || !pdfIngest?.ingestId) return undefined;
+    if (pdfIngest.status === "complete" || pdfIngest.status === "failed") return undefined;
+    const activePdfTaskId = pdfTaskId;
+    const activePdfDocumentId = pdfDocument.documentId;
+    const activePdfIngestId = pdfIngest.ingestId;
+    let cancelled = false;
+
+    async function pollPdfIngest() {
+      try {
+        const payload = await apiTestRequest<{
+          document: PdfDocumentRecord;
+          ingest: PdfIngestRecord;
+          result?: PdfIngestResult | null;
+        }>(`/tasks/${activePdfTaskId}/documents/${activePdfDocumentId}/ingests/${activePdfIngestId}`);
+        if (cancelled) return;
+        setPdfDocument(payload.document);
+        setPdfIngest(payload.ingest);
+        setPdfResult(payload.result ?? null);
+        setPdfActivity(`Polling PDF ingest ${payload.ingest.status}`);
+      } catch (pollError) {
+        if (!cancelled) {
+          setPdfError(pollError instanceof Error ? pollError.message : "Failed to poll PDF ingest");
+          setPdfActivity("Failed");
+        }
+      }
+    }
+
+    void pollPdfIngest();
+    const interval = window.setInterval(() => {
+      void pollPdfIngest();
+    }, 3500);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [pdfDocument?.documentId, pdfIngest?.ingestId, pdfIngest?.status, pdfTaskId]);
 
   useEffect(() => {
     setReferenceImageFiles((previous) => previous.slice(0, referenceImageLimit));
@@ -687,6 +924,205 @@ function App() {
       setActivity("Failed");
     } finally {
       setIsSubmitting(false);
+    }
+  }
+
+  async function handlePdfSubmit() {
+    setPdfError(null);
+    setPdfSuccessMessage(null);
+    setPdfResult(null);
+    setPdfDocument(null);
+    setPdfIngest(null);
+    setPdfTaskId(null);
+    setPdfActivity("Validating inputs");
+
+    if (!isAuthenticated) {
+      setPdfError("Sign in first.");
+      return;
+    }
+    if (!pdfFile) {
+      setPdfError("Select a PDF.");
+      return;
+    }
+    if (!(pdfFile.type === "application/pdf" || pdfFile.name.toLowerCase().endsWith(".pdf"))) {
+      setPdfError("Only PDF files are supported.");
+      return;
+    }
+
+    setIsPdfSubmitting(true);
+    try {
+      setPdfActivity("Creating temporary task");
+      const taskName = `pdf_${Date.now().toString(36).slice(-6)}`.slice(0, 15);
+      const createdTask = await apiTestRequest<{ taskId: string }>("/tasks", {
+        method: "POST",
+        body: JSON.stringify({
+          name: taskName,
+          workflowId: "simple_generation_workflow",
+        }),
+      });
+
+      setPdfTaskId(createdTask.taskId);
+      setPdfActivity("Uploading PDF");
+      const uploaded = await uploadTaskPdf(createdTask.taskId, pdfFile);
+
+      setPdfActivity("Queueing PDF ingest");
+      const queued = await apiTestRequest<{ documentId: string; ingestId: string; jobId: string }>(
+        `/tasks/${createdTask.taskId}/documents/${uploaded.documentId}/ingests`,
+        {
+          method: "POST",
+          body: JSON.stringify({ mode: pdfMode }),
+        },
+      );
+
+      setPdfDocument({
+        documentId: uploaded.documentId,
+        filename: pdfFile.name,
+        originalKey: "",
+        contentType: pdfFile.type || "application/pdf",
+      });
+      setPdfIngest({
+        ingestId: queued.ingestId,
+        documentId: queued.documentId,
+        mode: pdfMode,
+        status: "queued",
+        jobId: queued.jobId,
+      });
+      setPdfSuccessMessage(`Queued PDF ingest ${queued.ingestId} in task ${createdTask.taskId}`);
+      setPdfActivity(`Queued PDF ingest ${queued.ingestId}`);
+    } catch (submitError) {
+      setPdfError(submitError instanceof Error ? submitError.message : "PDF ingest failed");
+      setPdfActivity("Failed");
+    } finally {
+      setIsPdfSubmitting(false);
+    }
+  }
+
+  async function handleCanvasUpload() {
+    setCanvasError(null);
+    setCanvasSuccessMessage(null);
+    setCanvasProbe(null);
+    setCanvasFrameResult(null);
+    setCanvasTrimResult(null);
+    setCanvasActivity("Validating inputs");
+
+    if (!isAuthenticated) {
+      setCanvasError("Sign in first.");
+      return;
+    }
+    if (!canvasVideoFile) {
+      setCanvasError("Select a source video.");
+      return;
+    }
+    if (!canvasVideoFile.type.startsWith("video/")) {
+      setCanvasError("Select a video file.");
+      return;
+    }
+
+    setIsCanvasSubmitting(true);
+    try {
+      setCanvasActivity("Creating temporary canvas task");
+      const taskName = `canvas_${Date.now().toString(36).slice(-6)}`.slice(0, 18);
+      const createdTask = await apiTestRequest<{ taskId: string }>("/tasks", {
+        method: "POST",
+        body: JSON.stringify({
+          name: taskName,
+          workflowId: "canvas_workflow",
+        }),
+      });
+
+      setCanvasTaskId(createdTask.taskId);
+      setCanvasActivity("Uploading source video");
+      const uploaded = await uploadTaskVideo(createdTask.taskId, canvasVideoFile);
+      setCanvasSourceAssetKey(uploaded.assetKey);
+      setCanvasSuccessMessage(`Uploaded source video into canvas task ${createdTask.taskId}`);
+      setCanvasActivity("Ready");
+    } catch (submitError) {
+      setCanvasError(submitError instanceof Error ? submitError.message : "Canvas media upload failed");
+      setCanvasActivity("Failed");
+    } finally {
+      setIsCanvasSubmitting(false);
+    }
+  }
+
+  async function handleCanvasProbe() {
+    setCanvasError(null);
+    setCanvasSuccessMessage(null);
+    if (!canvasTaskId || !canvasSourceAssetKey) {
+      setCanvasError("Upload a source video first.");
+      return;
+    }
+    setIsCanvasSubmitting(true);
+    setCanvasActivity("Probing uploaded source");
+    try {
+      const payload = await apiTestRequest<CanvasMediaProbeResponse>(`/canvas/${canvasTaskId}/media/probe`, {
+        method: "POST",
+        body: JSON.stringify({ assetKey: canvasSourceAssetKey }),
+      });
+      setCanvasProbe(payload);
+      setCanvasSuccessMessage("Probe complete");
+      setCanvasActivity("Ready");
+    } catch (submitError) {
+      setCanvasError(submitError instanceof Error ? submitError.message : "Canvas media probe failed");
+      setCanvasActivity("Failed");
+    } finally {
+      setIsCanvasSubmitting(false);
+    }
+  }
+
+  async function handleCanvasExtractFrame() {
+    setCanvasError(null);
+    setCanvasSuccessMessage(null);
+    if (!canvasTaskId || !canvasSourceAssetKey) {
+      setCanvasError("Upload a source video first.");
+      return;
+    }
+    setIsCanvasSubmitting(true);
+    setCanvasActivity("Extracting frame");
+    try {
+      const payload = await apiTestRequest<CanvasMediaOperationResponse>(`/canvas/${canvasTaskId}/media/extract-frame`, {
+        method: "POST",
+        body: JSON.stringify({
+          assetKey: canvasSourceAssetKey,
+          frameIndex: Math.max(0, Math.floor(canvasFrameIndex || 0)),
+        }),
+      });
+      setCanvasFrameResult(payload);
+      setCanvasSuccessMessage(`Extracted frame ${payload.frameIndex ?? Math.max(0, Math.floor(canvasFrameIndex || 0))}`);
+      setCanvasActivity("Ready");
+    } catch (submitError) {
+      setCanvasError(submitError instanceof Error ? submitError.message : "Canvas frame extraction failed");
+      setCanvasActivity("Failed");
+    } finally {
+      setIsCanvasSubmitting(false);
+    }
+  }
+
+  async function handleCanvasTrim() {
+    setCanvasError(null);
+    setCanvasSuccessMessage(null);
+    if (!canvasTaskId || !canvasSourceAssetKey) {
+      setCanvasError("Upload a source video first.");
+      return;
+    }
+    setIsCanvasSubmitting(true);
+    setCanvasActivity("Trimming clip");
+    try {
+      const payload = await apiTestRequest<CanvasMediaOperationResponse>(`/canvas/${canvasTaskId}/media/trim`, {
+        method: "POST",
+        body: JSON.stringify({
+          assetKey: canvasSourceAssetKey,
+          startSec: Math.max(0, Number(canvasTrimStartSec) || 0),
+          durationSec: Math.max(0.1, Number(canvasTrimDurationSec) || 0.1),
+        }),
+      });
+      setCanvasTrimResult(payload);
+      setCanvasSuccessMessage("Trim complete");
+      setCanvasActivity("Ready");
+    } catch (submitError) {
+      setCanvasError(submitError instanceof Error ? submitError.message : "Canvas trim failed");
+      setCanvasActivity("Failed");
+    } finally {
+      setIsCanvasSubmitting(false);
     }
   }
 
@@ -1244,6 +1680,349 @@ function App() {
           </div>
         </section>
       </div>
+
+      <section className="api-card api-card-full">
+        <div className="api-card-inner api-section-stack">
+          <div>
+            <h2>PDF Ingest Test</h2>
+            <p className="api-muted">
+              This uses the new shared task-scoped PDF ingest route rather than the external generation API. The playground creates a temporary task, uploads the PDF, runs ingest, and shows extracted text, tables and images.
+            </p>
+          </div>
+
+          <div className="api-inline-grid">
+            <div className="api-field">
+              <label htmlFor="pdfFile">PDF file</label>
+              <input
+                id="pdfFile"
+                type="file"
+                accept="application/pdf,.pdf"
+                onChange={(event) => setPdfFile(event.target.files?.[0] ?? null)}
+              />
+            </div>
+
+            <div className="api-field">
+              <label htmlFor="pdfMode">Ingest mode</label>
+              <select id="pdfMode" value={pdfMode} onChange={(event) => setPdfMode(event.target.value as PdfIngestMode)}>
+                <option value="all">All: text, tables and images</option>
+                <option value="text_tables">Text and tables</option>
+                <option value="images">Images only</option>
+              </select>
+            </div>
+          </div>
+
+          <div className="api-button-row">
+            <button type="button" className="api-button" disabled={isPdfSubmitting} onClick={() => void handlePdfSubmit()}>
+              {isPdfSubmitting ? "Uploading…" : "Run PDF Ingest"}
+            </button>
+            <span className={`api-pill ${pdfIngest?.status === "failed" ? "api-pill-warn" : ""}`}>
+              {pdfIngest ? `${pdfIngest.status.toUpperCase()}${pdfIngest.mode ? ` · ${pdfIngest.mode}` : ""}` : "No PDF ingest yet"}
+            </span>
+          </div>
+
+          <div className="api-preview-tile">
+            <strong>Current activity</strong>
+            <span>{pdfActivity}</span>
+          </div>
+
+          {pdfError ? <div className="api-alert api-alert-error">{pdfError}</div> : null}
+          {pdfSuccessMessage ? <div className="api-alert api-alert-success">{pdfSuccessMessage}</div> : null}
+
+          <div className="api-kv">
+            <div className="api-kv-row">
+              <span>Task ID</span>
+              <span>{pdfTaskId ?? "n/a"}</span>
+            </div>
+            <div className="api-kv-row">
+              <span>Document ID</span>
+              <span>{pdfDocument?.documentId ?? "n/a"}</span>
+            </div>
+            <div className="api-kv-row">
+              <span>Ingest ID</span>
+              <span>{pdfIngest?.ingestId ?? "n/a"}</span>
+            </div>
+            <div className="api-kv-row">
+              <span>Source PDF</span>
+              <span>{pdfDocument?.filename ?? "n/a"}</span>
+            </div>
+          </div>
+
+          {pdfResult ? (
+            <div className="api-pdf-result-grid">
+              <div className="api-doc-panel">
+                <h3>Summary</h3>
+                <div className="api-kv">
+                  <div className="api-kv-row">
+                    <span>Pages</span>
+                    <span>{pdfResult.pageCount}</span>
+                  </div>
+                  <div className="api-kv-row">
+                    <span>Text pages</span>
+                    <span>{pdfResult.summary?.textPageCount ?? 0}</span>
+                  </div>
+                  <div className="api-kv-row">
+                    <span>Text characters</span>
+                    <span>{pdfResult.summary?.textCharCount ?? 0}</span>
+                  </div>
+                  <div className="api-kv-row">
+                    <span>Tables</span>
+                    <span>{pdfResult.summary?.tableCount ?? 0}</span>
+                  </div>
+                  <div className="api-kv-row">
+                    <span>Extracted images</span>
+                    <span>{pdfResult.summary?.imageCount ?? 0}</span>
+                  </div>
+                </div>
+                {pdfResult.warnings?.length ? (
+                  <div className="api-alert api-alert-error api-alert-block">
+                    {pdfResult.warnings.join("\n")}
+                  </div>
+                ) : null}
+              </div>
+
+              {pdfResult.imageAssets?.length ? (
+                <div className="api-doc-panel">
+                  <h3>Extracted Images</h3>
+                  <div className="api-pdf-image-grid">
+                    {pdfResult.imageAssets.map((asset) => (
+                      <div key={asset.assetId} className="api-pdf-image-card">
+                        {asset.imageUrl ? (
+                          <img src={asset.imageUrl} alt={asset.filename} className="api-preview-media" />
+                        ) : (
+                          <div className="api-preview-media api-pdf-image-placeholder">No preview</div>
+                        )}
+                        <strong>{asset.filename}</strong>
+                        <small>
+                          Pages {asset.pageNumbers?.join(", ") || "n/a"}
+                          {typeof asset.width === "number" && typeof asset.height === "number" ? ` · ${asset.width}×${asset.height}` : ""}
+                        </small>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+
+              {pdfResult.pages.length ? (
+                <div className="api-doc-panel api-pdf-pages-panel">
+                  <h3>Extracted Text And Tables</h3>
+                  <div className="api-pdf-page-list">
+                    {pdfResult.pages.map((page) => (
+                      <div key={page.pageNumber} className="api-pdf-page-card">
+                        <div className="api-pdf-page-header">
+                          <strong>{`Page ${page.pageNumber}`}</strong>
+                          <span>
+                            {page.tables?.length ? `${page.tables.length} table${page.tables.length === 1 ? "" : "s"}` : "No tables"}
+                          </span>
+                        </div>
+                        {page.text?.trim() ? <pre className="api-code api-pdf-page-text">{page.text}</pre> : <p className="api-muted">No extracted text.</p>}
+                        {page.tables?.length ? (
+                          <div className="api-pdf-table-list">
+                            {page.tables.map((table) => (
+                              <div key={`${page.pageNumber}-${table.tableIndex}`} className="api-pdf-table-card">
+                                <strong>{`Table ${table.tableIndex + 1}`}</strong>
+                                <div className="api-pdf-table-scroll">
+                                  <table className="api-pdf-table">
+                                    <tbody>
+                                      {(table.rows ?? []).map((row, rowIndex) => (
+                                        <tr key={rowIndex}>
+                                          {row.map((cell, cellIndex) => (
+                                            <td key={cellIndex}>{cell ?? ""}</td>
+                                          ))}
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+
+              <pre className="api-code">{formatJson(pdfResult)}</pre>
+            </div>
+          ) : null}
+        </div>
+      </section>
+
+      <section className="api-card api-card-full">
+        <div className="api-card-inner api-section-stack">
+          <div>
+            <h2>Canvas Media Test</h2>
+            <p className="api-muted">
+              This exercises the shared ffmpeg-backed canvas routes directly. The playground creates a temporary canvas task, uploads one source video into that task, then runs `probe`, `extract-frame`, and `trim` against that stored task asset.
+            </p>
+          </div>
+
+          <div className="api-inline-grid">
+            <div className="api-field">
+              <label htmlFor="canvasVideoFile">Source video</label>
+              <input
+                id="canvasVideoFile"
+                type="file"
+                accept="video/*"
+                onChange={(event) => {
+                  updatePreview(event.target.files?.[0] ?? null, setCanvasVideoFile, canvasVideoPreview, setCanvasVideoPreview);
+                  setCanvasTaskId(null);
+                  setCanvasSourceAssetKey(null);
+                  setCanvasProbe(null);
+                  setCanvasFrameResult(null);
+                  setCanvasTrimResult(null);
+                  setCanvasError(null);
+                  setCanvasSuccessMessage(null);
+                  setCanvasActivity("Idle");
+                }}
+              />
+            </div>
+
+            <div className="api-field">
+              <label htmlFor="canvasFrameIndex">Frame index</label>
+              <input
+                id="canvasFrameIndex"
+                type="number"
+                min={0}
+                step={1}
+                value={canvasFrameIndex}
+                onChange={(event) => setCanvasFrameIndex(Math.max(0, Math.floor(Number(event.target.value) || 0)))}
+              />
+            </div>
+
+            <div className="api-field">
+              <label htmlFor="canvasTrimStart">Trim start (seconds)</label>
+              <input
+                id="canvasTrimStart"
+                type="number"
+                min={0}
+                step={0.1}
+                value={canvasTrimStartSec}
+                onChange={(event) => setCanvasTrimStartSec(Math.max(0, Number(event.target.value) || 0))}
+              />
+            </div>
+
+            <div className="api-field">
+              <label htmlFor="canvasTrimDuration">Trim duration (seconds)</label>
+              <input
+                id="canvasTrimDuration"
+                type="number"
+                min={0.1}
+                step={0.1}
+                value={canvasTrimDurationSec}
+                onChange={(event) => setCanvasTrimDurationSec(Math.max(0.1, Number(event.target.value) || 0.1))}
+              />
+            </div>
+          </div>
+
+          <div className="api-button-row api-button-row-canvas">
+            <button type="button" className="api-button" disabled={isCanvasSubmitting} onClick={() => void handleCanvasUpload()}>
+              {isCanvasSubmitting ? "Working…" : "Upload Source Video"}
+            </button>
+            <button
+              type="button"
+              className="api-button api-button-secondary"
+              disabled={isCanvasSubmitting || !canvasSourceAssetKey}
+              onClick={() => void handleCanvasProbe()}
+            >
+              Probe
+            </button>
+            <button
+              type="button"
+              className="api-button api-button-secondary"
+              disabled={isCanvasSubmitting || !canvasSourceAssetKey}
+              onClick={() => void handleCanvasExtractFrame()}
+            >
+              Extract Frame
+            </button>
+            <button
+              type="button"
+              className="api-button api-button-secondary"
+              disabled={isCanvasSubmitting || !canvasSourceAssetKey}
+              onClick={() => void handleCanvasTrim()}
+            >
+              Trim
+            </button>
+            <span className={`api-pill ${canvasError ? "api-pill-warn" : ""}`}>
+              {canvasSourceAssetKey ? "Ready" : "Upload required"}
+            </span>
+          </div>
+
+          <div className="api-preview-tile">
+            <strong>Current activity</strong>
+            <span>{canvasActivity}</span>
+          </div>
+
+          {canvasError ? <div className="api-alert api-alert-error">{canvasError}</div> : null}
+          {canvasSuccessMessage ? <div className="api-alert api-alert-success">{canvasSuccessMessage}</div> : null}
+
+          <div className="api-kv">
+            <div className="api-kv-row">
+              <span>Task ID</span>
+              <span>{canvasTaskId ?? "n/a"}</span>
+            </div>
+            <div className="api-kv-row">
+              <span>Source asset key</span>
+              <span>{canvasSourceAssetKey ?? "n/a"}</span>
+            </div>
+            <div className="api-kv-row">
+              <span>Source filename</span>
+              <span>{canvasVideoFile?.name ?? "n/a"}</span>
+            </div>
+          </div>
+
+          <div className="api-canvas-result-grid">
+            {canvasVideoPreview ? (
+              <div className="api-output-tile">
+                <strong>Local source preview</strong>
+                <video src={canvasVideoPreview.url} controls className="api-output-media" />
+              </div>
+            ) : null}
+
+            {canvasFrameResult?.asset.outputUrl ? (
+              <div className="api-output-tile">
+                <strong>{`Extracted frame ${canvasFrameResult.frameIndex ?? canvasFrameIndex}`}</strong>
+                <img src={canvasFrameResult.asset.outputUrl} alt={canvasFrameResult.asset.filename} className="api-output-media" />
+                <a className="api-link" href={canvasFrameResult.asset.outputUrl} target="_blank" rel="noreferrer">
+                  Open extracted frame
+                </a>
+              </div>
+            ) : null}
+
+            {canvasTrimResult?.asset.outputUrl ? (
+              <div className="api-output-tile">
+                <strong>Trimmed clip</strong>
+                <video src={canvasTrimResult.asset.outputUrl} controls className="api-output-media" />
+                <a className="api-link" href={canvasTrimResult.asset.outputUrl} target="_blank" rel="noreferrer">
+                  Open trimmed clip
+                </a>
+              </div>
+            ) : null}
+          </div>
+
+          {canvasProbe ? (
+            <div className="api-doc-panel">
+              <h3>Probe result</h3>
+              <pre className="api-code">{formatJson(canvasProbe)}</pre>
+            </div>
+          ) : null}
+
+          {canvasFrameResult ? (
+            <div className="api-doc-panel">
+              <h3>Extract frame response</h3>
+              <pre className="api-code">{formatJson(canvasFrameResult)}</pre>
+            </div>
+          ) : null}
+
+          {canvasTrimResult ? (
+            <div className="api-doc-panel">
+              <h3>Trim response</h3>
+              <pre className="api-code">{formatJson(canvasTrimResult)}</pre>
+            </div>
+          ) : null}
+        </div>
+      </section>
 
       {previewAsset ? (
         <div className="api-lightbox" role="dialog" aria-modal="true" aria-label={previewAsset.label} onClick={() => setPreviewAsset(null)}>
