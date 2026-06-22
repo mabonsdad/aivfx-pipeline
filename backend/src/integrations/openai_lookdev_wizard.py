@@ -48,16 +48,25 @@ def improve_lookdev_prompt(
     user_visible_model_name: str = "Lookdev",
     aspect_ratio: str | None = None,
     reference_image_url: str | None = None,
+    reference_image_urls: list[str] | None = None,
     system_prompt: str | None = None,
     pricing_rates: dict[str, float] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Rewrite a lookdev/image draft prompt via the shared OpenAI engine.
+
+    Accepts one or more reference images (remote URLs or inline base64 data URLs).
+    ``reference_image_url`` (single) is kept for backward compatibility; if both are
+    given they are merged with the single one first. The first image is sent as the
+    primary frame and the rest as additional images.
 
     No required markers are passed, so the engine skips all video-marker validation.
     Temperature is intentionally not forwarded: the underlying model (gpt-5.5, a
     reasoning model on the Responses API) rejects the temperature parameter.
     Returns (result, usage) where usage holds token counts + estimated cost.
     """
+    images = ([reference_image_url] if reference_image_url else []) + list(reference_image_urls or [])
+    primary_image = images[0] if images else None
+    additional_images = images[1:]
     request_payload: dict[str, Any] = {
         "user_draft_prompt": user_draft_prompt,
         "app_required_markers": [],
@@ -70,7 +79,8 @@ def improve_lookdev_prompt(
         api_key=api_key,
         request_payload=request_payload,
         system_prompt=system_prompt or LOOKDEV_PROMPT_WIZARD_SYSTEM_PROMPT,
-        edited_first_frame_url=reference_image_url,
+        edited_first_frame_url=primary_image,
+        additional_image_urls=additional_images,
         pricing_rates=pricing_rates,
         return_usage=True,
     )

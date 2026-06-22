@@ -277,6 +277,7 @@ def improve_video_prompt(
     request_payload: dict[str, Any],
     system_prompt: str | None = None,
     edited_first_frame_url: str | None = None,
+    additional_image_urls: list[str] | None = None,
     temperature: float | None = None,
     pricing_rates: dict[str, float] | None = None,
     return_usage: bool = False,
@@ -295,6 +296,9 @@ def improve_video_prompt(
     ]
     if edited_first_frame_url:
         content.append({"type": "input_image", "image_url": edited_first_frame_url})
+    for image_url in additional_image_urls or []:
+        if image_url:
+            content.append({"type": "input_image", "image_url": image_url})
     model = "gpt-5.5"
     request_body: dict[str, Any] = {
         "model": model,
