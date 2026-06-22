@@ -102,6 +102,7 @@ from src.integrations.openai_images import (
 )
 from src.integrations.openai_prompt_wizard import improve_video_prompt as improve_openai_video_prompt
 from src.integrations.openai_lookdev_wizard import improve_lookdev_prompt as improve_openai_lookdev_prompt
+from src.integrations.openai_canvas_chat import run_canvas_chat as run_canvas_chat_engine
 from src.api.routes_canvas import handle_canvas_routes
 from src.core.canvas_prompt_admin import (
     ADMIN_CANVAS_PROMPT_PROFILES_KEY,
@@ -1625,6 +1626,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
         asset_store=asset_store,
         assets_s3_client=boto3.client("s3"),
         assets_bucket=settings.assets_bucket,
+        run_canvas_chat_fn=run_canvas_chat_engine,
     )
     if canvas_response is not None:
         return canvas_response

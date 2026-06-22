@@ -33,6 +33,7 @@ from pydantic import BaseModel, Field
 
 from src.core.cost_tracking import build_usage_record, estimate_cost_from_pricing_entry
 from src.generation.capabilities import VIDEO_MODELS
+from src.integrations.openai_canvas_chat import render_project_context
 
 # A reference image may be a remote URL or an inline base64 data URL (data:image/...).
 # Base64 data URLs are large, so the cap is generous; the frontend is expected to
@@ -62,6 +63,31 @@ class CanvasPromptWizardRequest(BaseModel):
     # frontend assembles it from the shot's script/shotlist/profile. Kept out of the
     # shared system prompt so general and project knowledge stay separate.
     project_context: str | None = Field(default=None, max_length=20000)
+    # Optional project id. When given and no explicit project_context is supplied, the
+    # route loads the project's stored memory and renders it as the project context, so
+    # every generation is automatically project-aware as the memory grows.
+    project_id: str | None = Field(default=None, max_length=200)
+
+
+class CanvasChatMessage(BaseModel):
+    role: str = Field(min_length=1, max_length=20)
+    content: str = Field(default="", max_length=200_000)
+
+
+class CanvasChatRequest(BaseModel):
+    projectId: str = Field(min_length=1, max_length=200)
+    messages: list[CanvasChatMessage] = Field(min_length=1, max_length=60)
+    profile: str = Field(default="lookdev", min_length=1, max_length=80)
+    # Optional images for THIS turn (remote URLs or inline base64 data URLs), attached
+    # to the most recent user message so the assistant can see what was referenced.
+    attachment_image_urls: list[ReferenceImage] = Field(default_factory=list, max_length=6)
+
+
+class CanvasMemoryRequest(BaseModel):
+    # Full project memory document, replaced verbatim. Shape is free-form but the
+    # render/chat code understands: summary (str), facts (str[]), references
+    # ({label,url,note}[]), learnings ({rule,scope,...}[]), transcripts ({title,ts,summary}[]).
+    memory: dict[str, Any] = Field(default_factory=dict)
 
 
 class CanvasStateRequest(BaseModel):
@@ -90,6 +116,63 @@ def _canvas_frame_asset_key(project_id: str, frame_id: str) -> str:
     safe_proj = re.sub(r"[^a-zA-Z0-9_-]+", "", project_id)[:80] or "proj"
     safe_frame = re.sub(r"[^a-zA-Z0-9_-]+", "", frame_id)[:40] or "frame"
     return f"{_CANVAS_FRAME_PREFIX}/{safe_proj}/frames/{safe_frame}.png"
+
+
+def _project_memory_key(project_id: str) -> str:
+    """S3 key (metadata bucket) for a project's canvas memory document."""
+    return f"admin/projects/{project_id}/canvas_memory.json"
+
+
+def _apply_memory_updates(
+    memory: dict[str, Any],
+    updates: dict[str, Any],
+    *,
+    now_iso: str,
+) -> dict[str, Any]:
+    """Merge chat-produced memory_updates into the stored memory document.
+
+    Additive: summary is replaced when provided; facts / references / learnings are
+    appended (facts de-duplicated). Never deletes existing knowledge.
+    """
+    memory = dict(memory or {})
+    summary = updates.get("summary")
+    if isinstance(summary, str) and summary.strip():
+        memory["summary"] = summary.strip()
+
+    existing_facts = [str(f) for f in (memory.get("facts") or []) if str(f).strip()]
+    seen = {f.lower() for f in existing_facts}
+    for fact in updates.get("facts_add") or []:
+        f = str(fact).strip()
+        if f and f.lower() not in seen:
+            existing_facts.append(f)
+            seen.add(f.lower())
+    memory["facts"] = existing_facts
+
+    references = list(memory.get("references") or [])
+    for ref in updates.get("references_add") or []:
+        if isinstance(ref, dict) and (ref.get("label") or ref.get("note")):
+            references.append(
+                {
+                    "label": str(ref.get("label") or "").strip(),
+                    "url": ref.get("url") if isinstance(ref.get("url"), str) else None,
+                    "note": str(ref.get("note") or "").strip(),
+                    "addedAt": now_iso,
+                }
+            )
+    memory["references"] = references
+
+    learnings = list(memory.get("learnings") or [])
+    for item in updates.get("learnings_add") or []:
+        if isinstance(item, dict) and str(item.get("rule") or "").strip():
+            learnings.append(
+                {
+                    "rule": str(item.get("rule")).strip(),
+                    "scope": str(item.get("scope") or "project").strip(),
+                    "addedAt": now_iso,
+                }
+            )
+    memory["learnings"] = learnings
+    return memory
 
 
 # ---------------------------------------------------------------------------
@@ -216,6 +299,7 @@ def handle_canvas_routes(
     asset_store=None,
     assets_s3_client=None,
     assets_bucket: str | None = None,
+    run_canvas_chat_fn: Callable[..., tuple[dict[str, Any], dict[str, Any]]] | None = None,
 ) -> dict[str, Any] | None:
     if method == "POST" and path == "/canvas/prompt-wizard":
         req = json_model(CanvasPromptWizardRequest, event)
@@ -238,6 +322,22 @@ def handle_canvas_routes(
             req.reference_image_urls
         )
 
+        # Project context: prefer the caller-supplied text; otherwise, if a project id
+        # is given, render the project's stored memory so the generation is project-aware.
+        # Loading another project's memory is gated by the same access check as state.
+        project_context = req.project_context
+        if (not project_context or not project_context.strip()) and req.project_id:
+            if can_access_project_fn is not None and is_admin_claims_fn is not None:
+                project = store.load_project(req.project_id)
+                is_admin = is_admin_claims_fn(claims)
+                if project is None and not is_admin:
+                    return error_response_fn(404, "Project not found", origin=origin)
+                if not can_access_project_fn(project, user_id=user_id, is_admin=is_admin):
+                    return error_response_fn(403, "Access denied to project", origin=origin)
+                stored_memory = (store.get_json(_project_memory_key(req.project_id)) or {}).get("memory", {})
+                rendered = render_project_context(stored_memory)
+                project_context = rendered or None
+
         try:
             result, usage = improve_lookdev_prompt_fn(
                 api_key=openai_api_key,
@@ -245,7 +345,7 @@ def handle_canvas_routes(
                 user_visible_model_name=req.user_visible_model_name,
                 aspect_ratio=req.aspect_ratio,
                 reference_image_urls=reference_images,
-                project_context=req.project_context,
+                project_context=project_context,
                 system_prompt=system_prompt,
                 pricing_rates=pricing_rates,
             )
@@ -476,6 +576,164 @@ def handle_canvas_routes(
         return response_fn(
             200,
             {"ok": True, "assetKey": output_key, "url": url},
+            origin=origin,
+        )
+
+    # -------------------------------------------------------------------------
+    # Project-scoped canvas MEMORY (the brain's growing project layer)
+    # GET  /canvas/projects/{projectId}/memory  -> { projectId, memory, updatedAt }
+    # PUT  /canvas/projects/{projectId}/memory  -> { ok, projectId, updatedAt }
+    #
+    # S3 key (metadata bucket): admin/projects/{projectId}/canvas_memory.json
+    # Access: caller must be a project member or an admin (same as state).
+    # This is what the chat assistant writes to and what prompt-wizard reads from.
+    # -------------------------------------------------------------------------
+    _PROJECT_MEMORY_PREFIX = "/canvas/projects/"
+    _PROJECT_MEMORY_SUFFIX = "/memory"
+    if path.startswith(_PROJECT_MEMORY_PREFIX) and path.endswith(_PROJECT_MEMORY_SUFFIX):
+        inner = path[len(_PROJECT_MEMORY_PREFIX) : -len(_PROJECT_MEMORY_SUFFIX)]
+        if not inner or "/" in inner:
+            return error_response_fn(400, "Invalid projectId in canvas memory path", origin=origin)
+        project_id = inner
+
+        if can_access_project_fn is None or is_admin_claims_fn is None:
+            return error_response_fn(500, "Project access check not available", origin=origin)
+        project = store.load_project(project_id)
+        is_admin = is_admin_claims_fn(claims)
+        if project is None and not is_admin:
+            return error_response_fn(404, "Project not found", origin=origin)
+        if not can_access_project_fn(project, user_id=user_id, is_admin=is_admin):
+            return error_response_fn(403, "Access denied to project memory", origin=origin)
+
+        memory_key = _project_memory_key(project_id)
+        if method == "GET":
+            stored = store.get_json(memory_key) or {}
+            return response_fn(
+                200,
+                {
+                    "projectId": project_id,
+                    "memory": stored.get("memory", {}),
+                    "updatedAt": stored.get("updatedAt"),
+                },
+                origin=origin,
+            )
+        if method == "PUT":
+            req = json_model(CanvasMemoryRequest, event)
+            now = now_iso_fn()
+            store.put_json(
+                memory_key,
+                {"memory": req.memory, "updatedAt": now, "userId": user_id, "projectId": project_id},
+            )
+            return response_fn(200, {"ok": True, "projectId": project_id, "updatedAt": now}, origin=origin)
+
+    # -------------------------------------------------------------------------
+    # POST /canvas/chat  body { projectId, messages[], profile?, attachment_image_urls? }
+    # The conversational GPT 5.5 assistant. Loads project memory as ground truth,
+    # returns a reply + memory_updates (applied server-side, so the brain grows) +
+    # canvas_actions (for the frontend to place nodes). Access: member or admin.
+    # -------------------------------------------------------------------------
+    if method == "POST" and path == "/canvas/chat":
+        if run_canvas_chat_fn is None:
+            return error_response_fn(500, "Canvas chat engine not available", origin=origin)
+        if can_access_project_fn is None or is_admin_claims_fn is None:
+            return error_response_fn(500, "Project access check not available", origin=origin)
+
+        req = json_model(CanvasChatRequest, event)
+        project_id = req.projectId.strip()
+        if not _safe_id_segment(project_id):
+            return error_response_fn(400, "Invalid projectId", origin=origin)
+
+        project = store.load_project(project_id)
+        is_admin = is_admin_claims_fn(claims)
+        if project is None and not is_admin:
+            return error_response_fn(404, "Project not found", origin=origin)
+        if not can_access_project_fn(project, user_id=user_id, is_admin=is_admin):
+            return error_response_fn(403, "Access denied to project chat", origin=origin)
+
+        openai_api_key = get_openai_api_key_fn()
+        if not openai_api_key:
+            return error_response_fn(500, "OPENAI_API_KEY is required for the canvas chat", origin=origin)
+
+        # Brain: the chat engine's built-in conversational system prompt. We do NOT route
+        # this through get_canvas_system_prompt_fn, because that resolver falls back to the
+        # lookdev *prompt-wizard* profile (JSON-only rewriter), which is the wrong brain for
+        # a chat. (To make the chat brain live-tunable later: add a dedicated admin key with
+        # no lookdev fallback.)
+        system_prompt = None
+        pricing_entry = get_openai_pricing_entry_fn("gpt-5.5")
+        pricing_rates = get_openai_pricing_rates_fn("gpt-5.5")
+
+        # Load the current project memory and render it as ground-truth context.
+        memory_record = store.get_json(_project_memory_key(project_id)) or {}
+        memory_doc = memory_record.get("memory", {}) if isinstance(memory_record, dict) else {}
+        project_context = render_project_context(memory_doc)
+
+        try:
+            result, usage = run_canvas_chat_fn(
+                api_key=openai_api_key,
+                messages=[{"role": m.role, "content": m.content} for m in req.messages],
+                project_context=project_context,
+                attachment_image_urls=list(req.attachment_image_urls),
+                system_prompt=system_prompt,
+                pricing_rates=pricing_rates,
+            )
+        except Exception as exc:
+            logger.warning("Canvas chat failed", extra={"userId": user_id, "error": str(exc)})
+            return error_response_fn(502, str(exc), origin=origin)
+
+        # Apply memory_updates to the store so the project understanding grows.
+        memory_updated_at = memory_record.get("updatedAt") if isinstance(memory_record, dict) else None
+        updates = result.get("memory_updates") or {}
+        has_updates = bool(
+            updates.get("summary")
+            or updates.get("facts_add")
+            or updates.get("references_add")
+            or updates.get("learnings_add")
+        )
+        if has_updates:
+            try:
+                now = now_iso_fn()
+                merged = _apply_memory_updates(memory_doc, updates, now_iso=now)
+                store.put_json(
+                    _project_memory_key(project_id),
+                    {"memory": merged, "updatedAt": now, "userId": user_id, "projectId": project_id},
+                )
+                memory_doc = merged
+                memory_updated_at = now
+            except Exception as exc:
+                logger.warning("Canvas chat memory write failed", extra={"userId": user_id, "error": str(exc)})
+
+        # Cost tracking (mirror the prompt wizard).
+        try:
+            estimate = estimate_cost_from_pricing_entry(pricing_entry, usage=usage)
+            usage_record = build_usage_record(
+                usage_record_id=new_id_fn("usage"),
+                now_iso=now_iso_fn(),
+                user_id=user_id,
+                provider="openai",
+                provider_model="gpt-5.5",
+                app_model_id="gpt-5.5",
+                request_type="chat",
+                source="canvas_chat",
+                tool_origin="canvas_chat",
+                workflow_id="canvas_workflow",
+                pricing_entry=pricing_entry,
+                estimate=estimate,
+                notes=f"project={project_id}",
+            )
+            store.save_usage_record(usage_record)
+        except Exception as exc:
+            logger.warning("Canvas chat usage tracking failed", extra={"userId": user_id, "error": str(exc)})
+
+        return response_fn(
+            200,
+            {
+                "reply": result.get("reply", ""),
+                "canvasActions": result.get("canvas_actions", []),
+                "memory": memory_doc,
+                "memoryUpdatedAt": memory_updated_at,
+                "usage": usage,
+            },
             origin=origin,
         )
 
