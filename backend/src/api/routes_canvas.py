@@ -10,11 +10,16 @@ OpenAI engine. Its system prompt (the "brain") is loaded from the editable
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Annotated, Any, Callable
 
 from pydantic import BaseModel, Field
 
 from src.core.cost_tracking import build_usage_record, estimate_cost_from_pricing_entry
+
+# A reference image may be a remote URL or an inline base64 data URL (data:image/...).
+# Base64 data URLs are large, so the cap is generous; the frontend is expected to
+# downscale before encoding to keep the request payload within Lambda's limit.
+ReferenceImage = Annotated[str, Field(min_length=1, max_length=2_000_000)]
 
 
 class CanvasPromptWizardRequest(BaseModel):
@@ -22,7 +27,11 @@ class CanvasPromptWizardRequest(BaseModel):
     profile: str = Field(default="lookdev", min_length=1, max_length=80)
     user_visible_model_name: str = Field(default="Lookdev", min_length=1, max_length=120)
     aspect_ratio: str | None = Field(default=None, max_length=16)
-    reference_image_url: str | None = Field(default=None, max_length=2000)
+    # Single reference (kept for backward compatibility) and a multi-image list.
+    # Both accept a remote URL or an inline base64 data URL. They are merged, the
+    # single one first, before being handed to the wizard.
+    reference_image_url: ReferenceImage | None = Field(default=None)
+    reference_image_urls: list[ReferenceImage] = Field(default_factory=list, max_length=4)
 
 
 def handle_canvas_routes(
@@ -62,13 +71,18 @@ def handle_canvas_routes(
         pricing_entry = get_openai_pricing_entry_fn("gpt-5.5")
         pricing_rates = get_openai_pricing_rates_fn("gpt-5.5")
 
+        # Merge the single + list reference images into one ordered list (single first).
+        reference_images = ([req.reference_image_url] if req.reference_image_url else []) + list(
+            req.reference_image_urls
+        )
+
         try:
             result, usage = improve_lookdev_prompt_fn(
                 api_key=openai_api_key,
                 user_draft_prompt=draft_prompt,
                 user_visible_model_name=req.user_visible_model_name,
                 aspect_ratio=req.aspect_ratio,
-                reference_image_url=req.reference_image_url,
+                reference_image_urls=reference_images,
                 system_prompt=system_prompt,
                 pricing_rates=pricing_rates,
             )
