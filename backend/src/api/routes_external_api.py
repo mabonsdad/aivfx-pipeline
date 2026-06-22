@@ -43,6 +43,10 @@ def _normalized_patch_reference_asset_keys(*, plural: list[str] | tuple[str, ...
     return [candidate] if candidate else []
 
 
+def _is_truthy_query(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _validate_reference_asset_limit(*, model: str, reference_asset_keys: list[str], limits: dict[str, int], context_label: str) -> None:
     supported_limit = limits.get(model)
     if supported_limit is None:
@@ -117,20 +121,40 @@ def handle_external_api_routes(
         status_filter = str(query.get("status") or "").strip().lower()
         workflow_filter = str(query.get("workflow") or "").strip().lower()
         model_filter = str(query.get("model") or "").strip()
+        user_id_filter = str(query.get("userId") or "").strip()
+        exclude_failed = _is_truthy_query(query.get("excludeFailed"))
         limit_raw = str(query.get("limit") or "").strip()
+        offset_raw = str(query.get("offset") or "").strip()
         limit = max(1, min(200, int(limit_raw))) if limit_raw.isdigit() else 100
+        offset = max(0, int(offset_raw)) if offset_raw.isdigit() else 0
         filtered: list[dict[str, Any]] = []
         for item in requests:
             if status_filter and str(item.get("status") or "").lower() != status_filter:
+                continue
+            if exclude_failed and str(item.get("status") or "").lower() == "failed":
                 continue
             if workflow_filter and str(item.get("workflow") or "").lower() != workflow_filter:
                 continue
             if model_filter and str(item.get("model") or "") != model_filter:
                 continue
-            filtered.append(api_request_response_fn(item, asset_store))
-            if len(filtered) >= limit:
-                break
-        return response_fn(200, {"requests": filtered}, origin=origin)
+            if use_all_scope and user_id_filter and str(item.get("userId") or "").strip() != user_id_filter:
+                continue
+            filtered.append(item)
+        total = len(filtered)
+        paged = filtered[offset : offset + limit]
+        next_offset = offset + len(paged)
+        return response_fn(
+            200,
+            {
+                "requests": [api_request_response_fn(item, asset_store) for item in paged],
+                "total": total,
+                "offset": offset,
+                "limit": limit,
+                "hasMore": next_offset < total,
+                "nextOffset": next_offset if next_offset < total else None,
+            },
+            origin=origin,
+        )
 
     if method == "GET" and path.startswith("/api/v1/requests/"):
         query = extract_query_fn(event)

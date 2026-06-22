@@ -227,7 +227,7 @@ class EditVideoReferenceGenerateRequest(BaseModel):
 
 
 class SegmentGenerateRequest(BaseModel):
-    lumaModel: str = "ray-2"
+    lumaModel: str = "ray-3.2-720p"
     mode: str
     inputMode: Literal["start_video", "start_end", "start_only", "edit_video"] | None = None
     prompt: str | None = Field(default=None)
@@ -515,7 +515,7 @@ class SegmentGenerationLengthenRequest(BaseModel):
 
 
 class ChunkedSegmentGenerateRequest(BaseModel):
-    lumaModel: str = "ray-2"
+    lumaModel: str = "ray-3.2-720p"
     mode: str
     openingPrompt: str | None = Field(default=None)
     continuationPrompt: str | None = Field(default=None)

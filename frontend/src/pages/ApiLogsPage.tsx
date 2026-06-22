@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 
 import { apiClient } from "../api/client";
@@ -67,18 +67,48 @@ export default function ApiLogsPage({
   scope?: "mine" | "all";
 }) {
   const [selectedRequestId, setSelectedRequestId] = useState<string | null>(null);
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [workflowFilter, setWorkflowFilter] = useState("all");
+  const [userFilter, setUserFilter] = useState("all");
+  const [excludeFailed, setExcludeFailed] = useState(false);
+  const [requestLimit, setRequestLimit] = useState(30);
+
+  const adminUsersQuery = useQuery({
+    queryKey: ["admin", "users", "api-logs"],
+    queryFn: () => apiClient.listAdminUsers(),
+    enabled: scope === "all",
+    refetchOnWindowFocus: false,
+  });
+
   const requestsQuery = useQuery({
-    queryKey: ["api-requests", scope],
-    queryFn: async () => (await apiClient.listApiRequests({ limit: 100, scope })).requests,
+    queryKey: ["api-requests", scope, statusFilter, workflowFilter, userFilter, excludeFailed, requestLimit],
+    queryFn: async () =>
+      apiClient.listApiRequests({
+        limit: requestLimit,
+        scope,
+        status: statusFilter !== "all" ? statusFilter : undefined,
+        workflow: workflowFilter !== "all" ? workflowFilter : undefined,
+        userId: scope === "all" && userFilter !== "all" ? userFilter : null,
+        excludeFailed,
+      }),
     refetchInterval: 5000,
     refetchOnWindowFocus: false,
   });
 
-  const requests = requestsQuery.data ?? [];
+  const requests = useMemo(() => requestsQuery.data?.requests ?? [], [requestsQuery.data?.requests]);
   const selectedRequest = useMemo(
     () => requests.find((item) => item.requestId === selectedRequestId) ?? requests[0] ?? null,
     [requests, selectedRequestId],
   );
+
+  useEffect(() => {
+    setRequestLimit(30);
+  }, [statusFilter, workflowFilter, userFilter, excludeFailed, scope]);
+
+  useEffect(() => {
+    if (selectedRequestId && requests.some((item) => item.requestId === selectedRequestId)) return;
+    setSelectedRequestId(requests[0]?.requestId ?? null);
+  }, [requests, selectedRequestId]);
 
   const detailQuery = useQuery({
     queryKey: ["api-request", scope, selectedRequest?.requestId],
@@ -94,6 +124,15 @@ export default function ApiLogsPage({
     const jobLogs = detail?.job?.logs ?? [];
     return [...requestLogs, ...jobLogs].sort((a, b) => a.at.localeCompare(b.at));
   }, [detail?.job?.logs, detail?.logs]);
+  const workflowOptions = useMemo(() => {
+    const values = new Set<string>();
+    for (const item of requests) {
+      const workflow = String(item.workflow || "").trim();
+      if (workflow) values.add(workflow);
+    }
+    return Array.from(values).sort();
+  }, [requests]);
+  const adminUsers = adminUsersQuery.data?.users ?? [];
 
   return (
     <div className="space-y-4">
@@ -106,10 +145,44 @@ export default function ApiLogsPage({
         </p>
       </div>
 
-      <div className="grid gap-4 xl:grid-cols-[320px_minmax(0,1fr)]">
+      <div className="grid gap-4 xl:grid-cols-[340px_minmax(0,1fr)]">
         <div className="space-y-3">
           <div className="rounded-xl border border-ink/10 bg-white p-3">
-            <p className="text-sm font-semibold">Requests</p>
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-sm font-semibold">Requests</p>
+              <p className="text-xs text-ink/55">{requestsQuery.data?.total ?? 0} matching</p>
+            </div>
+            <div className="mt-3 grid gap-2">
+              <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)} className="rounded border border-ink/20 px-3 py-2 text-sm">
+                <option value="all">All statuses</option>
+                <option value="queued">Queued</option>
+                <option value="running">Running</option>
+                <option value="complete">Complete</option>
+                <option value="failed">Failed</option>
+              </select>
+              <select value={workflowFilter} onChange={(event) => setWorkflowFilter(event.target.value)} className="rounded border border-ink/20 px-3 py-2 text-sm">
+                <option value="all">All workflows</option>
+                {workflowOptions.map((workflow) => (
+                  <option key={workflow} value={workflow}>
+                    {workflow}
+                  </option>
+                ))}
+              </select>
+              {scope === "all" ? (
+                <select value={userFilter} onChange={(event) => setUserFilter(event.target.value)} className="rounded border border-ink/20 px-3 py-2 text-sm">
+                  <option value="all">All users</option>
+                  {adminUsers.map((user) => (
+                    <option key={String(user.userId)} value={String(user.userId)}>
+                      {user.email || user.username || user.userId}
+                    </option>
+                  ))}
+                </select>
+              ) : null}
+              <label className="flex items-center gap-2 rounded border border-ink/10 bg-bg px-3 py-2 text-sm text-ink/75">
+                <input type="checkbox" checked={excludeFailed} onChange={(event) => setExcludeFailed(event.target.checked)} />
+                Hide failed
+              </label>
+            </div>
             {requestsQuery.isLoading ? (
               <div className="mt-2">
                 <StatusNotice variant="loading">
@@ -138,17 +211,29 @@ export default function ApiLogsPage({
                         : "border-ink/10 bg-card"
                   }`}
                 >
-                  <p className="text-sm font-medium">{apiRequestTitle(item)}</p>
-                  <p className="text-xs text-ink/60">{item.model}</p>
-                  {scope === "all" ? <p className="text-[11px] text-ink/55">{item.userEmail || item.username || item.userId}</p> : null}
-                  <p className="mt-1 text-[11px] uppercase tracking-wide text-ink/70">
-                    {item.status} · {formatDuration(item.processingDurationSec)}
-                  </p>
-                  <p className="mt-1 text-[11px] text-ink/55">{formatTimestamp(item.updatedAt)}</p>
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-medium">{apiRequestTitle(item)}</p>
+                      <p className="text-xs text-ink/60">{item.model}</p>
+                      {scope === "all" ? <p className="text-[11px] text-ink/55">{item.userEmail || item.username || item.userId}</p> : null}
+                    </div>
+                    <p className="text-[11px] uppercase tracking-wide text-ink/70">{item.status}</p>
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-ink/55">
+                    <span>{formatDuration(item.processingDurationSec)}</span>
+                    <span>{formatTimestamp(item.updatedAt)}</span>
+                  </div>
                 </button>
               ))}
-              {!requests.length && !requestsQuery.isLoading ? <p className="text-sm text-ink/60">No API requests yet.</p> : null}
+              {!requests.length && !requestsQuery.isLoading ? <p className="text-sm text-ink/60">No API requests match the current filter.</p> : null}
             </div>
+            {requestsQuery.data?.hasMore ? (
+              <div className="mt-4 flex justify-center">
+                <button type="button" className="text-sm text-accent underline" onClick={() => setRequestLimit((value) => value + 30)}>
+                  More...
+                </button>
+              </div>
+            ) : null}
           </div>
         </div>
 

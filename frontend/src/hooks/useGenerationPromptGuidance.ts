@@ -140,14 +140,14 @@ function generationModelHelp(modelName: VideoModelId, modeValue: string, inputMo
   }
   if (modelName === "runway-gen4-aleph") {
     return {
-      title: "Runway Gen-4 Aleph",
+      title: "Runway Aleph 2.0",
       lines: [
         inputMode === "edit_video"
           ? "Uses the working-range video plus one selected reference image."
-          : "Uses the working-range video plus the selected edited start frame as an image reference.",
-        "Prompts work best when they start with a clear verb and reference the first frame.",
+          : "Uses the working-range video plus the selected edited start frame as a first keyframe.",
+        "Prompts work best when they start with a clear verb and reference the opening frame or first keyframe.",
         'Example: "edit the video to start on the input image as the first frame. add motion so that the car floats weightlessly, as if in zero gravity, throughout the video".',
-        "Runway may center-crop to fit supported output ratios.",
+        "Aleph 2.0 preserves the input video resolution; target aspect ratio is only needed for expand/outpaint cases.",
       ],
     };
   }
@@ -183,9 +183,9 @@ function generationModelHelp(modelName: VideoModelId, modeValue: string, inputMo
     };
   }
   return {
-    title: modelName === "ray-flash-2" ? "Luma Ray Flash 2" : "Luma Ray 2",
+    title: modelName === "ray-3.2-1080p" ? "Luma Ray 3.2 1080p" : "Luma Ray 3.2 720p",
     lines: [
-      "Uses the working-range video plus the selected edited start frame.",
+      "Uses the working-range source video plus the selected edited start frame as a guide frame on Luma's Ray 3.2 video-edit route.",
       "Luma modes: adhere = closest to source, flex = moderate change, reimagine = strongest change.",
       `Current mode: ${modeValue}. Use lower modes for continuity and higher modes for stronger visual change.`,
     ],
@@ -267,7 +267,7 @@ export function useGenerationPromptGuidance({
     if (lumaModel === "runway-gen4-aleph") {
       return generationInputMode === "edit_video"
         ? "Uses the selected working-range video plus one selected reference image. Prompt should describe the intended transformation while preserving motion and camera continuity."
-        : "Uses the selected working-range video plus the selected edited start frame as an image reference. Prompt should describe the intended transformation while preserving motion and camera continuity. Runway may center-crop to the chosen output ratio.";
+        : "Uses the selected working-range video plus the selected edited start frame as the opening keyframe. Prompt should describe the intended transformation while preserving motion and camera continuity.";
     }
     if (lumaModel === "sora-2-image-to-video") {
       return "Uses only the selected edited start frame. No source working-range video is sent.";
@@ -280,6 +280,9 @@ export function useGenerationPromptGuidance({
     }
     if (generationInputMode === "start_only" && (lumaModel === "kling-2.6" || lumaModel === "veo-3.1" || lumaModel === "veo-3.1-fast")) {
       return "Start frame only is enforced in this tab; the end frame is not sent.";
+    }
+    if (lumaModel === "ray-3.2-720p" || lumaModel === "ray-3.2-1080p") {
+      return "Uses the selected working-range video plus the selected edited start frame as a guide frame.";
     }
     return "Start and end frame variants are taken automatically from your Edit frames selections.";
   }, [generationInputMode, lumaModel]);
@@ -311,10 +314,13 @@ export function useGenerationPromptGuidance({
       return "Describe one clear camera move and subject motion that transitions naturally from the start frame into the end frame.";
     }
     if (lumaModel === "runway-gen4-aleph") {
-      return "Transform the horse into the white unicorn from the reference image while preserving camera movement, timing and background continuity.";
+      return "Start on the edited first-frame keyframe, then transform the horse into the white unicorn while preserving camera movement, timing and background continuity.";
     }
     if (lumaModel === "sora-2-image-to-video") {
       return "Animate from this first frame with clear subject motion, camera motion and scene continuity.";
+    }
+    if (lumaModel === "ray-3.2-720p" || lumaModel === "ray-3.2-1080p") {
+      return "Describe the intended visual change while preserving motion and continuity from the source video.";
     }
     return "Optional generation prompt";
   }, [generationInputMode, lumaModel]);
@@ -369,8 +375,11 @@ export function useGenerationPromptGuidance({
     if (lumaModel === "ltx-2.3-pro" && !promptValue) {
       return "LTX 2.3 Pro requires a prompt describing motion and camera transition between the start and end frames.";
     }
+    if ((lumaModel === "ray-3.2-720p" || lumaModel === "ray-3.2-1080p") && !promptValue) {
+      return `${lumaModel === "ray-3.2-1080p" ? "Luma Ray 3.2 1080p" : "Luma Ray 3.2 720p"} requires a prompt describing the intended transformation.`;
+    }
     if (lumaModel === "runway-gen4-aleph" && !promptValue) {
-      return "Runway Gen-4 Aleph requires a prompt describing the intended transformation.";
+      return "Runway Aleph 2.0 requires a prompt describing the intended transformation.";
     }
     if (lumaModel === "sora-2-image-to-video" && !promptValue) {
       return "Sora 2 Image to Video requires a prompt describing the intended motion from the first frame.";

@@ -347,7 +347,7 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
     Boolean(selectedSegmentId) &&
     !generationPromptError &&
     generationInputMode === "start_video" &&
-    ["ray-2", "ray-flash-2", "kling-o1", "kling-v3-omni-video", "seedance-2.0-reference-to-video", "wan2.7-videoedit"].includes(lumaModel);
+    ["ray-3.2-720p", "ray-3.2-1080p", "kling-o1", "kling-v3-omni-video", "seedance-2.0-reference-to-video", "wan2.7-videoedit"].includes(lumaModel);
   const canStartSinglePassGeneration =
     Boolean(selectedSegmentId) &&
     !selectedSegmentOverLimit &&
@@ -730,7 +730,7 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
                   </option>
                 ))}
               </select>
-              {lumaModel === "ray-2" || lumaModel === "ray-flash-2" ? (
+              {lumaModel === "ray-3.2-720p" || lumaModel === "ray-3.2-1080p" ? (
                 <select value={advancedMode} onChange={(e) => setAdvancedMode(e.target.value)} className="rounded-md border border-ink/20 px-3 py-2">
                   {[
                     "adhere_1",
@@ -1016,7 +1016,7 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
               <p className="text-xs">Switch to `start frame + video` for the long-video chunked flow.</p>
             </StatusNotice>
           ) : null}
-          {!["ray-2", "ray-flash-2", "kling-o1", "kling-v3-omni-video", "seedance-2.0-reference-to-video", "wan2.7-videoedit"].includes(lumaModel) ? (
+          {!["ray-3.2-720p", "ray-3.2-1080p", "kling-o1", "kling-v3-omni-video", "seedance-2.0-reference-to-video", "wan2.7-videoedit"].includes(lumaModel) ? (
             <StatusNotice variant="warning">
               <p className="text-xs">This model is not in the first chunked-release set. Use one of the first-frame + source-video models for whole-video generation.</p>
             </StatusNotice>

@@ -20,6 +20,13 @@ import requests
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageOps, ImageStat
 
 from src.core.assets import ApiAssetPaths, AssetPaths, AssetStore
+from src.core.cost_tracking import (
+    attach_usage_summary,
+    build_usage_record,
+    estimate_cost_from_pricing_entry,
+    load_pricing_admin_config,
+    resolve_pricing_entry,
+)
 from src.core.ffmpeg import (
     FFMPEG_BIN,
     compose_cropped_generated_segment,
@@ -74,9 +81,9 @@ from src.integrations.kling import (
 )
 from src.integrations.luma import (
     create_uni_image_generation,
-    create_modify_generation,
+    create_video_edit_generation,
     create_uni_image_edit_generation,
-    get_generation,
+    get_video_generation,
     get_uni_generation,
     parse_uni_output_url,
     wait_for_uni_generation_complete,
@@ -150,6 +157,102 @@ class _WorkerStoreProxy:
         merge_on_conflict: bool = True,
     ) -> dict[str, Any]:
         return self._store.save_task(task, snapshot=snapshot, merge_on_conflict=merge_on_conflict)
+
+
+def _task_project_id(task: dict[str, Any]) -> str | None:
+    value = str(task.get("projectId") or "").strip()
+    return value or None
+
+
+def _record_usage(
+    *,
+    store: S3JsonStore,
+    user_id: str,
+    source: str,
+    tool_origin: str,
+    request_type: str,
+    provider: str,
+    provider_model: str | None,
+    app_model_id: str | None,
+    target_record: dict[str, Any] | None = None,
+    task: dict[str, Any] | None = None,
+    workflow_id: str | None = None,
+    task_id: str | None = None,
+    segment_id: str | None = None,
+    project_id: str | None = None,
+    request_id: str | None = None,
+    asset_id: str | None = None,
+    asset_kind: str | None = None,
+    usage: dict[str, Any] | None = None,
+    duration_sec: float | None = None,
+    width: int | None = None,
+    height: int | None = None,
+    fps: float | None = None,
+    resolution_label: str | None = None,
+    image_count: int = 1,
+    operation: str | None = None,
+    reference_count: int = 0,
+    notes: str | None = None,
+) -> dict[str, Any] | None:
+    try:
+        pricing_entry = resolve_pricing_entry(
+            load_pricing_admin_config(store),
+            app_model_id=app_model_id,
+            provider_model=provider_model,
+        )
+        estimate = estimate_cost_from_pricing_entry(
+            pricing_entry,
+            usage=usage,
+            duration_sec=duration_sec,
+            width=width,
+            height=height,
+            fps=fps,
+            resolution_label=resolution_label,
+            image_count=image_count,
+            operation=operation,
+            reference_count=reference_count,
+        )
+        usage_record = build_usage_record(
+            usage_record_id=new_id("usage"),
+            now_iso=now_iso(),
+            user_id=user_id,
+            provider=provider,
+            provider_model=provider_model,
+            app_model_id=app_model_id,
+            request_type=request_type,
+            source=source,
+            tool_origin=tool_origin,
+            workflow_id=workflow_id or (str(task.get("workflowId") or "").strip() if isinstance(task, dict) else None),
+            task_id=task_id or (str(task.get("taskId") or "").strip() if isinstance(task, dict) else None),
+            segment_id=segment_id,
+            project_id=project_id or (_task_project_id(task) if isinstance(task, dict) else None),
+            request_id=request_id,
+            asset_id=asset_id,
+            asset_kind=asset_kind,
+            pricing_entry=pricing_entry,
+            estimate=estimate,
+            notes=notes,
+        )
+        store.save_usage_record(usage_record)
+        if isinstance(target_record, dict):
+            attach_usage_summary(target_record, usage_record)
+        return usage_record
+    except Exception:
+        logger.exception(
+            "usage_tracking_failed",
+            extra={
+                "userId": user_id,
+                "taskId": task_id or (task.get("taskId") if isinstance(task, dict) else None),
+                "segmentId": segment_id,
+                "requestId": request_id,
+                "assetId": asset_id,
+                "source": source,
+                "provider": provider,
+                "providerModel": provider_model,
+                "appModelId": app_model_id,
+            },
+        )
+        return None
 
 
 def _reference_content_type_from_key(key: str) -> str:
@@ -1920,6 +2023,13 @@ def _parse_luma_output_url(payload: dict[str, Any]) -> str:
             candidates.append(maybe.get("url"))
         elif isinstance(maybe, str):
             candidates.append(maybe)
+    output = payload.get("output")
+    if isinstance(output, list):
+        for item in output:
+            if isinstance(item, dict):
+                candidates.append(item.get("url"))
+            elif isinstance(item, str):
+                candidates.append(item)
     for value in candidates:
         if isinstance(value, str) and value.startswith("http"):
             return value
@@ -1929,8 +2039,8 @@ def _parse_luma_output_url(payload: dict[str, Any]) -> str:
 def _wait_luma_complete(api_key: str, generation_id: str, *, timeout_sec: int = 900) -> dict[str, Any]:
     start = time.time()
     while True:
-        payload = get_generation(api_key=api_key, generation_id=generation_id)
-        state = payload.get("state") or payload.get("status")
+        payload = get_video_generation(api_key=api_key, generation_id=generation_id)
+        state = str(payload.get("state") or payload.get("status") or "").lower()
         if state in {"completed", "complete", "succeeded", "success"}:
             return payload
         if state in {"failed", "error", "cancelled"}:
@@ -1938,6 +2048,12 @@ def _wait_luma_complete(api_key: str, generation_id: str, *, timeout_sec: int = 
         if time.time() - start > timeout_sec:
             raise TimeoutError("Luma generation poll timeout")
         time.sleep(6)
+
+
+def _luma_ray32_resolution_label(model_name: str) -> str:
+    if model_name == "ray-3.2-1080p":
+        return "1080p"
+    return "720p"
 
 
 def _parse_luma_uni_output_url(payload: dict[str, Any]) -> str:
@@ -2788,6 +2904,28 @@ def _handle_full_edit(
             "style": luma_uni_style,
             "outputFormat": luma_uni_output_format,
         }
+    _record_usage(
+        store=store,
+        user_id=task["userId"],
+        task=task,
+        source="task_full_edit",
+        tool_origin="full_edit",
+        request_type="image_generation",
+        provider=provider_name,
+        provider_model=(
+            str(variant["generationSettings"].get("lumaUni", {}).get("model") or "")
+            if isinstance(variant["generationSettings"].get("lumaUni"), dict)
+            else None
+        )
+        or model_name,
+        app_model_id=model_name,
+        target_record=variant,
+        asset_id=variant_id,
+        asset_kind="frame_variant",
+        width=normalized_image.width,
+        height=normalized_image.height,
+        operation="full_edit",
+    )
     frame.setdefault("variants", []).append(variant)
     if not frame.get("selectedVariantId"):
         frame["selectedVariantId"] = variant_id
@@ -2983,6 +3121,24 @@ def _handle_patch_edit(
             "maskGrowPx": mask_grow_px,
         },
     }
+    _record_usage(
+        store=store,
+        user_id=task["userId"],
+        task=task,
+        source="task_patch_edit",
+        tool_origin="patch_edit",
+        request_type="image_generation",
+        provider=provider_name,
+        provider_model=model_name,
+        app_model_id=model_name,
+        target_record=variant,
+        asset_id=variant_id,
+        asset_kind="frame_variant",
+        width=source_image.width,
+        height=source_image.height,
+        operation="patch_edit",
+        reference_count=1 if payload.get("referenceImageKey") else 0,
+    )
     frame.setdefault("variants", []).append(variant)
     if not frame.get("selectedVariantId"):
         frame["selectedVariantId"] = variant_id
@@ -3107,6 +3263,29 @@ def _handle_api_image_edit_full(
         request_record.setdefault("request", {})["lumaUniModel"] = luma_uni_model
         request_record.setdefault("request", {})["lumaUniStyle"] = luma_uni_style
         request_record.setdefault("request", {})["lumaUniOutputFormat"] = luma_uni_output_format
+    _record_usage(
+        store=store,
+        user_id=job["userId"],
+        source="external_api_image_edit_full",
+        tool_origin="external_api_image_edit_full",
+        request_type="image_generation",
+        provider=provider_name,
+        provider_model=(
+            str(request_record.get("request", {}).get("lumaUniModel") or "")
+            if isinstance(request_record.get("request"), dict)
+            else None
+        )
+        or model_name,
+        app_model_id=model_name,
+        target_record=request_record,
+        request_id=request_id,
+        asset_id=request_id,
+        asset_kind="api_request",
+        width=normalized_image.width,
+        height=normalized_image.height,
+        operation="full_edit",
+        reference_count=len(reference_asset_keys),
+    )
     request_record["error"] = None
     _save_api_request(store, request_record)
     _job_progress(job, store, 100, "complete", "API full image edit completed")
@@ -3285,6 +3464,24 @@ def _handle_api_image_edit_patch(
         "edgeAwareRadiusPx": edge_refine_radius_px,
         "maskGrowPx": mask_grow_px,
     }
+    _record_usage(
+        store=store,
+        user_id=job["userId"],
+        source="external_api_image_edit_patch",
+        tool_origin="external_api_image_edit_patch",
+        request_type="image_generation",
+        provider=provider_name,
+        provider_model=model_name,
+        app_model_id=model_name,
+        target_record=request_record,
+        request_id=request_id,
+        asset_id=request_id,
+        asset_kind="api_request",
+        width=final_variant_image.width,
+        height=final_variant_image.height,
+        operation="patch_edit",
+        reference_count=len(reference_asset_keys),
+    )
     request_record["error"] = None
     _save_api_request(store, request_record)
     _job_progress(job, store, 100, "complete", "API patch image edit completed")
@@ -3697,7 +3894,7 @@ def _handle_api_video_generate_reference(
         elif model_name == "runway-gen4-aleph":
             runway_key = secrets["RUNWAY_API_KEY"]
             provider_duration_sec = round(provider_input_duration_sec or segment_duration_sec, 3)
-            _api_request_progress(job=job, store=store, request_record=request_record, progress=40, status="running", logs="Creating Runway Gen-4 Aleph video-to-video generation")
+            _api_request_progress(job=job, store=store, request_record=request_record, progress=40, status="running", logs="Creating Runway Aleph 2.0 video-to-video generation")
             runway_video_uri = _upload_runway_ephemeral_asset(
                 api_key=runway_key,
                 file_path=local_provider_segment or source_video_path,
@@ -3713,15 +3910,15 @@ def _handle_api_video_generate_reference(
                 video_uri=runway_video_uri,
                 prompt_text=str(payload.get("prompt") or "Modify the source video while preserving timing, camera movement, and overall motion continuity."),
                 first_frame_uri=runway_first_frame_uri,
-                ratio=f"{first_target_w}:{first_target_h}",
+                model="aleph2",
             )
             generation_id = created.get("id")
             if not generation_id:
                 raise RuntimeError(f"Unexpected Runway create response: {created}")
-            _api_request_progress(job=job, store=store, request_record=request_record, progress=55, status="running", logs="Polling Runway Gen-4 Aleph generation")
+            _api_request_progress(job=job, store=store, request_record=request_record, progress=55, status="running", logs="Polling Runway Aleph 2.0 generation")
             result = _wait_runway_complete(runway_key, generation_id)
             out_url = _parse_runway_output_url(result)
-            used_provider_model = "gen4_aleph"
+            used_provider_model = "aleph2"
         elif model_name == "kling-2.6":
             kling_key = secrets.get("RUNWARE_API_KEY") or secrets.get("KLING_API_KEY")
             if not kling_key:
@@ -4080,25 +4277,31 @@ def _handle_api_video_generate_reference(
             out_url = _parse_replicate_output_url(result)
             used_provider_model = "wan-video/wan-2.7-videoedit"
         else:
-            luma_key = secrets["LUMA_API_KEY"]
+            luma_key = _resolve_luma_uni_api_key(secrets)
+            if not luma_key:
+                raise RuntimeError(
+                    "Luma Ray 3.2 video edit requires a Luma Agents key (`luma-api-*`) in "
+                    "LUMA_AGENTS_API_KEY, or in LUMA_API_KEY if that value is also an Agents key."
+                )
             if not media_url:
                 raise RuntimeError("Luma generation requires a prepared source video")
-            _api_request_progress(job=job, store=store, request_record=request_record, progress=40, status="running", logs="Creating Luma modify generation")
-            created = create_modify_generation(
+            ray32_resolution = _luma_ray32_resolution_label(model_name)
+            _api_request_progress(job=job, store=store, request_record=request_record, progress=40, status="running", logs="Creating Luma Ray 3.2 video edit generation")
+            created = create_video_edit_generation(
                 api_key=luma_key,
                 media_url=media_url,
-                first_frame_url=first_frame_url,
-                mode=luma_mode,
-                model=model_name,
+                resolution=ray32_resolution,
+                strength=luma_mode,
                 prompt=payload.get("prompt"),
+                start_frame_url=first_frame_url,
             )
             generation_id = created.get("id") or created.get("generation_id")
             if not generation_id:
                 raise RuntimeError(f"Unexpected Luma create response: {created}")
-            _api_request_progress(job=job, store=store, request_record=request_record, progress=55, status="running", logs="Polling Luma generation")
+            _api_request_progress(job=job, store=store, request_record=request_record, progress=55, status="running", logs="Polling Luma Ray 3.2 generation")
             result = _wait_luma_complete(luma_key, generation_id)
             out_url = _parse_luma_output_url(result)
-            used_provider_model = model_name
+            used_provider_model = "ray-3.2"
 
         out_key = paths.request_artifact(request_id, "output", "result", ".mp4")
         _api_request_progress(job=job, store=store, request_record=request_record, progress=75, status="running", logs="Downloading provider output")
@@ -4247,6 +4450,33 @@ def _handle_api_video_generate_reference(
         "mediaHasAudio": provider_media_has_audio,
         "providerModel": used_provider_model or model_name,
     }
+    _record_usage(
+        store=store,
+        user_id=job["userId"],
+        source="external_api_reference_video_generate",
+        tool_origin="external_api_reference_video_generate",
+        request_type="video_generation",
+        provider=provider_name,
+        provider_model=used_provider_model or model_name,
+        app_model_id=model_name,
+        target_record=request_record,
+        request_id=request_id,
+        asset_id=request_id,
+        asset_kind="api_request",
+        duration_sec=provider_duration_sec,
+        width=output_width,
+        height=output_height,
+        fps=float(output_fps.numerator) / float(output_fps.denominator) if isinstance(output_fps, Fraction) else None,
+        resolution_label=(
+            _luma_ray32_resolution_label(model_name)
+            if model_name in {"ray-3.2-720p", "ray-3.2-1080p"}
+            else (
+                "1080p"
+                if min(int(output_width or 0), int(output_height or 0)) >= 1080
+                else "720p" if min(int(output_width or 0), int(output_height or 0)) >= 720 else None
+            )
+        ),
+    )
     request_record["error"] = None
     _save_api_request(store, request_record)
     _job_progress(job, store, 100, "complete", "API reference video generation completed")
@@ -4308,7 +4538,10 @@ def _handle_edit_video_reference_generate(
             }
         )
 
+    provider_name = "google"
+    provider_model_name = model
     if model in {"chatgpt", "chatgpt_latest"}:
+        provider_name = "openai"
         openai_key = str(secrets.get("OPENAI_API_KEY") or "")
         if not openai_key:
             raise RuntimeError("OPENAI_API_KEY is required for ChatGPT image generation")
@@ -4332,13 +4565,15 @@ def _handle_edit_video_reference_generate(
                 aspect_ratio=aspect_ratio,
             )
     elif model in {"luma_uni_1", "luma_uni_1_max"}:
+        provider_name = "luma"
         luma_key = str(secrets.get("LUMA_AGENTS_API_KEY") or secrets.get("LUMA_API_KEY") or "").strip()
         if not luma_key or not luma_key.startswith("luma-api-"):
             raise RuntimeError("Luma Uni requires a Luma Agents key (`luma-api-*`).")
+        provider_model_name = "uni-1-max" if model == "luma_uni_1_max" else "uni-1"
         created = create_uni_image_generation(
             api_key=luma_key,
             prompt=prompt,
-            model="uni-1-max" if model == "luma_uni_1_max" else "uni-1",
+            model=provider_model_name,
             style="auto",
             output_format="png",
             image_refs=selected_reference_luma_inputs or None,
@@ -4377,6 +4612,8 @@ def _handle_edit_video_reference_generate(
             )
 
     normalized_bytes = _normalize_generated_reference_png(out_bytes)
+    with Image.open(BytesIO(normalized_bytes)) as generated_image:
+        generated_width, generated_height = generated_image.size
     key = _asset_paths(task).edit_video_reference(reference_id, f"{reference_id}.png")
     asset_store.put_bytes(key, normalized_bytes, content_type="image/png")
     finished_at = now_iso()
@@ -4387,6 +4624,24 @@ def _handle_edit_video_reference_generate(
     reference_record["updatedAt"] = finished_at
     reference_record["jobId"] = job.get("jobId")
     reference_record["error"] = None
+    _record_usage(
+        store=store,
+        user_id=task["userId"],
+        task=task,
+        source="edit_video_reference_generate",
+        tool_origin="edit_video_reference_generate",
+        request_type="image_generation",
+        provider=provider_name,
+        provider_model=provider_model_name,
+        app_model_id=model,
+        target_record=reference_record,
+        asset_id=reference_id,
+        asset_kind="edit_video_reference",
+        width=generated_width,
+        height=generated_height,
+        operation="reference_generation",
+        reference_count=len(selected_reference_ids),
+    )
     task.setdefault("history", []).append(
         {
             "at": finished_at,
@@ -4509,6 +4764,17 @@ def _handle_quality_match_sam(
             }
         )
 
+    usage_payload = {
+        "imageCount": 1,
+        "proposalCount": len(proposal_items),
+        "positivePointCount": len(list(payload.get("positivePoints") or [])),
+        "negativePointCount": len(list(payload.get("negativePoints") or [])),
+        "usedExistingMask": bool(existing_mask_bytes),
+        "restrictToMaskBounds": bool(payload.get("restrictToMaskBounds")),
+    }
+    if payload.get("box"):
+        usage_payload["usedBoxPrompt"] = True
+
     _job_progress(job, store, 100, "complete", "SAM proposal ready")
     job["resultRefs"] = {
         "frameId": frame_id,
@@ -4517,6 +4783,25 @@ def _handle_quality_match_sam(
         "proposals": proposal_items,
         "warnings": result.get("warnings", []),
     }
+    _record_usage(
+        store=store,
+        user_id=str(task.get("userId") or ""),
+        source="quality_match_sam",
+        tool_origin="quality_match_sam",
+        request_type="image_segmentation",
+        provider="fal.ai",
+        provider_model="fal-ai/sam2/image",
+        app_model_id="fal-ai/sam2/image",
+        target_record=job["resultRefs"],
+        task=task,
+        request_id=str(job.get("jobId") or ""),
+        asset_id=analysis_id,
+        asset_kind="quality_match_analysis",
+        usage=usage_payload,
+        image_count=1,
+        operation="segmentation",
+        notes="SAM-assisted quality-match mask proposal generation.",
+    )
     store.save_job(job)
     return job
 
@@ -4906,48 +5191,72 @@ def _handle_segment_generate_clip_lengthen(
             "requestedPrompt": prompt,
         },
     }
+    generation_updates = {
+        "genId": gen_id,
+        "segmentId": segment_id,
+        "luma": {
+            "provider": provider_name,
+            "model": model_name,
+            "mode": requested_mode,
+            "prompt": prompt,
+            "negativePrompt": payload.get("negativePrompt"),
+            "lumaGenerationId": generation_id,
+        },
+        "status": "complete",
+        "outputKey": paths.segment_generated(segment_id, gen_id),
+        "posterKey": poster_key,
+        "inputMediaKey": media_key_for_provider,
+        "inputFirstFrameKey": None,
+        "inputLastFrameKey": None,
+        "sourceFirstFrameCaptureKey": parent_generation.get("sourceFirstFrameCaptureKey"),
+        "sourceFirstFrameVariantId": parent_generation.get("sourceFirstFrameVariantId"),
+        "sourceFirstFrameResolvedKey": parent_generation.get("sourceFirstFrameResolvedKey"),
+        "sourceLastFrameCaptureKey": parent_generation.get("sourceLastFrameCaptureKey"),
+        "sourceLastFrameVariantId": parent_generation.get("sourceLastFrameVariantId"),
+        "sourceLastFrameResolvedKey": parent_generation.get("sourceLastFrameResolvedKey"),
+        "requestedDurationSec": round(provider_duration_sec, 3),
+        "providerDurationSec": provider_duration_sec,
+        "sourceFrameOffset": inherited_source_frame_offset,
+        "alignment": inherited_alignment if direction == "end" else None,
+        "segmentCrop": parent_generation.get("segmentCrop") or segment.get("crop"),
+        "generationSettings": generation_settings,
+        "createdAt": gen_meta.get("createdAt") or now_iso(),
+        "updatedAt": finished_at,
+        "finishedAt": finished_at,
+        "processingDurationSec": processing_duration_sec,
+        "error": None,
+        "parentGenerationId": parent_generation_id,
+        "extension": clip_lengthen,
+    }
+    _record_usage(
+        store=store,
+        user_id=task["userId"],
+        task=task,
+        source="segment_generate_clip_lengthen",
+        tool_origin="segment_generate_clip_lengthen",
+        request_type="video_generation",
+        provider=provider_name,
+        provider_model=used_provider_model or model_name,
+        app_model_id=model_name,
+        target_record=generation_updates,
+        segment_id=segment_id,
+        asset_id=gen_id,
+        asset_kind="segment_generation",
+        duration_sec=provider_duration_sec,
+        width=int(stored_output_probe.get("width") or 0) or None,
+        height=int(stored_output_probe.get("height") or 0) or None,
+        fps=(
+            float(stored_output_probe.get("fps_num") or 0) / float(stored_output_probe.get("fps_den") or 1)
+            if stored_output_probe.get("fps_num")
+            else None
+        ),
+    )
     gen_meta = _update_segment_generation_record(
         store=store,
         user_id=task["userId"],
         task_id=task["taskId"],
         gen_id=gen_id,
-        updates={
-            "genId": gen_id,
-            "segmentId": segment_id,
-            "luma": {
-                "provider": provider_name,
-                "model": model_name,
-                "mode": requested_mode,
-                "prompt": prompt,
-                "negativePrompt": payload.get("negativePrompt"),
-                "lumaGenerationId": generation_id,
-            },
-            "status": "complete",
-            "outputKey": paths.segment_generated(segment_id, gen_id),
-            "posterKey": poster_key,
-            "inputMediaKey": media_key_for_provider,
-            "inputFirstFrameKey": None,
-            "inputLastFrameKey": None,
-            "sourceFirstFrameCaptureKey": parent_generation.get("sourceFirstFrameCaptureKey"),
-            "sourceFirstFrameVariantId": parent_generation.get("sourceFirstFrameVariantId"),
-            "sourceFirstFrameResolvedKey": parent_generation.get("sourceFirstFrameResolvedKey"),
-            "sourceLastFrameCaptureKey": parent_generation.get("sourceLastFrameCaptureKey"),
-            "sourceLastFrameVariantId": parent_generation.get("sourceLastFrameVariantId"),
-            "sourceLastFrameResolvedKey": parent_generation.get("sourceLastFrameResolvedKey"),
-            "requestedDurationSec": round(provider_duration_sec, 3),
-            "providerDurationSec": provider_duration_sec,
-            "sourceFrameOffset": inherited_source_frame_offset,
-            "alignment": inherited_alignment if direction == "end" else None,
-            "segmentCrop": parent_generation.get("segmentCrop") or segment.get("crop"),
-            "generationSettings": generation_settings,
-            "createdAt": gen_meta.get("createdAt") or now_iso(),
-            "updatedAt": finished_at,
-            "finishedAt": finished_at,
-            "processingDurationSec": processing_duration_sec,
-            "error": None,
-            "parentGenerationId": parent_generation_id,
-            "extension": clip_lengthen,
-        },
+        updates=generation_updates,
         history_entry={
             "at": finished_at,
             "event": "segment_generation.complete",
@@ -5238,57 +5547,81 @@ def _handle_previz_generate(
             gen_id=gen_id,
             video_path=str(poster_source_path),
         )
+        generation_updates = {
+            "genId": gen_id,
+            "segmentId": segment_id,
+            "luma": {
+                "provider": provider_name,
+                "model": model_name,
+                "mode": "previz_frames",
+                "prompt": prompt,
+                "negativePrompt": None,
+                "lumaGenerationId": generation_id,
+            },
+            "status": "complete",
+            "outputKey": out_key,
+            "posterKey": poster_key,
+            "inputFirstFrameKey": first_frame_key,
+            "inputLastFrameKey": last_frame_key if len(frame_keys) > 1 else None,
+            "requestedDurationSec": round(float(duration_sec), 3),
+            "providerDurationSec": provider_duration_sec,
+            "generationSettings": {
+                "workflowId": "simple_generation_workflow",
+                "provider": provider_name,
+                "requestedModel": model_name,
+                "model": used_provider_model or model_name,
+                "sceneAspectRatio": scene_aspect_ratio,
+                "selectedFrameIds": selected_frame_ids,
+                "selectedFrameCount": len(selected_frame_ids),
+                "selectedReferenceIds": selected_frame_ids,
+                "selectedReferenceCount": len(selected_frame_ids),
+                "requestedDurationSec": round(float(duration_sec), 3),
+                "scenePrompt": metadata.get("scenePrompt"),
+                "storedOutput": _video_timing_payload(stored_output_probe or {}),
+                "timelineConform": {
+                    "policy": "scene_cfr_resolution",
+                    "applied": needs_timeline_conform,
+                    "durationDeltaSec": round(float(stored_output_probe.get("duration_sec") or 0.0) - float(duration_sec), 4),
+                    "frameDelta": int(stored_output_probe.get("frame_count") or 0) - int(round(duration_sec * 24)),
+                    "fpsConformed": True,
+                    "resolutionConformed": needs_timeline_conform,
+                },
+            },
+            "createdAt": gen_meta.get("createdAt") or now_iso(),
+            "updatedAt": finished_at,
+            "finishedAt": finished_at,
+            "processingDurationSec": processing_duration_sec,
+            "error": None,
+        }
+        _record_usage(
+            store=store,
+            user_id=task["userId"],
+            task=task,
+            source="previz_generate",
+            tool_origin="previz_generate",
+            request_type="video_generation",
+            provider=provider_name,
+            provider_model=used_provider_model or model_name,
+            app_model_id=model_name,
+            target_record=generation_updates,
+            segment_id=segment_id,
+            asset_id=gen_id,
+            asset_kind="segment_generation",
+            duration_sec=provider_duration_sec,
+            width=int(stored_output_probe.get("width") or output_width or 0) or None,
+            height=int(stored_output_probe.get("height") or output_height or 0) or None,
+            fps=(
+                float(stored_output_probe.get("fps_num") or 0) / float(stored_output_probe.get("fps_den") or 1)
+                if stored_output_probe.get("fps_num")
+                else 24.0
+            ),
+        )
         gen_meta = _update_segment_generation_record(
             store=store,
             user_id=task["userId"],
             task_id=task["taskId"],
             gen_id=gen_id,
-            updates={
-                "genId": gen_id,
-                "segmentId": segment_id,
-                "luma": {
-                    "provider": provider_name,
-                    "model": model_name,
-                    "mode": "previz_frames",
-                    "prompt": prompt,
-                    "negativePrompt": None,
-                    "lumaGenerationId": generation_id,
-                },
-                "status": "complete",
-                "outputKey": out_key,
-                "posterKey": poster_key,
-                "inputFirstFrameKey": first_frame_key,
-                "inputLastFrameKey": last_frame_key if len(frame_keys) > 1 else None,
-                "requestedDurationSec": round(float(duration_sec), 3),
-                "providerDurationSec": provider_duration_sec,
-                "generationSettings": {
-                    "workflowId": "simple_generation_workflow",
-                    "provider": provider_name,
-                    "requestedModel": model_name,
-                    "model": used_provider_model or model_name,
-                    "sceneAspectRatio": scene_aspect_ratio,
-                    "selectedFrameIds": selected_frame_ids,
-                    "selectedFrameCount": len(selected_frame_ids),
-                    "selectedReferenceIds": selected_frame_ids,
-                    "selectedReferenceCount": len(selected_frame_ids),
-                    "requestedDurationSec": round(float(duration_sec), 3),
-                    "scenePrompt": metadata.get("scenePrompt"),
-                    "storedOutput": _video_timing_payload(stored_output_probe or {}),
-                    "timelineConform": {
-                        "policy": "scene_cfr_resolution",
-                        "applied": needs_timeline_conform,
-                        "durationDeltaSec": round(float(stored_output_probe.get("duration_sec") or 0.0) - float(duration_sec), 4),
-                        "frameDelta": int(stored_output_probe.get("frame_count") or 0) - int(round(duration_sec * 24)),
-                        "fpsConformed": True,
-                        "resolutionConformed": needs_timeline_conform,
-                    },
-                },
-                "createdAt": gen_meta.get("createdAt") or now_iso(),
-                "updatedAt": finished_at,
-                "finishedAt": finished_at,
-                "processingDurationSec": processing_duration_sec,
-                "error": None,
-            },
+            updates=generation_updates,
             history_entry={
                 "at": finished_at,
                 "event": "previz_generation.complete",
@@ -5586,78 +5919,105 @@ def _handle_segment_generate_character_animate(
             gen_id=gen_id,
             video_path=str(downloaded_path),
         )
+        generation_updates = {
+            "genId": gen_id,
+            "segmentId": segment_id,
+            "luma": {
+                "provider": provider_name,
+                "model": model_name,
+                "mode": mode,
+                "prompt": prompt,
+                "negativePrompt": None,
+                "lumaGenerationId": generation_id,
+            },
+            "characterAnimation": {
+                "workflowId": str(task.get("workflowId") or "character_animate_workflow"),
+                "mode": mode,
+                "model": model_name,
+                "modelLabel": _character_animate_model_label(model_name),
+                "characterReferenceId": character_reference_id,
+                "outputAspectRatio": output_aspect_ratio if mode == "pose_video" else None,
+                "omnihumanResolution": omnihuman_resolution if mode == "audio_driven" else None,
+                "klingMode": kling_mode if model_name == "kling_v3_motion_control" else None,
+                "klingCharacterOrientation": kling_character_orientation if model_name == "kling_v3_motion_control" else None,
+                "seedanceResolution": seedance_resolution if model_name == "seedance_2_0_reference_to_video" else None,
+                "seedanceAspectRatio": seedance_aspect_ratio if model_name == "seedance_2_0_reference_to_video" else None,
+                "bodyControl": body_control if mode == "pose_video" else None,
+                "expressionIntensity": expression_intensity if mode == "pose_video" else None,
+                "prompt": prompt,
+            },
+            "status": "complete",
+            "outputKey": out_key,
+            "posterKey": poster_key,
+            "inputMediaKey": source_segment_key,
+            "inputFirstFrameKey": character_key,
+            "inputAudioKey": input_audio_key,
+            "requestedDurationSec": round(float(segment.get("durationSec") or 0.0), 3),
+            "providerDurationSec": provider_duration_sec,
+            "generationSettings": {
+                "workflowId": str(task.get("workflowId") or "character_animate_workflow"),
+                "provider": provider_name,
+                "requestedModel": model_name,
+                "model": used_provider_model or model_name,
+                "characterMode": mode,
+                "characterReferenceId": character_reference_id,
+                "outputAspectRatio": output_aspect_ratio if mode == "pose_video" else None,
+                "omnihumanResolution": omnihuman_resolution if mode == "audio_driven" else None,
+                "klingMode": kling_mode if model_name == "kling_v3_motion_control" else None,
+                "klingCharacterOrientation": kling_character_orientation if model_name == "kling_v3_motion_control" else None,
+                "seedanceResolution": seedance_resolution if model_name == "seedance_2_0_reference_to_video" else None,
+                "seedanceAspectRatio": seedance_aspect_ratio if model_name == "seedance_2_0_reference_to_video" else None,
+                "bodyControl": body_control if mode == "pose_video" else None,
+                "expressionIntensity": expression_intensity if mode == "pose_video" else None,
+                "requestedDurationSec": round(float(segment.get("durationSec") or 0.0), 3),
+                "providerDurationSec": provider_duration_sec,
+                "sourceSegmentTiming": {
+                    "startFrame": int(segment.get("startFrame") or 0),
+                    "endFrameExclusive": int(segment.get("endFrameExclusive") or 0),
+                    "durationFrames": int(segment.get("durationFrames") or 0),
+                    "durationSec": round(float(segment.get("durationSec") or 0.0), 4),
+                },
+                "providerOutputRaw": _video_timing_payload(raw_output_probe or {}),
+                "storedOutput": _video_timing_payload(stored_output_probe or {}),
+            },
+            "createdAt": gen_meta.get("createdAt") or now_iso(),
+            "updatedAt": finished_at,
+            "finishedAt": finished_at,
+            "processingDurationSec": processing_duration_sec,
+            "error": None,
+        }
+        _record_usage(
+            store=store,
+            user_id=task["userId"],
+            task=task,
+            source="character_animation_generate",
+            tool_origin="segment_generate_character_animate",
+            request_type="video_generation",
+            provider=provider_name,
+            provider_model=used_provider_model or model_name,
+            app_model_id=model_name,
+            target_record=generation_updates,
+            segment_id=segment_id,
+            asset_id=gen_id,
+            asset_kind="segment_generation",
+            duration_sec=provider_duration_sec,
+            width=int(stored_output_probe.get("width") or 0) or None,
+            height=int(stored_output_probe.get("height") or 0) or None,
+            fps=(
+                float(stored_output_probe.get("fps_num") or 0) / float(stored_output_probe.get("fps_den") or 1)
+                if stored_output_probe.get("fps_num")
+                else None
+            ),
+            resolution_label=(
+                seedance_resolution if model_name == "seedance_2_0_reference_to_video" else omnihuman_resolution if model_name == "omnihuman_v1_5" else "1080p"
+            ),
+        )
         gen_meta = _update_segment_generation_record(
             store=store,
             user_id=task["userId"],
             task_id=task["taskId"],
             gen_id=gen_id,
-            updates={
-                "genId": gen_id,
-                "segmentId": segment_id,
-                "luma": {
-                    "provider": provider_name,
-                    "model": model_name,
-                    "mode": mode,
-                    "prompt": prompt,
-                    "negativePrompt": None,
-                    "lumaGenerationId": generation_id,
-                },
-                "characterAnimation": {
-                    "workflowId": str(task.get("workflowId") or "character_animate_workflow"),
-                    "mode": mode,
-                    "model": model_name,
-                    "modelLabel": _character_animate_model_label(model_name),
-                    "characterReferenceId": character_reference_id,
-                    "outputAspectRatio": output_aspect_ratio if mode == "pose_video" else None,
-                    "omnihumanResolution": omnihuman_resolution if mode == "audio_driven" else None,
-                    "klingMode": kling_mode if model_name == "kling_v3_motion_control" else None,
-                    "klingCharacterOrientation": kling_character_orientation if model_name == "kling_v3_motion_control" else None,
-                    "seedanceResolution": seedance_resolution if model_name == "seedance_2_0_reference_to_video" else None,
-                    "seedanceAspectRatio": seedance_aspect_ratio if model_name == "seedance_2_0_reference_to_video" else None,
-                    "bodyControl": body_control if mode == "pose_video" else None,
-                    "expressionIntensity": expression_intensity if mode == "pose_video" else None,
-                    "prompt": prompt,
-                },
-                "status": "complete",
-                "outputKey": out_key,
-                "posterKey": poster_key,
-                "inputMediaKey": source_segment_key,
-                "inputFirstFrameKey": character_key,
-                "inputAudioKey": input_audio_key,
-                "requestedDurationSec": round(float(segment.get("durationSec") or 0.0), 3),
-                "providerDurationSec": provider_duration_sec,
-                "generationSettings": {
-                    "workflowId": str(task.get("workflowId") or "character_animate_workflow"),
-                    "provider": provider_name,
-                    "requestedModel": model_name,
-                    "model": used_provider_model or model_name,
-                    "characterMode": mode,
-                    "characterReferenceId": character_reference_id,
-                    "outputAspectRatio": output_aspect_ratio if mode == "pose_video" else None,
-                    "omnihumanResolution": omnihuman_resolution if mode == "audio_driven" else None,
-                    "klingMode": kling_mode if model_name == "kling_v3_motion_control" else None,
-                    "klingCharacterOrientation": kling_character_orientation if model_name == "kling_v3_motion_control" else None,
-                    "seedanceResolution": seedance_resolution if model_name == "seedance_2_0_reference_to_video" else None,
-                    "seedanceAspectRatio": seedance_aspect_ratio if model_name == "seedance_2_0_reference_to_video" else None,
-                    "bodyControl": body_control if mode == "pose_video" else None,
-                    "expressionIntensity": expression_intensity if mode == "pose_video" else None,
-                    "requestedDurationSec": round(float(segment.get("durationSec") or 0.0), 3),
-                    "providerDurationSec": provider_duration_sec,
-                    "sourceSegmentTiming": {
-                        "startFrame": int(segment.get("startFrame") or 0),
-                        "endFrameExclusive": int(segment.get("endFrameExclusive") or 0),
-                        "durationFrames": int(segment.get("durationFrames") or 0),
-                        "durationSec": round(float(segment.get("durationSec") or 0.0), 4),
-                    },
-                    "providerOutputRaw": _video_timing_payload(raw_output_probe or {}),
-                    "storedOutput": _video_timing_payload(stored_output_probe or {}),
-                },
-                "createdAt": gen_meta.get("createdAt") or now_iso(),
-                "updatedAt": finished_at,
-                "finishedAt": finished_at,
-                "processingDurationSec": processing_duration_sec,
-                "error": None,
-            },
+            updates=generation_updates,
             history_entry={
                 "at": finished_at,
                 "event": "character_animation.complete",
@@ -6185,22 +6545,22 @@ def _handle_segment_generate(
     elif model_name == "runway-gen4-aleph":
         runway_key = secrets["RUNWAY_API_KEY"]
         provider_duration_sec = round(provider_input_duration_sec or segment_duration_sec, 3)
-        _job_progress(job, store, 35, "running", "Creating Runway Gen-4 Aleph video-to-video generation")
+        _job_progress(job, store, 35, "running", "Creating Runway Aleph 2.0 video-to-video generation")
         created = create_video_to_video(
             api_key=runway_key,
             video_uri=str(runway_video_uri),
             prompt_text=payload.get("prompt") or "Modify the source video while preserving timing, camera movement, and overall motion continuity.",
             first_frame_uri=str(runway_first_frame_uri),
-            ratio=f"{first_target_w}:{first_target_h}",
+            model="aleph2",
         )
         generation_id = created.get("id")
         if not generation_id:
             raise RuntimeError(f"Unexpected Runway create response: {created}")
-        _job_progress(job, store, 55, "running", "Polling Runway Gen-4 Aleph generation")
+        _job_progress(job, store, 55, "running", "Polling Runway Aleph 2.0 generation")
         result = _wait_runway_complete(runway_key, generation_id)
         out_url = _parse_runway_output_url(result)
         provider_name = "runway"
-        used_provider_model = "gen4_aleph"
+        used_provider_model = "aleph2"
     elif model_name == "kling-2.6":
         kling_key = secrets.get("RUNWARE_API_KEY") or secrets.get("KLING_API_KEY")
         if not kling_key:
@@ -6598,26 +6958,32 @@ def _handle_segment_generate(
         provider_name = "replicate"
         used_provider_model = "wan-video/wan-2.7-videoedit"
     else:
-        luma_key = secrets["LUMA_API_KEY"]
+        luma_key = _resolve_luma_uni_api_key(secrets)
+        if not luma_key:
+            raise RuntimeError(
+                "Luma Ray 3.2 video edit requires a Luma Agents key (`luma-api-*`) in "
+                "LUMA_AGENTS_API_KEY, or in LUMA_API_KEY if that value is also an Agents key."
+            )
         if not media_url:
             raise RuntimeError("Luma generation requires a prepared segment media URL")
-        _job_progress(job, store, 35, "running", "Creating Luma modify generation")
-        created = create_modify_generation(
+        ray32_resolution = _luma_ray32_resolution_label(model_name)
+        _job_progress(job, store, 35, "running", "Creating Luma Ray 3.2 video edit generation")
+        created = create_video_edit_generation(
             api_key=luma_key,
             media_url=media_url,
-            first_frame_url=first_frame_url,
-            mode=luma_mode,
-            model=model_name,
+            resolution=ray32_resolution,
+            strength=luma_mode,
             prompt=payload.get("prompt"),
+            start_frame_url=first_frame_url,
         )
         generation_id = created.get("id") or created.get("generation_id")
         if not generation_id:
             raise RuntimeError(f"Unexpected Luma create response: {created}")
-        _job_progress(job, store, 55, "running", "Polling Luma generation")
+        _job_progress(job, store, 55, "running", "Polling Luma Ray 3.2 generation")
         result = _wait_luma_complete(luma_key, generation_id)
         out_url = _parse_luma_output_url(result)
         provider_name = "luma"
-        used_provider_model = model_name
+        used_provider_model = "ray-3.2"
 
     out_key = paths.segment_generated(segment_id, gen_id)
     _job_progress(job, store, 75, "running", "Downloading generation output to S3")
@@ -6725,135 +7091,160 @@ def _handle_segment_generate(
         gen_id=gen_id,
         video_path=str(conformed_path if needs_timeline_conform else downloaded_path),
     )
+    generation_updates = {
+        "genId": gen_id,
+        "segmentId": segment_id,
+        "luma": {
+            "provider": provider_name,
+            "model": model_name,
+            "mode": requested_mode,
+            "prompt": payload.get("prompt"),
+            "negativePrompt": payload.get("negativePrompt"),
+            "lumaGenerationId": generation_id,
+        },
+        "status": "complete",
+        "outputKey": out_key,
+        "posterKey": poster_key,
+        "inputMediaKey": media_key_for_provider,
+        "inputFirstFrameKey": first_frame_input_key,
+        "inputLastFrameKey": last_frame_input_key,
+        "inputAudioKey": input_audio_key,
+        "sourceFirstFrameCaptureKey": start_frame.get("captureKey"),
+        "sourceFirstFrameVariantId": source_first_variant_id,
+        "sourceFirstFrameResolvedKey": first_frame_key,
+        "sourceLastFrameCaptureKey": end_frame.get("captureKey") if uses_end_keyframe else None,
+        "sourceLastFrameVariantId": source_last_variant_id,
+        "sourceLastFrameResolvedKey": last_frame_key,
+        "requestedDurationSec": round(segment_duration_sec, 3),
+        "providerDurationSec": provider_duration_sec,
+        "sourceFrameOffset": int((timeline_alignment or {}).get("sourceFrameOffset") or 0),
+        "alignment": timeline_alignment,
+        "segmentCrop": segment.get("crop"),
+        "generationSettings": {
+            "provider": provider_name,
+            "requestedModel": model_name,
+            "model": used_provider_model or model_name,
+            "mode": requested_mode,
+            "providerMode": luma_mode if provider_name == "luma" else requested_mode,
+            "firstFrameResolution": {"width": first_target_w, "height": first_target_h},
+            "firstFrameContentType": first_frame_content_type,
+            "lastFrameContentType": last_frame_content_type,
+            "mediaResolution": (
+                {"width": provider_media_width, "height": provider_media_height}
+                if provider_media_width and provider_media_height
+                else None
+            ),
+            "mediaFps": (
+                {"num": provider_media_fps.numerator, "den": provider_media_fps.denominator}
+                if provider_media_fps
+                else None
+            ),
+            "aspectRatio": (
+                ltx23_aspect_ratio
+                if model_name == "ltx-2.3-pro"
+                else (
+                    replicate_aspect_ratio
+                    if model_name in {"kling-o1", "kling-v3-omni-video"}
+                    else (seedance_aspect_ratio if model_name == "seedance-2.0-reference-to-video" else (wan27_aspect_ratio if model_name == "wan2.7-videoedit" else None))
+                )
+            ),
+            "replicateKlingMode": replicate_kling_mode if model_name == "kling-o1" else None,
+            "replicateKlingV3Mode": replicate_kling_v3_mode if model_name == "kling-v3-omni-video" else None,
+            "seedanceResolution": "720p" if model_name == "seedance-2.0-reference-to-video" else None,
+            "seedanceRequestedDurationSec": seedance_requested_duration_sec if model_name == "seedance-2.0-reference-to-video" else None,
+            "seedanceRawOutputResolution": (
+                {"width": seedance_raw_output_width, "height": seedance_raw_output_height}
+                if model_name == "seedance-2.0-reference-to-video" and seedance_raw_output_width and seedance_raw_output_height
+                else None
+            ),
+            "seedanceOutputResolution": (
+                {"width": seedance_output_width, "height": seedance_output_height}
+                if model_name == "seedance-2.0-reference-to-video" and seedance_output_width and seedance_output_height
+                else None
+            ),
+            "wan27Resolution": wan27_resolution if model_name in {"wan2.7-videoedit", "wan2.7-i2v"} else None,
+            "wan27VideoTransport": wan27_video_transport if model_name == "wan2.7-videoedit" else None,
+            "wan27ReferenceTransport": wan27_reference_transport if model_name in {"wan2.7-videoedit", "wan2.7-i2v"} else None,
+            "wan27NegativePrompt": wan27_negative_prompt if model_name == "wan2.7-i2v" else None,
+            "ltx23ReferenceTransport": ltx23_reference_transport if model_name == "ltx-2.3-pro" else None,
+            "ltx23RequestedDurationSec": ltx23_requested_duration_sec if model_name == "ltx-2.3-pro" else None,
+            "ltx23RequestedFps": ltx23_requested_fps if model_name == "ltx-2.3-pro" else None,
+            "sora2Resolution": sora2_resolution if model_name == "sora-2-image-to-video" else None,
+            "happyHorseResolution": happy_horse_resolution if model_name in {"happy-horse-video-edit", "happy-horse-image-to-video"} else None,
+            "selectedReferenceIds": selected_reference_ids,
+            "selectedReferenceCount": len(selected_reference_ids),
+            "audioReferenceId": selected_audio_reference_id or None,
+            "sora2RequestedDurationSec": sora2_requested_duration_sec if model_name == "sora-2-image-to-video" else None,
+            "sora2ProviderDurationSec": sora2_provider_duration_sec if model_name == "sora-2-image-to-video" else None,
+            "preserveFrames": preserve_frames,
+            "providerInputTimingPolicy": provider_input_timing_policy,
+            "mediaHasAudio": provider_media_has_audio,
+            "segmentCrop": segment.get("crop"),
+            "requestedDurationSec": round(segment_duration_sec, 3),
+            "providerDurationSec": provider_duration_sec,
+            "sourceSegmentTiming": {
+                "startFrame": int(segment.get("startFrame") or 0),
+                "endFrameExclusive": int(segment.get("endFrameExclusive") or 0),
+                "durationFrames": int(segment.get("durationFrames") or max(0, int(segment.get("endFrameExclusive") or 0) - int(segment.get("startFrame") or 0))),
+                "durationSec": round(float(segment.get("durationSec") or 0.0), 4),
+                "fps": {"num": fps.numerator, "den": fps.denominator},
+                "width": target_output_width,
+                "height": target_output_height,
+            },
+            "providerInputTiming": (
+                {
+                    "durationSec": round(float(provider_input_duration_sec or provider_duration_sec or segment_duration_sec), 4),
+                    "fps": {"num": provider_media_fps.numerator, "den": provider_media_fps.denominator},
+                    "width": provider_media_width,
+                    "height": provider_media_height,
+                    "timingPolicy": provider_input_timing_policy,
+                }
+                if provider_media_fps and provider_media_width and provider_media_height
+                else None
+            ),
+            "providerOutputRaw": _video_timing_payload(raw_output_probe or {}),
+            "storedOutput": _video_timing_payload(stored_output_probe or {}),
+            "timelineAlignment": timeline_alignment,
+            "timelineConform": timeline_conform,
+        },
+        "createdAt": gen_meta.get("createdAt") or now_iso(),
+        "updatedAt": finished_at,
+        "finishedAt": finished_at,
+        "processingDurationSec": processing_duration_sec,
+        "error": None,
+        "parentGenerationId": payload.get("parentGenerationId"),
+        "extension": payload.get("extensionMetadata") if isinstance(payload.get("extensionMetadata"), dict) else gen_meta.get("extension"),
+    }
+    _record_usage(
+        store=store,
+        user_id=task["userId"],
+        task=task,
+        source="segment_generate",
+        tool_origin="segment_generate",
+        request_type="video_generation",
+        provider=provider_name,
+        provider_model=used_provider_model or model_name,
+        app_model_id=model_name,
+        target_record=generation_updates,
+        segment_id=segment_id,
+        asset_id=gen_id,
+        asset_kind="segment_generation",
+        duration_sec=provider_duration_sec,
+        width=int(stored_output_probe.get("width") or target_output_width or 0) or None,
+        height=int(stored_output_probe.get("height") or target_output_height or 0) or None,
+        fps=(
+            float(stored_output_probe.get("fps_num") or 0) / float(stored_output_probe.get("fps_den") or 1)
+            if stored_output_probe.get("fps_num")
+            else None
+        ),
+        resolution_label=_luma_ray32_resolution_label(model_name) if model_name in {"ray-3.2-720p", "ray-3.2-1080p"} else None,
+    )
     gen_meta = _update_segment_generation_record(
         store=store,
         user_id=task["userId"],
         task_id=task["taskId"],
         gen_id=gen_id,
-        updates={
-            "genId": gen_id,
-            "segmentId": segment_id,
-            "luma": {
-                "provider": provider_name,
-                "model": model_name,
-                "mode": requested_mode,
-                "prompt": payload.get("prompt"),
-                "negativePrompt": payload.get("negativePrompt"),
-                "lumaGenerationId": generation_id,
-            },
-            "status": "complete",
-            "outputKey": out_key,
-            "posterKey": poster_key,
-            "inputMediaKey": media_key_for_provider,
-            "inputFirstFrameKey": first_frame_input_key,
-            "inputLastFrameKey": last_frame_input_key,
-            "inputAudioKey": input_audio_key,
-            "sourceFirstFrameCaptureKey": start_frame.get("captureKey"),
-            "sourceFirstFrameVariantId": source_first_variant_id,
-            "sourceFirstFrameResolvedKey": first_frame_key,
-            "sourceLastFrameCaptureKey": end_frame.get("captureKey") if uses_end_keyframe else None,
-            "sourceLastFrameVariantId": source_last_variant_id,
-            "sourceLastFrameResolvedKey": last_frame_key,
-            "requestedDurationSec": round(segment_duration_sec, 3),
-            "providerDurationSec": provider_duration_sec,
-            "sourceFrameOffset": int((timeline_alignment or {}).get("sourceFrameOffset") or 0),
-            "alignment": timeline_alignment,
-            "segmentCrop": segment.get("crop"),
-            "generationSettings": {
-                "provider": provider_name,
-                "requestedModel": model_name,
-                "model": used_provider_model or model_name,
-                "mode": requested_mode,
-                "providerMode": luma_mode if provider_name == "luma" else requested_mode,
-                "firstFrameResolution": {"width": first_target_w, "height": first_target_h},
-                "firstFrameContentType": first_frame_content_type,
-                "lastFrameContentType": last_frame_content_type,
-                "mediaResolution": (
-                    {"width": provider_media_width, "height": provider_media_height}
-                    if provider_media_width and provider_media_height
-                    else None
-                ),
-                "mediaFps": (
-                    {"num": provider_media_fps.numerator, "den": provider_media_fps.denominator}
-                    if provider_media_fps
-                    else None
-                ),
-                "aspectRatio": (
-                    ltx23_aspect_ratio
-                    if model_name == "ltx-2.3-pro"
-                    else (
-                    replicate_aspect_ratio
-                    if model_name in {"kling-o1", "kling-v3-omni-video"}
-                    else (seedance_aspect_ratio if model_name == "seedance-2.0-reference-to-video" else (wan27_aspect_ratio if model_name == "wan2.7-videoedit" else None))
-                    )
-                ),
-                "replicateKlingMode": replicate_kling_mode if model_name == "kling-o1" else None,
-                "replicateKlingV3Mode": replicate_kling_v3_mode if model_name == "kling-v3-omni-video" else None,
-                "seedanceResolution": "720p" if model_name == "seedance-2.0-reference-to-video" else None,
-                "seedanceRequestedDurationSec": seedance_requested_duration_sec if model_name == "seedance-2.0-reference-to-video" else None,
-                "seedanceRawOutputResolution": (
-                    {"width": seedance_raw_output_width, "height": seedance_raw_output_height}
-                    if model_name == "seedance-2.0-reference-to-video" and seedance_raw_output_width and seedance_raw_output_height
-                    else None
-                ),
-                "seedanceOutputResolution": (
-                    {"width": seedance_output_width, "height": seedance_output_height}
-                    if model_name == "seedance-2.0-reference-to-video" and seedance_output_width and seedance_output_height
-                    else None
-                ),
-                "wan27Resolution": wan27_resolution if model_name in {"wan2.7-videoedit", "wan2.7-i2v"} else None,
-                "wan27VideoTransport": wan27_video_transport if model_name == "wan2.7-videoedit" else None,
-                "wan27ReferenceTransport": wan27_reference_transport if model_name in {"wan2.7-videoedit", "wan2.7-i2v"} else None,
-                "wan27NegativePrompt": wan27_negative_prompt if model_name == "wan2.7-i2v" else None,
-                "ltx23ReferenceTransport": ltx23_reference_transport if model_name == "ltx-2.3-pro" else None,
-                "ltx23RequestedDurationSec": ltx23_requested_duration_sec if model_name == "ltx-2.3-pro" else None,
-                "ltx23RequestedFps": ltx23_requested_fps if model_name == "ltx-2.3-pro" else None,
-                "sora2Resolution": sora2_resolution if model_name == "sora-2-image-to-video" else None,
-                "happyHorseResolution": happy_horse_resolution if model_name in {"happy-horse-video-edit", "happy-horse-image-to-video"} else None,
-                "selectedReferenceIds": selected_reference_ids,
-                "selectedReferenceCount": len(selected_reference_ids),
-                "audioReferenceId": selected_audio_reference_id or None,
-                "sora2RequestedDurationSec": sora2_requested_duration_sec if model_name == "sora-2-image-to-video" else None,
-                "sora2ProviderDurationSec": sora2_provider_duration_sec if model_name == "sora-2-image-to-video" else None,
-                "preserveFrames": preserve_frames,
-                "providerInputTimingPolicy": provider_input_timing_policy,
-                "mediaHasAudio": provider_media_has_audio,
-                "segmentCrop": segment.get("crop"),
-                "requestedDurationSec": round(segment_duration_sec, 3),
-                "providerDurationSec": provider_duration_sec,
-                "sourceSegmentTiming": {
-                    "startFrame": int(segment.get("startFrame") or 0),
-                    "endFrameExclusive": int(segment.get("endFrameExclusive") or 0),
-                    "durationFrames": int(segment.get("durationFrames") or max(0, int(segment.get("endFrameExclusive") or 0) - int(segment.get("startFrame") or 0))),
-                    "durationSec": round(float(segment.get("durationSec") or 0.0), 4),
-                    "fps": {"num": fps.numerator, "den": fps.denominator},
-                    "width": target_output_width,
-                    "height": target_output_height,
-                },
-                "providerInputTiming": (
-                    {
-                        "durationSec": round(float(provider_input_duration_sec or provider_duration_sec or segment_duration_sec), 4),
-                        "fps": {"num": provider_media_fps.numerator, "den": provider_media_fps.denominator},
-                        "width": provider_media_width,
-                        "height": provider_media_height,
-                        "timingPolicy": provider_input_timing_policy,
-                    }
-                    if provider_media_fps and provider_media_width and provider_media_height
-                    else None
-                ),
-                "providerOutputRaw": _video_timing_payload(raw_output_probe or {}),
-                "storedOutput": _video_timing_payload(stored_output_probe or {}),
-                "timelineAlignment": timeline_alignment,
-                "timelineConform": timeline_conform,
-            },
-            "createdAt": gen_meta.get("createdAt") or now_iso(),
-            "updatedAt": finished_at,
-            "finishedAt": finished_at,
-            "processingDurationSec": processing_duration_sec,
-            "error": None,
-            "parentGenerationId": payload.get("parentGenerationId"),
-            "extension": payload.get("extensionMetadata") if isinstance(payload.get("extensionMetadata"), dict) else gen_meta.get("extension"),
-        },
+        updates=generation_updates,
         history_entry={
             "at": finished_at,
             "event": "segment_generation.complete",
@@ -11048,6 +11439,30 @@ def _handle_export_topaz_upscale(
         existing_result_export.update(result_export_record)
     else:
         task.setdefault("exports", []).append(result_export_record)
+
+    _record_usage(
+        store=store,
+        user_id=task["userId"],
+        task=task,
+        source="topaz_upscale",
+        tool_origin="topaz_upscale",
+        request_type="video_upscale",
+        provider="fal",
+        provider_model="fal-ai/topaz/upscale/video",
+        app_model_id="fal-ai/topaz/upscale/video",
+        target_record=existing_result_export if isinstance(existing_result_export, dict) else result_export_record,
+        asset_id=result_export_id,
+        asset_kind="export",
+        duration_sec=float(output_probe.get("duration_sec") or 0.0) or None,
+        width=int(output_probe.get("width") or 0) or None,
+        height=int(output_probe.get("height") or 0) or None,
+        fps=(
+            float(output_probe.get("fps_num") or 0) / float(output_probe.get("fps_den") or 1)
+            if output_probe.get("fps_num")
+            else None
+        ),
+        notes=f"preset={preset};model={model}",
+    )
 
     topaz_state.update(
         {

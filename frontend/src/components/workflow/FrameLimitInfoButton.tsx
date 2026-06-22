@@ -10,10 +10,10 @@ type FrameLimitRow = {
 type GenerateInputMode = "start_video" | "start_end" | "start_only" | "edit_video";
 
 const START_VIDEO_ROWS: FrameLimitRow[] = [
-  { model: "Luma Ray 2 Flash", maxSeconds: 10, modelFps: 24, maxFrameCount: 240 },
-  { model: "Luma Ray 2", maxSeconds: 10, modelFps: 24, maxFrameCount: 240 },
+  { model: "Luma Ray 3.2 720p", maxSeconds: 18, modelFps: 24, maxFrameCount: 432 },
+  { model: "Luma Ray 3.2 1080p", maxSeconds: 18, modelFps: 24, maxFrameCount: 432 },
   { model: "Happy Horse 1.0 Video Edit", maxSeconds: 15, modelFps: 24, maxFrameCount: 360 },
-  { model: "Runway Gen 4 Aleph", maxSeconds: 5, modelFps: 24, maxFrameCount: 120 },
+  { model: "Runway Aleph 2.0", maxSeconds: 5, modelFps: 24, maxFrameCount: 120 },
   { model: "Kling O1 Edit", maxSeconds: 30, modelFps: 30, maxFrameCount: 900 },
   { model: "Kling 3.0 Omni", maxSeconds: 15, modelFps: 60, maxFrameCount: 900 },
   { model: "Seedance 2.0", maxSeconds: 15, modelFps: 24, maxFrameCount: 360 },

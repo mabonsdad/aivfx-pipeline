@@ -6,6 +6,7 @@ from typing import Any, Callable
 from botocore.exceptions import ClientError
 
 from src.core.asset_origin import build_asset_origin
+from src.core.cost_tracking import build_usage_record, estimate_cost_from_pricing_entry
 from src.core.http import parse_json_body
 from src.core.prompt_wizard_admin import resolve_prompt_wizard_model_config
 from src.models.schemas import (
@@ -59,6 +60,8 @@ def handle_task_segment_routes(
     resolve_frame_source_fn: Callable[[dict[str, Any], str | None], tuple[str, str | None]],
     get_openai_api_key_fn: Callable[[], str],
     get_prompt_wizard_admin_config_fn: Callable[[], dict[str, Any]],
+    get_openai_pricing_entry_fn: Callable[[str], dict[str, Any] | None],
+    get_openai_pricing_rates_fn: Callable[[str], dict[str, float] | None],
     improve_video_prompt_fn: Callable[..., dict[str, Any]],
     logger,
 ) -> dict[str, Any] | None:
@@ -351,17 +354,48 @@ def handle_task_segment_routes(
         openai_api_key = get_openai_api_key_fn()
         if not openai_api_key:
             return error_response_fn(500, "OPENAI_API_KEY is required for Prompt Wizard", origin=origin)
+        pricing_entry = get_openai_pricing_entry_fn("gpt-5.5")
+        pricing_rates = get_openai_pricing_rates_fn("gpt-5.5")
         try:
-            result = improve_video_prompt_fn(
+            result, usage = improve_video_prompt_fn(
                 api_key=openai_api_key,
                 request_payload=request_payload,
                 system_prompt=str(admin_config.get("systemPrompt") or "").strip() or None,
                 edited_first_frame_url=edited_first_frame_url,
+                pricing_rates=pricing_rates,
+                return_usage=True,
             )
         except Exception as exc:
             logger.warning("Prompt Wizard request failed", extra={"taskId": task_id, "segmentId": segment_id, "error": str(exc)})
             return error_response_fn(502, str(exc), origin=origin)
-        return response_fn(200, {"result": result}, origin=origin)
+        try:
+            timestamp = now_iso_fn()
+            estimate = estimate_cost_from_pricing_entry(pricing_entry, usage=usage)
+            usage_record = build_usage_record(
+                usage_record_id=new_id_fn("usage"),
+                now_iso=timestamp,
+                user_id=user_id,
+                provider="openai",
+                provider_model="gpt-5.5",
+                app_model_id="gpt-5.5",
+                request_type="prompt_rewrite",
+                source="task_segment_prompt_wizard",
+                tool_origin="prompt_wizard",
+                workflow_id=str(task.get("workflowId") or "source_video_flow"),
+                task_id=task_id,
+                segment_id=segment_id,
+                project_id=str(task.get("projectId") or "").strip() or None,
+                pricing_entry=pricing_entry,
+                estimate=estimate,
+                notes=f"model={req.selected_model}",
+            )
+            store.save_usage_record(usage_record)
+        except Exception as exc:
+            logger.warning(
+                "Prompt Wizard usage tracking failed",
+                extra={"taskId": task_id, "segmentId": segment_id, "error": str(exc)},
+            )
+        return response_fn(200, {"result": result, "usage": usage}, origin=origin)
 
     if method == "POST" and len(parts) == 7 and parts[2] == "segments" and parts[4] == "manual-generation" and parts[5] == "upload" and parts[6] == "init":
         segment_id = parts[3]

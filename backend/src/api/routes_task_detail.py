@@ -10,9 +10,6 @@ import boto3
 from src.core.assets import AssetPaths
 from src.core.ffmpeg import extract_frame_png, ffprobe_video
 from src.core.projects import can_access_project, project_summary
-from src.core.task_workflows import infer_task_workflow_id
-
-
 def _backfill_generation_posters(task: dict[str, Any], asset_store, *, assets_bucket: str, max_per_request: int = 6) -> bool:
     generations = task.get("segmentGenerations")
     if not isinstance(generations, dict) or not generations:
@@ -168,10 +165,6 @@ def handle_task_detail_route(
         return error_response_fn(404, "Task not found", origin=origin)
 
     changed = False
-    inferred_workflow_id = infer_task_workflow_id(task)
-    if task.get("workflowId") != inferred_workflow_id:
-        task["workflowId"] = inferred_workflow_id
-        changed = True
     changed = _ensure_previz_bootstrap(task, new_id_fn=helpers["new_id"]) or changed
     if not task.get("sourceMedia") and task.get("video"):
         video = task.get("video", {})

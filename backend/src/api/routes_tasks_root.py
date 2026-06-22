@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from src.core.projects import can_access_project, project_summary
-from src.core.task_workflows import infer_task_workflow_id
 from src.models.schemas import TaskCreateRequest, TaskProjectUpdateRequest
 
 
@@ -176,10 +175,6 @@ def handle_tasks_root_routes(
             task_items = store.list_all_tasks() if use_all_scope else store.list_tasks(user_id)
         for item in task_items:
             changed = False
-            inferred_workflow_id = infer_task_workflow_id(item)
-            if item.get("workflowId") != inferred_workflow_id:
-                item["workflowId"] = inferred_workflow_id
-                changed = True
             changed = _ensure_previz_bootstrap(item, new_id_fn=new_id_fn) or changed
             changed = maintain_segment_generations_fn(item, store) or changed
             changed = cleanup_legacy_generation_qc_fn(item) or changed

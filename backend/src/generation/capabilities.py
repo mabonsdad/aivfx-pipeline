@@ -31,24 +31,26 @@ class VideoModelCapability:
 
 
 VIDEO_MODELS: dict[str, VideoModelCapability] = {
-    "ray-2": VideoModelCapability(
-        model="ray-2",
-        label="Luma Ray 2",
+    "ray-3.2-720p": VideoModelCapability(
+        model="ray-3.2-720p",
+        label="Luma Ray 3.2 720p",
         provider="luma",
         allowed_modes=LUMA_API_ALLOWED_MODES,
-        max_seconds=10,
+        max_seconds=18,
+        requires_prompt=True,
         supports_chunked_generation=True,
         supports_extension=True,
         uses_source_video=True,
         source_video_profile="default_source_video",
         provider_input_namespace="luma",
     ),
-    "ray-flash-2": VideoModelCapability(
-        model="ray-flash-2",
-        label="Luma Ray Flash 2",
+    "ray-3.2-1080p": VideoModelCapability(
+        model="ray-3.2-1080p",
+        label="Luma Ray 3.2 1080p",
         provider="luma",
         allowed_modes=LUMA_API_ALLOWED_MODES,
-        max_seconds=15,
+        max_seconds=18,
+        requires_prompt=True,
         supports_chunked_generation=True,
         supports_extension=True,
         uses_source_video=True,
@@ -101,7 +103,7 @@ VIDEO_MODELS: dict[str, VideoModelCapability] = {
     ),
     "runway-gen4-aleph": VideoModelCapability(
         model="runway-gen4-aleph",
-        label="Runway Gen-4 Aleph",
+        label="Runway Aleph 2.0",
         provider="runway",
         allowed_modes=frozenset({"runway_aleph_v2v"}),
         max_seconds=10,

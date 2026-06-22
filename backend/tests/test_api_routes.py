@@ -109,12 +109,12 @@ def test_admin_prompt_wizard_route_updates_config_with_pin(monkeypatch) -> None:
             "systemPrompt": "Updated prompt",
             "models": [
                 {
-                    "selected_model": "ray-2",
-                    "dropdown_name": "Luma Ray 2",
+                    "selected_model": "ray-3.2-720p",
+                    "dropdown_name": "Luma Ray 3.2 720p",
                     "mode": "start_video",
                     "provider": "Luma",
-                    "provider_model": "ray-2",
-                    "endpoint_used": "POST https://api.lumalabs.ai/dream-machine/v1/generations/video/modify",
+                    "provider_model": "ray-3.2",
+                    "endpoint_used": "POST https://agents.lumalabs.ai/v1/generations (type=video_edit)",
                     "required_markers": [],
                     "supports_negative_prompt": False,
                     "prompt_strategy": "luma_descriptive_change",
@@ -835,7 +835,7 @@ def test_segment_generate_route_returns_job_and_gen(monkeypatch) -> None:
         _event(
             "POST",
             "/tasks/task_1/segments/seg_1/generate",
-            {"lumaModel": "ray-2", "mode": "adhere_1", "prompt": "make it cinematic"},
+            {"lumaModel": "ray-3.2-720p", "mode": "adhere_1", "prompt": "make it cinematic"},
         )
     )
     assert result["statusCode"] == 202
@@ -1078,7 +1078,7 @@ def test_segment_generation_extend_route_adjusts_late_alignment_to_model_minimum
                 "segmentId": "seg_prev",
                 "status": "complete",
                 "outputKey": "users/user-1/tasks/task_1/generated/gen_prev.mp4",
-                "luma": {"model": "ray-2", "mode": "start_video", "prompt": "Continue motion"},
+                "luma": {"model": "ray-3.2-720p", "mode": "start_video", "prompt": "Continue motion"},
                 "generationSettings": {},
             }
         },

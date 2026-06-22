@@ -14,6 +14,8 @@ from typing import Any, Callable
 
 from pydantic import BaseModel, Field
 
+from src.core.cost_tracking import build_usage_record, estimate_cost_from_pricing_entry
+
 
 class CanvasPromptWizardRequest(BaseModel):
     user_draft_prompt: str = Field(min_length=1, max_length=4000)
@@ -35,8 +37,12 @@ def handle_canvas_routes(
     json_model: Callable[[Any, dict[str, Any]], Any],
     response_fn: Callable[..., dict[str, Any]],
     error_response_fn: Callable[..., dict[str, Any]],
+    store,
+    new_id_fn: Callable[[str], str],
+    now_iso_fn: Callable[[], str],
     get_openai_api_key_fn: Callable[[], str],
     get_canvas_system_prompt_fn: Callable[[str], str | None],
+    get_openai_pricing_entry_fn: Callable[[str], dict[str, Any] | None],
     get_openai_pricing_rates_fn: Callable[[str], dict[str, float] | None],
     improve_lookdev_prompt_fn: Callable[..., dict[str, Any]],
     logger,
@@ -54,6 +60,7 @@ def handle_canvas_routes(
         # Load the brain (system prompt) from the editable server-side profile config.
         # Falls back to the built-in default inside improve_lookdev_prompt if absent.
         system_prompt = get_canvas_system_prompt_fn(req.profile)
+        pricing_entry = get_openai_pricing_entry_fn("gpt-5.5")
         pricing_rates = get_openai_pricing_rates_fn("gpt-5.5")
 
         temperature = req.temperature if req.temperature is not None else 0.2
@@ -72,6 +79,27 @@ def handle_canvas_routes(
         except Exception as exc:
             logger.warning("Lookdev prompt wizard failed", extra={"userId": user_id, "error": str(exc)})
             return error_response_fn(502, str(exc), origin=origin)
+        try:
+            timestamp = now_iso_fn()
+            estimate = estimate_cost_from_pricing_entry(pricing_entry, usage=usage)
+            usage_record = build_usage_record(
+                usage_record_id=new_id_fn("usage"),
+                now_iso=timestamp,
+                user_id=user_id,
+                provider="openai",
+                provider_model="gpt-5.5",
+                app_model_id="gpt-5.5",
+                request_type="prompt_rewrite",
+                source="canvas_prompt_wizard",
+                tool_origin="canvas_prompt_wizard",
+                workflow_id="canvas_workflow",
+                pricing_entry=pricing_entry,
+                estimate=estimate,
+                notes=f"profile={req.profile}",
+            )
+            store.save_usage_record(usage_record)
+        except Exception as exc:
+            logger.warning("Canvas prompt wizard usage tracking failed", extra={"userId": user_id, "error": str(exc)})
         return response_fn(200, {"result": result, "usage": usage}, origin=origin)
 
     return None

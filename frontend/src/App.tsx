@@ -477,13 +477,13 @@ function fpsValue(task: TaskDetail | undefined): number {
 const MODEL_FRAME_BUDGET_FPS = 24;
 
 function videoModelLabel(model: VideoModel): string {
-  if (model === "ray-2") return "Luma Ray 2";
-  if (model === "ray-flash-2") return "Luma Ray Flash 2";
+  if (model === "ray-3.2-720p") return "Luma Ray 3.2 720p";
+  if (model === "ray-3.2-1080p") return "Luma Ray 3.2 1080p";
   if (model === "runway-gen4.5") return "Runway Gen-4.5";
   if (model === "sora-2-image-to-video") return "Sora 2 Image to Video";
   if (model === "happy-horse-video-edit") return "Happy Horse 1.0 Video Edit";
   if (model === "happy-horse-image-to-video") return "Happy Horse 1.0 Image to Video";
-  if (model === "runway-gen4-aleph") return "Runway Gen-4 Aleph";
+  if (model === "runway-gen4-aleph") return "Runway Aleph 2.0";
   if (model === "kling-2.6") return "Kling 2.6";
   if (model === "kling-o1") return "Kling O1 Edit";
   if (model === "kling-v3-omni-video") return "Kling v3 Omni Video";
@@ -538,8 +538,7 @@ function videoModelDurationConstraints(model: VideoModel): {
   maxSeconds: number;
   frameBudgetFps?: number | null;
 } {
-  if (model === "ray-2") return { maxSeconds: 10 };
-  if (model === "ray-flash-2") return { maxSeconds: 15 };
+  if (model === "ray-3.2-720p" || model === "ray-3.2-1080p") return { minSeconds: 1, maxSeconds: 18 };
   if (model === "runway-gen4.5") return { maxSeconds: 10 };
   if (model === "sora-2-image-to-video") return { minSeconds: 4, maxSeconds: 10 };
   if (model === "happy-horse-video-edit" || model === "happy-horse-image-to-video") return { minSeconds: 3, maxSeconds: 15 };
@@ -609,10 +608,10 @@ function assessVideoModelDurationLimit(
 }
 
 const AUTOMATION_VIDEO_OPTIONS: AutomationVideoOption[] = [
-  { id: "ray-flash-2:start_video:flex_1", label: "Luma Ray Flash 2 (Start frame + video)", inputMode: "start_video", lumaModel: "ray-flash-2", mode: "flex_1" },
-  { id: "ray-2:start_video:flex_1", label: "Luma Ray 2 (Start frame + video)", inputMode: "start_video", lumaModel: "ray-2", mode: "flex_1" },
+  { id: "ray-3.2-720p:start_video:flex_1", label: "Luma Ray 3.2 720p (Source video edit)", inputMode: "start_video", lumaModel: "ray-3.2-720p", mode: "flex_1" },
+  { id: "ray-3.2-1080p:start_video:flex_1", label: "Luma Ray 3.2 1080p (Source video edit)", inputMode: "start_video", lumaModel: "ray-3.2-1080p", mode: "flex_1" },
   { id: "happy-horse-video-edit:start_video:happy_horse_video_edit", label: "Happy Horse 1.0 Video Edit (Start frame + video)", inputMode: "start_video", lumaModel: "happy-horse-video-edit", mode: "happy_horse_video_edit" },
-  { id: "runway-gen4-aleph:start_video:runway_aleph_v2v", label: "Runway Gen-4 Aleph (Start frame + video)", inputMode: "start_video", lumaModel: "runway-gen4-aleph", mode: "runway_aleph_v2v" },
+  { id: "runway-gen4-aleph:start_video:runway_aleph_v2v", label: "Runway Aleph 2.0 (Start frame + video)", inputMode: "start_video", lumaModel: "runway-gen4-aleph", mode: "runway_aleph_v2v" },
   { id: "kling-v3-omni-video:start_video:kling_v3_omni_video_edit", label: "Kling v3 Omni Video (Start frame + video)", inputMode: "start_video", lumaModel: "kling-v3-omni-video", mode: "kling_v3_omni_video_edit" },
   { id: "seedance-2.0-reference-to-video:start_video:seedance_reference_to_video", label: "Seedance 2.0 Reference to Video (Start frame + video)", inputMode: "start_video", lumaModel: "seedance-2.0-reference-to-video", mode: "seedance_reference_to_video" },
   { id: "kling-2.6:start_end:kling_start_end", label: "Kling 2.6 (Start/End frame)", inputMode: "start_end", lumaModel: "kling-2.6", mode: "kling_start_end" },
@@ -3180,7 +3179,7 @@ export default function App() {
         supports_negative_prompt: false as const,
         duration_seconds: selectedSegment ? selectedSegment.durationSec : null,
         aspect_ratio: selectedSegment?.crop?.aspect ?? null,
-        luma_mode: lumaModel === "ray-2" || lumaModel === "ray-flash-2" ? lumaModeBucket(advancedMode) : null,
+        luma_mode: lumaModel === "ray-3.2-720p" || lumaModel === "ray-3.2-1080p" ? lumaModeBucket(advancedMode) : null,
         user_visible_model_name: config.dropdownName,
         first_frame_variant_id: firstFrameVariantId,
         selected_reference_ids:

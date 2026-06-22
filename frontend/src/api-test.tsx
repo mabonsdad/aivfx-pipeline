@@ -50,13 +50,23 @@ const IMAGE_MASKED_MODELS = [
 ] as const;
 
 const VIDEO_MODELS: readonly VideoModelOption[] = [
-  { value: "ray-flash-2", label: "Luma Ray 2 Flash", mode: "flex_1" },
-  { value: "ray-2", label: "Luma Ray 2", mode: "adhere_1" },
+  {
+    value: "ray-3.2-720p",
+    label: "Luma Ray 3.2 720p",
+    mode: "flex_1",
+    note: "Uses the source video plus the first-frame image as video.start_frame on the Luma Agents video_edit route. A text prompt is still required. Strength controls still apply.",
+  },
+  {
+    value: "ray-3.2-1080p",
+    label: "Luma Ray 3.2 1080p",
+    mode: "flex_1",
+    note: "Uses the source video plus the first-frame image as video.start_frame on the Luma Agents video_edit route. A text prompt is still required. Strength controls still apply.",
+  },
   { value: "runway-gen4.5", label: "Runway Gen-4.5", mode: "runway_i2v" },
   { value: "sora-2-image-to-video", label: "Sora 2 Image to Video", mode: "sora_i2v", note: "Image-to-video only. Uses the first frame image and prompt. Resolution can be auto, 720p or 1080p." },
   { value: "happy-horse-video-edit", label: "Happy Horse 1.0 Video Edit", mode: "happy_horse_video_edit", note: "Uses source video plus up to 3 ordered reference images. In prompts, @Image1..@Image3 follow the referenceAssetKeys order. If none are supplied, the edited first frame is used as the fallback provider reference image. Resolution can be 720p or 1080p." },
   { value: "happy-horse-image-to-video", label: "Happy Horse 1.0 Image to Video", mode: "happy_horse_i2v", note: "Image-to-video only. Uses the first frame image and prompt. Resolution can be 720p or 1080p.", usesSourceVideo: false },
-  { value: "runway-gen4-aleph", label: "Runway Gen-4 Aleph", mode: "runway_aleph_v2v", note: "Uses source video plus the edited first frame image. Extra ordered reference images are not used in this route." },
+  { value: "runway-gen4-aleph", label: "Runway Aleph 2.0", mode: "runway_aleph_v2v", note: "Uses source video plus one opening keyframe image via Aleph 2.0 keyframes. Extra ordered reference images are not used in this route." },
   { value: "kling-2.6", label: "Kling 2.6", mode: "kling_start_only" },
   { value: "kling-o1", label: "Kling O1 Edit", mode: "kling_o1_video_edit", note: "Prompt should reference <<<video_1>>> and the ordered reference images as <<<image_1>>>..<<<image_3>>>. If no extra references are supplied, the edited first frame is used as the fallback provider reference image." },
   { value: "kling-v3-omni-video", label: "Kling V3 Omni Video", mode: "kling_v3_omni_video_edit", note: "Prompt should reference <<<video_1>>> and the ordered reference images as <<<image_1>>>..<<<image_3>>>. If no extra references are supplied, the edited first frame is used as the fallback provider reference image." },
@@ -270,7 +280,7 @@ function App() {
   const [prompt, setPrompt] = useState("");
   const [imageModel, setImageModel] = useState<string>("nano_banana_pro");
   const [maskedModel, setMaskedModel] = useState<string>("nano_banana_pro");
-  const [videoModel, setVideoModel] = useState<string>("ray-flash-2");
+  const [videoModel, setVideoModel] = useState<string>("ray-3.2-720p");
   const [klingMode, setKlingMode] = useState<"std" | "pro">("pro");
   const [klingV3Mode, setKlingV3Mode] = useState<"standard" | "pro">("pro");
   const [wan27Resolution, setWan27Resolution] = useState<"720p" | "1080p">("720p");

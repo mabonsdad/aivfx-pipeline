@@ -29,10 +29,10 @@ export type GenerationModelOption = {
 
 export const GENERATION_MODELS_BY_INPUT: Record<GenerateInputMode, GenerationModelOption[]> = {
   start_video: [
-    { value: "ray-flash-2", label: "Luma Ray Flash 2" },
-    { value: "ray-2", label: "Luma Ray 2" },
+    { value: "ray-3.2-720p", label: "Luma Ray 3.2 720p" },
+    { value: "ray-3.2-1080p", label: "Luma Ray 3.2 1080p" },
     { value: "happy-horse-video-edit", label: "Happy Horse 1.0 Video Edit" },
-    { value: "runway-gen4-aleph", label: "Runway Gen-4 Aleph" },
+    { value: "runway-gen4-aleph", label: "Runway Aleph 2.0" },
     { value: "kling-o1", label: "Kling O1 Edit" },
     { value: "kling-v3-omni-video", label: "Kling v3 Omni Video" },
     { value: "seedance-2.0-reference-to-video", label: "Seedance 2.0 Reference to Video" },
@@ -60,19 +60,19 @@ export const GENERATION_MODELS_BY_INPUT: Record<GenerateInputMode, GenerationMod
     { value: "happy-horse-video-edit", label: "Happy Horse 1.0 Video Edit" },
     { value: "kling-v3-omni-video", label: "Kling v3 Omni Video" },
     { value: "wan2.7-videoedit", label: "Wan 2.7 VideoEdit" },
-    { value: "runway-gen4-aleph", label: "Runway Gen-4 Aleph" },
+    { value: "runway-gen4-aleph", label: "Runway Aleph 2.0" },
   ],
 };
 
 export function useGenerationConfigState(forcedInputMode: GenerateInputMode | null = null) {
   const [storedGenerationInputMode, setStoredGenerationInputMode] = useState<GenerateInputMode>(() => readStoredGenerationInputMode() ?? "start_video");
   const [generationModelByInput, setGenerationModelByInput] = useState<Record<GenerateInputMode, VideoModelId>>({
-    start_video: "ray-flash-2",
+    start_video: "ray-3.2-720p",
     start_end: "kling-2.6",
     start_only: "wan2.2-a14b",
     edit_video: "seedance-2.0-reference-to-video",
   });
-  const [lumaModel, setLumaModel] = useState<VideoModelId>("ray-flash-2");
+  const [lumaModel, setLumaModel] = useState<VideoModelId>("ray-3.2-720p");
   const [advancedMode, setAdvancedMode] = useState("flex_1");
   const [lumaPrompt, setLumaPrompt] = useState("");
   const [lumaContinuationPrompt, setLumaContinuationPrompt] = useState("");

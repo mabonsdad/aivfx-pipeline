@@ -69,7 +69,7 @@ Model-specific rules:
 - Keep it concise and action-oriented.
 - Use @Video1 and @Image1 exactly.
 
-3. Runway Gen-4 Aleph, mode=start_video:
+3. Runway Aleph 2.0, mode=start_video:
 - Start with a specific edit/action verb when possible: Change, Replace, Add, Remove, Re-light, Re-style, Transform.
 - The prompt should explicitly state that the video should start with the input image as the first frame.
 - Then describe how added or changed elements should move or behave across the duration of the video.

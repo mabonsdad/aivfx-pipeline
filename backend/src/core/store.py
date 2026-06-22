@@ -138,6 +138,14 @@ class S3JsonStore:
         return f"users/{user_id}/api_requests/"
 
     @staticmethod
+    def usage_record_key(user_id: str, usage_record_id: str) -> str:
+        return f"users/{user_id}/usage/{usage_record_id}.json"
+
+    @staticmethod
+    def user_usage_prefix(user_id: str) -> str:
+        return f"users/{user_id}/usage/"
+
+    @staticmethod
     def projects_prefix() -> str:
         return "admin/projects/"
 
@@ -253,6 +261,16 @@ class S3JsonStore:
         tasks.sort(key=lambda t: t.get("updatedAt", ""), reverse=True)
         return tasks
 
+    def _list_user_prefixes(self) -> list[str]:
+        paginator = self.s3.get_paginator("list_objects_v2")
+        prefixes: list[str] = []
+        for page in paginator.paginate(Bucket=self.metadata_bucket, Prefix="users/", Delimiter="/"):
+            for item in page.get("CommonPrefixes") or []:
+                prefix = str(item.get("Prefix") or "")
+                if prefix.startswith("users/"):
+                    prefixes.append(prefix)
+        return prefixes
+
     def load_task_any(self, task_id: str) -> dict[str, Any] | None:
         suffix = f"/tasks/{task_id}/task.json"
         paginator = self.s3.get_paginator("list_objects_v2")
@@ -319,7 +337,11 @@ class S3JsonStore:
         return self._list_api_requests_by_prefix(prefix)
 
     def list_all_api_requests(self) -> list[dict[str, Any]]:
-        return self._list_api_requests_by_prefix("users/")
+        requests: list[dict[str, Any]] = []
+        for prefix in self._list_user_prefixes():
+            requests.extend(self._list_api_requests_by_prefix(f"{prefix}api_requests/"))
+        requests.sort(key=lambda item: item.get("updatedAt", ""), reverse=True)
+        return requests
 
     def _list_api_requests_by_prefix(self, prefix: str) -> list[dict[str, Any]]:
         paginator = self.s3.get_paginator("list_objects_v2")
@@ -347,3 +369,35 @@ class S3JsonStore:
                 if payload:
                     return payload
         return None
+
+    def load_usage_record(self, user_id: str, usage_record_id: str) -> dict[str, Any] | None:
+        return self.get_json(self.usage_record_key(user_id, usage_record_id))
+
+    def save_usage_record(self, usage_record: dict[str, Any]) -> dict[str, Any]:
+        usage_record["updatedAt"] = now_iso()
+        self.put_json(self.usage_record_key(usage_record["userId"], usage_record["usageRecordId"]), usage_record)
+        return usage_record
+
+    def list_usage_records(self, user_id: str) -> list[dict[str, Any]]:
+        return self._list_usage_records_by_prefix(self.user_usage_prefix(user_id))
+
+    def list_all_usage_records(self) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        for prefix in self._list_user_prefixes():
+            records.extend(self._list_usage_records_by_prefix(f"{prefix}usage/"))
+        records.sort(key=lambda item: str(item.get("createdAt") or item.get("updatedAt") or ""), reverse=True)
+        return records
+
+    def _list_usage_records_by_prefix(self, prefix: str) -> list[dict[str, Any]]:
+        paginator = self.s3.get_paginator("list_objects_v2")
+        records: list[dict[str, Any]] = []
+        for page in paginator.paginate(Bucket=self.metadata_bucket, Prefix=prefix):
+            for item in page.get("Contents", []):
+                key = item["Key"]
+                if "/usage/" not in key or not key.endswith(".json"):
+                    continue
+                payload = self.get_json(key)
+                if payload:
+                    records.append(payload)
+        records.sort(key=lambda item: str(item.get("createdAt") or item.get("updatedAt") or ""), reverse=True)
+        return records

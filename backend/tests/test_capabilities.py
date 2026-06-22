@@ -19,12 +19,17 @@ def test_all_video_models_are_resolvable() -> None:
 
 def test_validate_video_mode_rejects_invalid_mode() -> None:
     with pytest.raises(ValueError):
-        validate_video_model_mode("ray-2", "runway_i2v")
+        validate_video_model_mode("ray-3.2-720p", "runway_i2v")
 
 
 def test_validate_video_prompt_requires_markers() -> None:
     with pytest.raises(ValueError):
         validate_video_model_prompt("seedance-2.0-reference-to-video", "animate this")
+
+
+def test_validate_video_prompt_requires_luma_prompt() -> None:
+    with pytest.raises(ValueError):
+        validate_video_model_prompt("ray-3.2-720p", None)
 
 
 def test_provider_fps_uses_cap_when_not_preserving_frames() -> None:

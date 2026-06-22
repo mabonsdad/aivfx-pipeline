@@ -41,16 +41,15 @@ def create_video_to_video(
     video_uri: str,
     prompt_text: str | None,
     first_frame_uri: str | None,
-    ratio: str,
+    model: str = "aleph2",
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
-        "model": "gen4_aleph",
+        "model": model,
         "videoUri": video_uri,
         "promptText": prompt_text or "Modify the source video while preserving overall composition and motion continuity.",
-        "ratio": ratio,
     }
     if first_frame_uri:
-        payload["references"] = [{"type": "image", "uri": first_frame_uri}]
+        payload["keyframes"] = [{"uri": first_frame_uri, "at": 0.0}]
     return _request("POST", "https://api.dev.runwayml.com/v1/video_to_video", token=api_key, payload=payload)
 
 

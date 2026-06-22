@@ -3,8 +3,8 @@ from __future__ import annotations
 # Canonical video-generation identifiers shared between backend validation
 # and generated frontend contract types.
 VIDEO_MODEL_IDS: tuple[str, ...] = (
-    "ray-2",
-    "ray-flash-2",
+    "ray-3.2-720p",
+    "ray-3.2-1080p",
     "runway-gen4.5",
     "sora-2-image-to-video",
     "happy-horse-video-edit",

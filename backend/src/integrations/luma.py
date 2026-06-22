@@ -34,36 +34,48 @@ def _request(method: str, url: str, *, token: str, payload: dict[str, Any] | Non
         raise LumaError(f"Luma API {method} {url} returned non-JSON response") from exc
 
 
-def create_modify_generation(
+def create_video_edit_generation(
     *,
     api_key: str,
     media_url: str,
-    first_frame_url: str,
-    mode: str,
-    model: str,
+    resolution: str,
+    strength: str,
     prompt: str | None,
+    start_frame_url: str | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
-        "media": {"url": media_url},
-        "first_frame": {"url": first_frame_url},
-        "mode": mode,
-        "model": model,
+        "model": "ray-3.2",
+        "type": "video_edit",
+        "source": {
+            "url": media_url,
+            "media_type": "video/mp4",
+        },
+        "video": {
+            "resolution": resolution,
+            "edit": {
+                "strength": strength,
+            },
+        },
     }
     if prompt:
         payload["prompt"] = prompt
+    if start_frame_url:
+        payload["video"]["start_frame"] = {
+            "url": start_frame_url,
+        }
 
     return _request(
         "POST",
-        "https://api.lumalabs.ai/dream-machine/v1/generations/video/modify",
+        "https://agents.lumalabs.ai/v1/generations",
         token=api_key,
         payload=payload,
     )
 
 
-def get_generation(*, api_key: str, generation_id: str) -> dict[str, Any]:
+def get_video_generation(*, api_key: str, generation_id: str) -> dict[str, Any]:
     return _request(
         "GET",
-        f"https://api.lumalabs.ai/dream-machine/v1/generations/{generation_id}",
+        f"https://agents.lumalabs.ai/v1/generations/{generation_id}",
         token=api_key,
     )
 

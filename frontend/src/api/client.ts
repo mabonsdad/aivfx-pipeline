@@ -38,6 +38,7 @@ import type {
   HappyHorseResolutionId,
 } from "../lib/generated/videoContracts";
 import type {
+  AdminUsageTotals,
   AdminUserSummary,
   ApiRequestRecord,
   CurrentUserInfo,
@@ -46,6 +47,7 @@ import type {
   SegmentRecord,
   TaskDetail,
   TaskSummary,
+  UsageRecordSummary,
   VideoCleanupTrack,
   VideoCleanupSettings,
 } from "../types/api";
@@ -206,6 +208,38 @@ export const apiClient = {
       users: AdminUserSummary[];
       projects: ProjectSummary[];
     }>("/admin/users"),
+  getAdminUsageSummary: () =>
+    api<{
+      users: Record<string, unknown>;
+      totals: AdminUsageTotals;
+    }>("/admin/usage/summary"),
+  getAdminUsageLogs: (params?: {
+    limit?: number;
+    offset?: number;
+    userId?: string | null;
+    projectId?: string | null;
+    requestType?: string | null;
+    status?: string | null;
+    excludeFailed?: boolean;
+  }) => {
+    const search = new URLSearchParams();
+    if (typeof params?.limit === "number") search.set("limit", String(Math.max(1, Math.min(params.limit, 200))));
+    if (typeof params?.offset === "number" && params.offset > 0) search.set("offset", String(Math.max(0, params.offset)));
+    if (params?.userId) search.set("userId", params.userId);
+    if (params?.projectId) search.set("projectId", params.projectId);
+    if (params?.requestType) search.set("requestType", params.requestType);
+    if (params?.status) search.set("status", params.status);
+    if (params?.excludeFailed) search.set("excludeFailed", "true");
+    const query = search.toString();
+    return api<{
+      records: UsageRecordSummary[];
+      total: number;
+      offset: number;
+      limit: number;
+      hasMore: boolean;
+      nextOffset?: number | null;
+    }>(`/admin/usage/logs${query ? `?${query}` : ""}`);
+  },
   listTasks: (params?: { scope?: "mine" | "all" | "project"; projectId?: string | null }) => {
     const search = new URLSearchParams();
     if (params?.scope && params.scope !== "mine") search.set("scope", params.scope);
@@ -420,15 +454,34 @@ export const apiClient = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
-  listApiRequests: (params?: { status?: string; workflow?: string; model?: string; limit?: number; scope?: "mine" | "all" }) => {
+  listApiRequests: (params?: {
+    status?: string;
+    workflow?: string;
+    model?: string;
+    limit?: number;
+    offset?: number;
+    scope?: "mine" | "all";
+    userId?: string | null;
+    excludeFailed?: boolean;
+  }) => {
     const search = new URLSearchParams();
     if (params?.status) search.set("status", params.status);
     if (params?.workflow) search.set("workflow", params.workflow);
     if (params?.model) search.set("model", params.model);
     if (typeof params?.limit === "number") search.set("limit", String(params.limit));
+    if (typeof params?.offset === "number" && params.offset > 0) search.set("offset", String(params.offset));
     if (params?.scope && params.scope !== "mine") search.set("scope", params.scope);
+    if (params?.userId) search.set("userId", params.userId);
+    if (params?.excludeFailed) search.set("excludeFailed", "true");
     const query = search.toString();
-    return api<{ requests: ApiRequestRecord[] }>(`/api/v1/requests${query ? `?${query}` : ""}`);
+    return api<{
+      requests: ApiRequestRecord[];
+      total: number;
+      offset: number;
+      limit: number;
+      hasMore: boolean;
+      nextOffset?: number | null;
+    }>(`/api/v1/requests${query ? `?${query}` : ""}`);
   },
   getApiRequest: (requestId: string, params?: { scope?: "mine" | "all" }) => {
     const search = new URLSearchParams();

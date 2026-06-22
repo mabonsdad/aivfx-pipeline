@@ -44,6 +44,11 @@ from src.core.asset_origin import build_asset_origin
 from src.core.assets import ApiAssetPaths, AssetPaths, AssetStore
 from src.core.auth import UnauthorizedError, get_user_claims, get_user_groups, get_user_id, is_admin_claims
 from src.core.config import load_settings
+from src.core.cost_tracking import (
+    load_pricing_admin_config,
+    resolve_openai_prompt_wizard_pricing_entry,
+    resolve_openai_prompt_wizard_rates,
+)
 from src.core.ffmpeg import (
     extract_frame_png,
     ffprobe_audio,
@@ -61,11 +66,6 @@ from src.core.store import S3JsonStore, now_iso
 from src.core.prompt_wizard_admin import (
     ADMIN_PROMPT_WIZARD_CONFIG_KEY,
     normalize_prompt_wizard_admin_config_for_read,
-)
-from src.core.pricing_admin import (
-    ADMIN_PRICING_CONFIG_KEY,
-    normalize_pricing_admin_config_for_read,
-    resolve_openai_token_pricing,
 )
 from src.core.projects import can_access_project, project_summary
 from src.core.task_workflows import is_source_video_workflow_id
@@ -1607,15 +1607,16 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
         json_model=_json_model,
         response_fn=response,
         error_response_fn=error_response,
+        store=store,
+        new_id_fn=new_id,
+        now_iso_fn=now_iso,
         get_openai_api_key_fn=lambda: str(load_secret(settings.secrets_arn).get("OPENAI_API_KEY") or ""),
         get_canvas_system_prompt_fn=lambda profile: resolve_canvas_system_prompt(
             normalize_canvas_prompt_profiles_for_read(store.get_json(ADMIN_CANVAS_PROMPT_PROFILES_KEY)),
             profile,
         ),
-        get_openai_pricing_rates_fn=lambda model: resolve_openai_token_pricing(
-            normalize_pricing_admin_config_for_read(store.get_json(ADMIN_PRICING_CONFIG_KEY)),
-            model,
-        ),
+        get_openai_pricing_entry_fn=lambda model: resolve_openai_prompt_wizard_pricing_entry(load_pricing_admin_config(store), model),
+        get_openai_pricing_rates_fn=lambda model: resolve_openai_prompt_wizard_rates(load_pricing_admin_config(store), model),
         improve_lookdev_prompt_fn=improve_openai_lookdev_prompt,
         logger=logger,
     )
@@ -1882,6 +1883,8 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             get_prompt_wizard_admin_config_fn=lambda: normalize_prompt_wizard_admin_config_for_read(
                 store.get_json(ADMIN_PROMPT_WIZARD_CONFIG_KEY)
             ),
+            get_openai_pricing_entry_fn=lambda model: resolve_openai_prompt_wizard_pricing_entry(load_pricing_admin_config(store), model),
+            get_openai_pricing_rates_fn=lambda model: resolve_openai_prompt_wizard_rates(load_pricing_admin_config(store), model),
             improve_video_prompt_fn=improve_openai_video_prompt,
             logger=logger,
         )

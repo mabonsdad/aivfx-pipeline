@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import math
 from typing import Any, Callable
 
 import boto3
@@ -151,6 +152,98 @@ def _summarize_user_metrics(tasks: list[dict[str, Any]], user_projects: dict[str
             metrics["imageGenerationsByTool"][tool] = int(metrics["imageGenerationsByTool"].get(tool) or 0) + 1
 
     return output
+
+
+def _safe_cost(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    return number
+
+
+def _is_truthy_query(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _usage_record_list_item(record: dict[str, Any]) -> dict[str, Any]:
+    request_type = str(record.get("requestType") or "").strip()
+    return {
+        "usageRecordId": record.get("usageRecordId"),
+        "createdAt": record.get("createdAt"),
+        "userId": record.get("userId"),
+        "taskId": record.get("taskId"),
+        "segmentId": record.get("segmentId"),
+        "workflowId": record.get("workflowId"),
+        "projectId": record.get("projectId"),
+        "provider": record.get("provider"),
+        "providerModel": record.get("providerModel"),
+        "appModelId": record.get("appModelId"),
+        "requestType": request_type,
+        "source": record.get("source"),
+        "toolOrigin": record.get("toolOrigin"),
+        "pricingId": record.get("pricingId"),
+        "estimatedCostUsd": record.get("estimatedCostUsd"),
+        "estimateQuality": record.get("estimateQuality"),
+        "usage": record.get("usage") if isinstance(record.get("usage"), dict) else {},
+        "status": record.get("status"),
+    }
+
+
+def _summarize_usage_records(records: list[dict[str, Any]]) -> tuple[dict[str, dict[str, Any]], dict[str, Any], list[dict[str, Any]]]:
+    by_user: dict[str, dict[str, Any]] = {}
+    recent_records: list[dict[str, Any]] = []
+    totals = {
+        "usageRecordsTotal": 0,
+        "promptRewriteTotal": 0,
+        "estimatedCostUsd": 0.0,
+        "estimatedCostByCategory": {},
+    }
+
+    def ensure_user(user_id: str) -> dict[str, Any]:
+        metrics = by_user.get(user_id)
+        if metrics is None:
+            metrics = {
+                "usageRecordsTotal": 0,
+                "promptRewriteTotal": 0,
+                "estimatedCostUsd": 0.0,
+                "estimatedCostByCategory": {},
+                "recentUsageAt": None,
+            }
+            by_user[user_id] = metrics
+        return metrics
+
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        user_id = str(record.get("userId") or "").strip()
+        if not user_id:
+            continue
+        metrics = ensure_user(user_id)
+        metrics["usageRecordsTotal"] += 1
+        totals["usageRecordsTotal"] += 1
+        request_type = str(record.get("requestType") or "").strip()
+        if request_type == "prompt_rewrite":
+            metrics["promptRewriteTotal"] += 1
+            totals["promptRewriteTotal"] += 1
+        created_at = str(record.get("createdAt") or record.get("updatedAt") or "")
+        if created_at and (not metrics.get("recentUsageAt") or created_at > str(metrics.get("recentUsageAt") or "")):
+            metrics["recentUsageAt"] = created_at
+        cost = _safe_cost(record.get("estimatedCostUsd"))
+        pricing_snapshot = record.get("pricingSnapshot") if isinstance(record.get("pricingSnapshot"), dict) else {}
+        category = str(pricing_snapshot.get("category") or request_type or "other").strip() or "other"
+        if cost is not None:
+            metrics["estimatedCostUsd"] = round(float(metrics["estimatedCostUsd"]) + cost, 6)
+            totals["estimatedCostUsd"] = round(float(totals["estimatedCostUsd"]) + cost, 6)
+            metrics["estimatedCostByCategory"][category] = round(float(metrics["estimatedCostByCategory"].get(category) or 0.0) + cost, 6)
+            totals["estimatedCostByCategory"][category] = round(float(totals["estimatedCostByCategory"].get(category) or 0.0) + cost, 6)
+
+        recent_records.append(_usage_record_list_item(record))
+
+    recent_records.sort(key=lambda item: str(item.get("createdAt") or ""), reverse=True)
+    return by_user, totals, recent_records
 
 
 def handle_admin_routes(
@@ -357,10 +450,12 @@ def handle_admin_routes(
             for member_user_id in normalize_project_members(project.get("memberUserIds")):
                 user_projects.setdefault(member_user_id, []).append(project_id)
         metrics_by_user = _summarize_user_metrics(store.list_all_tasks(), user_projects)
+        usage_metrics_by_user, _, _ = _summarize_usage_records(store.list_all_usage_records())
         users = []
         for user in cognito_users:
             user_id = str(user.get("userId") or "").strip()
             metrics = metrics_by_user.get(user_id)
+            usage_metrics = usage_metrics_by_user.get(user_id)
             users.append(
                 {
                     **user,
@@ -370,6 +465,11 @@ def handle_admin_routes(
                     "videoGenerationsTotal": int(metrics.get("videoGenerationsTotal") or 0) if isinstance(metrics, dict) else 0,
                     "imageGenerationsByTool": dict(metrics.get("imageGenerationsByTool") or {}) if isinstance(metrics, dict) else {},
                     "videoGenerationsByTool": dict(metrics.get("videoGenerationsByTool") or {}) if isinstance(metrics, dict) else {},
+                    "usageRecordsTotal": int(usage_metrics.get("usageRecordsTotal") or 0) if isinstance(usage_metrics, dict) else 0,
+                    "promptRewriteTotal": int(usage_metrics.get("promptRewriteTotal") or 0) if isinstance(usage_metrics, dict) else 0,
+                    "estimatedCostUsd": float(usage_metrics.get("estimatedCostUsd") or 0.0) if isinstance(usage_metrics, dict) else 0.0,
+                    "estimatedCostByCategory": dict(usage_metrics.get("estimatedCostByCategory") or {}) if isinstance(usage_metrics, dict) else {},
+                    "recentUsageAt": usage_metrics.get("recentUsageAt") if isinstance(usage_metrics, dict) else None,
                 }
             )
         return response_fn(
@@ -377,6 +477,60 @@ def handle_admin_routes(
             {
                 "users": users,
                 "projects": [project_summary(project) for project in projects],
+            },
+            origin=origin,
+        )
+
+    if method == "GET" and path == "/admin/usage/summary":
+        usage_by_user, totals, _ = _summarize_usage_records(store.list_all_usage_records())
+        return response_fn(200, {"users": usage_by_user, "totals": totals}, origin=origin)
+
+    if method == "GET" and path == "/admin/usage/logs":
+        query = (event.get("queryStringParameters") or {}) if isinstance(event.get("queryStringParameters"), dict) else {}
+        raw_limit = query.get("limit")
+        raw_offset = query.get("offset")
+        user_id_filter = str(query.get("userId") or "").strip()
+        project_id_filter = str(query.get("projectId") or "").strip()
+        request_type_filter = str(query.get("requestType") or "").strip().lower()
+        status_filter = str(query.get("status") or "").strip().lower()
+        exclude_failed = _is_truthy_query(query.get("excludeFailed"))
+        try:
+            limit = max(1, min(int(raw_limit or 50), 200))
+        except (TypeError, ValueError):
+            limit = 50
+        try:
+            offset = max(0, int(raw_offset or 0))
+        except (TypeError, ValueError):
+            offset = 0
+
+        filtered_records: list[dict[str, Any]] = []
+        for record in store.list_all_usage_records():
+            if not isinstance(record, dict):
+                continue
+            if user_id_filter and str(record.get("userId") or "").strip() != user_id_filter:
+                continue
+            if project_id_filter and str(record.get("projectId") or "").strip() != project_id_filter:
+                continue
+            if request_type_filter and str(record.get("requestType") or "").strip().lower() != request_type_filter:
+                continue
+            if status_filter and str(record.get("status") or "").strip().lower() != status_filter:
+                continue
+            if exclude_failed and str(record.get("status") or "").strip().lower() == "failed":
+                continue
+            filtered_records.append(_usage_record_list_item(record))
+
+        total = len(filtered_records)
+        records = filtered_records[offset : offset + limit]
+        next_offset = offset + len(records)
+        return response_fn(
+            200,
+            {
+                "records": records,
+                "total": total,
+                "offset": offset,
+                "limit": limit,
+                "hasMore": next_offset < total,
+                "nextOffset": next_offset if next_offset < total else None,
             },
             origin=origin,
         )

@@ -40,6 +40,39 @@ export type AdminUserSummary = {
   videoGenerationsTotal: number;
   imageGenerationsByTool: Record<string, number>;
   videoGenerationsByTool: Record<string, number>;
+  usageRecordsTotal: number;
+  promptRewriteTotal: number;
+  estimatedCostUsd: number;
+  estimatedCostByCategory: Record<string, number>;
+  recentUsageAt?: string | null;
+};
+
+export type UsageRecordSummary = {
+  usageRecordId?: string | null;
+  createdAt?: string | null;
+  userId?: string | null;
+  taskId?: string | null;
+  segmentId?: string | null;
+  workflowId?: string | null;
+  projectId?: string | null;
+  provider?: string | null;
+  providerModel?: string | null;
+  appModelId?: string | null;
+  requestType?: string | null;
+  source?: string | null;
+  toolOrigin?: string | null;
+  pricingId?: string | null;
+  estimatedCostUsd?: number | null;
+  estimateQuality?: string | null;
+  usage: Record<string, unknown>;
+  status?: string | null;
+};
+
+export type AdminUsageTotals = {
+  usageRecordsTotal: number;
+  promptRewriteTotal: number;
+  estimatedCostUsd: number;
+  estimatedCostByCategory: Record<string, number>;
 };
 
 export type TaskSummary = {
@@ -659,6 +692,8 @@ export type ChunkedGenerationRun = {
   sourceSegmentId: string;
   status: "created" | "running" | "paused" | "failed" | "complete" | "canceled";
   model:
+    | "ray-3.2-720p"
+    | "ray-3.2-1080p"
     | "ray-2"
     | "ray-flash-2"
     | "runway-gen4-aleph"
