@@ -4,13 +4,16 @@ on:
   push:
     branches: [main]
 
+concurrency:
+  group: deploy-main
+  cancel-in-progress: true
+
 permissions:
   id-token: write
   contents: read
 
 env:
   AWS_REGION: eu-west-2
-  WEB_PREFIX: experiments/aivfx
 
 jobs:
   deploy:
@@ -47,71 +50,23 @@ jobs:
             -r backend/requirements.txt \
             -t backend
 
-      - name: Deploy infrastructure
+      - name: Install infrastructure dependencies
+        run: npm install --prefix infra
+
+      - name: Install frontend dependencies
+        run: npm install --prefix frontend
+
+      - name: Deploy dev infrastructure
         env:
           FFMPEG_LAYER_ARN: ${{ vars.FFMPEG_LAYER_ARN }}
           REQUESTS_LAYER_ARN: ${{ vars.REQUESTS_LAYER_ARN }}
           LUMALABS_LAYER_ARN: ${{ vars.LUMALABS_LAYER_ARN }}
-          ALLOWED_WEB_ORIGINS: https://www.shwsh.co.uk,https://s3.eu-west-2.amazonaws.com
-          COGNITO_REDIRECT_SIGN_IN_URLS: https://www.shwsh.co.uk/experiments/aivfx/,https://s3.eu-west-2.amazonaws.com/shwsh.co.uk/experiments/aivfx/,http://localhost:5173/
-          COGNITO_REDIRECT_SIGN_OUT_URLS: https://www.shwsh.co.uk/experiments/aivfx/,https://s3.eu-west-2.amazonaws.com/shwsh.co.uk/experiments/aivfx/,http://localhost:5173/
-          APP_NAME: aivfx
           WEB_BUCKET_OVERRIDE: ${{ vars.WEB_BUCKET_OVERRIDE }}
           MANAGE_APP_CLOUDFRONT: "false"
           WEB_PUBLIC_BASE_URL: https://www.shwsh.co.uk/experiments/aivfx/
-        run: |
-          cd infra
-          npm install
-          npm run build
-          npx cdk deploy AivfxStack --require-approval never --outputs-file cdk-outputs.json
+        run: npm run deploy:infra:dev
 
-      - name: Export stack outputs to env
-        run: |
-          node -e '
-          const fs=require("fs");
-          const data=JSON.parse(fs.readFileSync("infra/cdk-outputs.json","utf8"));
-          const out=data.AivfxStack;
-          const lines=[
-            `STACK_API_URL=${out.ApiUrl}`,
-            `STACK_USER_POOL_ID=${out.CognitoUserPoolId}`,
-            `STACK_USER_POOL_CLIENT_ID=${out.CognitoUserPoolClientId}`,
-            `STACK_COGNITO_DOMAIN=${out.CognitoDomain}`,
-            `STACK_WEB_BUCKET=${out.WebBucketName}`,
-            `STACK_DISTRIBUTION_ID=${out.CloudFrontDistributionId}`,
-          ];
-          fs.appendFileSync(process.env.GITHUB_ENV,lines.join("\n")+"\n");
-          '
-
-      - name: Build frontend
-        run: |
-          cd frontend
-          npm install
-          cat > .env.production <<EOT
-          VITE_API_BASE_URL=${STACK_API_URL}
-          VITE_COGNITO_USER_POOL_ID=${STACK_USER_POOL_ID}
-          VITE_COGNITO_USER_POOL_CLIENT_ID=${STACK_USER_POOL_CLIENT_ID}
-          VITE_COGNITO_DOMAIN=${STACK_COGNITO_DOMAIN}
-          VITE_COGNITO_REDIRECT_SIGN_IN=https://www.shwsh.co.uk/${WEB_PREFIX}/
-          VITE_COGNITO_REDIRECT_SIGN_OUT=https://www.shwsh.co.uk/${WEB_PREFIX}/
-          VITE_COGNITO_REGION=${AWS_REGION}
-          VITE_BASE_PATH=/${WEB_PREFIX}/
-          EOT
-          npm run build
-
-      - name: Upload frontend to S3
+      - name: Deploy dev frontend
         env:
-          WEB_BUCKET_OVERRIDE: ${{ vars.WEB_BUCKET_OVERRIDE }}
-        run: |
-          TARGET_BUCKET=${WEB_BUCKET_OVERRIDE:-$STACK_WEB_BUCKET}
-          aws s3 sync frontend/dist s3://${TARGET_BUCKET}/${WEB_PREFIX}/ --delete
-
-      - name: Invalidate CloudFront
-        env:
-          WEB_CLOUDFRONT_DISTRIBUTION_ID: ${{ vars.WEB_CLOUDFRONT_DISTRIBUTION_ID }}
-        run: |
-          TARGET_DISTRIBUTION_ID=${WEB_CLOUDFRONT_DISTRIBUTION_ID:-$STACK_DISTRIBUTION_ID}
-          if [ -z "$TARGET_DISTRIBUTION_ID" ]; then
-            echo "No CloudFront distribution configured for invalidation; skipping."
-            exit 0
-          fi
-          aws cloudfront create-invalidation --distribution-id ${TARGET_DISTRIBUTION_ID} --paths "/${WEB_PREFIX}/*"
+          DEV_CLOUDFRONT_INVALIDATION_PATH: /experiments/aivfx/*
+        run: npm run deploy:frontend:dev
