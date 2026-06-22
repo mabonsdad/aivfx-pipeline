@@ -78,6 +78,7 @@ const destination =
   target === "prod" ? `s3://${bucket}/` : `s3://${bucket}/${config.syncPrefix}`;
 const htmlDestination =
   target === "prod" ? `s3://${bucket}` : `s3://${bucket}/${config.syncPrefix.replace(/\/$/, "")}`;
+const expectedBasePath = target === "prod" ? "/" : "/experiments/aivfx/";
 
 const run = (command) => {
   execSync(command, {
@@ -87,8 +88,37 @@ const run = (command) => {
   });
 };
 
+const extractLocalRefs = (html) => {
+  const matches = [...html.matchAll(/(?:src|href)="([^"]+)"/g)];
+  return matches
+    .map((match) => match[1])
+    .filter((value) => value && !value.startsWith("http://") && !value.startsWith("https://") && !value.startsWith("//"));
+};
+
+const verifyBuiltHtml = (filename) => {
+  const htmlPath = resolve(repoRoot, "frontend", "dist", filename);
+  const html = readFileSync(htmlPath, "utf8");
+  if (!html.includes('<div id="root"></div>')) {
+    throw new Error(`${filename} is missing the root mount element`);
+  }
+  const assetRefs = extractLocalRefs(html).filter((ref) => ref.includes("/assets/"));
+  if (!assetRefs.length) {
+    throw new Error(`${filename} has no local asset references`);
+  }
+  if (expectedBasePath !== "/") {
+    const invalidRefs = assetRefs.filter((ref) => !ref.startsWith(expectedBasePath));
+    if (invalidRefs.length) {
+      throw new Error(
+        `${filename} asset refs are missing expected base path ${expectedBasePath}: ${invalidRefs.join(", ")}`,
+      );
+    }
+  }
+};
+
 run(`npm run ${config.buildScript}`);
-run(`aws s3 sync frontend/dist ${destination} --delete`);
+verifyBuiltHtml("index.html");
+verifyBuiltHtml("api-test.html");
+run(`aws s3 sync frontend/dist ${destination} --delete --exclude index.html --exclude api-test.html`);
 run(`aws s3 cp frontend/dist/index.html ${htmlDestination}/index.html`);
 run(`aws s3 cp frontend/dist/api-test.html ${htmlDestination}/api-test.html`);
 run(`aws cloudfront create-invalidation --distribution-id ${distributionId} --paths "${config.invalidatePath}"`);

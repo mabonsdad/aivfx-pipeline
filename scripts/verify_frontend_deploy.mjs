@@ -37,6 +37,15 @@ function normalizePublicUrl(value) {
   return trimmed.endsWith("/") ? trimmed : `${trimmed}/`;
 }
 
+function buildPageUrls(baseUrl) {
+  const indexUrl = new URL(baseUrl);
+  const apiTestUrl = new URL("api-test.html", baseUrl);
+  return [
+    { label: "index", url: indexUrl },
+    { label: "api-test", url: apiTestUrl },
+  ];
+}
+
 function extractLocalRefs(html) {
   const matches = [...html.matchAll(/(?:src|href)="([^"]+)"/g)];
   return matches
@@ -81,35 +90,40 @@ let lastError = "Unknown verification error";
 
 for (let attempt = 1; attempt <= attempts; attempt += 1) {
   try {
-    const pageUrl = new URL(publicUrl);
-    pageUrl.searchParams.set("__verify", `${Date.now()}-${attempt}`);
-    const { response, text } = await fetchText(pageUrl.toString());
-    if (!response.ok) {
-      throw new Error(`Page returned ${response.status}`);
-    }
-    if (!text.includes('<div id="root"></div>')) {
-      throw new Error("Root mount element missing from index.html");
-    }
+    const pageUrls = buildPageUrls(publicUrl);
 
-    const localRefs = extractLocalRefs(text);
-    const assetRefs = localRefs.filter((ref) => ref.includes("/assets/"));
-    if (!assetRefs.length) {
-      throw new Error("No local asset references found in index.html");
-    }
+    for (const { label, url } of pageUrls) {
+      url.searchParams.set("__verify", `${Date.now()}-${attempt}-${label}`);
+      const { response, text } = await fetchText(url.toString());
+      if (!response.ok) {
+        throw new Error(`${label} page returned ${response.status}`);
+      }
+      if (!text.includes('<div id="root"></div>')) {
+        throw new Error(`Root mount element missing from ${label}.html`);
+      }
 
-    const invalidRefs = assetRefs.filter(
-      (ref) => config.expectedBasePath !== "/" && !ref.startsWith(config.expectedBasePath),
-    );
-    if (invalidRefs.length) {
-      throw new Error(`Asset refs missing expected base path ${config.expectedBasePath}: ${invalidRefs.join(", ")}`);
-    }
+      const localRefs = extractLocalRefs(text);
+      const assetRefs = localRefs.filter((ref) => ref.includes("/assets/"));
+      if (!assetRefs.length) {
+        throw new Error(`No local asset references found in ${label}.html`);
+      }
 
-    for (const ref of assetRefs) {
-      await verifyAsset(new URL(ref, publicUrl).toString());
+      const invalidRefs = assetRefs.filter(
+        (ref) => config.expectedBasePath !== "/" && !ref.startsWith(config.expectedBasePath),
+      );
+      if (invalidRefs.length) {
+        throw new Error(
+          `${label}.html asset refs missing expected base path ${config.expectedBasePath}: ${invalidRefs.join(", ")}`,
+        );
+      }
+
+      for (const ref of assetRefs) {
+        await verifyAsset(new URL(ref, publicUrl).toString());
+      }
     }
 
     console.log(
-      `Verified ${target} frontend at ${publicUrl} with ${assetRefs.length} local assets using base path ${config.expectedBasePath}`,
+      `Verified ${target} frontend at ${publicUrl} for index and api-test using base path ${config.expectedBasePath}`,
     );
     process.exit(0);
   } catch (error) {
