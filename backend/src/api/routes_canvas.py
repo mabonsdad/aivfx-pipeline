@@ -115,6 +115,13 @@ class CanvasExtractFrameRequest(BaseModel):
     projectId: str = Field(min_length=1, max_length=200)
 
 
+class CanvasTrimVideoRequest(BaseModel):
+    assetKey: str = Field(min_length=1, max_length=2000)
+    start: float = Field(ge=0.0)
+    end: float = Field(gt=0.0)
+    projectId: str = Field(min_length=1, max_length=200)
+
+
 def _safe_id_segment(value: str) -> bool:
     """Return True if value is a non-empty path segment with no slashes."""
     return bool(value) and "/" not in value
@@ -125,6 +132,13 @@ def _canvas_frame_asset_key(project_id: str, frame_id: str) -> str:
     safe_proj = re.sub(r"[^a-zA-Z0-9_-]+", "", project_id)[:80] or "proj"
     safe_frame = re.sub(r"[^a-zA-Z0-9_-]+", "", frame_id)[:40] or "frame"
     return f"{_CANVAS_FRAME_PREFIX}/{safe_proj}/frames/{safe_frame}.png"
+
+
+def _canvas_clip_asset_key(project_id: str, clip_id: str) -> str:
+    """S3 key for a canvas-trimmed video clip (MP4) in the assets bucket."""
+    safe_proj = re.sub(r"[^a-zA-Z0-9_-]+", "", project_id)[:80] or "proj"
+    safe_clip = re.sub(r"[^a-zA-Z0-9_-]+", "", clip_id)[:40] or "clip"
+    return f"{_CANVAS_FRAME_PREFIX}/{safe_proj}/clips/{safe_clip}.mp4"
 
 
 def _project_memory_key(project_id: str) -> str:
@@ -586,6 +600,87 @@ def handle_canvas_routes(
         return response_fn(
             200,
             {"ok": True, "assetKey": output_key, "url": url},
+            origin=origin,
+        )
+
+    # -------------------------------------------------------------------------
+    # POST /canvas/trim-video  body { assetKey, start, end, projectId }
+    # Cuts the source video to keep [start, end] seconds at native rate, uploads the
+    # MP4 to the assets bucket, returns a presigned GET URL. Runs ffmpeg synchronously
+    # in Lambda (same pattern as extract-frame); fine for short lookdev reference clips.
+    # NOTE: very long clips can exceed Lambda's limits -> a worker job would be needed
+    # then (worker already has trim_and_retime_video_uniform). Access: member or admin.
+    # -------------------------------------------------------------------------
+    if method == "POST" and path == "/canvas/trim-video":
+        if asset_store is None or assets_s3_client is None or assets_bucket is None:
+            return error_response_fn(500, "Asset store not available for canvas trim-video", origin=origin)
+        if can_access_project_fn is None or is_admin_claims_fn is None:
+            return error_response_fn(500, "Project access check not available", origin=origin)
+
+        req = json_model(CanvasTrimVideoRequest, event)
+        asset_key = req.assetKey.strip()
+        project_id = req.projectId.strip()
+        if not asset_key:
+            return error_response_fn(400, "assetKey is required", origin=origin)
+        if not _safe_id_segment(project_id):
+            return error_response_fn(400, "Invalid projectId", origin=origin)
+        if req.end <= req.start:
+            return error_response_fn(400, "end must be greater than start", origin=origin)
+
+        project = store.load_project(project_id)
+        is_admin = is_admin_claims_fn(claims)
+        if project is None and not is_admin:
+            return error_response_fn(404, "Project not found", origin=origin)
+        if not can_access_project_fn(project, user_id=user_id, is_admin=is_admin):
+            return error_response_fn(403, "Access denied to project canvas", origin=origin)
+
+        from src.core.ffmpeg import FFmpegError, ffprobe_video, trim_and_retime_video_uniform
+
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                td_path = Path(td)
+                local_video = td_path / "source.mp4"
+                local_out = td_path / "clip.mp4"
+                assets_s3_client.download_file(assets_bucket, asset_key, str(local_video))
+
+                from fractions import Fraction
+                probe = ffprobe_video(str(local_video))
+                fps = Fraction(probe.get("fps_num", 24) or 24, probe.get("fps_den", 1) or 1)
+                duration_sec = float(probe.get("duration_sec") or 0.0)
+                # Keep [start, end]: trim head before start, trim tail after end.
+                start_frames = max(0, int(round(req.start * float(fps))))
+                tail_sec = max(0.0, duration_sec - req.end) if duration_sec else 0.0
+                end_frames = max(0, int(round(tail_sec * float(fps))))
+
+                trim_and_retime_video_uniform(
+                    str(local_video),
+                    str(local_out),
+                    fps=fps,
+                    playback_rate=1.0,
+                    trim_start_frames=start_frames,
+                    trim_end_frames=end_frames,
+                )
+
+                clip_id = new_id_fn("cvc")
+                output_key = _canvas_clip_asset_key(project_id, clip_id)
+                assets_s3_client.upload_file(
+                    str(local_out),
+                    assets_bucket,
+                    output_key,
+                    ExtraArgs={"ContentType": "video/mp4", "ServerSideEncryption": "AES256"},
+                )
+                out_probe = ffprobe_video(str(local_out))
+        except FFmpegError as exc:
+            logger.warning("Canvas trim-video ffmpeg failed", extra={"userId": user_id, "assetKey": asset_key, "error": str(exc)})
+            return error_response_fn(422, f"Video trim failed: {exc}", origin=origin)
+        except Exception as exc:
+            logger.warning("Canvas trim-video failed", extra={"userId": user_id, "assetKey": asset_key, "error": str(exc)})
+            return error_response_fn(502, f"Could not trim video: {exc}", origin=origin)
+
+        url = asset_store.presign_get(output_key, expires=_PRESIGNED_TTL)
+        return response_fn(
+            200,
+            {"ok": True, "assetKey": output_key, "url": url, "duration": out_probe.get("duration_sec")},
             origin=origin,
         )
 
