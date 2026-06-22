@@ -34,6 +34,7 @@ from pydantic import BaseModel, Field
 from src.core.cost_tracking import build_usage_record, estimate_cost_from_pricing_entry
 from src.generation.capabilities import VIDEO_MODELS
 from src.integrations.openai_canvas_chat import render_project_context
+from src.integrations.canvas_skills import get_canvas_skill, list_canvas_skills, run_canvas_skill
 
 # A reference image may be a remote URL or an inline base64 data URL (data:image/...).
 # Base64 data URLs are large, so the cap is generous; the frontend is expected to
@@ -88,6 +89,14 @@ class CanvasMemoryRequest(BaseModel):
     # render/chat code understands: summary (str), facts (str[]), references
     # ({label,url,note}[]), learnings ({rule,scope,...}[]), transcripts ({title,ts,summary}[]).
     memory: dict[str, Any] = Field(default_factory=dict)
+
+
+class CanvasSkillRequest(BaseModel):
+    projectId: str = Field(min_length=1, max_length=200)
+    # The work data the skill consumes (e.g. for EOD: history, generations, costs, notes).
+    # Summarised only; never persisted verbatim. The frontend assembles it from the
+    # history tab + canvas state.
+    payload: dict[str, Any] = Field(default_factory=dict)
 
 
 class CanvasStateRequest(BaseModel):
@@ -736,5 +745,111 @@ def handle_canvas_routes(
             },
             origin=origin,
         )
+
+    # -------------------------------------------------------------------------
+    # GET /canvas/skills -> { skills: [{name, description}] }
+    # The named capabilities the frontend can trigger (e.g. an EOD button).
+    # -------------------------------------------------------------------------
+    if method == "GET" and path == "/canvas/skills":
+        return response_fn(200, {"skills": list_canvas_skills()}, origin=origin)
+
+    # -------------------------------------------------------------------------
+    # POST /canvas/skill/{skillName}  body { projectId, payload }
+    # Run a named skill against the project memory. EOD is the first skill: it turns
+    # the day's work into an end-of-day report and writes a handover entry into the
+    # project memory (a session "handover card", so the project brain accumulates a
+    # daily trail for later automated reporting). Project-gated, cost-tracked.
+    # -------------------------------------------------------------------------
+    _SKILL_PREFIX = "/canvas/skill/"
+    if method == "POST" and path.startswith(_SKILL_PREFIX):
+        skill_name = path[len(_SKILL_PREFIX) :]
+        if not skill_name or "/" in skill_name:
+            return error_response_fn(400, "Invalid skill name", origin=origin)
+        skill = get_canvas_skill(skill_name)
+        if skill is None:
+            return error_response_fn(404, f"Unknown canvas skill: {skill_name}", origin=origin)
+        if can_access_project_fn is None or is_admin_claims_fn is None:
+            return error_response_fn(500, "Project access check not available", origin=origin)
+
+        req = json_model(CanvasSkillRequest, event)
+        project_id = req.projectId.strip()
+        if not _safe_id_segment(project_id):
+            return error_response_fn(400, "Invalid projectId", origin=origin)
+
+        project = store.load_project(project_id)
+        is_admin = is_admin_claims_fn(claims)
+        if project is None and not is_admin:
+            return error_response_fn(404, "Project not found", origin=origin)
+        if not can_access_project_fn(project, user_id=user_id, is_admin=is_admin):
+            return error_response_fn(403, "Access denied to project", origin=origin)
+
+        openai_api_key = get_openai_api_key_fn()
+        if not openai_api_key:
+            return error_response_fn(500, "OPENAI_API_KEY is required for canvas skills", origin=origin)
+
+        pricing_entry = get_openai_pricing_entry_fn("gpt-5.5")
+        pricing_rates = get_openai_pricing_rates_fn("gpt-5.5")
+
+        memory_record = store.get_json(_project_memory_key(project_id)) or {}
+        memory_doc = memory_record.get("memory", {}) if isinstance(memory_record, dict) else {}
+        project_context = render_project_context(memory_doc)
+
+        try:
+            result, usage = run_canvas_skill(
+                api_key=openai_api_key,
+                skill=skill,
+                payload=req.payload,
+                project_context=project_context,
+                pricing_rates=pricing_rates,
+            )
+        except Exception as exc:
+            logger.warning("Canvas skill failed", extra={"userId": user_id, "skill": skill_name, "error": str(exc)})
+            return error_response_fn(502, str(exc), origin=origin)
+
+        # For EOD, append a handover entry to the project memory so the brain keeps a
+        # session trail (a "handover card" per run). Additive, best-effort.
+        if skill_name == "eod":
+            try:
+                now = now_iso_fn()
+                tldr = [str(t) for t in (result.get("tldr") or []) if str(t).strip()]
+                handover = {
+                    "date": str(req.payload.get("date") or now),
+                    "tldr": tldr,
+                    "summary": str(result.get("full_report") or "").strip(),
+                    "createdAt": now,
+                }
+                handovers = list(memory_doc.get("handovers") or [])
+                handovers.append(handover)
+                memory_doc = dict(memory_doc)
+                memory_doc["handovers"] = handovers
+                store.put_json(
+                    _project_memory_key(project_id),
+                    {"memory": memory_doc, "updatedAt": now, "userId": user_id, "projectId": project_id},
+                )
+            except Exception as exc:
+                logger.warning("Canvas EOD handover write failed", extra={"userId": user_id, "error": str(exc)})
+
+        try:
+            estimate = estimate_cost_from_pricing_entry(pricing_entry, usage=usage)
+            usage_record = build_usage_record(
+                usage_record_id=new_id_fn("usage"),
+                now_iso=now_iso_fn(),
+                user_id=user_id,
+                provider="openai",
+                provider_model="gpt-5.5",
+                app_model_id="gpt-5.5",
+                request_type="skill",
+                source=f"canvas_skill:{skill_name}",
+                tool_origin="canvas_skill",
+                workflow_id="canvas_workflow",
+                pricing_entry=pricing_entry,
+                estimate=estimate,
+                notes=f"skill={skill_name} project={project_id}",
+            )
+            store.save_usage_record(usage_record)
+        except Exception as exc:
+            logger.warning("Canvas skill usage tracking failed", extra={"userId": user_id, "skill": skill_name, "error": str(exc)})
+
+        return response_fn(200, {"skill": skill_name, "result": result, "usage": usage}, origin=origin)
 
     return None
