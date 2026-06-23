@@ -3624,6 +3624,7 @@ def _handle_canvas_image_generate(
     asset_store.put_bytes(output_key, out_bytes, content_type="image/png")
 
     now = now_iso()
+    project_id = str(task.get("projectId") or "").strip() or None
     record = {
         "assetId": asset_id,
         "operation": "canvas_image_generate",
@@ -3635,6 +3636,7 @@ def _handle_canvas_image_generate(
         "model": model_name,
         "prompt": prompt,
         "seed": seed,
+        "projectId": project_id,
         "inputAssetKey": input_asset_key or None,
         "referenceAssetKeys": reference_asset_keys,
         "createdAt": now,
@@ -3670,6 +3672,7 @@ def _handle_canvas_image_generate(
         app_model_id=model_name,
         task=task,
         task_id=task_id,
+        project_id=project_id,
         asset_id=asset_id,
         asset_kind="canvas_media",
         width=out_width,

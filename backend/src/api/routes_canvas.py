@@ -650,6 +650,7 @@ def handle_canvas_routes(
                     tool_origin="canvas_chat",
                     workflow_id="canvas_workflow",
                     task_id=task_id,
+                    project_id=str(task.get("projectId") or "").strip() or None,
                     pricing_entry=pricing_entry,
                     estimate=estimate,
                 )
@@ -729,6 +730,7 @@ def handle_canvas_routes(
                     tool_origin=f"canvas_skill_{skill_name}",
                     workflow_id="canvas_workflow",
                     task_id=task_id,
+                    project_id=str(task.get("projectId") or "").strip() or None,
                     pricing_entry=pricing_entry,
                     estimate=estimate,
                 )
