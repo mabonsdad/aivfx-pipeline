@@ -6,6 +6,16 @@ time the handler runs. Reuses shared helpers rather than inventing new shapes.
 POST /canvas/prompt-wizard rewrites a lookdev / image draft prompt via the shared
 OpenAI engine. Its system prompt (the "brain") is loaded from the editable
 `admin/canvas_prompt_profiles.json` config, so it can be improved without a redeploy.
+
+The media routes (`/canvas/{taskId}/media/{probe|extract-frame|trim}`) own all
+ffmpeg work and register outputs into the task. The remaining canvas state lives in
+two per-task sibling JSON blobs alongside `task.json` (Robin's recommended boundary:
+task is the storage namespace, with a single task per project for now):
+  - canvas_state.json  : the node graph / layout / prompts / history (the editor state)
+  - canvas_memory.json : the project "brain" (summary, facts, references, learnings,
+                         handovers) that the chat assistant and EOD skill grow over time
+Plus a conversational GPT chat (`POST /canvas/{taskId}/chat`) and a skills framework
+(`GET /canvas/skills`, `POST /canvas/{taskId}/skill/{name}`, first skill: EOD report).
 """
 
 from __future__ import annotations
@@ -21,6 +31,8 @@ from pydantic import BaseModel, Field
 from src.core.asset_origin import build_asset_origin
 from src.core.cost_tracking import build_usage_record, estimate_cost_from_pricing_entry
 from src.core.ffmpeg import extract_audio_segment, extract_frame_png, ffprobe_audio, ffprobe_video, trim_video_segment
+from src.integrations.openai_canvas_chat import render_project_context
+from src.integrations.canvas_skills import get_canvas_skill, list_canvas_skills, run_canvas_skill
 
 # A reference image may be a remote URL or an inline base64 data URL (data:image/...).
 # Base64 data URLs are large, so the cap is generous; the frontend is expected to
@@ -60,6 +72,32 @@ class CanvasMediaTrimRequest(BaseModel):
     targetWidth: int | None = Field(default=None, ge=1, le=8192)
     targetHeight: int | None = Field(default=None, ge=1, le=8192)
     resizeMode: str = Field(default="pad", max_length=16)
+
+
+# The canvas state blob is free-form (the frontend computes the whole graph and
+# persists it). Cap the size so a runaway client cannot write an unbounded object.
+class CanvasStatePutRequest(BaseModel):
+    state: dict[str, Any] = Field(default_factory=dict)
+
+
+class CanvasMemoryPutRequest(BaseModel):
+    memory: dict[str, Any] = Field(default_factory=dict)
+
+
+class CanvasChatMessage(BaseModel):
+    role: str = Field(default="user", max_length=16)
+    content: str = Field(default="", max_length=200_000)
+
+
+class CanvasChatRequest(BaseModel):
+    messages: list[CanvasChatMessage] = Field(default_factory=list, max_length=60)
+    attachment_image_urls: list[str] = Field(default_factory=list, max_length=8)
+    profile: str = Field(default="canvas_chat", min_length=1, max_length=80)
+
+
+class CanvasSkillRequest(BaseModel):
+    payload: dict[str, Any] = Field(default_factory=dict)
+    profile: str | None = Field(default=None, max_length=80)
 
 
 def _canvas_path_parts(path: str) -> list[str]:
@@ -148,6 +186,71 @@ def _canvas_register_media_asset(
     return payload
 
 
+def _canvas_state_key(task: dict[str, Any]) -> str:
+    """Per-task canvas state blob, sibling to task.json (NOT folded into it)."""
+    return f"users/{task['userId']}/tasks/{task['taskId']}/canvas_state.json"
+
+
+def _canvas_memory_key(task: dict[str, Any]) -> str:
+    """Per-task canvas memory blob (the project brain), sibling to task.json."""
+    return f"users/{task['userId']}/tasks/{task['taskId']}/canvas_memory.json"
+
+
+def _default_canvas_memory() -> dict[str, Any]:
+    return {"summary": "", "facts": [], "references": [], "learnings": [], "handovers": []}
+
+
+def _apply_memory_updates(
+    memory: dict[str, Any], updates: dict[str, Any], *, now_iso: str
+) -> dict[str, Any]:
+    """Fold a chat turn's memory_updates into the stored project memory.
+
+    Summary is replaced when present; facts / references / learnings are appended
+    with light de-duplication so the brain grows without accumulating duplicates.
+    """
+    mem = dict(memory) if isinstance(memory, dict) else _default_canvas_memory()
+    mem.setdefault("facts", [])
+    mem.setdefault("references", [])
+    mem.setdefault("learnings", [])
+    mem.setdefault("handovers", [])
+
+    summary = updates.get("summary")
+    if isinstance(summary, str) and summary.strip():
+        mem["summary"] = summary.strip()
+
+    existing_facts = {str(f).strip().lower() for f in mem["facts"]}
+    for fact in updates.get("facts_add") or []:
+        text = str(fact).strip()
+        if text and text.lower() not in existing_facts:
+            mem["facts"].append(text)
+            existing_facts.add(text.lower())
+
+    existing_refs = {str(r.get("label", "")).strip().lower() for r in mem["references"] if isinstance(r, dict)}
+    for ref in updates.get("references_add") or []:
+        if not isinstance(ref, dict):
+            continue
+        label = str(ref.get("label") or "").strip()
+        if label and label.lower() in existing_refs:
+            continue
+        mem["references"].append(
+            {"label": label, "url": ref.get("url"), "note": str(ref.get("note") or "").strip(), "addedAt": now_iso}
+        )
+        if label:
+            existing_refs.add(label.lower())
+
+    existing_rules = {str(l.get("rule", "")).strip().lower() for l in mem["learnings"] if isinstance(l, dict)}
+    for item in updates.get("learnings_add") or []:
+        if not isinstance(item, dict):
+            continue
+        rule = str(item.get("rule") or "").strip()
+        if rule and rule.lower() not in existing_rules:
+            mem["learnings"].append({"rule": rule, "scope": str(item.get("scope") or "project").strip(), "addedAt": now_iso})
+            existing_rules.add(rule.lower())
+
+    mem["updatedAt"] = now_iso
+    return mem
+
+
 def handle_canvas_routes(
     method: str,
     path: str,
@@ -170,6 +273,8 @@ def handle_canvas_routes(
     get_openai_pricing_rates_fn: Callable[[str], dict[str, float] | None],
     improve_lookdev_prompt_fn: Callable[..., dict[str, Any]],
     logger,
+    get_canvas_brain_fn: Callable[[str], str | None] | None = None,
+    run_canvas_chat_fn: Callable[..., tuple[dict[str, Any], dict[str, Any]]] | None = None,
 ) -> dict[str, Any] | None:
     path_parts = _canvas_path_parts(path)
 
@@ -433,5 +538,191 @@ def handle_canvas_routes(
                 return response_fn(200, {"asset": output_record, "probe": output_probe}, origin=origin)
 
         return error_response_fn(404, "Canvas media operation not found", origin=origin)
+
+    # ---- GET /canvas/skills (static registry; no task) ----------------------
+    if method == "GET" and path == "/canvas/skills":
+        return response_fn(200, {"skills": list_canvas_skills()}, origin=origin)
+
+    # ---- GET/PUT /canvas/{taskId}/state -- per-task editor state blob --------
+    if len(path_parts) == 3 and path_parts[0] == "canvas" and path_parts[2] == "state":
+        task_id = path_parts[1]
+        task = _load_canvas_task_or_404(store, user_id, task_id)
+        if not isinstance(task, dict):
+            return error_response_fn(404, "Task not found", origin=origin)
+        state_key = _canvas_state_key(task)
+        if method == "GET":
+            stored = store.get_json(state_key) or {}
+            return response_fn(200, {"state": stored.get("state", {})}, origin=origin)
+        if method == "PUT":
+            req = json_model(CanvasStatePutRequest, event)
+            store.put_json(state_key, {"state": req.state, "updatedAt": now_iso_fn(), "updatedBy": user_id})
+            return response_fn(200, {"ok": True}, origin=origin)
+        return error_response_fn(405, "Method not allowed", origin=origin)
+
+    # ---- GET/PUT /canvas/{taskId}/memory -- per-task project brain -----------
+    if len(path_parts) == 3 and path_parts[0] == "canvas" and path_parts[2] == "memory":
+        task_id = path_parts[1]
+        task = _load_canvas_task_or_404(store, user_id, task_id)
+        if not isinstance(task, dict):
+            return error_response_fn(404, "Task not found", origin=origin)
+        memory_key = _canvas_memory_key(task)
+        if method == "GET":
+            stored = store.get_json(memory_key) or _default_canvas_memory()
+            return response_fn(200, {"memory": stored}, origin=origin)
+        if method == "PUT":
+            req = json_model(CanvasMemoryPutRequest, event)
+            memory = dict(req.memory)
+            memory["updatedAt"] = now_iso_fn()
+            store.put_json(memory_key, memory)
+            return response_fn(200, {"memory": memory}, origin=origin)
+        return error_response_fn(405, "Method not allowed", origin=origin)
+
+    # ---- POST /canvas/{taskId}/chat -- conversational GPT assistant ----------
+    if method == "POST" and len(path_parts) == 3 and path_parts[0] == "canvas" and path_parts[2] == "chat":
+        if run_canvas_chat_fn is None:
+            return error_response_fn(500, "Canvas chat engine is not configured", origin=origin)
+        task_id = path_parts[1]
+        task = _load_canvas_task_or_404(store, user_id, task_id)
+        if not isinstance(task, dict):
+            return error_response_fn(404, "Task not found", origin=origin)
+        req = json_model(CanvasChatRequest, event)
+        messages = [
+            {"role": m.role, "content": m.content}
+            for m in req.messages
+            if m.content.strip() or m.role == "assistant"
+        ]
+        if not messages:
+            return error_response_fn(400, "At least one message is required", origin=origin)
+
+        openai_api_key = get_openai_api_key_fn()
+        if not openai_api_key:
+            return error_response_fn(500, "OPENAI_API_KEY is required for canvas chat", origin=origin)
+
+        memory_key = _canvas_memory_key(task)
+        memory = store.get_json(memory_key) or _default_canvas_memory()
+        project_context = render_project_context(memory)
+        system_prompt = get_canvas_brain_fn(req.profile) if get_canvas_brain_fn else None
+        pricing_entry = get_openai_pricing_entry_fn("gpt-5.5")
+        pricing_rates = get_openai_pricing_rates_fn("gpt-5.5")
+
+        try:
+            result, usage = run_canvas_chat_fn(
+                api_key=openai_api_key,
+                messages=messages,
+                project_context=project_context,
+                attachment_image_urls=[u for u in req.attachment_image_urls if u],
+                system_prompt=system_prompt,
+                pricing_rates=pricing_rates,
+            )
+        except Exception as exc:
+            logger.warning("Canvas chat failed", extra={"userId": user_id, "taskId": task_id, "error": str(exc)})
+            return error_response_fn(502, str(exc), origin=origin)
+
+        # Grow the project brain with whatever this turn captured, then persist.
+        updated_memory = _apply_memory_updates(memory, result.get("memory_updates") or {}, now_iso=now_iso_fn())
+        store.put_json(memory_key, updated_memory)
+
+        try:
+            estimate = estimate_cost_from_pricing_entry(pricing_entry, usage=usage)
+            store.save_usage_record(
+                build_usage_record(
+                    usage_record_id=new_id_fn("usage"),
+                    now_iso=now_iso_fn(),
+                    user_id=user_id,
+                    provider="openai",
+                    provider_model="gpt-5.5",
+                    app_model_id="gpt-5.5",
+                    request_type="chat",
+                    source="canvas_chat",
+                    tool_origin="canvas_chat",
+                    workflow_id="canvas_workflow",
+                    task_id=task_id,
+                    pricing_entry=pricing_entry,
+                    estimate=estimate,
+                )
+            )
+        except Exception as exc:
+            logger.warning("Canvas chat usage tracking failed", extra={"userId": user_id, "error": str(exc)})
+
+        return response_fn(
+            200,
+            {
+                "reply": result.get("reply", ""),
+                "canvasActions": result.get("canvas_actions", []),
+                "memory": updated_memory,
+                "usage": usage,
+            },
+            origin=origin,
+        )
+
+    # ---- POST /canvas/{taskId}/skill/{name} -- named capability (EOD, ...) ---
+    if method == "POST" and len(path_parts) == 4 and path_parts[0] == "canvas" and path_parts[2] == "skill":
+        task_id = path_parts[1]
+        skill_name = path_parts[3]
+        skill = get_canvas_skill(skill_name)
+        if skill is None:
+            return error_response_fn(404, f"Unknown skill '{skill_name}'", origin=origin)
+        task = _load_canvas_task_or_404(store, user_id, task_id)
+        if not isinstance(task, dict):
+            return error_response_fn(404, "Task not found", origin=origin)
+        req = json_model(CanvasSkillRequest, event)
+
+        openai_api_key = get_openai_api_key_fn()
+        if not openai_api_key:
+            return error_response_fn(500, "OPENAI_API_KEY is required for canvas skills", origin=origin)
+
+        memory_key = _canvas_memory_key(task)
+        memory = store.get_json(memory_key) or _default_canvas_memory()
+        project_context = render_project_context(memory)
+        brain_profile = req.profile or f"skill_{skill_name}"
+        system_prompt_override = get_canvas_brain_fn(brain_profile) if get_canvas_brain_fn else None
+        pricing_entry = get_openai_pricing_entry_fn("gpt-5.5")
+        pricing_rates = get_openai_pricing_rates_fn("gpt-5.5")
+
+        try:
+            result, usage = run_canvas_skill(
+                api_key=openai_api_key,
+                skill=skill,
+                payload=req.payload,
+                project_context=project_context,
+                pricing_rates=pricing_rates,
+                system_prompt_override=system_prompt_override,
+            )
+        except Exception as exc:
+            logger.warning("Canvas skill failed", extra={"userId": user_id, "skill": skill_name, "error": str(exc)})
+            return error_response_fn(502, str(exc), origin=origin)
+
+        # EOD writes a handover card into the project brain (the daily trail).
+        if skill_name == "eod":
+            now = now_iso_fn()
+            memory.setdefault("handovers", []).append(
+                {"at": now, "report": result.get("full_report", ""), "tldr": result.get("tldr", [])}
+            )
+            memory["updatedAt"] = now
+            store.put_json(memory_key, memory)
+
+        try:
+            estimate = estimate_cost_from_pricing_entry(pricing_entry, usage=usage)
+            store.save_usage_record(
+                build_usage_record(
+                    usage_record_id=new_id_fn("usage"),
+                    now_iso=now_iso_fn(),
+                    user_id=user_id,
+                    provider="openai",
+                    provider_model="gpt-5.5",
+                    app_model_id="gpt-5.5",
+                    request_type="skill",
+                    source=f"canvas_skill:{skill_name}",
+                    tool_origin=f"canvas_skill_{skill_name}",
+                    workflow_id="canvas_workflow",
+                    task_id=task_id,
+                    pricing_entry=pricing_entry,
+                    estimate=estimate,
+                )
+            )
+        except Exception as exc:
+            logger.warning("Canvas skill usage tracking failed", extra={"userId": user_id, "error": str(exc)})
+
+        return response_fn(200, {"result": result, "usage": usage}, origin=origin)
 
     return None

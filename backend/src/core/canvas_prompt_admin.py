@@ -133,11 +133,22 @@ def normalize_canvas_prompt_profiles_for_write(payload: dict[str, Any]) -> dict[
     return {"schemaVersion": 1, "profiles": profiles}
 
 
-def resolve_canvas_system_prompt(config: dict[str, Any], profile: str) -> str | None:
+def resolve_canvas_system_prompt(
+    config: dict[str, Any], profile: str, *, fallback_profile: str | None = "lookdev"
+) -> str | None:
+    """Resolve a profile's system prompt (the "brain").
+
+    By default an unknown profile falls back to the lookdev wizard brain (kept for the
+    prompt-wizard route). The chat and skill brains pass ``fallback_profile=None`` so a
+    missing live profile resolves to ``None`` and the caller uses its own built-in
+    default instead of accidentally inheriting the JSON-only wizard brain.
+    """
     profiles = config.get("profiles") if isinstance(config, dict) else None
     if not isinstance(profiles, dict):
         return None
-    entry = profiles.get(profile) or profiles.get("lookdev")
+    entry = profiles.get(profile)
+    if not isinstance(entry, dict) and fallback_profile is not None:
+        entry = profiles.get(fallback_profile)
     if not isinstance(entry, dict):
         return None
     system_prompt = str(entry.get("system_prompt") or "").strip()
