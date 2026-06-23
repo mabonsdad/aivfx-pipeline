@@ -1628,6 +1628,7 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             fallback_profile=None,
         ),
         run_canvas_chat_fn=run_canvas_chat_engine,
+        queue_job_fn=lambda **kwargs: _queue_job(queue=queue, **kwargs),
         get_openai_pricing_entry_fn=lambda model: resolve_openai_prompt_wizard_pricing_entry(load_pricing_admin_config(store), model),
         get_openai_pricing_rates_fn=lambda model: resolve_openai_prompt_wizard_rates(load_pricing_admin_config(store), model),
         improve_lookdev_prompt_fn=improve_openai_lookdev_prompt,

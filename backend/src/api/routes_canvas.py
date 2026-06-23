@@ -100,6 +100,18 @@ class CanvasSkillRequest(BaseModel):
     profile: str | None = Field(default=None, max_length=80)
 
 
+class CanvasGenerateImageRequest(BaseModel):
+    # One route covers edit (inputAssetKey set), reference-based, and pure
+    # text-to-image (none set). Inputs/references are asset keys the user already
+    # uploaded (e.g. via /api/v1/assets/uploads/init), so no new upload path is needed.
+    prompt: str = Field(default="", max_length=8000)
+    model: str = Field(default="nano_banana", min_length=1, max_length=80)
+    inputAssetKey: str | None = Field(default=None, max_length=1024)
+    referenceAssetKeys: list[str] = Field(default_factory=list, max_length=6)
+    seed: int | None = Field(default=None)
+    aspectRatio: str | None = Field(default=None, max_length=16)
+
+
 def _canvas_path_parts(path: str) -> list[str]:
     return [part for part in str(path or "").split("/") if part]
 
@@ -275,6 +287,7 @@ def handle_canvas_routes(
     logger,
     get_canvas_brain_fn: Callable[[str], str | None] | None = None,
     run_canvas_chat_fn: Callable[..., tuple[dict[str, Any], dict[str, Any]]] | None = None,
+    queue_job_fn: Callable[..., str] | None = None,
 ) -> dict[str, Any] | None:
     path_parts = _canvas_path_parts(path)
 
@@ -724,5 +737,62 @@ def handle_canvas_routes(
             logger.warning("Canvas skill usage tracking failed", extra={"userId": user_id, "error": str(exc)})
 
         return response_fn(200, {"result": result, "usage": usage}, origin=origin)
+
+    # ---- POST /canvas/{taskId}/generate-image -- async image gen (seed + t2i) ----
+    if method == "POST" and len(path_parts) == 3 and path_parts[0] == "canvas" and path_parts[2] == "generate-image":
+        if queue_job_fn is None:
+            return error_response_fn(500, "Canvas generation is not configured", origin=origin)
+        task_id = path_parts[1]
+        task = _load_canvas_task_or_404(store, user_id, task_id)
+        if not isinstance(task, dict):
+            return error_response_fn(404, "Task not found", origin=origin)
+        req = json_model(CanvasGenerateImageRequest, event)
+        reference_keys = [k.strip() for k in req.referenceAssetKeys if k and k.strip()]
+        if not req.prompt.strip() and not req.inputAssetKey and not reference_keys:
+            return error_response_fn(400, "Provide a prompt, an input image, or references", origin=origin)
+        job_id = queue_job_fn(
+            store=store,
+            user_id=user_id,
+            task_id=task_id,
+            job_type="canvas_image_generate",
+            payload={
+                "taskId": task_id,
+                "prompt": req.prompt,
+                "model": req.model,
+                "inputAssetKey": (req.inputAssetKey or "").strip() or None,
+                "referenceAssetKeys": reference_keys,
+                "seed": req.seed,
+                "aspectRatio": req.aspectRatio,
+            },
+            enqueue=True,
+        )
+        return response_fn(202, {"jobId": job_id, "taskId": task_id, "status": "queued"}, origin=origin)
+
+    # ---- GET /canvas/{taskId}/job/{jobId} -- poll an async canvas job ----
+    if method == "GET" and len(path_parts) == 4 and path_parts[0] == "canvas" and path_parts[2] == "job":
+        task_id = path_parts[1]
+        job_id = path_parts[3]
+        task = _load_canvas_task_or_404(store, user_id, task_id)
+        if not isinstance(task, dict):
+            return error_response_fn(404, "Task not found", origin=origin)
+        job = store.load_job(user_id, job_id)
+        if not isinstance(job, dict):
+            return error_response_fn(404, "Job not found", origin=origin)
+        result = dict(job.get("resultRefs") or {})
+        output_key = result.get("outputKey")
+        if isinstance(output_key, str) and output_key:
+            # Refresh the presigned URL on each poll so it never serves a stale link.
+            result["outputUrl"] = asset_store.presign_get(output_key)
+        return response_fn(
+            200,
+            {
+                "jobId": job_id,
+                "status": job.get("status"),
+                "progress": job.get("progress"),
+                "error": job.get("error"),
+                "result": result,
+            },
+            origin=origin,
+        )
 
     return None
