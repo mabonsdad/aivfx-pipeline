@@ -76,6 +76,7 @@ def generate_image_edit(
     reference_images: list[tuple[bytes, str]] | None = None,
     input_mime_type: str = "image/png",
     aspect_ratio: str | None = None,
+    seed: int | None = None,
 ) -> bytes:
     model_id = GEMINI_MODEL_MAP[model]
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent"
@@ -131,6 +132,10 @@ def generate_image_edit(
         generation_config["imageConfig"] = {
             "aspectRatio": aspect_ratio,
         }
+    # Optional seed for repeatable look-dev. Gemini accepts it in generationConfig;
+    # determinism is best-effort on Google's side, not guaranteed identical output.
+    if seed is not None:
+        generation_config["seed"] = int(seed)
 
     payload: dict[str, Any] = {
         "contents": [
@@ -164,7 +169,13 @@ def generate_image_from_references(
     prompt: str,
     reference_images: list[tuple[bytes, str]],
     aspect_ratio: str | None = None,
+    seed: int | None = None,
 ) -> bytes:
+    """Generate an image from a prompt plus zero or more reference images.
+
+    With an empty ``reference_images`` list this is a pure text-to-image generation
+    (the prompt is the only part), which is how the canvas does prompt-only gen.
+    """
     model_id = GEMINI_MODEL_MAP[model]
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent"
     headers = {
@@ -189,6 +200,8 @@ def generate_image_from_references(
         generation_config["imageConfig"] = {
             "aspectRatio": aspect_ratio,
         }
+    if seed is not None:
+        generation_config["seed"] = int(seed)
 
     payload: dict[str, Any] = {
         "contents": [

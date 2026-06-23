@@ -12,6 +12,7 @@ def build_job_handlers(
     handle_patch_edit_fn: Callable[..., Any],
     handle_api_image_edit_full_fn: Callable[..., Any],
     handle_api_image_edit_patch_fn: Callable[..., Any],
+    handle_canvas_image_generate_fn: Callable[..., Any],
     handle_api_video_generate_reference_fn: Callable[..., Any],
     handle_edit_video_reference_generate_fn: Callable[..., Any],
     handle_previz_generate_fn: Callable[..., Any],
@@ -44,6 +45,12 @@ def build_job_handlers(
             settings=kwargs["settings"],
         ),
         "api_image_edit_patch": lambda **kwargs: handle_api_image_edit_patch_fn(
+            job=kwargs["job"],
+            store=kwargs["store"],
+            asset_store=kwargs["asset_store"],
+            settings=kwargs["settings"],
+        ),
+        "canvas_image_generate": lambda **kwargs: handle_canvas_image_generate_fn(
             job=kwargs["job"],
             store=kwargs["store"],
             asset_store=kwargs["asset_store"],

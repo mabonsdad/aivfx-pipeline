@@ -3527,6 +3527,171 @@ def _handle_api_image_edit_full(
     return job
 
 
+def _handle_canvas_image_generate(
+    *,
+    job: dict[str, Any],
+    store: S3JsonStore,
+    asset_store: AssetStore,
+    settings: Any,
+) -> dict[str, Any]:
+    """Canvas image generation (additive, sits beside the external-API image path).
+
+    Reuses the shared Gemini / OpenAI wrappers, the job/queue system, task asset
+    paths, cost tracking and asset-origin helpers. Supports three modes off one route:
+    edit (base image present), reference-based, and pure text-to-image (no base, no
+    references), plus an optional seed for repeatable look-dev. The output is
+    registered into the task as a canvas media asset so it shows up in
+    library / reporting like any other task asset.
+    """
+    payload = job["payload"]
+    task_id = str(payload["taskId"])
+    task = store.load_task(job["userId"], task_id)
+    if not isinstance(task, dict) or task.get("deletedAt"):
+        raise RuntimeError(f"Task not found: {task_id}")
+
+    prompt = str(payload.get("prompt") or "")
+    model_name = str(payload["model"])
+    aspect_ratio = payload.get("aspectRatio") or None
+    raw_seed = payload.get("seed")
+    seed = int(raw_seed) if isinstance(raw_seed, (int, float)) else (
+        int(raw_seed) if isinstance(raw_seed, str) and raw_seed.strip().lstrip("-").isdigit() else None
+    )
+    input_asset_key = str(payload.get("inputAssetKey") or "").strip()
+    reference_asset_keys = [str(item or "").strip() for item in payload.get("referenceAssetKeys") or [] if str(item or "").strip()]
+
+    _job_progress(job, store, 15, "running", "Loading reference images")
+    reference_images: list[tuple[bytes, str]] = []
+    for reference_asset_key in reference_asset_keys:
+        reference_bytes = asset_store.read_bytes(reference_asset_key)
+        with Image.open(BytesIO(reference_bytes)) as reference_probe:
+            mime_type = Image.MIME.get(reference_probe.format or "", "image/png")
+        reference_images.append((reference_bytes, mime_type))
+
+    secrets = load_secret(settings.secrets_arn)
+    provider_name = "gemini"
+    _job_progress(job, store, 40, "running", "Generating image")
+
+    if model_name in {"chatgpt", "chatgpt_latest"}:
+        openai_key = secrets.get("OPENAI_API_KEY")
+        if not openai_key:
+            raise RuntimeError("OPENAI_API_KEY is required for ChatGPT image generation")
+        provider_name = "openai"
+        if input_asset_key:
+            src_bytes = asset_store.read_bytes(input_asset_key)
+            out_bytes = generate_openai_image_edit(
+                api_key=openai_key,
+                model=model_name,
+                prompt=prompt,
+                input_image_bytes=src_bytes,
+                reference_images=reference_images,
+            )
+        else:
+            out_bytes = generate_openai_image_from_references(
+                api_key=openai_key,
+                model=model_name,
+                prompt=prompt,
+                reference_images=reference_images,
+            )
+    else:
+        gemini_key = secrets["GEMINI_API_KEY"]
+        if input_asset_key:
+            src_bytes = asset_store.read_bytes(input_asset_key)
+            out_bytes = generate_gemini_image_edit(
+                api_key=gemini_key,
+                model=model_name,
+                prompt=prompt,
+                input_image_bytes=src_bytes,
+                reference_images=reference_images,
+                aspect_ratio=aspect_ratio,
+                seed=seed,
+            )
+        else:
+            out_bytes = generate_gemini_image_from_references(
+                api_key=gemini_key,
+                model=model_name,
+                prompt=prompt,
+                reference_images=reference_images,
+                aspect_ratio=aspect_ratio,
+                seed=seed,
+            )
+
+    _job_progress(job, store, 80, "running", "Saving output")
+    with Image.open(BytesIO(out_bytes)) as out_probe:
+        out_width, out_height = out_probe.width, out_probe.height
+    asset_id = new_id("canvasmedia")
+    paths = _asset_paths(task)
+    output_key = paths.canvas_media_asset(asset_id, f"gen_{asset_id}.png")
+    asset_store.put_bytes(output_key, out_bytes, content_type="image/png")
+
+    now = now_iso()
+    project_id = str(task.get("projectId") or "").strip() or None
+    record = {
+        "assetId": asset_id,
+        "operation": "canvas_image_generate",
+        "mediaKind": "image",
+        "outputKey": output_key,
+        "contentType": "image/png",
+        "width": out_width,
+        "height": out_height,
+        "model": model_name,
+        "prompt": prompt,
+        "seed": seed,
+        "projectId": project_id,
+        "inputAssetKey": input_asset_key or None,
+        "referenceAssetKeys": reference_asset_keys,
+        "createdAt": now,
+        "updatedAt": now,
+        "origin": build_asset_origin(
+            workflow_id=str(task.get("workflowId") or "canvas_workflow"),
+            step_origin="canvas_generate",
+            tool_origin="canvas_image_generate",
+            app_surface="canvas_workflow",
+        ),
+    }
+    task.setdefault("canvasMediaAssets", []).append(record)
+    task.setdefault("history", []).append(
+        {
+            "at": now,
+            "event": "canvas.image.generated",
+            "assetId": asset_id,
+            "outputKey": output_key,
+            "model": model_name,
+            "seed": seed,
+        }
+    )
+    store.save_task(task, merge_on_conflict=True)
+
+    _record_usage(
+        store=store,
+        user_id=job["userId"],
+        source="canvas_image_generate",
+        tool_origin="canvas_image_generate",
+        request_type="image_generation",
+        provider=provider_name,
+        provider_model=model_name,
+        app_model_id=model_name,
+        task=task,
+        task_id=task_id,
+        project_id=project_id,
+        asset_id=asset_id,
+        asset_kind="canvas_media",
+        width=out_width,
+        height=out_height,
+        operation="edit" if input_asset_key else "generate",
+        reference_count=len(reference_asset_keys),
+    )
+
+    job["resultRefs"] = {
+        "assetId": asset_id,
+        "outputKey": output_key,
+        "outputUrl": asset_store.presign_get(output_key),
+        "taskId": task_id,
+    }
+    _job_progress(job, store, 100, "complete", "Canvas image generated")
+    store.save_job(job)
+    return job
+
+
 def _handle_api_image_edit_patch(
     *,
     job: dict[str, Any],
@@ -12874,6 +13039,7 @@ def process_job_record(record: dict[str, Any], *, settings: Any) -> None:
             handle_patch_edit_fn=_handle_patch_edit,
             handle_api_image_edit_full_fn=_handle_api_image_edit_full,
             handle_api_image_edit_patch_fn=_handle_api_image_edit_patch,
+            handle_canvas_image_generate_fn=_handle_canvas_image_generate,
             handle_api_video_generate_reference_fn=_handle_api_video_generate_reference,
             handle_edit_video_reference_generate_fn=_handle_edit_video_reference_generate,
             handle_previz_generate_fn=_handle_previz_generate,
