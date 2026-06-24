@@ -288,6 +288,7 @@ def handle_canvas_routes(
     get_canvas_brain_fn: Callable[[str], str | None] | None = None,
     run_canvas_chat_fn: Callable[..., tuple[dict[str, Any], dict[str, Any]]] | None = None,
     queue_job_fn: Callable[..., str] | None = None,
+    decorate_s3_keys_fn: Callable[[Any], None] | None = None,
 ) -> dict[str, Any] | None:
     path_parts = _canvas_path_parts(path)
 
@@ -565,7 +566,17 @@ def handle_canvas_routes(
         state_key = _canvas_state_key(task)
         if method == "GET":
             stored = store.get_json(state_key) or {}
-            return response_fn(200, {"state": stored.get("state", {})}, origin=origin)
+            state = stored.get("state", {})
+            # The canvas graph is a free-form blob; image/media nodes persist S3 asset keys
+            # (e.g. previewKey, inputKey). Decorate them into presigned *Url siblings on read so
+            # the frontend can render stored references/library images, mirroring how task-detail
+            # decorates editVideoReferences. Without this the client only gets bare keys.
+            if decorate_s3_keys_fn is not None:
+                try:
+                    decorate_s3_keys_fn(state)
+                except Exception:
+                    logger.warning("Failed to decorate canvas state asset keys", extra={"taskId": task_id})
+            return response_fn(200, {"state": state}, origin=origin)
         if method == "PUT":
             req = json_model(CanvasStatePutRequest, event)
             store.put_json(state_key, {"state": req.state, "updatedAt": now_iso_fn(), "updatedBy": user_id})
