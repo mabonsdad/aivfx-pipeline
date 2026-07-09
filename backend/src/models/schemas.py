@@ -323,7 +323,7 @@ class CharacterAnimateGenerateRequest(BaseModel):
 
 class SegmentPromptWizardRequest(BaseModel):
     selected_model: str = Field(min_length=1, max_length=120)
-    provider: Literal["Luma", "fal.ai", "Runway", "Replicate", "Runware"]
+    provider: Literal["Luma", "fal.ai", "Runway", "Replicate", "Runware", "Google"]
     provider_model: str = Field(min_length=1, max_length=160)
     endpoint_used: str | None = Field(default=None, max_length=300)
     mode: Literal["start_video", "start_end", "edit_video"]

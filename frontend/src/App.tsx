@@ -479,6 +479,7 @@ const MODEL_FRAME_BUDGET_FPS = 24;
 function videoModelLabel(model: VideoModel): string {
   if (model === "ray-3.2-720p") return "Luma Ray 3.2 720p";
   if (model === "ray-3.2-1080p") return "Luma Ray 3.2 1080p";
+  if (model === "gemini-omni-flash-preview") return "Gemini Omni Flash";
   if (model === "runway-gen4.5") return "Runway Gen-4.5";
   if (model === "sora-2-image-to-video") return "Sora 2 Image to Video";
   if (model === "happy-horse-video-edit") return "Happy Horse 1.0 Video Edit";
@@ -533,11 +534,16 @@ function isPresignedUrlNearExpiry(url: string | null | undefined, withinMs = 60_
   return typeof expiryMs === "number" && expiryMs - Date.now() <= withinMs;
 }
 
-function videoModelDurationConstraints(model: VideoModel): {
+function videoModelDurationConstraints(model: VideoModel, inputMode?: GenerateInputMode | null): {
   minSeconds?: number;
   maxSeconds: number;
   frameBudgetFps?: number | null;
 } {
+  if (model === "gemini-omni-flash-preview") {
+    return inputMode === "start_video" || inputMode === "edit_video"
+      ? { minSeconds: 3, maxSeconds: 3, frameBudgetFps: MODEL_FRAME_BUDGET_FPS }
+      : { minSeconds: 3, maxSeconds: 10, frameBudgetFps: MODEL_FRAME_BUDGET_FPS };
+  }
   if (model === "ray-3.2-720p" || model === "ray-3.2-1080p") return { minSeconds: 1, maxSeconds: 18 };
   if (model === "runway-gen4.5") return { maxSeconds: 10 };
   if (model === "sora-2-image-to-video") return { minSeconds: 4, maxSeconds: 10 };
@@ -561,6 +567,7 @@ function assessVideoModelDurationLimit(
   durationFrames: number,
   durationSec: number,
   sourceFps: number,
+  inputMode?: GenerateInputMode | null,
 ): {
   minSeconds?: number;
   maxSeconds: number;
@@ -568,7 +575,7 @@ function assessVideoModelDurationLimit(
   overLimit: boolean;
   message: string | null;
 } | null {
-  const constraints = videoModelDurationConstraints(model);
+  const constraints = videoModelDurationConstraints(model, inputMode);
   const minSeconds = constraints.minSeconds;
   const maxSeconds = constraints.maxSeconds;
   const frameBudgetFps = constraints.frameBudgetFps ?? null;
@@ -610,12 +617,15 @@ function assessVideoModelDurationLimit(
 const AUTOMATION_VIDEO_OPTIONS: AutomationVideoOption[] = [
   { id: "ray-3.2-720p:start_video:flex_1", label: "Luma Ray 3.2 720p (Source video edit)", inputMode: "start_video", lumaModel: "ray-3.2-720p", mode: "flex_1" },
   { id: "ray-3.2-1080p:start_video:flex_1", label: "Luma Ray 3.2 1080p (Source video edit)", inputMode: "start_video", lumaModel: "ray-3.2-1080p", mode: "flex_1" },
+  { id: "gemini-omni-flash-preview:start_video:gemini_omni_start_video", label: "Gemini Omni Flash (Start frame + video)", inputMode: "start_video", lumaModel: "gemini-omni-flash-preview", mode: "gemini_omni_start_video" },
   { id: "happy-horse-video-edit:start_video:happy_horse_video_edit", label: "Happy Horse 1.0 Video Edit (Start frame + video)", inputMode: "start_video", lumaModel: "happy-horse-video-edit", mode: "happy_horse_video_edit" },
   { id: "runway-gen4-aleph:start_video:runway_aleph_v2v", label: "Runway Aleph 2.0 (Start frame + video)", inputMode: "start_video", lumaModel: "runway-gen4-aleph", mode: "runway_aleph_v2v" },
   { id: "kling-v3-omni-video:start_video:kling_v3_omni_video_edit", label: "Kling v3 Omni Video (Start frame + video)", inputMode: "start_video", lumaModel: "kling-v3-omni-video", mode: "kling_v3_omni_video_edit" },
   { id: "seedance-2.0-reference-to-video:start_video:seedance_reference_to_video", label: "Seedance 2.0 Reference to Video (Start frame + video)", inputMode: "start_video", lumaModel: "seedance-2.0-reference-to-video", mode: "seedance_reference_to_video" },
+  { id: "gemini-omni-flash-preview:start_end:gemini_omni_start_end", label: "Gemini Omni Flash (Start/End reference)", inputMode: "start_end", lumaModel: "gemini-omni-flash-preview", mode: "gemini_omni_start_end" },
   { id: "kling-2.6:start_end:kling_start_end", label: "Kling 2.6 (Start/End frame)", inputMode: "start_end", lumaModel: "kling-2.6", mode: "kling_start_end" },
   { id: "ltx-2.3-pro:start_end:ltx23_i2v_start_end", label: "LTX 2.3 Pro (Start/End frame)", inputMode: "start_end", lumaModel: "ltx-2.3-pro", mode: "ltx23_i2v_start_end" },
+  { id: "gemini-omni-flash-preview:start_only:gemini_omni_start_only", label: "Gemini Omni Flash (Start frame only)", inputMode: "start_only", lumaModel: "gemini-omni-flash-preview", mode: "gemini_omni_start_only" },
   { id: "kling-2.6:start_only:kling_start_only", label: "Kling 2.6 (Start frame only)", inputMode: "start_only", lumaModel: "kling-2.6", mode: "kling_start_only" },
   { id: "veo-3.1:start_end:veo_start_end", label: "Veo 3.1 (Start/End frame)", inputMode: "start_end", lumaModel: "veo-3.1", mode: "veo_start_end" },
   { id: "veo-3.1:start_only:veo_start_only", label: "Veo 3.1 (Start frame only)", inputMode: "start_only", lumaModel: "veo-3.1", mode: "veo_start_only" },
@@ -3108,6 +3118,14 @@ export default function App() {
   const resolveSelectedGenerationMode = useCallback((): string => {
     return lumaModel === "runway-gen4.5"
       ? "runway_i2v"
+      : lumaModel === "gemini-omni-flash-preview"
+        ? generationInputMode === "start_only"
+          ? "gemini_omni_start_only"
+          : generationInputMode === "start_end"
+            ? "gemini_omni_start_end"
+            : generationInputMode === "edit_video"
+              ? "gemini_omni_edit_video"
+              : "gemini_omni_start_video"
       : lumaModel === "sora-2-image-to-video"
         ? "sora_i2v"
       : lumaModel === "happy-horse-video-edit"
@@ -4088,12 +4106,12 @@ export default function App() {
     sourceCacheKey: mergeOriginalSourceCacheKey,
   });
   const lumaHardLimit = useMemo(() => {
-    const constraints = videoModelDurationConstraints(lumaModel);
+    const constraints = videoModelDurationConstraints(lumaModel, generationInputMode);
     return {
       maxSeconds: constraints.maxSeconds,
       maxFrames: Math.round(constraints.maxSeconds * (constraints.frameBudgetFps ?? fpsValue(task))),
     };
-  }, [lumaModel, task]);
+  }, [generationInputMode, lumaModel, task]);
   const hasHardDurationLimit = Boolean(lumaHardLimit);
   const lumaHardLimitSeconds = lumaHardLimit?.maxSeconds ?? 0;
   const lumaHardLimitFrames = lumaHardLimit?.maxFrames ?? 0;
@@ -4129,8 +4147,8 @@ export default function App() {
 
   const selectedSegmentLimit = useMemo(() => {
     if (!selectedSegment) return null;
-    return assessVideoModelDurationLimit(lumaModel, selectedSegment.durationFrames, selectedSegment.durationSec, fpsValue(task));
-  }, [lumaModel, selectedSegment, task]);
+    return assessVideoModelDurationLimit(lumaModel, selectedSegment.durationFrames, selectedSegment.durationSec, fpsValue(task), generationInputMode);
+  }, [generationInputMode, lumaModel, selectedSegment, task]);
   const selectedSegmentOverLimit = Boolean(selectedSegmentLimit?.overLimit);
   const selectedSegmentLimitMessage = selectedSegmentLimit?.message ?? null;
   const generationModeConfig = useMemo(() => getGenerationModeConfig(generationInputMode), [generationInputMode]);

@@ -9,7 +9,7 @@ from src.integrations.openai_prompt_wizard import VIDEO_PROMPT_WIZARD_SYSTEM_PRO
 ADMIN_PROMPT_WIZARD_CONFIG_KEY = "admin/prompt_wizard_config.json"
 ADMIN_PIN = "246810"
 
-_ALLOWED_PROVIDERS = {"Luma", "fal.ai", "Runway", "Replicate", "Runware"}
+_ALLOWED_PROVIDERS = {"Luma", "fal.ai", "Runway", "Replicate", "Runware", "Google"}
 _ALLOWED_MODES = {"start_video", "start_end", "edit_video"}
 _ALLOWED_STRATEGIES = {
     "luma_descriptive_change",
@@ -46,6 +46,17 @@ _DEFAULT_MODEL_CONFIGS: list[dict[str, Any]] = [
         "required_markers": [],
         "supports_negative_prompt": False,
         "prompt_strategy": "luma_descriptive_change",
+    },
+    {
+        "selected_model": "gemini-omni-flash-preview",
+        "dropdown_name": "Gemini Omni Flash",
+        "mode": "start_video",
+        "provider": "Google",
+        "provider_model": "gemini-omni-flash-preview",
+        "endpoint_used": "POST https://generativelanguage.googleapis.com/v1beta/interactions",
+        "required_markers": [],
+        "supports_negative_prompt": False,
+        "prompt_strategy": "wan_videoedit_focused_change",
     },
     {
         "selected_model": "happy-horse-video-edit",
@@ -114,6 +125,17 @@ _DEFAULT_MODEL_CONFIGS: list[dict[str, Any]] = [
         "prompt_strategy": "wan_videoedit_focused_change",
     },
     {
+        "selected_model": "gemini-omni-flash-preview",
+        "dropdown_name": "Gemini Omni Flash",
+        "mode": "edit_video",
+        "provider": "Google",
+        "provider_model": "gemini-omni-flash-preview",
+        "endpoint_used": "POST https://generativelanguage.googleapis.com/v1beta/interactions",
+        "required_markers": [],
+        "supports_negative_prompt": False,
+        "prompt_strategy": "wan_videoedit_focused_change",
+    },
+    {
         "selected_model": "happy-horse-video-edit",
         "dropdown_name": "Happy Horse 1.0 Video Edit",
         "mode": "edit_video",
@@ -167,6 +189,17 @@ _DEFAULT_MODEL_CONFIGS: list[dict[str, Any]] = [
         "required_markers": [],
         "supports_negative_prompt": False,
         "prompt_strategy": "wan_videoedit_focused_change",
+    },
+    {
+        "selected_model": "gemini-omni-flash-preview",
+        "dropdown_name": "Gemini Omni Flash",
+        "mode": "start_end",
+        "provider": "Google",
+        "provider_model": "gemini-omni-flash-preview",
+        "endpoint_used": "POST https://generativelanguage.googleapis.com/v1beta/interactions",
+        "required_markers": [],
+        "supports_negative_prompt": False,
+        "prompt_strategy": "veo_start_end_visual_transition",
     },
     {
         "selected_model": "kling-2.6",

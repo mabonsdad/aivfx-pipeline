@@ -20,6 +20,7 @@ API_PATCH_REFERENCE_LIMITS: dict[str, int] = {
 }
 
 API_VIDEO_REFERENCE_LIMITS: dict[str, int] = {
+    "gemini-omni-flash-preview": 3,
     "happy-horse-video-edit": 3,
     "kling-o1": 3,
     "kling-v3-omni-video": 3,
@@ -374,6 +375,10 @@ def handle_external_api_routes(
             validate_api_video_mode_fn(req.model, req.mode)
             validate_video_model_prompt_fn(req.model, prompt)
             capability = get_video_model_capability_fn(req.model)
+            gemini_omni_requires_video = req.model == "gemini-omni-flash-preview" and req.mode in {
+                "gemini_omni_start_video",
+                "gemini_omni_edit_video",
+            }
             _validate_reference_asset_limit(
                 model=req.model,
                 reference_asset_keys=reference_asset_keys,
@@ -387,11 +392,15 @@ def handle_external_api_routes(
                     asset_key=req.videoAssetKey,
                     expected_type="video",
                 )
-                if capability.uses_source_video
+                if capability.uses_source_video or gemini_omni_requires_video
                 else None
             )
-            if capability.uses_source_video and not req.videoAssetKey:
+            if (capability.uses_source_video or gemini_omni_requires_video) and not req.videoAssetKey:
                 raise ValueError(f"{capability.label} requires videoAssetKey")
+            if req.model == "gemini-omni-flash-preview" and req.mode in {"gemini_omni_start_video", "gemini_omni_edit_video"}:
+                requested_duration = float(req.durationSeconds or capability.min_seconds or capability.max_seconds or 3)
+                if requested_duration > 3.0 + 1e-6:
+                    raise ValueError("Gemini Omni Flash currently supports source-video and edit-video flows only for durations up to 3 seconds in this route.")
             first_frame_asset = validate_api_asset_key_fn(
                 asset_store=asset_store,
                 user_id=user_id,

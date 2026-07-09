@@ -10,8 +10,8 @@ import {
 } from "./taskWorkflows";
 import type { SegmentGeneration, TaskDetail } from "../types/api";
 
-const START_END_MODES = new Set(["kling_start_end", "veo_start_end", "ltx23_i2v_start_end"]);
-const START_ONLY_MODES = new Set(["kling_start_only", "veo_start_only", "runway_i2v", "sora_i2v", "happy_horse_i2v", "wan_a14b_i2v"]);
+const START_END_MODES = new Set(["kling_start_end", "veo_start_end", "ltx23_i2v_start_end", "gemini_omni_start_end"]);
+const START_ONLY_MODES = new Set(["kling_start_only", "veo_start_only", "runway_i2v", "sora_i2v", "happy_horse_i2v", "wan_a14b_i2v", "gemini_omni_start_only"]);
 
 export type GenerationOrigin = {
   workflowId: TaskWorkflowId;
@@ -73,6 +73,8 @@ function inferLegacySourceInputMode(
   const mode = String(generation?.luma.mode ?? "").trim();
   if (START_END_MODES.has(mode)) return "start_end";
   if (START_ONLY_MODES.has(mode)) return "start_only";
+  if (mode === "gemini_omni_edit_video") return "edit_video";
+  if (mode === "gemini_omni_start_video") return "start_video";
   if (mode === "seedance_reference_to_video" && /@video1/.test(prompt)) {
     const hasEditReferences = Array.isArray(task?.editVideoReferences) && task.editVideoReferences.length > 0;
     if (hasEditReferences) return "edit_video";

@@ -2,7 +2,7 @@ import type { VideoModelId } from "./generated/videoContracts";
 
 export type PromptWizardMode = "start_video" | "start_end" | "edit_video";
 
-export type PromptWizardProvider = "Luma" | "fal.ai" | "Runway" | "Replicate" | "Runware";
+export type PromptWizardProvider = "Luma" | "fal.ai" | "Runway" | "Replicate" | "Runware" | "Google";
 
 export type PromptWizardPromptStrategy =
   | "luma_descriptive_change"
@@ -72,6 +72,17 @@ const PROMPT_WIZARD_MODEL_CONFIGS: PromptWizardAdminModelConfig[] = [
     prompt_strategy: "luma_descriptive_change",
   },
   {
+    selected_model: "gemini-omni-flash-preview",
+    dropdown_name: "Gemini Omni Flash",
+    mode: "start_video",
+    provider: "Google",
+    provider_model: "gemini-omni-flash-preview",
+    endpoint_used: "POST https://generativelanguage.googleapis.com/v1beta/interactions",
+    required_markers: [],
+    supports_negative_prompt: false,
+    prompt_strategy: "wan_videoedit_focused_change",
+  },
+  {
     selected_model: "happy-horse-video-edit",
     dropdown_name: "Happy Horse 1.0 Video Edit",
     mode: "start_video",
@@ -138,6 +149,17 @@ const PROMPT_WIZARD_MODEL_CONFIGS: PromptWizardAdminModelConfig[] = [
     prompt_strategy: "wan_videoedit_focused_change",
   },
   {
+    selected_model: "gemini-omni-flash-preview",
+    dropdown_name: "Gemini Omni Flash",
+    mode: "edit_video",
+    provider: "Google",
+    provider_model: "gemini-omni-flash-preview",
+    endpoint_used: "POST https://generativelanguage.googleapis.com/v1beta/interactions",
+    required_markers: [],
+    supports_negative_prompt: false,
+    prompt_strategy: "wan_videoedit_focused_change",
+  },
+  {
     selected_model: "happy-horse-video-edit",
     dropdown_name: "Happy Horse 1.0 Video Edit",
     mode: "edit_video",
@@ -191,6 +213,17 @@ const PROMPT_WIZARD_MODEL_CONFIGS: PromptWizardAdminModelConfig[] = [
     required_markers: [],
     supports_negative_prompt: false,
     prompt_strategy: "wan_videoedit_focused_change",
+  },
+  {
+    selected_model: "gemini-omni-flash-preview",
+    dropdown_name: "Gemini Omni Flash",
+    mode: "start_end",
+    provider: "Google",
+    provider_model: "gemini-omni-flash-preview",
+    endpoint_used: "POST https://generativelanguage.googleapis.com/v1beta/interactions",
+    required_markers: [],
+    supports_negative_prompt: false,
+    prompt_strategy: "veo_start_end_visual_transition",
   },
   {
     selected_model: "kling-2.6",

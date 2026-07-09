@@ -18,8 +18,8 @@ TASK_WORKFLOW_IDS = {
     "simple_generation_workflow",
     "canvas_workflow",
 }
-START_END_MODES = frozenset({"kling_start_end", "veo_start_end", "ltx23_i2v_start_end"})
-START_ONLY_MODES = frozenset({"kling_start_only", "veo_start_only", "runway_i2v", "sora_i2v", "happy_horse_i2v", "wan_a14b_i2v"})
+START_END_MODES = frozenset({"kling_start_end", "veo_start_end", "ltx23_i2v_start_end", "gemini_omni_start_end"})
+START_ONLY_MODES = frozenset({"kling_start_only", "veo_start_only", "runway_i2v", "sora_i2v", "happy_horse_i2v", "wan_a14b_i2v", "gemini_omni_start_only"})
 
 
 def is_task_workflow_id(value: str | None) -> bool:
@@ -73,6 +73,10 @@ def infer_source_generation_input_mode(task: dict[str, Any], generation: dict[st
         return "start_end"
     if mode in START_ONLY_MODES:
         return "start_only"
+    if mode == "gemini_omni_edit_video":
+        return "edit_video"
+    if mode == "gemini_omni_start_video":
+        return "start_video"
     if mode in {"happy_horse_video_edit", "runway_aleph_v2v", "kling_v3_omni_video_edit", "seedance_reference_to_video", "flex_1"}:
         has_edit_references = isinstance(task.get("editVideoReferences"), list) and len(task.get("editVideoReferences")) > 0
         if mode == "seedance_reference_to_video" and "@video1" in prompt and has_edit_references:

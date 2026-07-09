@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import re
 import time
 from typing import Any
 
@@ -11,6 +12,10 @@ GEMINI_MODEL_MAP = {
     "nano_banana": "gemini-2.5-flash-image",
     "nano_banana_pro": "gemini-3-pro-image-preview",
 }
+
+GEMINI_OMNI_FLASH_MODEL = "gemini-omni-flash-preview"
+GEMINI_INTERACTIONS_URL = "https://generativelanguage.googleapis.com/v1beta/interactions"
+GEMINI_FILES_URL = "https://generativelanguage.googleapis.com/v1beta/files"
 
 
 class GeminiError(RuntimeError):
@@ -64,6 +69,149 @@ def _extract_image_bytes(payload: dict[str, Any]) -> bytes:
     if details:
         raise GeminiError(f"Gemini did not return an image: {' | '.join(details)}")
     raise GeminiError("Gemini did not return an image")
+
+
+def _extract_video_uri(payload: dict[str, Any]) -> str | None:
+    output_video = payload.get("output_video")
+    if isinstance(output_video, dict):
+        uri = str(output_video.get("uri") or "").strip()
+        if uri:
+            return uri
+    steps = payload.get("steps")
+    if isinstance(steps, list):
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            content = step.get("content")
+            if not isinstance(content, list):
+                continue
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("type") or "").strip().lower() != "video":
+                    continue
+                uri = str(item.get("uri") or "").strip()
+                if uri:
+                    return uri
+    return None
+
+
+def _extract_video_bytes(payload: dict[str, Any]) -> bytes | None:
+    output_video = payload.get("output_video")
+    if isinstance(output_video, dict):
+        data = str(output_video.get("data") or "").strip()
+        if data:
+            return base64.b64decode(data)
+    steps = payload.get("steps")
+    if isinstance(steps, list):
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            content = step.get("content")
+            if not isinstance(content, list):
+                continue
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("type") or "").strip().lower() != "video":
+                    continue
+                data = str(item.get("data") or "").strip()
+                if data:
+                    return base64.b64decode(data)
+    return None
+
+
+def _extract_file_id(file_uri: str) -> str:
+    match = re.search(r"/files/([^/?#:]+)", file_uri)
+    if match:
+        return match.group(1)
+    match = re.search(r"files/([^/?#:]+)", file_uri)
+    if match:
+        return match.group(1)
+    raise GeminiError(f"Could not determine Gemini file id from URI: {file_uri}")
+
+
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=8), reraise=True)
+def _get_json(url: str, headers: dict[str, str]) -> dict[str, Any]:
+    response = requests.get(url, headers=headers, timeout=90)
+    if response.status_code >= 400:
+        body = ""
+        try:
+            body = response.text.strip()
+        except Exception:
+            body = ""
+        raise GeminiError(f"{response.status_code} Client Error: {response.reason} for url: {url}{f' | {body}' if body else ''}")
+    return response.json()
+
+
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=8), reraise=True)
+def _get_bytes(url: str, headers: dict[str, str]) -> bytes:
+    response = requests.get(url, headers=headers, timeout=180)
+    if response.status_code >= 400:
+        body = ""
+        try:
+            body = response.text.strip()
+        except Exception:
+            body = ""
+        raise GeminiError(f"{response.status_code} Client Error: {response.reason} for url: {url}{f' | {body}' if body else ''}")
+    return response.content
+
+
+def create_omni_video_interaction(
+    *,
+    api_key: str,
+    input_payload: str | list[dict[str, Any]],
+    task: str,
+    aspect_ratio: str = "16:9",
+    model: str = GEMINI_OMNI_FLASH_MODEL,
+) -> dict[str, Any]:
+    headers = {
+        "x-goog-api-key": api_key,
+        "content-type": "application/json",
+    }
+    payload: dict[str, Any] = {
+        "model": model,
+        "input": input_payload,
+        "response_format": {
+            "type": "video",
+            "delivery": "uri",
+            "aspect_ratio": aspect_ratio if aspect_ratio in {"16:9", "9:16"} else "16:9",
+        },
+        "generation_config": {
+            "video_config": {
+                "task": task,
+            }
+        },
+    }
+    return _post(f"{GEMINI_INTERACTIONS_URL}?key={api_key}", headers, payload)
+
+
+def wait_for_gemini_video_result(
+    *,
+    api_key: str,
+    interaction: dict[str, Any],
+    timeout_sec: int = 900,
+) -> tuple[bytes, str]:
+    inline_video = _extract_video_bytes(interaction)
+    if inline_video is not None:
+        return inline_video, ""
+    file_uri = _extract_video_uri(interaction)
+    if not file_uri:
+        raise GeminiError(f"Gemini Omni Flash did not return a downloadable video URI: {interaction}")
+    file_id = _extract_file_id(file_uri)
+    headers = {"x-goog-api-key": api_key}
+    deadline = time.time() + timeout_sec
+    while True:
+        status_payload = _get_json(f"{GEMINI_FILES_URL}/{file_id}?key={api_key}", headers)
+        state = str(status_payload.get("state") or "").strip().upper()
+        if state == "ACTIVE":
+            video_bytes = _get_bytes(f"{GEMINI_FILES_URL}/{file_id}:download?alt=media&key={api_key}", headers)
+            return video_bytes, file_id
+        if state == "FAILED":
+            raise GeminiError(f"Gemini Omni Flash video generation failed: {status_payload}")
+        if time.time() >= deadline:
+            raise GeminiError(f"Timed out waiting for Gemini Omni Flash video file {file_id} to become ACTIVE")
+        time.sleep(5)
 
 
 def generate_image_edit(

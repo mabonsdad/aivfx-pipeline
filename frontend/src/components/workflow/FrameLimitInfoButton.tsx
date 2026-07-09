@@ -12,6 +12,7 @@ type GenerateInputMode = "start_video" | "start_end" | "start_only" | "edit_vide
 const START_VIDEO_ROWS: FrameLimitRow[] = [
   { model: "Luma Ray 3.2 720p", maxSeconds: 18, modelFps: 24, maxFrameCount: 432 },
   { model: "Luma Ray 3.2 1080p", maxSeconds: 18, modelFps: 24, maxFrameCount: 432 },
+  { model: "Gemini Omni Flash", maxSeconds: 3, modelFps: 24, maxFrameCount: 72 },
   { model: "Happy Horse 1.0 Video Edit", maxSeconds: 15, modelFps: 24, maxFrameCount: 360 },
   { model: "Runway Aleph 2.0", maxSeconds: 5, modelFps: 24, maxFrameCount: 120 },
   { model: "Kling O1 Edit", maxSeconds: 30, modelFps: 30, maxFrameCount: 900 },
@@ -22,6 +23,7 @@ const START_VIDEO_ROWS: FrameLimitRow[] = [
 ];
 
 const START_END_ROWS: FrameLimitRow[] = [
+  { model: "Gemini Omni Flash", maxSeconds: 10, modelFps: 24, maxFrameCount: 240 },
   { model: "Kling 2.6", maxSeconds: 10, modelFps: 48, maxFrameCount: 480 },
   { model: "LTX 2.3 Pro", maxSeconds: 10, modelFps: 24, maxFrameCount: 240 },
   { model: "Veo 3.1", maxSeconds: 8, modelFps: 24, maxFrameCount: 192 },
@@ -31,6 +33,7 @@ const START_END_ROWS: FrameLimitRow[] = [
 ];
 
 const START_ONLY_ROWS: FrameLimitRow[] = [
+  { model: "Gemini Omni Flash", maxSeconds: 10, modelFps: 24, maxFrameCount: 240 },
   { model: "Wan 2.2 A14B", maxSeconds: 5, modelFps: 16, maxFrameCount: 80 },
   { model: "Happy Horse 1.0 Image to Video", maxSeconds: 15, modelFps: 24, maxFrameCount: 360 },
   { model: "Runway Gen 4.5", maxSeconds: 10, modelFps: 24, maxFrameCount: 240 },
@@ -89,6 +92,7 @@ export default function FrameLimitInfoButton(props: { label?: string; mode: Gene
         <p>
           If you are above these limits, generate in parts and extend later in Post Process.
         </p>
+        <p>Gemini Omni Flash source-video editing is currently limited much more tightly than its image-led modes.</p>
         <section className="space-y-2">
           <h4 className="text-sm font-semibold text-ink">{modeTitle(props.mode)}</h4>
           <FrameLimitTable rows={rows} />

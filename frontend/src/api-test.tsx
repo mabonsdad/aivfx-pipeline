@@ -164,6 +164,37 @@ const IMAGE_MASKED_MODELS = [
 
 const VIDEO_MODELS: readonly VideoModelOption[] = [
   {
+    value: "gemini-omni-flash-preview:start_video",
+    apiModel: "gemini-omni-flash-preview",
+    label: "Gemini Omni Flash (Start frame + video)",
+    mode: "gemini_omni_start_video",
+    note: "Experimental short source-video edit route. Uses source video plus the first-frame image as an opening guide. Current Google docs say uploaded-video editing is unavailable in the EEA, Switzerland, and the United Kingdom. Keep ranges to 3 seconds or shorter.",
+  },
+  {
+    value: "gemini-omni-flash-preview:start_end",
+    apiModel: "gemini-omni-flash-preview",
+    label: "Gemini Omni Flash (Start/End reference)",
+    mode: "gemini_omni_start_end",
+    note: "Image-led route. Uses first and last frame images as ordered references only; it is not true interpolation. Prompt for one continuous shot and describe how motion should land on the end reference.",
+    usesSourceVideo: false,
+    requiresLastFrame: true,
+  },
+  {
+    value: "gemini-omni-flash-preview:start_only",
+    apiModel: "gemini-omni-flash-preview",
+    label: "Gemini Omni Flash (Start frame only)",
+    mode: "gemini_omni_start_only",
+    note: "Image-to-video route. Uses the first frame image and prompt only. Google currently documents 3 to 10 second 720p outputs for this preview model.",
+    usesSourceVideo: false,
+  },
+  {
+    value: "gemini-omni-flash-preview:edit_video",
+    apiModel: "gemini-omni-flash-preview",
+    label: "Gemini Omni Flash (Video + text + refs)",
+    mode: "gemini_omni_edit_video",
+    note: "Experimental short source-video edit route with up to 3 ordered image references. Current Google docs say uploaded-video editing is unavailable in the EEA, Switzerland, and the United Kingdom. Keep ranges to 3 seconds or shorter.",
+  },
+  {
     value: "ray-3.2-720p",
     label: "Luma Ray 3.2 720p",
     mode: "flex_1",
@@ -231,6 +262,7 @@ const IMAGE_MASKED_REFERENCE_LIMITS: Partial<Record<string, number>> = {
 };
 
 const VIDEO_REFERENCE_LIMITS: Partial<Record<string, number>> = {
+  "gemini-omni-flash-preview": 3,
   "happy-horse-video-edit": 3,
   "kling-o1": 3,
   "kling-v3-omni-video": 3,
@@ -521,6 +553,9 @@ function App() {
   const referenceImageLimit = useMemo(() => {
     if (workflow === "image_full") return IMAGE_FULL_REFERENCE_LIMITS[imageModel] ?? 0;
     if (workflow === "image_masked") return IMAGE_MASKED_REFERENCE_LIMITS[maskedModel] ?? 0;
+    if ((selectedVideoModel.apiModel ?? selectedVideoModel.value) === "gemini-omni-flash-preview") {
+      return selectedVideoModel.mode === "gemini_omni_edit_video" ? 3 : 0;
+    }
     return VIDEO_REFERENCE_LIMITS[selectedVideoModel.apiModel ?? selectedVideoModel.value] ?? 0;
   }, [imageModel, maskedModel, selectedVideoModel.apiModel, selectedVideoModel.value, workflow]);
   const supportsReferenceImages = referenceImageLimit > 0;
@@ -564,6 +599,19 @@ function App() {
         "@Image1, @Image2, and @Image3 map to referenceAssetKeys[0], [1], and [2] in order.",
         "If referenceAssetKeys is empty, the route falls back to firstFrameAssetKey as the provider-side image reference.",
       ];
+    }
+    if (model === "gemini-omni-flash-preview") {
+      return selectedVideoModel.mode === "gemini_omni_start_end"
+        ? [
+            "referenceAssetKeys are not used in this Gemini start/end route.",
+            "firstFrameAssetKey is the opening frame and lastFrameAssetKey is the visual target for where the motion should land.",
+            "This is reference-guided motion, not strict interpolation.",
+          ]
+        : [
+            "For Gemini edit mode, referenceAssetKeys[0], [1], and [2] are passed in order as additional image references.",
+            "If referenceAssetKeys is empty in edit mode, the route falls back to firstFrameAssetKey as the provider-side image reference.",
+            "No special prompt markers are required; describe the references in natural language if order matters.",
+          ];
     }
     if (model === "happy-horse-video-edit") {
       return [
