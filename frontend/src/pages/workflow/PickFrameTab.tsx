@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType, type PointerEvent, type RefObject } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ComponentType, type PointerEvent, type RefObject } from "react";
 
 import TaskProjectAssignmentCard from "../../components/tasks/TaskProjectAssignmentCard";
 import { HelpInfoButton, PendingButtonLabel, StatusNotice } from "../../components/layout/UiFeedback";
@@ -151,6 +151,18 @@ export type PickFrameTabCtx = {
   timelinePlaybackUrl: string;
   timelineVideoRef: RefObject<HTMLMediaElement | null>;
   sourceMediaKind?: "video" | "audio";
+  sourceReady: boolean;
+  sourceStatus: string;
+  sourceSelectionBusy: boolean;
+  sourceSelectionError: string | null;
+  currentSourcePreviewUrl?: string | null;
+  currentSourceWaveformUrl?: string | null;
+  currentSourceTitle?: string | null;
+  currentSourceSubtitle?: string | null;
+  canReplaceSourceMedia: boolean;
+  sourceReplacementBlockedReason?: string | null;
+  openSourcePicker: () => void;
+  uploadSourceFile: (file: File) => Promise<void>;
   sourceWaveformUrl?: string | null;
   frameCount: (task: TaskDetail | undefined) => number;
   task: TaskDetail | undefined;
@@ -216,6 +228,18 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
     assignProjectToTask,
     frameCount,
     sourceMediaKind = "video",
+    sourceReady,
+    sourceStatus,
+    sourceSelectionBusy,
+    sourceSelectionError,
+    currentSourcePreviewUrl,
+    currentSourceWaveformUrl,
+    currentSourceTitle,
+    currentSourceSubtitle,
+    canReplaceSourceMedia,
+    sourceReplacementBlockedReason,
+    openSourcePicker,
+    uploadSourceFile,
     sourceWaveformUrl,
     task,
     fpsValue,
@@ -245,6 +269,7 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
   const sourceWidth = Number(task?.video?.editSource?.width ?? 0);
   const sourceHeight = Number(task?.video?.editSource?.height ?? 0);
   const isAudioSource = sourceMediaKind === "audio";
+  const [isUploadingSource, setIsUploadingSource] = useState(false);
   const canOpenCropTool = !isAudioSource && Boolean(selectedSegmentId || selectedRange);
   const [isWorkingRangeModalOpen, setIsWorkingRangeModalOpen] = useState(false);
 
@@ -578,6 +603,21 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
     };
   }, [cropDraft, modalLayoutTick, sourceHeight, sourceWidth, isCropModalOpen]);
 
+  async function handleSourceFileChange(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0] ?? null;
+    event.target.value = "";
+    if (!file) return;
+    setUiError(null);
+    setIsUploadingSource(true);
+    try {
+      await uploadSourceFile(file);
+    } catch (error) {
+      setUiError(error instanceof Error ? error.message : "Failed to upload source media");
+    } finally {
+      setIsUploadingSource(false);
+    }
+  }
+
   return (
     <div className="space-y-4">
       {uiError ? (
@@ -591,6 +631,75 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
         isSaving={isUpdatingProject}
         onAssignProject={assignProjectToTask}
       />
+      <div className="rounded-2xl border border-ink/10 bg-card p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p className="text-sm font-semibold text-ink">{isAudioSource ? "Select Source Audio" : "Select Source Video"}</p>
+            <p className="text-xs text-ink/60">
+              {isAudioSource
+                ? "Choose the core audio asset for this task before working on ranges, references, or generation."
+                : "Choose the core video asset for this task before working on ranges, frames, references, or generation."}
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50">
+              <input
+                type="file"
+                accept={isAudioSource ? "audio/*" : "video/*"}
+                className="hidden"
+                disabled={sourceSelectionBusy || isUploadingSource || !canReplaceSourceMedia}
+                onChange={(event) => void handleSourceFileChange(event)}
+              />
+              {sourceSelectionBusy || isUploadingSource ? "Uploading..." : isAudioSource ? "Upload audio" : "Upload video"}
+            </label>
+            <button
+              type="button"
+              className="rounded-md border border-ink/20 bg-white px-4 py-2 text-sm font-medium text-ink disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={sourceSelectionBusy || isUploadingSource || !canReplaceSourceMedia}
+              onClick={openSourcePicker}
+            >
+              Choose from library
+            </button>
+          </div>
+        </div>
+        {currentSourcePreviewUrl || currentSourceWaveformUrl ? (
+          <div className="mt-3 flex flex-wrap items-start gap-3 rounded-xl border border-ink/10 bg-white p-3">
+            <div className="flex h-24 w-40 items-center justify-center overflow-hidden rounded-lg border border-ink/10 bg-bg">
+              {isAudioSource ? (
+                currentSourceWaveformUrl ? (
+                  <img src={currentSourceWaveformUrl} alt={currentSourceTitle ?? "Source audio"} className="h-full w-full object-contain" />
+                ) : (
+                  <div className="text-xs text-ink/45">Audio</div>
+                )
+              ) : currentSourcePreviewUrl ? (
+                <video src={currentSourcePreviewUrl} className="h-full w-full object-cover" muted playsInline />
+              ) : (
+                <div className="text-xs text-ink/45">Video</div>
+              )}
+            </div>
+            <div className="min-w-[12rem] flex-1 space-y-1">
+              <p className="text-sm font-medium text-ink">{currentSourceTitle ?? (isAudioSource ? "Source audio selected" : "Source video selected")}</p>
+              {currentSourceSubtitle ? <p className="text-xs text-ink/60">{currentSourceSubtitle}</p> : null}
+              <p className="text-xs text-ink/60">Status: {sourceStatus}</p>
+              {isAudioSource && currentSourcePreviewUrl ? <audio src={currentSourcePreviewUrl} controls className="mt-2 w-full" /> : null}
+            </div>
+          </div>
+        ) : (
+          <div className="mt-3 rounded-xl border border-dashed border-ink/20 bg-bg px-3 py-4 text-sm text-ink/60">
+            No source {isAudioSource ? "audio" : "video"} selected yet.
+          </div>
+        )}
+        {!canReplaceSourceMedia && sourceReplacementBlockedReason ? (
+          <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">{sourceReplacementBlockedReason}</div>
+        ) : null}
+        {sourceSelectionError ? <div className="mt-3 text-xs text-red-700">{sourceSelectionError}</div> : null}
+      </div>
+      {!sourceReady ? (
+        <div className="rounded-md border border-dashed border-ink/20 bg-bg px-3 py-3 text-sm text-ink/60">
+          Complete source selection and ingest before using the rest of this workflow.
+        </div>
+      ) : null}
+      <div className={!sourceReady ? "pointer-events-none opacity-50" : undefined}>
       <div className="rounded-2xl border border-ink/10 bg-card p-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="flex items-start gap-2">
@@ -796,11 +905,12 @@ export default function PickFrameTab({ ctx }: PickFrameTabProps) {
         <button
           type="button"
           className="rounded-md bg-teal-600 px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
-          disabled={!selectedSegmentId && !defaultVideoSegment}
+          disabled={!sourceReady || (!selectedSegmentId && !defaultVideoSegment)}
           onClick={onContinueToEditFrames}
         >
           Next
         </button>
+      </div>
       </div>
 
       {isWorkingRangeModalOpen ? (

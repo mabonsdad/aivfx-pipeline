@@ -80,6 +80,12 @@ export type GenerateTabCtx = {
   generationPromptPlaceholder: string;
   generationPromptError: string | null;
   missingRouteInputsMessage: string | null;
+  autoModelTestSupported: boolean;
+  autoModelTestModels: Array<{ id: string; label: string; disabledReason: string | null }>;
+  autoModelTestWarning: string | null;
+  autoModelTestError: string | null;
+  runAutoModelTest: (selectedModelIds: string[]) => Promise<void>;
+  isAutoModelTestRunning: boolean;
   generationInputNote: string;
   generationHelp: { title: string; lines: string[] };
   selectedStartSourceLabel: string;
@@ -273,6 +279,12 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
     generationPromptPlaceholder,
     generationPromptError,
     missingRouteInputsMessage,
+    autoModelTestSupported,
+    autoModelTestModels,
+    autoModelTestWarning,
+    autoModelTestError,
+    runAutoModelTest,
+    isAutoModelTestRunning,
     generationHelp,
     selectedSegmentOverLimit,
     selectedSegmentLimitMessage,
@@ -327,6 +339,8 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
   const [promptWizardAdvice, setPromptWizardAdvice] = useState<string | null>(null);
   const [promptWizardWarnings, setPromptWizardWarnings] = useState<string[]>([]);
   const [promptWizardError, setPromptWizardError] = useState<string | null>(null);
+  const [isMultiModelModalOpen, setIsMultiModelModalOpen] = useState(false);
+  const [selectedAutoModelIds, setSelectedAutoModelIds] = useState<string[]>([]);
   const [cancellingPendingJobIds, setCancellingPendingJobIds] = useState<Record<string, boolean>>({});
   const [extendModal, setExtendModal] = useState<ExtendModalState | null>(null);
   const [extendAlignmentFrame, setExtendAlignmentFrame] = useState("");
@@ -361,6 +375,24 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
   const visibleSegmentGenerations = selectedSegmentGenerations.slice(0, visibleGenerationSlots);
   const sourceFrameCount = task?.video?.editSource?.frameCount ?? 0;
   const sourceFps = task?.video?.editSource?.fps?.den ? task.video.editSource.fps.num / task.video.editSource.fps.den : 30;
+  const enabledAutoModelIds = useMemo(
+    () => autoModelTestModels.filter((model) => !model.disabledReason).map((model) => model.id),
+    [autoModelTestModels],
+  );
+  const selectedAutoModelIdsSet = useMemo(() => new Set(selectedAutoModelIds), [selectedAutoModelIds]);
+
+  useEffect(() => {
+    if (!autoModelTestSupported) {
+      setIsMultiModelModalOpen(false);
+      setSelectedAutoModelIds([]);
+      return;
+    }
+    setSelectedAutoModelIds((previous) => {
+      const valid = previous.filter((id) => enabledAutoModelIds.includes(id));
+      if (valid.length) return valid;
+      return enabledAutoModelIds;
+    });
+  }, [autoModelTestSupported, enabledAutoModelIds]);
 
   useEffect(() => {
     if (!latestChunkedRun) return;
@@ -1262,17 +1294,39 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
         </div>
       ) : null}
 
-      <button
-        className="rounded-md bg-accent px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-50"
-        disabled={!canStartSinglePassGeneration || Boolean(generateSegmentMutation.isPending)}
-        onClick={() => generateSegmentMutation.mutate()}
-      >
-        <PendingButtonLabel
-          isPending={Boolean(generateSegmentMutation.isPending)}
-          idle="Generate Output"
-          pending="Starting generation..."
-        />
-      </button>
+      <div className="flex flex-wrap items-center gap-3">
+        <button
+          className="rounded-md bg-accent px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-50"
+          disabled={!canStartSinglePassGeneration || Boolean(generateSegmentMutation.isPending)}
+          onClick={() => generateSegmentMutation.mutate()}
+        >
+          <PendingButtonLabel
+            isPending={Boolean(generateSegmentMutation.isPending)}
+            idle="Generate Output"
+            pending="Starting generation..."
+          />
+        </button>
+        {autoModelTestSupported ? (
+          <button
+            type="button"
+            className="rounded-md border border-accent bg-white px-4 py-2 text-sm text-accent disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={isAutoModelTestRunning}
+            onClick={() => setIsMultiModelModalOpen(true)}
+          >
+            <PendingButtonLabel
+              isPending={isAutoModelTestRunning}
+              idle="Multi model generate"
+              pending="Running multi model..."
+            />
+          </button>
+        ) : null}
+      </div>
+
+      {autoModelTestError ? (
+        <StatusNotice variant="error">
+          <p className="text-xs">{autoModelTestError}</p>
+        </StatusNotice>
+      ) : null}
 
       <div className="space-y-2 rounded-lg border border-ink/10 p-3">
         <div className="flex flex-wrap items-start justify-between gap-2">
@@ -1483,6 +1537,85 @@ export default function GenerateTab({ ctx }: GenerateTabProps) {
             }
           )}
         </div>
+        {isMultiModelModalOpen ? (
+          <div className="fixed inset-0 z-[78] flex items-center justify-center bg-black/60 p-4" onClick={() => setIsMultiModelModalOpen(false)}>
+            <div className="w-full max-w-2xl rounded-2xl bg-white shadow-xl" onClick={(event) => event.stopPropagation()}>
+              <div className="flex items-center justify-between border-b border-ink/10 px-5 py-4">
+                <div>
+                  <p className="text-lg font-semibold text-ink">Multi model generate</p>
+                  <p className="text-sm text-ink/65">
+                    Select which eligible models to run sequentially with the current working range, references, and prompt.
+                  </p>
+                </div>
+                <button type="button" className="rounded-md border border-ink/20 px-3 py-2 text-sm" onClick={() => setIsMultiModelModalOpen(false)}>
+                  Cancel
+                </button>
+              </div>
+              <div className="space-y-4 px-5 py-4">
+                <div className="space-y-2">
+                  {autoModelTestModels.map((model) => (
+                    <label
+                      key={model.id}
+                      className={`flex items-start gap-3 rounded-lg border px-3 py-3 ${
+                        model.disabledReason ? "border-ink/10 bg-bg/60 text-ink/45" : "border-ink/15 bg-white text-ink"
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        className="mt-1 h-4 w-4 rounded border border-ink/25"
+                        checked={selectedAutoModelIdsSet.has(model.id)}
+                        disabled={Boolean(model.disabledReason) || isAutoModelTestRunning}
+                        onChange={(event) => {
+                          setSelectedAutoModelIds((previous) =>
+                            event.target.checked
+                              ? previous.includes(model.id)
+                                ? previous
+                                : [...previous, model.id]
+                              : previous.filter((value) => value !== model.id),
+                          );
+                        }}
+                      />
+                      <span className="min-w-0 flex-1">
+                        <span className="block text-sm font-medium">{model.label}</span>
+                        {model.disabledReason ? <span className="mt-1 block text-xs text-red-700">{model.disabledReason}</span> : null}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+                {autoModelTestWarning ? (
+                  <StatusNotice variant="warning">
+                    <p className="text-xs">{autoModelTestWarning}</p>
+                  </StatusNotice>
+                ) : null}
+                {autoModelTestError ? (
+                  <StatusNotice variant="error">
+                    <p className="text-xs">{autoModelTestError}</p>
+                  </StatusNotice>
+                ) : null}
+                <div className="flex items-center justify-end gap-2 border-t border-ink/10 pt-4">
+                  <button type="button" className="rounded-md border border-ink/20 px-4 py-2 text-sm" onClick={() => setIsMultiModelModalOpen(false)}>
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded-md bg-accent px-4 py-2 text-sm text-white disabled:cursor-not-allowed disabled:opacity-50"
+                    disabled={Boolean(autoModelTestWarning) || !selectedAutoModelIds.length || isAutoModelTestRunning}
+                    onClick={() => {
+                      void runAutoModelTest(selectedAutoModelIds);
+                      setIsMultiModelModalOpen(false);
+                    }}
+                  >
+                    <PendingButtonLabel
+                      isPending={isAutoModelTestRunning}
+                      idle="Generate all"
+                      pending="Running multi model..."
+                    />
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : null}
         {extendModal ? (
           <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/60 p-4">
             <div className="w-full max-w-3xl rounded-2xl bg-white shadow-xl">

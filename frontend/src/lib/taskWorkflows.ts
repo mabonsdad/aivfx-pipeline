@@ -227,3 +227,13 @@ export function workflowForSourceVideoMode(mode: GenerateInputMode | null | unde
 export function workflowForCharacterAnimateMode(mode: CharacterAnimateMode | null | undefined): TaskWorkflowId {
   return mode === "audio_driven" ? "character_animate_audio_workflow" : "character_animate_workflow";
 }
+
+export function workflowRequiresSourceMedia(value: string | null | undefined): boolean {
+  return isSourceVideoWorkflowId(value) || isCharacterAnimateWorkflowId(value);
+}
+
+export function workflowSourceMediaKind(value: string | null | undefined): "video" | "audio" | null {
+  if (isSourceVideoWorkflowId(value)) return "video";
+  if (!isCharacterAnimateWorkflowId(value)) return null;
+  return getFixedCharacterAnimateModeForWorkflow(value) === "audio_driven" ? "audio" : "video";
+}

@@ -241,6 +241,7 @@ def handle_task_segment_routes(
                 "selectedReferenceIds": list(req.selectedReferenceIds or []),
                 "audioReferenceId": req.audioReferenceId,
                 "preserveFrames": bool(req.preserveFrames),
+                "toolOrigin": req.toolOrigin,
             },
         )
         task.setdefault("segmentGenerations", {})[gen_id] = {
@@ -264,7 +265,7 @@ def handle_task_segment_routes(
             "origin": build_asset_origin(
                 workflow_id=str(task.get("workflowId") or "source_video_flow"),
                 step_origin="generate",
-                tool_origin="segment_generate",
+                tool_origin=req.toolOrigin or "segment_generate",
                 creation_mode=req.inputMode,
             ),
             "status": "queued",

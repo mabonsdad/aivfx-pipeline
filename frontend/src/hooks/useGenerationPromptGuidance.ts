@@ -63,7 +63,7 @@ function generationModelHelp(modelName: VideoModelId, modeValue: string, inputMo
               ? "Uses the working-range video plus up to 3 ordered reference images. Keep prompts simple and focus on the intended change."
               : "Uses the working-range video plus the selected edited start frame as a visual guide for the opening look.",
         inputMode === "start_video" || inputMode === "edit_video"
-          ? "Current Google API docs say uploaded-video editing is not available in the EEA, Switzerland, and the United Kingdom."
+          ? "Google currently blocks uploaded-video editing for users in the EEA, Switzerland, and the United Kingdom. Start/end and start-only Gemini Omni modes remain available because they do not upload task video."
           : "Google currently documents 3 to 10 second 720p outputs for this preview model.",
         "Prompting works best when you ask for one continuous shot, avoid scene cuts, and describe only the key motion or visual change.",
       ],

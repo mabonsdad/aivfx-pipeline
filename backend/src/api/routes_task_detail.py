@@ -63,6 +63,9 @@ def _ensure_previz_bootstrap(task: dict[str, Any], *, new_id_fn: Callable[[str],
     if "scenePrompt" not in previz:
         previz["scenePrompt"] = ""
         changed = True
+    if "description" not in task:
+        task["description"] = str(previz.get("scenePrompt") or "").strip()
+        changed = True
     if "sceneAspectRatio" not in previz:
         previz["sceneAspectRatio"] = None
         changed = True

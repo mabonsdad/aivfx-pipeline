@@ -78,6 +78,7 @@ export type AdminUsageTotals = {
 export type TaskSummary = {
   taskId: string;
   name: string;
+  description?: string | null;
   workflowId: TaskWorkflowId;
   projectId?: string | null;
   projectName?: string | null;
@@ -836,6 +837,7 @@ export type TaskDetail = {
   taskId: string;
   userId: string;
   name: string;
+  description?: string | null;
   workflowId: TaskWorkflowId;
   projectId?: string | null;
   projectName?: string | null;
@@ -911,6 +913,8 @@ export type TaskDetail = {
   };
   sourceMedia?: {
     kind: "video" | "audio";
+    linkedSourceTaskId?: string | null;
+    linkedSourceUserId?: string | null;
     original?: {
       s3Key: string;
       filename: string;

@@ -20,6 +20,9 @@ def _ensure_previz_bootstrap(task: dict[str, Any], *, new_id_fn: Callable[[str],
     if "scenePrompt" not in previz:
         previz["scenePrompt"] = ""
         changed = True
+    if "description" not in task:
+        task["description"] = str(previz.get("scenePrompt") or "").strip()
+        changed = True
     if "sceneAspectRatio" not in previz:
         previz["sceneAspectRatio"] = None
         changed = True
@@ -121,7 +124,7 @@ def handle_tasks_root_routes(
         file_prefix = build_file_prefix_fn(unique_name, task_id, existing_prefixes)
         now = now_iso_fn()
         previz = {
-            "scenePrompt": (req.scenePrompt or "").strip(),
+            "scenePrompt": str(req.description or req.scenePrompt or "").strip(),
             "sceneAspectRatio": None,
             "selectedReferenceIds": [],
             "frameReferenceIds": [],
@@ -133,6 +136,7 @@ def handle_tasks_root_routes(
             "userId": user_id,
             "name": unique_name,
             "workflowId": req.workflowId,
+            "description": str(req.description or req.scenePrompt or "").strip(),
             "projectId": None,
             "projectName": None,
             "filePrefix": file_prefix,

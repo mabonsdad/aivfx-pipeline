@@ -653,6 +653,7 @@ def _task_summary(task: dict[str, Any]) -> dict[str, Any]:
     return {
         "taskId": task["taskId"],
         "name": task["name"],
+        "description": str(task.get("description") or "").strip() or None,
         "workflowId": task.get("workflowId", DEFAULT_TASK_WORKFLOW_ID),
         "projectId": task.get("projectId"),
         "projectName": task.get("projectName"),
@@ -1776,6 +1777,8 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             parts=parts,
             event=event,
             origin=origin,
+            user_id=user_id,
+            claims=claims,
             task=task,
             store=store,
             asset_store=asset_store,
@@ -1784,11 +1787,13 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
             error_response_fn=error_response,
             new_id_fn=new_id,
             now_iso_fn=now_iso,
+            queue_job_fn=lambda **kwargs: _queue_job(queue=queue, **kwargs),
             max_upload_bytes=settings.max_upload_bytes,
             presigned_get_ttl_seconds=PRESIGNED_GET_TTL_SECONDS,
             logger=logger,
             asset_paths_for_task_fn=_asset_paths_for_task,
             cleanup_custom_reports_fn=_cleanup_custom_reports,
+            is_admin_claims_fn=is_admin_claims,
         )
         if task_asset_response is not None:
             return task_asset_response

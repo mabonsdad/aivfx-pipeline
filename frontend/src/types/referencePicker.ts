@@ -55,3 +55,22 @@ export type ReferencePickerVideoItem = {
   width?: number | null;
   height?: number | null;
 };
+
+export type SourceMediaPickerScope = "task" | "project" | "all_tasks";
+
+export type SourceMediaPickerItem = {
+  taskId: string;
+  title: string;
+  subtitle: string;
+  createdAt: string;
+  mediaKind: "video" | "audio";
+  previewUrl: string;
+  thumbnailUrl?: string;
+  waveformUrl?: string;
+  durationSec?: number | null;
+  width?: number | null;
+  height?: number | null;
+  isCurrentTaskAsset: boolean;
+  isProjectAsset: boolean;
+  sourceLabel: "uploaded";
+};

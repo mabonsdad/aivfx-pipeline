@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import time
 import base64
+from copy import deepcopy
 from datetime import datetime, timezone
 from fractions import Fraction
 from io import BytesIO
@@ -2088,6 +2089,55 @@ def _handle_ingest(
     store.save_task(task)
     _job_progress(job, store, 100, "complete", "Ingest completed")
     job["resultRefs"] = {"taskId": task["taskId"], "manifestKey": manifest_key}
+    store.save_job(job)
+    return job
+
+
+def _handle_bind_source_media(*, job: dict[str, Any], store: S3JsonStore, task: dict[str, Any], settings: Any) -> dict[str, Any]:
+    payload = job.get("payload") or {}
+    source_task_id = str(payload.get("sourceTaskId") or "").strip()
+    if not source_task_id:
+        raise RuntimeError("Source task ID is required")
+
+    _job_progress(job, store, 15, "running", "Loading reusable source media")
+    source_task = store.load_task_any(source_task_id)
+    if not isinstance(source_task, dict) or source_task.get("deletedAt"):
+        raise RuntimeError("Source task not found")
+
+    source_media = source_task.get("sourceMedia") if isinstance(source_task.get("sourceMedia"), dict) else {}
+    if not source_media:
+        raise RuntimeError("Source task has no reusable source media")
+    if not source_media.get("original") or not source_media.get("editSource") or not source_media.get("previewSource"):
+        raise RuntimeError("Source task source media is not ready")
+
+    source_kind = str(source_media.get("kind") or source_task.get("video", {}).get("editSource", {}).get("mediaType") or "video")
+    expected_kind = "audio" if str(task.get("workflowId") or "") == "character_animate_audio_workflow" else "video"
+    if source_kind != expected_kind:
+        raise RuntimeError(f"Source task must provide a {expected_kind} source")
+
+    _job_progress(job, store, 55, "running", "Linking source media metadata")
+    task["sourceMedia"] = deepcopy(source_media)
+    task["sourceMedia"]["linkedSourceTaskId"] = source_task_id
+    task["sourceMedia"]["linkedSourceUserId"] = str(source_task.get("userId") or "").strip() or None
+
+    task.setdefault("video", {})
+    source_video = source_task.get("video") if isinstance(source_task.get("video"), dict) else {}
+    task["video"]["original"] = deepcopy(source_video.get("original") or source_media.get("original"))
+    task["video"]["editSource"] = deepcopy(source_video.get("editSource") or source_media.get("editSource"))
+    task["video"]["previewSource"] = deepcopy(source_video.get("previewSource") or source_media.get("previewSource"))
+
+    task["status"] = "ready"
+    task.setdefault("history", []).append(
+        {
+            "at": now_iso(),
+            "event": "task.source_media.bound",
+            "jobId": job["jobId"],
+            "sourceTaskId": source_task_id,
+        }
+    )
+    store.save_task(task)
+    _job_progress(job, store, 100, "complete", "Reusable source media linked")
+    job["resultRefs"] = {"taskId": task["taskId"], "sourceTaskId": source_task_id}
     store.save_job(job)
     return job
 
@@ -13325,6 +13375,7 @@ def process_job_record(record: dict[str, Any], *, settings: Any) -> None:
         _raise_if_cancel_requested(job, store)
         handlers = build_job_handlers(
             handle_ingest_fn=_handle_ingest,
+            handle_bind_source_media_fn=_handle_bind_source_media,
             handle_full_edit_fn=_handle_full_edit,
             handle_patch_edit_fn=_handle_patch_edit,
             handle_api_image_edit_full_fn=_handle_api_image_edit_full,

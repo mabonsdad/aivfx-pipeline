@@ -168,7 +168,7 @@ const VIDEO_MODELS: readonly VideoModelOption[] = [
     apiModel: "gemini-omni-flash-preview",
     label: "Gemini Omni Flash (Start frame + video)",
     mode: "gemini_omni_start_video",
-    note: "Experimental short source-video edit route. Uses source video plus the first-frame image as an opening guide. Current Google docs say uploaded-video editing is unavailable in the EEA, Switzerland, and the United Kingdom. Keep ranges to 3 seconds or shorter.",
+    note: "Experimental short source-video edit route. Uses source video plus the first-frame image as an opening guide. Google currently blocks uploaded-video editing for users in the EEA, Switzerland, and the United Kingdom. Keep ranges to 3 seconds or shorter.",
   },
   {
     value: "gemini-omni-flash-preview:start_end",
@@ -192,7 +192,7 @@ const VIDEO_MODELS: readonly VideoModelOption[] = [
     apiModel: "gemini-omni-flash-preview",
     label: "Gemini Omni Flash (Video + text + refs)",
     mode: "gemini_omni_edit_video",
-    note: "Experimental short source-video edit route with up to 3 ordered image references. Current Google docs say uploaded-video editing is unavailable in the EEA, Switzerland, and the United Kingdom. Keep ranges to 3 seconds or shorter.",
+    note: "Experimental short source-video edit route with up to 3 ordered image references. Google currently blocks uploaded-video editing for users in the EEA, Switzerland, and the United Kingdom. Keep ranges to 3 seconds or shorter.",
   },
   {
     value: "ray-3.2-720p",

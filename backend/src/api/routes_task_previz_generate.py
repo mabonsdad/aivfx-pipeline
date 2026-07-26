@@ -92,7 +92,7 @@ def handle_task_previz_generate_routes(
                 "sceneAspectRatio": scene_aspect_ratio,
                 "selectedFrameIds": selected_frame_ids,
                 "durationSec": duration_sec,
-                "scenePrompt": str(previz.get("scenePrompt") or "").strip() or None,
+                "scenePrompt": str(task.get("description") or previz.get("scenePrompt") or "").strip() or None,
             },
         },
     )
@@ -117,7 +117,7 @@ def handle_task_previz_generate_routes(
             "selectedFrameIds": selected_frame_ids,
             "selectedFrameCount": len(selected_frame_ids),
             "requestedDurationSec": duration_sec,
-            "scenePrompt": str(previz.get("scenePrompt") or "").strip() or None,
+            "scenePrompt": str(task.get("description") or previz.get("scenePrompt") or "").strip() or None,
         },
         "origin": build_asset_origin(
             workflow_id="simple_generation_workflow",
