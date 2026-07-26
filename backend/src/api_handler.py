@@ -1630,6 +1630,9 @@ def _route(event: dict[str, Any]) -> dict[str, Any]:
         ),
         run_canvas_chat_fn=run_canvas_chat_engine,
         queue_job_fn=lambda **kwargs: _queue_job(queue=queue, **kwargs),
+        # Decorate S3 asset keys in the canvas state blob into presigned *Url siblings on read,
+        # so stored reference/library/output images render in the canvas (same helper task-detail uses).
+        decorate_s3_keys_fn=lambda obj: _decorate_embedded_s3_keys(obj, asset_store, decorate_plain_key=True),
         get_openai_pricing_entry_fn=lambda model: resolve_openai_prompt_wizard_pricing_entry(load_pricing_admin_config(store), model),
         get_openai_pricing_rates_fn=lambda model: resolve_openai_prompt_wizard_rates(load_pricing_admin_config(store), model),
         improve_lookdev_prompt_fn=improve_openai_lookdev_prompt,
