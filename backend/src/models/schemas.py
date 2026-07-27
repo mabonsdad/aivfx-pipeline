@@ -43,6 +43,7 @@ class TaskCreateRequest(BaseModel):
         "simple_generation_workflow",
         "canvas_workflow",
     ] = "source_video_flow"
+    description: str | None = Field(default=None, max_length=4000)
     scenePrompt: str | None = Field(default=None, max_length=4000)
 
 
@@ -76,6 +77,10 @@ class UploadVideoRequest(BaseModel):
     filename: str = Field(min_length=1, max_length=255)
     contentType: str = Field(default="video/mp4")
     sizeBytes: int = Field(gt=0)
+
+
+class SourceMediaBindRequest(BaseModel):
+    sourceTaskId: str = Field(min_length=1, max_length=120)
 
 
 class DocumentUploadInitRequest(BaseModel):
@@ -259,6 +264,7 @@ class SegmentGenerateRequest(BaseModel):
     selectedReferenceIds: list[str] = Field(default_factory=list, max_length=4)
     audioReferenceId: str | None = Field(default=None, max_length=120)
     preserveFrames: bool = True
+    toolOrigin: str | None = Field(default=None, min_length=1, max_length=80)
 
     @field_validator("lumaModel")
     @classmethod
@@ -323,7 +329,7 @@ class CharacterAnimateGenerateRequest(BaseModel):
 
 class SegmentPromptWizardRequest(BaseModel):
     selected_model: str = Field(min_length=1, max_length=120)
-    provider: Literal["Luma", "fal.ai", "Runway", "Replicate", "Runware"]
+    provider: Literal["Luma", "fal.ai", "Runway", "Replicate", "Runware", "Google"]
     provider_model: str = Field(min_length=1, max_length=160)
     endpoint_used: str | None = Field(default=None, max_length=300)
     mode: Literal["start_video", "start_end", "edit_video"]

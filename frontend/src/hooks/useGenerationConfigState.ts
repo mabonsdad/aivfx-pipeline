@@ -31,6 +31,7 @@ export const GENERATION_MODELS_BY_INPUT: Record<GenerateInputMode, GenerationMod
   start_video: [
     { value: "ray-3.2-720p", label: "Luma Ray 3.2 720p" },
     { value: "ray-3.2-1080p", label: "Luma Ray 3.2 1080p" },
+    { value: "gemini-omni-flash-preview", label: "Gemini Omni Flash" },
     { value: "happy-horse-video-edit", label: "Happy Horse 1.0 Video Edit" },
     { value: "runway-gen4-aleph", label: "Runway Aleph 2.0" },
     { value: "kling-o1", label: "Kling O1 Edit" },
@@ -39,6 +40,7 @@ export const GENERATION_MODELS_BY_INPUT: Record<GenerateInputMode, GenerationMod
     { value: "wan2.7-videoedit", label: "Wan 2.7 VideoEdit" },
   ],
   start_end: [
+    { value: "gemini-omni-flash-preview", label: "Gemini Omni Flash" },
     { value: "kling-2.6", label: "Kling 2.6" },
     { value: "ltx-2.3-pro", label: "LTX 2.3 Pro" },
     { value: "wan2.7-i2v", label: "Wan 2.7 Image to Video" },
@@ -46,6 +48,7 @@ export const GENERATION_MODELS_BY_INPUT: Record<GenerateInputMode, GenerationMod
     { value: "veo-3.1-fast", label: "Veo 3.1 Fast" },
   ],
   start_only: [
+    { value: "gemini-omni-flash-preview", label: "Gemini Omni Flash" },
     { value: "wan2.2-a14b", label: "Wan 2.2 A14B" },
     { value: "happy-horse-image-to-video", label: "Happy Horse 1.0 Image to Video" },
     { value: "wan2.7-i2v", label: "Wan 2.7 Image to Video" },
@@ -56,6 +59,7 @@ export const GENERATION_MODELS_BY_INPUT: Record<GenerateInputMode, GenerationMod
     { value: "kling-2.6", label: "Kling 2.6" },
   ],
   edit_video: [
+    { value: "gemini-omni-flash-preview", label: "Gemini Omni Flash" },
     { value: "seedance-2.0-reference-to-video", label: "Seedance 2.0 Reference to Video" },
     { value: "happy-horse-video-edit", label: "Happy Horse 1.0 Video Edit" },
     { value: "kling-v3-omni-video", label: "Kling v3 Omni Video" },

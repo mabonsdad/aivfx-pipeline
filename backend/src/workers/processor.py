@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import time
 import base64
+from copy import deepcopy
 from datetime import datetime, timezone
 from fractions import Fraction
 from io import BytesIO
@@ -63,8 +64,10 @@ from src.generation import (
     resolve_video_model_provider_fps,
 )
 from src.integrations.gemini import (
+    create_omni_video_interaction,
     generate_image_edit as generate_gemini_image_edit,
     generate_image_from_references as generate_gemini_image_from_references,
+    wait_for_gemini_video_result,
 )
 from src.integrations.fal import (
     get_queue_result as get_fal_queue_result,
@@ -277,6 +280,8 @@ REPLICATE_VIDEO_MAX_BYTES = 200 * 1024 * 1024
 MAX_PROVIDER_IMAGE_BYTES = 10 * 1024 * 1024
 WAN27_DATA_URL_MAX_BYTES = 6_800_000
 SEEDANCE_REFERENCE_VIDEO_MAX_BYTES = 49_000_000
+GEMINI_OMNI_REFERENCE_VIDEO_MAX_BYTES = 8_000_000
+GEMINI_OMNI_REFERENCE_VIDEO_MAX_SECONDS = 3
 KLING_SUPPORTED_DURATIONS = (5, 10)
 LTX23_SUPPORTED_DURATIONS = (6, 8, 10)
 LTX23_SUPPORTED_FPS = (24, 25, 48, 50)
@@ -330,6 +335,82 @@ def _raise_if_cancel_requested(job: dict[str, Any], store: S3JsonStore) -> None:
     raise JobCancelledError(message)
 def _segment_generation_provider_name(model: str) -> str:
     return get_video_model_provider(model)
+
+
+def _is_gemini_omni_model(model_name: str | None) -> bool:
+    return str(model_name or "").strip() == "gemini-omni-flash-preview"
+
+
+def _is_gemini_omni_source_video_mode(requested_mode: str | None) -> bool:
+    return str(requested_mode or "").strip() in {"gemini_omni_start_video", "gemini_omni_edit_video"}
+
+
+def _gemini_omni_task_for_mode(requested_mode: str | None) -> str:
+    normalized = str(requested_mode or "").strip()
+    if normalized == "gemini_omni_start_only":
+        return "image_to_video"
+    if normalized == "gemini_omni_start_end":
+        return "reference_to_video"
+    return "edit"
+
+
+def _gemini_omni_aspect_ratio(width: int, height: int) -> str:
+    return "16:9" if width >= height else "9:16"
+
+
+def _gemini_omni_prompt(
+    *,
+    requested_mode: str,
+    prompt: str | None,
+    reference_count: int,
+    has_source_video: bool,
+    target_duration_sec: float | None,
+) -> str:
+    base_prompt = str(prompt or "").strip()
+    if not base_prompt:
+        raise RuntimeError("Gemini Omni Flash requires a prompt.")
+    duration_clause = (
+        f" Aim for a result around {int(round(target_duration_sec))} seconds long."
+        if target_duration_sec and target_duration_sec > 0
+        else ""
+    )
+
+    if requested_mode == "gemini_omni_start_only":
+        return (
+            "[# Sources <FIRST_FRAME>@Image1] "
+            f"{base_prompt} "
+            f"Use Image1 as the starting frame.{duration_clause} In a single continuous shot. No scene cuts."
+        ).strip()
+
+    if requested_mode == "gemini_omni_start_end":
+        return (
+            "[# Sources <FIRST_FRAME>@Image1] [# References <IMAGE_REF_0>@Image2] "
+            f"{base_prompt} "
+            "Use Image1 as the starting frame. Use Image2 as a reference for where the shot should develop by the end; "
+            f"it is a visual target, not a guaranteed final frame match.{duration_clause} In a single continuous shot. No scene cuts."
+        ).strip()
+
+    reference_clause = ""
+    if reference_count > 0:
+        refs = " ".join(f"<IMAGE_REF_{index}>@Image{index + 1}" for index in range(reference_count))
+        reference_clause = f"[# References {refs}] "
+    elif not has_source_video:
+        reference_clause = "[# Sources <FIRST_FRAME>@Image1] "
+
+    if requested_mode == "gemini_omni_start_video":
+        return (
+            f"{reference_clause}{base_prompt} "
+            "Use the input video as the motion, timing, and camera baseline. "
+            "If a reference image is provided, use it to guide the opening-frame appearance and subject design. "
+            f"Keep everything else as consistent as possible unless explicitly changed.{duration_clause}"
+        ).strip()
+
+    return (
+        f"{reference_clause}{base_prompt} "
+        "Edit the input video while preserving motion continuity and composition unless explicitly changed. "
+        "If reference images are provided, use them as appearance and style guides rather than literal inserted stills. "
+        f"Keep everything else the same unless explicitly changed.{duration_clause}"
+    ).strip()
 
 
 RUNWARE_WAN22_ALLOWED_RESOLUTIONS: tuple[tuple[int, int], ...] = (
@@ -2008,6 +2089,55 @@ def _handle_ingest(
     store.save_task(task)
     _job_progress(job, store, 100, "complete", "Ingest completed")
     job["resultRefs"] = {"taskId": task["taskId"], "manifestKey": manifest_key}
+    store.save_job(job)
+    return job
+
+
+def _handle_bind_source_media(*, job: dict[str, Any], store: S3JsonStore, task: dict[str, Any], settings: Any) -> dict[str, Any]:
+    payload = job.get("payload") or {}
+    source_task_id = str(payload.get("sourceTaskId") or "").strip()
+    if not source_task_id:
+        raise RuntimeError("Source task ID is required")
+
+    _job_progress(job, store, 15, "running", "Loading reusable source media")
+    source_task = store.load_task_any(source_task_id)
+    if not isinstance(source_task, dict) or source_task.get("deletedAt"):
+        raise RuntimeError("Source task not found")
+
+    source_media = source_task.get("sourceMedia") if isinstance(source_task.get("sourceMedia"), dict) else {}
+    if not source_media:
+        raise RuntimeError("Source task has no reusable source media")
+    if not source_media.get("original") or not source_media.get("editSource") or not source_media.get("previewSource"):
+        raise RuntimeError("Source task source media is not ready")
+
+    source_kind = str(source_media.get("kind") or source_task.get("video", {}).get("editSource", {}).get("mediaType") or "video")
+    expected_kind = "audio" if str(task.get("workflowId") or "") == "character_animate_audio_workflow" else "video"
+    if source_kind != expected_kind:
+        raise RuntimeError(f"Source task must provide a {expected_kind} source")
+
+    _job_progress(job, store, 55, "running", "Linking source media metadata")
+    task["sourceMedia"] = deepcopy(source_media)
+    task["sourceMedia"]["linkedSourceTaskId"] = source_task_id
+    task["sourceMedia"]["linkedSourceUserId"] = str(source_task.get("userId") or "").strip() or None
+
+    task.setdefault("video", {})
+    source_video = source_task.get("video") if isinstance(source_task.get("video"), dict) else {}
+    task["video"]["original"] = deepcopy(source_video.get("original") or source_media.get("original"))
+    task["video"]["editSource"] = deepcopy(source_video.get("editSource") or source_media.get("editSource"))
+    task["video"]["previewSource"] = deepcopy(source_video.get("previewSource") or source_media.get("previewSource"))
+
+    task["status"] = "ready"
+    task.setdefault("history", []).append(
+        {
+            "at": now_iso(),
+            "event": "task.source_media.bound",
+            "jobId": job["jobId"],
+            "sourceTaskId": source_task_id,
+        }
+    )
+    store.save_task(task)
+    _job_progress(job, store, 100, "complete", "Reusable source media linked")
+    job["resultRefs"] = {"taskId": task["taskId"], "sourceTaskId": source_task_id}
     store.save_job(job)
     return job
 
@@ -3905,7 +4035,14 @@ def _handle_api_video_generate_reference(
     capability = get_video_model_capability(model_name)
     requested_mode = str(payload["mode"])
     luma_mode = requested_mode if requested_mode in LUMA_API_ALLOWED_MODES else "flex_1"
-    uses_end_keyframe = requested_mode in {"kling_start_end", "veo_start_end", "wan27_i2v_start_end", "ltx23_i2v_start_end"}
+    uses_end_keyframe = requested_mode in {
+        "kling_start_end",
+        "veo_start_end",
+        "wan27_i2v_start_end",
+        "ltx23_i2v_start_end",
+        "gemini_omni_start_end",
+    }
+    gemini_omni_uses_source_video = _is_gemini_omni_model(model_name) and _is_gemini_omni_source_video_mode(requested_mode)
     replicate_kling_mode = str(payload.get("replicateKlingMode") or "pro")
     replicate_kling_v3_mode = str(payload.get("replicateKlingV3Mode") or "pro")
     wan27_resolution = str(payload.get("wan27Resolution") or "720p")
@@ -4000,7 +4137,7 @@ def _handle_api_video_generate_reference(
         seedance_output_width: int | None = None
         seedance_output_height: int | None = None
 
-        if capability.source_video_profile == "kling_edit":
+        if capability.source_video_profile == "kling_edit" and source_video_key:
             replicate_aspect_ratio = _nearest_allowed_aspect_ratio(
                 src_width,
                 src_height,
@@ -4031,7 +4168,7 @@ def _handle_api_video_generate_reference(
             provider_input_duration_sec = round(float(ffprobe_video(str(local_provider_segment)).get("duration_sec") or segment_duration_sec), 3)
             media_key_for_provider = paths.request_artifact(request_id, "prepared", "provider_video", ".mp4")
             asset_store.put_bytes(media_key_for_provider, local_provider_segment.read_bytes(), content_type="video/mp4")
-        elif capability.source_video_profile == "seedance_reference":
+        elif capability.source_video_profile == "seedance_reference" and source_video_key:
             seedance_aspect_ratio = _nearest_allowed_aspect_ratio(
                 src_width,
                 src_height,
@@ -4060,7 +4197,34 @@ def _handle_api_video_generate_reference(
             provider_input_duration_sec = round(float(ffprobe_video(str(local_provider_segment)).get("duration_sec") or segment_duration_sec), 3)
             media_key_for_provider = paths.request_artifact(request_id, "prepared", "provider_video", ".mp4")
             asset_store.put_bytes(media_key_for_provider, local_provider_segment.read_bytes(), content_type="video/mp4")
-        elif capability.source_video_profile == "wan27_edit":
+        elif capability.source_video_profile == "gemini_omni_video" and gemini_omni_uses_source_video and source_video_key:
+            if segment_duration_sec > GEMINI_OMNI_REFERENCE_VIDEO_MAX_SECONDS + 1e-6:
+                raise RuntimeError(
+                    "Gemini Omni Flash currently supports source-video and edit-video flows only for working ranges up to 3 seconds."
+                )
+            gemini_provider_fps, provider_input_timing_policy = resolve_video_model_provider_fps(
+                model=model_name,
+                source_fps=fps,
+                preserve_frames=preserve_frames,
+            )
+            local_provider_segment = td_path / "provider_segment_gemini_omni.mp4"
+            _api_request_progress(job=job, store=store, request_record=request_record, progress=20, status="running", logs="Preparing short source clip for Gemini Omni Flash")
+            provider_media_width, provider_media_height, _ = _transcode_exact_with_size_limit(
+                input_path=str(source_video_path),
+                output_path=str(local_provider_segment),
+                fps=gemini_provider_fps,
+                source_fps=fps,
+                preserve_frame_count=preserve_frames,
+                target_width=1280 if src_width >= src_height else 720,
+                target_height=720 if src_width >= src_height else 1280,
+                resize_mode="cover",
+                max_bytes=GEMINI_OMNI_REFERENCE_VIDEO_MAX_BYTES,
+            )
+            provider_media_fps = gemini_provider_fps
+            provider_input_duration_sec = round(float(ffprobe_video(str(local_provider_segment)).get("duration_sec") or segment_duration_sec), 3)
+            media_key_for_provider = paths.request_artifact(request_id, "prepared", "provider_video", ".mp4")
+            asset_store.put_bytes(media_key_for_provider, local_provider_segment.read_bytes(), content_type="video/mp4")
+        elif capability.source_video_profile == "wan27_edit" and source_video_key:
             wan_edge = 1080 if wan27_resolution == "1080p" else 720
             wan27_aspect_ratio = _nearest_allowed_aspect_ratio(
                 src_width,
@@ -4097,7 +4261,7 @@ def _handle_api_video_generate_reference(
             wan27_video_transport = "data_url"
             media_key_for_provider = paths.request_artifact(request_id, "prepared", "provider_video", ".mp4")
             asset_store.put_bytes(media_key_for_provider, local_provider_segment.read_bytes(), content_type="video/mp4")
-        elif source_size > FULL_VIDEO_MAX_BYTES:
+        elif source_video_key and source_size > FULL_VIDEO_MAX_BYTES:
             local_provider_segment = td_path / "provider_segment_luma.mp4"
             _api_request_progress(job=job, store=store, request_record=request_record, progress=20, status="running", logs="Optimizing source video to provider size limits")
             provider_media_width, provider_media_height, _ = _transcode_with_size_limit(
@@ -4269,6 +4433,7 @@ def _handle_api_video_generate_reference(
 
         used_provider_model: str | None = None
         provider_duration_sec: float | None = None
+        gemini_output_bytes: bytes | None = None
         if model_name == "runway-gen4.5":
             runway_key = secrets["RUNWAY_API_KEY"]
             runway_duration = 5 if segment_duration_sec <= 7.5 else 10
@@ -4317,6 +4482,72 @@ def _handle_api_video_generate_reference(
             result = _wait_runway_complete(runway_key, generation_id)
             out_url = _parse_runway_output_url(result)
             used_provider_model = "aleph2"
+        elif model_name == "gemini-omni-flash-preview":
+            gemini_key = str(secrets.get("GEMINI_API_KEY") or "").strip()
+            if not gemini_key:
+                raise RuntimeError("Gemini Omni Flash requires GEMINI_API_KEY")
+            if gemini_omni_uses_source_video and not media_key_for_provider:
+                raise RuntimeError("Gemini Omni Flash source-video mode requires a prepared source video")
+            gemini_reference_images: list[tuple[bytes, str]] = []
+            if requested_mode == "gemini_omni_start_only":
+                gemini_reference_images.append((asset_store.read_bytes(first_frame_input_key), first_frame_content_type or "image/png"))
+            elif requested_mode == "gemini_omni_start_end":
+                gemini_reference_images.append((asset_store.read_bytes(first_frame_input_key), first_frame_content_type or "image/png"))
+                if not last_frame_input_key:
+                    raise RuntimeError("Gemini Omni Flash start/end mode requires a prepared end frame")
+                gemini_reference_images.append((asset_store.read_bytes(last_frame_input_key), last_frame_content_type or "image/png"))
+            elif requested_mode == "gemini_omni_start_video":
+                gemini_reference_images.append((asset_store.read_bytes(first_frame_input_key), first_frame_content_type or "image/png"))
+            elif reference_asset_keys:
+                gemini_reference_images.extend(
+                    (asset_store.read_bytes(key), _reference_content_type_from_key(key))
+                    for key in reference_asset_keys[:3]
+                )
+            else:
+                gemini_reference_images.append((asset_store.read_bytes(first_frame_input_key), first_frame_content_type or "image/png"))
+
+            gemini_prompt = _gemini_omni_prompt(
+                requested_mode=requested_mode,
+                prompt=payload.get("prompt"),
+                reference_count=max(0, len(gemini_reference_images) - (1 if requested_mode == "gemini_omni_start_end" else 0)),
+                has_source_video=gemini_omni_uses_source_video,
+                target_duration_sec=segment_duration_sec,
+            )
+            gemini_content: list[dict[str, Any]] = []
+            if gemini_omni_uses_source_video:
+                gemini_content.append(
+                    {
+                        "type": "video",
+                        "mime_type": "video/mp4",
+                        "data": base64.b64encode(asset_store.read_bytes(media_key_for_provider)).decode("utf-8"),
+                    }
+                )
+            for image_bytes, mime_type in gemini_reference_images:
+                gemini_content.append(
+                    {
+                        "type": "image",
+                        "mime_type": mime_type,
+                        "data": base64.b64encode(image_bytes).decode("utf-8"),
+                    }
+                )
+            gemini_content.append({"type": "text", "text": gemini_prompt})
+            gemini_input: str | list[dict[str, Any]]
+            if gemini_omni_uses_source_video:
+                gemini_input = [{"type": "user_input", "content": gemini_content}]
+            else:
+                gemini_input = gemini_content
+            provider_duration_sec = round(segment_duration_sec, 3)
+            _api_request_progress(job=job, store=store, request_record=request_record, progress=40, status="running", logs="Creating Gemini Omni Flash generation")
+            interaction = create_omni_video_interaction(
+                api_key=gemini_key,
+                input_payload=gemini_input,
+                task=_gemini_omni_task_for_mode(requested_mode),
+                aspect_ratio=_gemini_omni_aspect_ratio(first_target_w, first_target_h),
+            )
+            generation_id = str(interaction.get("id") or "")
+            _api_request_progress(job=job, store=store, request_record=request_record, progress=55, status="running", logs="Polling Gemini Omni Flash generation")
+            gemini_output_bytes, _gemini_file_id = wait_for_gemini_video_result(api_key=gemini_key, interaction=interaction)
+            used_provider_model = "gemini-omni-flash-preview"
         elif model_name == "kling-2.6":
             kling_key = secrets.get("RUNWARE_API_KEY") or secrets.get("KLING_API_KEY")
             if not kling_key:
@@ -4704,7 +4935,10 @@ def _handle_api_video_generate_reference(
         out_key = paths.request_artifact(request_id, "output", "result", ".mp4")
         _api_request_progress(job=job, store=store, request_record=request_record, progress=75, status="running", logs="Downloading provider output")
         downloaded_path = td_path / "provider_output_raw.mp4"
-        _download_url_to_path(out_url, downloaded_path)
+        if gemini_output_bytes is not None:
+            downloaded_path.write_bytes(gemini_output_bytes)
+        else:
+            _download_url_to_path(out_url, downloaded_path)
         if (
             model_name == "sora-2-image-to-video"
             and sora2_requested_duration_sec
@@ -6544,7 +6778,7 @@ def _handle_segment_generate(
         else ""
     )
     segment_key: str | None = None
-    if capability.uses_source_video:
+    if capability.uses_source_video or gemini_omni_uses_source_video:
         segment_key = _ensure_segment_clip(
             s3=s3,
             asset_store=asset_store,
@@ -6691,6 +6925,36 @@ def _handle_segment_generate(
                 provider_media_fps = fps
                 provider_input_duration_sec = round(float(ffprobe_video(str(local_provider_segment)).get("duration_sec") or float(segment.get("durationSec") or 0.0)), 3)
                 media_key_for_provider = paths.segment_provider_input(segment_id, gen_id, "fal")
+                _upload_s3(s3, settings.assets_bucket, media_key_for_provider, local_provider_segment, "video/mp4")
+            elif capability.source_video_profile == "gemini_omni_video" or gemini_omni_uses_source_video:
+                if float(segment.get("durationSec") or 0.0) > GEMINI_OMNI_REFERENCE_VIDEO_MAX_SECONDS + 1e-6:
+                    raise RuntimeError(
+                        "Gemini Omni Flash currently supports source-video and edit-video flows only for working ranges up to 3 seconds."
+                    )
+                gemini_provider_fps, provider_input_timing_policy = resolve_video_model_provider_fps(
+                    model=model_name,
+                    source_fps=fps,
+                    preserve_frames=preserve_frames,
+                )
+                _job_progress(job, store, 20, "running", "Preparing short source clip for Gemini Omni Flash")
+                local_provider_segment = td_path / "segment_gemini_omni.mp4"
+                provider_media_width, provider_media_height, _ = _transcode_exact_with_size_limit(
+                    input_path=str(local_segment_source),
+                    output_path=str(local_provider_segment),
+                    fps=gemini_provider_fps,
+                    source_fps=fps,
+                    preserve_frame_count=preserve_frames,
+                    target_width=1280 if segment_src_width >= segment_src_height else 720,
+                    target_height=720 if segment_src_width >= segment_src_height else 1280,
+                    resize_mode="cover",
+                    max_bytes=GEMINI_OMNI_REFERENCE_VIDEO_MAX_BYTES,
+                )
+                provider_media_fps = gemini_provider_fps
+                provider_input_duration_sec = round(
+                    float(ffprobe_video(str(local_provider_segment)).get("duration_sec") or float(segment.get("durationSec") or 0.0)),
+                    3,
+                )
+                media_key_for_provider = paths.segment_provider_input(segment_id, gen_id, "gemini")
                 _upload_s3(s3, settings.assets_bucket, media_key_for_provider, local_provider_segment, "video/mp4")
             elif capability.source_video_profile == "wan27_edit":
                 wan_edge = 1080 if wan27_resolution == "1080p" else 720
@@ -6867,7 +7131,7 @@ def _handle_segment_generate(
         )
         _upload_s3(s3, settings.assets_bucket, first_frame_input_key, local_first_frame, first_frame_content_type)
 
-        if model_name in {"kling-2.6", "veo-3.1", "veo-3.1-fast", "wan2.7-i2v", "ltx-2.3-pro"} and uses_end_keyframe:
+        if model_name in {"kling-2.6", "veo-3.1", "veo-3.1-fast", "wan2.7-i2v", "ltx-2.3-pro", "gemini-omni-flash-preview"} and uses_end_keyframe:
             last_frame_bytes = asset_store.read_bytes(last_frame_key)
             prepared_last_frame, last_frame_content_type, last_frame_ext = _prepare_first_frame_image_payload(
                 last_frame_bytes,
@@ -6881,7 +7145,13 @@ def _handle_segment_generate(
             last_frame_input_key = paths.segment_provider_last_frame(
                 segment_id,
                 gen_id,
-                "kling" if model_name == "kling-2.6" else ("replicate" if model_name in {"wan2.7-i2v", "ltx-2.3-pro"} else "runware"),
+                "kling"
+                if model_name == "kling-2.6"
+                else (
+                    "replicate"
+                    if model_name in {"wan2.7-i2v", "ltx-2.3-pro"}
+                    else ("gemini" if model_name == "gemini-omni-flash-preview" else "runware")
+                ),
                 ext=last_frame_ext,
             )
             _upload_s3(s3, settings.assets_bucket, last_frame_input_key, local_last_frame, last_frame_content_type)
@@ -6919,6 +7189,7 @@ def _handle_segment_generate(
 
     used_provider_model: str | None = None
     provider_duration_sec: float | None = None
+    gemini_output_bytes: bytes | None = None
     if model_name == "runway-gen4.5":
         runway_key = secrets["RUNWAY_API_KEY"]
         runway_duration = 5 if segment_duration_sec <= 7.5 else 10
@@ -6959,6 +7230,72 @@ def _handle_segment_generate(
         out_url = _parse_runway_output_url(result)
         provider_name = "runway"
         used_provider_model = "aleph2"
+    elif model_name == "gemini-omni-flash-preview":
+        gemini_key = str(secrets.get("GEMINI_API_KEY") or "").strip()
+        if not gemini_key:
+            raise RuntimeError("Gemini Omni Flash requires GEMINI_API_KEY")
+        if gemini_omni_uses_source_video and not media_key_for_provider:
+            raise RuntimeError("Gemini Omni Flash source-video mode requires a prepared source video")
+        gemini_reference_images: list[tuple[bytes, str]] = []
+        if requested_mode == "gemini_omni_start_only":
+            gemini_reference_images.append((asset_store.read_bytes(first_frame_input_key), first_frame_content_type or "image/png"))
+        elif requested_mode == "gemini_omni_start_end":
+            gemini_reference_images.append((asset_store.read_bytes(first_frame_input_key), first_frame_content_type or "image/png"))
+            if not last_frame_input_key:
+                raise RuntimeError("Gemini Omni Flash start/end mode requires a prepared end frame")
+            gemini_reference_images.append((asset_store.read_bytes(last_frame_input_key), last_frame_content_type or "image/png"))
+        elif requested_mode == "gemini_omni_start_video":
+            gemini_reference_images.append((asset_store.read_bytes(first_frame_input_key), first_frame_content_type or "image/png"))
+        elif selected_reference_keys:
+            gemini_reference_images.extend(
+                (asset_store.read_bytes(key), _reference_content_type_from_key(key))
+                for key in selected_reference_keys[:3]
+            )
+        else:
+            gemini_reference_images.append((asset_store.read_bytes(first_frame_input_key), first_frame_content_type or "image/png"))
+
+        gemini_prompt = _gemini_omni_prompt(
+            requested_mode=requested_mode,
+            prompt=payload.get("prompt"),
+            reference_count=max(0, len(gemini_reference_images) - (1 if requested_mode == "gemini_omni_start_end" else 0)),
+            has_source_video=gemini_omni_uses_source_video,
+            target_duration_sec=segment_duration_sec,
+        )
+        gemini_content: list[dict[str, Any]] = []
+        if gemini_omni_uses_source_video:
+            gemini_content.append(
+                {
+                    "type": "video",
+                    "mime_type": "video/mp4",
+                    "data": base64.b64encode(asset_store.read_bytes(media_key_for_provider)).decode("utf-8"),
+                }
+            )
+        for image_bytes, mime_type in gemini_reference_images:
+            gemini_content.append(
+                {
+                    "type": "image",
+                    "mime_type": mime_type,
+                    "data": base64.b64encode(image_bytes).decode("utf-8"),
+                }
+            )
+        gemini_content.append({"type": "text", "text": gemini_prompt})
+        gemini_input: str | list[dict[str, Any]]
+        if gemini_omni_uses_source_video:
+            gemini_input = [{"type": "user_input", "content": gemini_content}]
+        else:
+            gemini_input = gemini_content
+        _job_progress(job, store, 35, "running", "Creating Gemini Omni Flash generation")
+        interaction = create_omni_video_interaction(
+            api_key=gemini_key,
+            input_payload=gemini_input,
+            task=_gemini_omni_task_for_mode(requested_mode),
+            aspect_ratio=_gemini_omni_aspect_ratio(first_target_w, first_target_h),
+        )
+        generation_id = str(interaction.get("id") or "")
+        _job_progress(job, store, 55, "running", "Polling Gemini Omni Flash generation")
+        gemini_output_bytes, _gemini_file_id = wait_for_gemini_video_result(api_key=gemini_key, interaction=interaction)
+        provider_name = "gemini"
+        used_provider_model = "gemini-omni-flash-preview"
     elif model_name == "kling-2.6":
         kling_key = secrets.get("RUNWARE_API_KEY") or secrets.get("KLING_API_KEY")
         if not kling_key:
@@ -7392,7 +7729,10 @@ def _handle_segment_generate(
     with tempfile.TemporaryDirectory() as td:
         td_path = Path(td)
         downloaded_path = td_path / "provider_output_raw.mp4"
-        _download_url_to_path(out_url, downloaded_path)
+        if gemini_output_bytes is not None:
+            downloaded_path.write_bytes(gemini_output_bytes)
+        else:
+            _download_url_to_path(out_url, downloaded_path)
         if (
             model_name == "sora-2-image-to-video"
             and sora2_requested_duration_sec
@@ -13035,6 +13375,7 @@ def process_job_record(record: dict[str, Any], *, settings: Any) -> None:
         _raise_if_cancel_requested(job, store)
         handlers = build_job_handlers(
             handle_ingest_fn=_handle_ingest,
+            handle_bind_source_media_fn=_handle_bind_source_media,
             handle_full_edit_fn=_handle_full_edit,
             handle_patch_edit_fn=_handle_patch_edit,
             handle_api_image_edit_full_fn=_handle_api_image_edit_full,

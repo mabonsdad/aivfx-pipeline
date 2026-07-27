@@ -46,6 +46,29 @@ function generationModelHelp(modelName: VideoModelId, modeValue: string, inputMo
       ],
     };
   }
+  if (modelName === "gemini-omni-flash-preview") {
+    return {
+      title:
+        inputMode === "start_only"
+          ? "Gemini Omni Flash (Start Frame)"
+          : inputMode === "start_end"
+            ? "Gemini Omni Flash (Start/End Reference)"
+            : "Gemini Omni Flash",
+      lines: [
+        inputMode === "start_only"
+          ? "Uses only the selected start frame and prompt. No source working-range video is sent."
+          : inputMode === "start_end"
+            ? "Uses start frame plus end frame reference only. This is reference-guided, not true frame interpolation."
+            : inputMode === "edit_video"
+              ? "Uses the working-range video plus up to 3 ordered reference images. Keep prompts simple and focus on the intended change."
+              : "Uses the working-range video plus the selected edited start frame as a visual guide for the opening look.",
+        inputMode === "start_video" || inputMode === "edit_video"
+          ? "Google currently blocks uploaded-video editing for users in the EEA, Switzerland, and the United Kingdom. Start/end and start-only Gemini Omni modes remain available because they do not upload task video."
+          : "Google currently documents 3 to 10 second 720p outputs for this preview model.",
+        "Prompting works best when you ask for one continuous shot, avoid scene cuts, and describe only the key motion or visual change.",
+      ],
+    };
+  }
   if (modelName === "wan2.7-videoedit") {
     return {
       title: "Wan 2.7 VideoEdit",
@@ -248,6 +271,18 @@ export function useGenerationPromptGuidance({
         ? "Uses the selected working-range video plus one selected reference image. Prompt should describe only the intended edit."
         : "Uses the selected working-range video plus the selected edited start frame as reference_image. Prompt should describe only the intended edit.";
     }
+    if (lumaModel === "gemini-omni-flash-preview") {
+      if (generationInputMode === "start_only") {
+        return "Uses only the selected edited start frame. No source working-range video is sent.";
+      }
+      if (generationInputMode === "start_end") {
+        return "Uses the selected edited start frame plus the edited end frame as a reference target. No source working-range video is sent.";
+      }
+      if (generationInputMode === "edit_video") {
+        return "Uses the selected working-range video plus up to 3 ordered reference images. No special prompt markers are required; describe the change plainly and refer to first or second reference in natural language if needed.";
+      }
+      return "Uses the selected working-range video plus the selected edited start frame as the opening visual guide.";
+    }
     if (lumaModel === "happy-horse-video-edit") {
       return generationInputMode === "edit_video"
         ? "Uses the selected working-range video plus up to 3 selected references as @Image1..@Image3. Prompt must reference @Image1."
@@ -295,6 +330,15 @@ export function useGenerationPromptGuidance({
       return generationInputMode === "edit_video"
         ? "Keep the motion and camera from @Video1, optionally use @Image1 for look/style and @Audio1 for timing or mood."
         : "Transform the horse in @Video1 into the unicorn in @Image1. Keep the motion, camera movement and background the same.";
+    }
+    if (lumaModel === "gemini-omni-flash-preview") {
+      return generationInputMode === "start_only"
+        ? "Animate from this first frame in a single continuous shot with clear subject motion and stable continuity."
+        : generationInputMode === "start_end"
+          ? "Use the first frame as the start state and the second frame as a visual target for where the motion should land, while keeping one continuous shot."
+          : generationInputMode === "edit_video"
+            ? "Keep the base shot from the source video, apply only the described change, and use the selected references as appearance guides where relevant."
+            : "Use the source video motion and timing, keep one continuous shot, and describe only the intended visual change from the opening frame onward.";
     }
     if (lumaModel === "wan2.7-videoedit") {
       return "Change the horse into the white unicorn, keep the background and motion the same.";
@@ -355,6 +399,15 @@ export function useGenerationPromptGuidance({
       if (generationInputMode !== "edit_video" && !promptValue.includes("@Image1")) missing.push("@Image1");
       if (missing.length) return `Seedance 2.0 Reference to Video prompt must include ${missing.join(" and ")}.`;
       return null;
+    }
+    if (lumaModel === "gemini-omni-flash-preview" && !promptValue) {
+      if (generationInputMode === "start_end") {
+        return "Gemini Omni Flash requires a prompt describing the motion and how the shot should progress toward the end-frame reference.";
+      }
+      if (generationInputMode === "start_only") {
+        return "Gemini Omni Flash requires a prompt describing the intended motion from the first frame.";
+      }
+      return "Gemini Omni Flash requires a prompt describing the intended transformation.";
     }
     if (lumaModel === "wan2.7-videoedit" && !promptValue) {
       return "Wan 2.7 VideoEdit requires a prompt describing the change you want to make.";

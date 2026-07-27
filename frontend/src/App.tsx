@@ -13,6 +13,7 @@ import QualityMatchModal from "./components/quality/QualityMatchModal";
 import NewTaskModal from "./components/tasks/NewTaskModal";
 import WorkflowTaskPickerModal from "./components/tasks/WorkflowTaskPickerModal";
 import ReferenceImagePickerModal from "./components/workflow/ReferenceImagePickerModal";
+import SourceMediaPickerModal from "./components/workflow/SourceMediaPickerModal";
 import { CurrentWorkingReferencePanel } from "./components/workflow/WorkingRangePanel";
 import {
   taskRoute,
@@ -58,8 +59,11 @@ import {
   isPrevizWorkflowId,
   isSourceVideoWorkflowId,
   normalizeTaskWorkflowId,
+  workflowRequiresSourceMedia,
+  workflowSourceMediaKind,
   type TaskWorkflowId,
 } from "./lib/taskWorkflows";
+import { uploadFileWithProgress, validateSourceMediaFile } from "./lib/sourceMedia";
 import { resolveLatestTaskThumbnailUrl } from "./lib/taskPreview";
 import { type PrimaryWorkflowSection } from "./lib/workflowSections";
 import { currentUser, login, logout } from "./lib/auth";
@@ -91,7 +95,7 @@ import type {
   TaskSummary,
 } from "./types/api";
 import type { LibraryAsset, LibraryAssetDeletePayload } from "./types/libraryAsset";
-import type { ReferencePickerItem, ReferencePickerVideoItem, WorkingReferencePreviewItem } from "./types/referencePicker";
+import type { ReferencePickerItem, ReferencePickerVideoItem, SourceMediaPickerItem, WorkingReferencePreviewItem } from "./types/referencePicker";
 
 type VideoModel = VideoModelId;
 
@@ -103,26 +107,11 @@ type AutomationVideoOption = {
   mode: string;
 };
 
-type AutomationVariantChoice = {
-  frameId: string;
-  variantId: string;
-  imageUrl: string;
-  model: string;
-  createdAt: string;
+type AutomationVideoChoice = {
+  id: string;
+  label: string;
+  disabledReason: string | null;
 };
-
-type AutomationSelectionState = {
-  taskId: string;
-  segmentId: string;
-  startFrameId: string;
-  endFrameId: string;
-  startChoices: AutomationVariantChoice[];
-  endChoices: AutomationVariantChoice[];
-  startSelectedVariantId: string | null;
-  endSelectedVariantId: string | null;
-};
-
-type AutomationVideoRunOption = AutomationVideoOption & { enabled: boolean };
 
 type VideoCleanupModalState = {
   isOpen: boolean;
@@ -479,6 +468,7 @@ const MODEL_FRAME_BUDGET_FPS = 24;
 function videoModelLabel(model: VideoModel): string {
   if (model === "ray-3.2-720p") return "Luma Ray 3.2 720p";
   if (model === "ray-3.2-1080p") return "Luma Ray 3.2 1080p";
+  if (model === "gemini-omni-flash-preview") return "Gemini Omni Flash";
   if (model === "runway-gen4.5") return "Runway Gen-4.5";
   if (model === "sora-2-image-to-video") return "Sora 2 Image to Video";
   if (model === "happy-horse-video-edit") return "Happy Horse 1.0 Video Edit";
@@ -533,11 +523,16 @@ function isPresignedUrlNearExpiry(url: string | null | undefined, withinMs = 60_
   return typeof expiryMs === "number" && expiryMs - Date.now() <= withinMs;
 }
 
-function videoModelDurationConstraints(model: VideoModel): {
+function videoModelDurationConstraints(model: VideoModel, inputMode?: GenerateInputMode | null): {
   minSeconds?: number;
   maxSeconds: number;
   frameBudgetFps?: number | null;
 } {
+  if (model === "gemini-omni-flash-preview") {
+    return inputMode === "start_video" || inputMode === "edit_video"
+      ? { maxSeconds: 3, frameBudgetFps: MODEL_FRAME_BUDGET_FPS }
+      : { minSeconds: 3, maxSeconds: 10, frameBudgetFps: MODEL_FRAME_BUDGET_FPS };
+  }
   if (model === "ray-3.2-720p" || model === "ray-3.2-1080p") return { minSeconds: 1, maxSeconds: 18 };
   if (model === "runway-gen4.5") return { maxSeconds: 10 };
   if (model === "sora-2-image-to-video") return { minSeconds: 4, maxSeconds: 10 };
@@ -561,6 +556,7 @@ function assessVideoModelDurationLimit(
   durationFrames: number,
   durationSec: number,
   sourceFps: number,
+  inputMode?: GenerateInputMode | null,
 ): {
   minSeconds?: number;
   maxSeconds: number;
@@ -568,7 +564,7 @@ function assessVideoModelDurationLimit(
   overLimit: boolean;
   message: string | null;
 } | null {
-  const constraints = videoModelDurationConstraints(model);
+  const constraints = videoModelDurationConstraints(model, inputMode);
   const minSeconds = constraints.minSeconds;
   const maxSeconds = constraints.maxSeconds;
   const frameBudgetFps = constraints.frameBudgetFps ?? null;
@@ -610,12 +606,24 @@ function assessVideoModelDurationLimit(
 const AUTOMATION_VIDEO_OPTIONS: AutomationVideoOption[] = [
   { id: "ray-3.2-720p:start_video:flex_1", label: "Luma Ray 3.2 720p (Source video edit)", inputMode: "start_video", lumaModel: "ray-3.2-720p", mode: "flex_1" },
   { id: "ray-3.2-1080p:start_video:flex_1", label: "Luma Ray 3.2 1080p (Source video edit)", inputMode: "start_video", lumaModel: "ray-3.2-1080p", mode: "flex_1" },
+  { id: "gemini-omni-flash-preview:start_video:gemini_omni_start_video", label: "Gemini Omni Flash (Start frame + video)", inputMode: "start_video", lumaModel: "gemini-omni-flash-preview", mode: "gemini_omni_start_video" },
   { id: "happy-horse-video-edit:start_video:happy_horse_video_edit", label: "Happy Horse 1.0 Video Edit (Start frame + video)", inputMode: "start_video", lumaModel: "happy-horse-video-edit", mode: "happy_horse_video_edit" },
   { id: "runway-gen4-aleph:start_video:runway_aleph_v2v", label: "Runway Aleph 2.0 (Start frame + video)", inputMode: "start_video", lumaModel: "runway-gen4-aleph", mode: "runway_aleph_v2v" },
   { id: "kling-v3-omni-video:start_video:kling_v3_omni_video_edit", label: "Kling v3 Omni Video (Start frame + video)", inputMode: "start_video", lumaModel: "kling-v3-omni-video", mode: "kling_v3_omni_video_edit" },
   { id: "seedance-2.0-reference-to-video:start_video:seedance_reference_to_video", label: "Seedance 2.0 Reference to Video (Start frame + video)", inputMode: "start_video", lumaModel: "seedance-2.0-reference-to-video", mode: "seedance_reference_to_video" },
+  { id: "gemini-omni-flash-preview:start_end:gemini_omni_start_end", label: "Gemini Omni Flash (Start/End reference)", inputMode: "start_end", lumaModel: "gemini-omni-flash-preview", mode: "gemini_omni_start_end" },
   { id: "kling-2.6:start_end:kling_start_end", label: "Kling 2.6 (Start/End frame)", inputMode: "start_end", lumaModel: "kling-2.6", mode: "kling_start_end" },
   { id: "ltx-2.3-pro:start_end:ltx23_i2v_start_end", label: "LTX 2.3 Pro (Start/End frame)", inputMode: "start_end", lumaModel: "ltx-2.3-pro", mode: "ltx23_i2v_start_end" },
+  { id: "ray-3.2-720p:edit_video:flex_1", label: "Luma Ray 3.2 720p (Video + text + refs)", inputMode: "edit_video", lumaModel: "ray-3.2-720p", mode: "flex_1" },
+  { id: "ray-3.2-1080p:edit_video:flex_1", label: "Luma Ray 3.2 1080p (Video + text + refs)", inputMode: "edit_video", lumaModel: "ray-3.2-1080p", mode: "flex_1" },
+  { id: "gemini-omni-flash-preview:edit_video:gemini_omni_edit_video", label: "Gemini Omni Flash (Video + text + refs)", inputMode: "edit_video", lumaModel: "gemini-omni-flash-preview", mode: "gemini_omni_edit_video" },
+  { id: "happy-horse-video-edit:edit_video:happy_horse_video_edit", label: "Happy Horse 1.0 Video Edit (Video + text + refs)", inputMode: "edit_video", lumaModel: "happy-horse-video-edit", mode: "happy_horse_video_edit" },
+  { id: "runway-gen4-aleph:edit_video:runway_aleph_v2v", label: "Runway Aleph 2.0 (Video + text + refs)", inputMode: "edit_video", lumaModel: "runway-gen4-aleph", mode: "runway_aleph_v2v" },
+  { id: "kling-o1:edit_video:kling_o1_video_edit", label: "Kling O1 Video Edit (Video + text + refs)", inputMode: "edit_video", lumaModel: "kling-o1", mode: "kling_o1_video_edit" },
+  { id: "kling-v3-omni-video:edit_video:kling_v3_omni_video_edit", label: "Kling v3 Omni Video (Video + text + refs)", inputMode: "edit_video", lumaModel: "kling-v3-omni-video", mode: "kling_v3_omni_video_edit" },
+  { id: "seedance-2.0-reference-to-video:edit_video:seedance_reference_to_video", label: "Seedance 2.0 Reference to Video (Video + text + refs)", inputMode: "edit_video", lumaModel: "seedance-2.0-reference-to-video", mode: "seedance_reference_to_video" },
+  { id: "wan2.7-videoedit:edit_video:wan27_video_edit", label: "Wan 2.7 Video Edit (Video + text + refs)", inputMode: "edit_video", lumaModel: "wan2.7-videoedit", mode: "wan27_video_edit" },
+  { id: "gemini-omni-flash-preview:start_only:gemini_omni_start_only", label: "Gemini Omni Flash (Start frame only)", inputMode: "start_only", lumaModel: "gemini-omni-flash-preview", mode: "gemini_omni_start_only" },
   { id: "kling-2.6:start_only:kling_start_only", label: "Kling 2.6 (Start frame only)", inputMode: "start_only", lumaModel: "kling-2.6", mode: "kling_start_only" },
   { id: "veo-3.1:start_end:veo_start_end", label: "Veo 3.1 (Start/End frame)", inputMode: "start_end", lumaModel: "veo-3.1", mode: "veo_start_end" },
   { id: "veo-3.1:start_only:veo_start_only", label: "Veo 3.1 (Start frame only)", inputMode: "start_only", lumaModel: "veo-3.1", mode: "veo_start_only" },
@@ -1011,14 +1019,7 @@ export default function App() {
   });
   const [jobIds, setJobIds] = useState<string[]>([]);
   const [dismissedPendingGenerationJobIds, setDismissedPendingGenerationJobIds] = useState<Record<string, true>>({});
-  const [automationEnabled, setAutomationEnabled] = useState(false);
-  const [automationStartPrompt, setAutomationStartPrompt] = useState("");
-  const [automationEndPrompt, setAutomationEndPrompt] = useState("");
-  const [automationVideoPrompt, setAutomationVideoPrompt] = useState("");
-  const [automationSelectedVideoOptionIds, setAutomationSelectedVideoOptionIds] = useState<string[]>(
-    AUTOMATION_VIDEO_OPTIONS.map((option) => option.id),
-  );
-  const [automationUiError, setAutomationUiError] = useState<string | null>(null);
+  const [autoModelTestError, setAutoModelTestError] = useState<string | null>(null);
   const [appUiError, setAppUiError] = useState<string | null>(null);
   const [mergeApplyRetime, setMergeApplyRetime] = useState(false);
   const [mergePlaybackRate, setMergePlaybackRate] = useState(1);
@@ -1056,13 +1057,14 @@ export default function App() {
     terminal: false,
     logs: [],
   });
-  const [automationSelectionState, setAutomationSelectionState] = useState<AutomationSelectionState | null>(null);
   const [firstFrameId, setFirstFrameId] = useState<string | null>(null);
   const [lastFrameId, setLastFrameId] = useState<string | null>(null);
   const [editVideoSelectedReferenceIds, setEditVideoSelectedReferenceIds] = useState<string[]>([]);
   const [editVideoToolSelectedReferenceIds, setEditVideoToolSelectedReferenceIds] = useState<string[]>([]);
   const [editVideoReferencePromptDraft, setEditVideoReferencePromptDraft] = useState("");
   const [isReferenceImagePickerOpen, setIsReferenceImagePickerOpen] = useState(false);
+  const [isSourceMediaPickerOpen, setIsSourceMediaPickerOpen] = useState(false);
+  const [isSourceMediaPickerSaving, setIsSourceMediaPickerSaving] = useState(false);
   const [taskPickerWorkflowId, setTaskPickerWorkflowId] = useState<TaskWorkflowId | null>(null);
   const [isReferenceImagePickerSaving, setIsReferenceImagePickerSaving] = useState(false);
   const [isToolReferenceImagePickerOpen, setIsToolReferenceImagePickerOpen] = useState(false);
@@ -1096,9 +1098,6 @@ export default function App() {
   const pageHiddenAtRef = useRef<number | null>(null);
   const automationCancelRef = useRef(false);
   const defaultSegmentInitRef = useRef<Set<string>>(new Set());
-  const automationSelectionResolverRef = useRef<
-    ((choice: { startVariantId: string; endVariantId: string | null; cancelled: boolean }) => void) | null
-  >(null);
 
   useEffect(() => {
     currentUser().then((user) => setIsAuthed(!!user));
@@ -1171,6 +1170,7 @@ export default function App() {
     }
   }, [assetLibraryScope, isProjectScopeAvailable]);
   const enableReferenceAssetTaskQueries =
+    isSourceMediaPickerOpen ||
     isReferenceImagePickerOpen ||
     isToolReferenceImagePickerOpen ||
     isEditFrameReferenceImagePickerOpen ||
@@ -1329,43 +1329,22 @@ export default function App() {
     setIsNewTaskModalOpen,
     newTaskName,
     setNewTaskName,
-    newTaskFile,
-    newTaskScenePrompt,
+    newTaskDescription,
     newTaskWorkflowId,
-    setNewTaskScenePrompt,
+    setNewTaskDescription,
     newTaskStage,
     newTaskError,
-    newTaskUploadPercent,
-    pendingCreateJobQuery,
     normalizedNewTaskName,
-    taskNameAlreadyExists,
     showTaskNameExistsWarning,
     openNewTaskModal,
-    handleCreateTaskWithUpload,
-    handleNewTaskFileSelect,
+    handleCreateTask,
   } = useTaskLifecycle({
-    isAuthed,
-    isPageVisible,
-    selectedTaskId,
     existingTaskNames: (tasksQuery.data ?? []).map((taskItem) => taskItem.name),
     queryClient,
     setSelectedTaskId,
     setTab,
-    onTrackJobId: (jobId) => setJobIds((previous) => appendTrackedJobId(previous, jobId)),
   });
 
-  const automationVideoOptions = useMemo(
-    () => AUTOMATION_VIDEO_OPTIONS.map((option) => ({ id: option.id, label: option.label })),
-    [],
-  );
-  const selectedAutomationVideoOptions = useMemo<AutomationVideoRunOption[]>(
-    () =>
-      AUTOMATION_VIDEO_OPTIONS.map((option) => ({
-        ...option,
-        enabled: automationSelectedVideoOptionIds.includes(option.id),
-      })).filter((option) => option.enabled),
-    [automationSelectedVideoOptionIds],
-  );
   const assetTaskRequests = useMemo(() => {
     if (tab === "asset_library" && assetLibraryScope === "all" && isAdmin) {
       return (adminAllTasksQuery.data ?? []).map((taskSummary) => ({
@@ -1463,10 +1442,48 @@ export default function App() {
       await queryClient.invalidateQueries({ queryKey: ["tasks", "project"] });
     },
   });
+  const uploadTaskSourceMediaMutation = useMutation({
+    mutationFn: async (file: File) => {
+      if (!selectedTaskId) throw new Error("No task selected");
+      await validateSourceMediaFile(currentTaskWorkflowId, file);
+      const contentType = file.type || (requiredSourceMediaKind === "audio" ? "audio/wav" : "video/mp4");
+      const upload = await apiClient.createVideoUpload(selectedTaskId, {
+        filename: file.name,
+        contentType,
+        sizeBytes: file.size,
+      });
+      await uploadFileWithProgress(upload.uploadUrl, file, contentType, () => {});
+      const ingest = await apiClient.ingestTask(selectedTaskId);
+      setJobIds((previous) => appendTrackedJobId(previous, ingest.jobId));
+      return ingest.jobId;
+    },
+    onSuccess: async () => {
+      if (selectedTaskId) {
+        await queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
+      }
+      await queryClient.invalidateQueries({ queryKey: ["tasks"] });
+    },
+  });
+  const bindTaskSourceMediaMutation = useMutation({
+    mutationFn: async (sourceTaskId: string) => {
+      if (!selectedTaskId) throw new Error("No task selected");
+      const response = await apiClient.bindTaskSourceMedia(selectedTaskId, { sourceTaskId });
+      setJobIds((previous) => appendTrackedJobId(previous, response.jobId));
+      return response.jobId;
+    },
+    onSuccess: async () => {
+      if (selectedTaskId) {
+        await queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
+      }
+      await queryClient.invalidateQueries({ queryKey: ["tasks"] });
+    },
+  });
   const isCurrentWorkflowImplemented = currentTaskWorkflow.implemented;
   const isSourceVideoWorkflow = isSourceVideoWorkflowId(currentTaskWorkflowId);
   const isCharacterAnimateWorkflow = isCharacterAnimateWorkflowId(currentTaskWorkflowId);
   const isPrevizWorkflow = isPrevizWorkflowId(currentTaskWorkflowId);
+  const currentWorkflowRequiresSourceMedia = workflowRequiresSourceMedia(currentTaskWorkflowId);
+  const requiredSourceMediaKind = workflowSourceMediaKind(currentTaskWorkflowId);
   const fixedGenerationInputMode = getFixedGenerationInputModeForWorkflow(currentTaskWorkflowId);
   const fixedCharacterAnimateMode = getFixedCharacterAnimateModeForWorkflow(currentTaskWorkflowId);
   const isGlobalUtilityTab = tab === "asset_library" || tab === "custom_qc" || tab === "api_logs" || tab === "admin";
@@ -1516,7 +1533,7 @@ export default function App() {
     if (currentTaskWorkflowId !== "simple_generation_workflow") return;
     setPrevizGenerateModel("veo_3_1");
     setPrevizGenerateDurationSec(8);
-    setPrevizGeneratePrompt(typeof task?.previz?.scenePrompt === "string" ? task.previz.scenePrompt : "");
+    setPrevizGeneratePrompt(typeof task?.description === "string" ? task.description : "");
   }, [currentTaskWorkflowId, selectedTaskId]);
   const latestTaskByWorkflow = useMemo(() => {
     const latest = new Map<TaskWorkflowId, { taskId: string; name: string; projectName: string | null; updatedAtMs: number }>();
@@ -1820,7 +1837,34 @@ export default function App() {
   const assetsTabLoading = tab === "assets" && assetsLoading;
   const assetLibraryTabLoading = tab === "asset_library" && assetLibraryLoading;
   const sourceMediaKind = (task?.sourceMedia?.kind ?? task?.video?.editSource?.mediaType ?? "video") as "video" | "audio";
+  const sourceMediaReady = !currentWorkflowRequiresSourceMedia || Boolean(task?.sourceMedia?.editSource?.s3Key ?? task?.video?.editSource?.s3Key);
+  const disabledWorkflowSections = useMemo<PrimaryWorkflowSection[]>(
+    () => (currentWorkflowRequiresSourceMedia && !sourceMediaReady ? ["create", "outputs", "post"] : []),
+    [currentWorkflowRequiresSourceMedia, sourceMediaReady],
+  );
+  const canReplaceSourceMedia = useMemo(() => {
+    if (!task) return true;
+    const hasExistingSource = Boolean(task.sourceMedia?.original?.s3Key ?? task.video?.original?.s3Key);
+    if (!hasExistingSource) return true;
+    const hasSegments = Array.isArray(task.segments) && task.segments.length > 0;
+    const hasFrames = Boolean(task.frames && Object.keys(task.frames).length > 0);
+    const hasGenerations = Boolean(task.segmentGenerations && Object.keys(task.segmentGenerations).length > 0);
+    return !(hasSegments || hasFrames || hasGenerations);
+  }, [task]);
+  const sourceReplacementBlockedReason = !canReplaceSourceMedia
+    ? "This task already contains derived segments, frames, or generations tied to the current source media."
+    : null;
+  const sourceSelectionBusy = uploadTaskSourceMediaMutation.isPending || bindTaskSourceMediaMutation.isPending;
+  const sourceSelectionError =
+    (uploadTaskSourceMediaMutation.error instanceof Error ? uploadTaskSourceMediaMutation.error.message : null) ??
+    (bindTaskSourceMediaMutation.error instanceof Error ? bindTaskSourceMediaMutation.error.message : null);
   const isCharacterAudioSource = isCharacterAnimateWorkflow && sourceMediaKind === "audio";
+  useEffect(() => {
+    if (!selectedTaskId) return;
+    if (!currentWorkflowRequiresSourceMedia || sourceMediaReady) return;
+    if (!activeWorkflowSection || !disabledWorkflowSections.includes(activeWorkflowSection)) return;
+    setTab("timeline", selectedTaskId, true);
+  }, [activeWorkflowSection, currentWorkflowRequiresSourceMedia, disabledWorkflowSections, selectedTaskId, setTab, sourceMediaReady]);
   const sourceWaveformUrl = task?.sourceMedia?.waveform?.downloadUrl ?? task?.video?.editSource?.waveformUrl ?? null;
   const generationAudioReference = task?.generationAudioReference ?? null;
   const selectedSegment = task?.segments.find((s) => s.segmentId === selectedSegmentId) ?? null;
@@ -2359,6 +2403,55 @@ export default function App() {
     selectedTaskId,
     task,
   ]);
+  const sourceMediaPickerItems = useMemo<SourceMediaPickerItem[]>(() => {
+    if (!selectedTaskId || !requiredSourceMediaKind) return [];
+    const output: SourceMediaPickerItem[] = [];
+    const seenTaskIds = new Set<string>();
+    const currentTaskId = task?.taskId ?? selectedTaskId;
+    const tasksToScan = task ? [task, ...assetTasks.filter((assetTask) => assetTask.taskId !== task.taskId)] : assetTasks;
+    for (const assetTask of tasksToScan) {
+      const sourceKind = assetTask.sourceMedia?.kind ?? assetTask.video?.editSource?.mediaType ?? "video";
+      if (sourceKind !== requiredSourceMediaKind) continue;
+      const previewUrl =
+        assetTask.sourceMedia?.previewSource?.downloadUrl ??
+        assetTask.sourceMedia?.editSource?.downloadUrl ??
+        assetTask.video?.previewSource?.downloadUrl ??
+        assetTask.video?.editSource?.downloadUrl ??
+        null;
+      if (!previewUrl || seenTaskIds.has(assetTask.taskId)) continue;
+      seenTaskIds.add(assetTask.taskId);
+      const sourceKey =
+        assetTask.sourceMedia?.original?.s3Key ??
+        assetTask.video?.original?.s3Key ??
+        assetTask.sourceMedia?.editSource?.s3Key ??
+        assetTask.video?.editSource?.s3Key ??
+        assetTask.taskId;
+      output.push({
+        taskId: assetTask.taskId,
+        title: humanizeFilename(
+          assetTask.sourceMedia?.original?.filename ??
+            assetTask.video?.original?.filename ??
+            keyBasenameFromS3Key(sourceKey),
+        ),
+        subtitle: `${assetTask.name} · uploaded source ${requiredSourceMediaKind}`,
+        createdAt: assetTask.updatedAt,
+        mediaKind: requiredSourceMediaKind,
+        previewUrl,
+        thumbnailUrl:
+          requiredSourceMediaKind === "video"
+            ? resolveLatestTaskThumbnailUrl(assetTask) ?? undefined
+            : assetTask.sourceMedia?.waveform?.downloadUrl ?? assetTask.video?.editSource?.waveformUrl ?? undefined,
+        waveformUrl: assetTask.sourceMedia?.waveform?.downloadUrl ?? assetTask.video?.editSource?.waveformUrl ?? undefined,
+        durationSec: assetTask.sourceMedia?.editSource?.durationSec ?? assetTask.video?.editSource?.durationSec ?? null,
+        width: assetTask.sourceMedia?.editSource?.width ?? assetTask.video?.editSource?.width ?? null,
+        height: assetTask.sourceMedia?.editSource?.height ?? assetTask.video?.editSource?.height ?? null,
+        isCurrentTaskAsset: assetTask.taskId === currentTaskId,
+        isProjectAsset: Boolean(effectiveCurrentProjectId) && assetTask.projectId === effectiveCurrentProjectId,
+        sourceLabel: "uploaded",
+      });
+    }
+    return output.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }, [assetTasks, effectiveCurrentProjectId, requiredSourceMediaKind, selectedTaskId, task]);
   const referencePickerItemById = useMemo(() => new Map(referencePickerItems.map((item) => [item.id, item])), [referencePickerItems]);
   const selectedReferencePickerItemIds = useMemo(
     () =>
@@ -3105,102 +3198,67 @@ export default function App() {
     },
   });
 
-  const resolveSelectedGenerationMode = useCallback((): string => {
-    return lumaModel === "runway-gen4.5"
+  const resolveGenerationModeForModel = useCallback((modelName: VideoModel, inputMode: GenerateInputMode): string => {
+    return modelName === "runway-gen4.5"
       ? "runway_i2v"
-      : lumaModel === "sora-2-image-to-video"
+      : modelName === "gemini-omni-flash-preview"
+        ? inputMode === "start_only"
+          ? "gemini_omni_start_only"
+          : inputMode === "start_end"
+            ? "gemini_omni_start_end"
+            : inputMode === "edit_video"
+              ? "gemini_omni_edit_video"
+              : "gemini_omni_start_video"
+      : modelName === "sora-2-image-to-video"
         ? "sora_i2v"
-      : lumaModel === "happy-horse-video-edit"
+      : modelName === "happy-horse-video-edit"
         ? "happy_horse_video_edit"
-      : lumaModel === "happy-horse-image-to-video"
+      : modelName === "happy-horse-image-to-video"
         ? "happy_horse_i2v"
-      : lumaModel === "runway-gen4-aleph"
+      : modelName === "runway-gen4-aleph"
         ? "runway_aleph_v2v"
-      : lumaModel === "kling-2.6"
-        ? generationInputMode === "start_only"
+      : modelName === "kling-2.6"
+        ? inputMode === "start_only"
           ? "kling_start_only"
           : "kling_start_end"
-      : lumaModel === "kling-o1"
+      : modelName === "kling-o1"
         ? "kling_o1_video_edit"
-      : lumaModel === "kling-v3-omni-video"
+      : modelName === "kling-v3-omni-video"
         ? "kling_v3_omni_video_edit"
-      : lumaModel === "seedance-2.0-reference-to-video"
+      : modelName === "seedance-2.0-reference-to-video"
         ? "seedance_reference_to_video"
-      : lumaModel === "veo-3.1" || lumaModel === "veo-3.1-fast"
-        ? generationInputMode === "start_only"
+      : modelName === "veo-3.1" || modelName === "veo-3.1-fast"
+        ? inputMode === "start_only"
           ? "veo_start_only"
           : "veo_start_end"
-      : lumaModel === "wan2.2-a14b"
+      : modelName === "wan2.2-a14b"
         ? "wan_a14b_i2v"
-      : lumaModel === "wan2.2-animate"
+      : modelName === "wan2.2-animate"
         ? "wan_animate_replace"
-      : lumaModel === "wan2.7-i2v"
-        ? generationInputMode === "start_end"
+      : modelName === "wan2.7-i2v"
+        ? inputMode === "start_end"
           ? "wan27_i2v_start_end"
           : "wan27_i2v_start_only"
-      : lumaModel === "ltx-2.3-pro"
+      : modelName === "ltx-2.3-pro"
         ? "ltx23_i2v_start_end"
-      : lumaModel === "wan2.7-videoedit"
+      : modelName === "wan2.7-videoedit"
         ? "wan27_video_edit"
       : advancedMode;
-  }, [advancedMode, generationInputMode, lumaModel]);
+  }, [advancedMode]);
 
-  const improvePromptWizardMutation = useMutation({
-    mutationFn: async (): Promise<PromptWizardResult> => {
-      if (!selectedTaskId || !selectedSegmentId) throw new Error("Select a segment");
-      const promptWizardMode = promptWizardModeForInput(generationInputMode);
-      if (!promptWizardMode) {
-        throw new Error("Prompt Wizard is not available for this mode.");
-      }
-      const config = getPromptWizardModelConfig(lumaModel, promptWizardMode);
-      if (!config) {
-        throw new Error("Prompt Wizard is not configured for this model and mode.");
-      }
-      const trimmedPrompt = lumaPrompt.trim();
-      if (!trimmedPrompt) {
-        throw new Error("Prompt is required");
-      }
-      const firstFrameVariantId =
-        generationInputMode === "edit_video" ? null : refineSourceVariantIds.first || compareVariantIds.first || null;
-      const requestPayload = {
-        selected_model: lumaModel,
-        provider: config.provider,
-        provider_model: config.providerModel,
-        endpoint_used: config.endpointUsed,
-        mode: promptWizardMode,
-        user_draft_prompt: trimmedPrompt,
-        has_source_video: generationInputMode === "start_video" || generationInputMode === "edit_video",
-        has_edited_first_frame:
-          generationInputMode === "edit_video"
-            ? editVideoSelectedReferenceIds.length > 0
-            : Boolean(firstFrameVariantId && firstFrameVariantId !== "original"),
-        has_last_frame: generationInputMode === "start_end",
-        app_required_markers: config.requiredMarkers,
-        supports_negative_prompt: false as const,
-        duration_seconds: selectedSegment ? selectedSegment.durationSec : null,
-        aspect_ratio: selectedSegment?.crop?.aspect ?? null,
-        luma_mode: lumaModel === "ray-3.2-720p" || lumaModel === "ray-3.2-1080p" ? lumaModeBucket(advancedMode) : null,
-        user_visible_model_name: config.dropdownName,
-        first_frame_variant_id: firstFrameVariantId,
-        selected_reference_ids:
-          generationInputMode === "edit_video" ? editVideoSelectedReferenceIds.slice(0, editVideoReferenceLimitByModel || 3) : [],
-      };
-      const response = await apiClient.improveSegmentPrompt(selectedTaskId, selectedSegmentId, requestPayload);
-      return validatePromptWizardResult(response.result, config.requiredMarkers);
-    },
-  });
+  const resolveSelectedGenerationMode = useCallback((): string => {
+    return resolveGenerationModeForModel(lumaModel, generationInputMode);
+  }, [generationInputMode, lumaModel, resolveGenerationModeForModel]);
 
-  const generateSegmentMutation = useMutation({
-    mutationFn: async () => {
-      if (!selectedTaskId || !selectedSegmentId) throw new Error("Select a segment");
+  const buildSegmentGeneratePayload = useCallback(
+    (modelName: VideoModel, mode: string, toolOrigin?: string | null) => {
       const trimmedPrompt = lumaPrompt.trim();
-      const selectedMode = resolveSelectedGenerationMode();
-      return apiClient.generateSegment(selectedTaskId, selectedSegmentId, {
-        lumaModel,
-        mode: selectedMode as VideoModeId,
+      return {
+        lumaModel: modelName,
+        mode: mode as VideoModeId,
         inputMode: generationInputMode,
-        prompt: lumaModel === "wan2.2-animate" ? undefined : trimmedPrompt || undefined,
-        negativePrompt: lumaModel === "wan2.7-i2v" ? wan27NegativePrompt.trim() || undefined : undefined,
+        prompt: modelName === "wan2.2-animate" ? undefined : trimmedPrompt || undefined,
+        negativePrompt: modelName === "wan2.7-i2v" ? wan27NegativePrompt.trim() || undefined : undefined,
         firstFrameVariantId:
           generationInputMode === "edit_video" ? undefined : refineSourceVariantIds.first || compareVariantIds.first || undefined,
         lastFrameVariantId: generationInputMode === "start_end" ? refineSourceVariantIds.last || compareVariantIds.last || undefined : undefined,
@@ -3209,14 +3267,157 @@ export default function App() {
             ? editVideoSelectedReferenceIds.slice(0, editVideoReferenceLimitByModel || 3)
             : undefined,
         audioReferenceId:
-          generationInputMode === "edit_video" && lumaModel === "seedance-2.0-reference-to-video" ? generationAudioReference?.referenceId ?? undefined : undefined,
-        replicateKlingMode: lumaModel === "kling-o1" ? replicateKlingMode : undefined,
-        replicateKlingV3Mode: lumaModel === "kling-v3-omni-video" ? replicateKlingV3Mode : undefined,
-        wan27Resolution: lumaModel === "wan2.7-videoedit" || lumaModel === "wan2.7-i2v" ? wan27Resolution : undefined,
-        sora2Resolution: lumaModel === "sora-2-image-to-video" ? sora2Resolution : undefined,
-        happyHorseResolution: lumaModel === "happy-horse-video-edit" || lumaModel === "happy-horse-image-to-video" ? happyHorseResolution : undefined,
+          generationInputMode === "edit_video" && modelName === "seedance-2.0-reference-to-video"
+            ? generationAudioReference?.referenceId ?? undefined
+            : undefined,
+        replicateKlingMode: modelName === "kling-o1" ? replicateKlingMode : undefined,
+        replicateKlingV3Mode: modelName === "kling-v3-omni-video" ? replicateKlingV3Mode : undefined,
+        wan27Resolution: modelName === "wan2.7-videoedit" || modelName === "wan2.7-i2v" ? wan27Resolution : undefined,
+        sora2Resolution: modelName === "sora-2-image-to-video" ? sora2Resolution : undefined,
+        happyHorseResolution:
+          modelName === "happy-horse-video-edit" || modelName === "happy-horse-image-to-video" ? happyHorseResolution : undefined,
         preserveFrames,
+        toolOrigin: toolOrigin ?? undefined,
+      };
+    },
+    [
+      compareVariantIds.first,
+      compareVariantIds.last,
+      editVideoReferenceLimitByModel,
+      editVideoSelectedReferenceIds,
+      generationAudioReference?.referenceId,
+      generationInputMode,
+      happyHorseResolution,
+      lumaPrompt,
+      preserveFrames,
+      refineSourceVariantIds.first,
+      refineSourceVariantIds.last,
+      replicateKlingMode,
+      replicateKlingV3Mode,
+      sora2Resolution,
+      wan27NegativePrompt,
+      wan27Resolution,
+    ],
+  );
+
+  const autoModelTestOptions = useMemo(
+    () =>
+      AUTOMATION_VIDEO_OPTIONS.filter(
+        (option) =>
+          option.inputMode === generationInputMode &&
+          generationModelOptionsForInput.some((modelOption) => modelOption.value === option.lumaModel),
+      ),
+    [generationInputMode, generationModelOptionsForInput],
+  );
+
+  const autoModelTestModels = useMemo<AutomationVideoChoice[]>(
+    () =>
+      autoModelTestOptions.map((option) => {
+        const limit =
+          selectedSegment != null
+            ? assessVideoModelDurationLimit(
+                option.lumaModel,
+                selectedSegment.durationFrames,
+                selectedSegment.durationSec,
+                fpsValue(task),
+                option.inputMode,
+              )
+            : null;
+        return {
+          id: option.id,
+          label: option.label,
+          disabledReason: limit?.overLimit ? limit.message : null,
+        };
+      }),
+    [autoModelTestOptions, selectedSegment, task],
+  );
+
+  const runPromptWizardForModel = useCallback(
+    async ({
+      modelName,
+      inputMode,
+      draftPrompt,
+    }: {
+      modelName: VideoModel;
+      inputMode: GenerateInputMode;
+      draftPrompt: string;
+    }): Promise<{ prompt: string; result: PromptWizardResult | null }> => {
+      if (!selectedTaskId || !selectedSegmentId) throw new Error("Select a segment");
+      const trimmedPrompt = draftPrompt.trim();
+      if (!trimmedPrompt) {
+        throw new Error("Prompt is required");
+      }
+      const mode = promptWizardModeForInput(inputMode);
+      if (!mode) {
+        return { prompt: trimmedPrompt, result: null };
+      }
+      const config = getPromptWizardModelConfig(modelName, mode);
+      if (!config) {
+        return { prompt: trimmedPrompt, result: null };
+      }
+      const firstFrameVariantId =
+        inputMode === "edit_video" ? null : refineSourceVariantIds.first || compareVariantIds.first || null;
+      const requestPayload = {
+        selected_model: modelName,
+        provider: config.provider,
+        provider_model: config.providerModel,
+        endpoint_used: config.endpointUsed,
+        mode,
+        user_draft_prompt: trimmedPrompt,
+        has_source_video: inputMode === "start_video" || inputMode === "edit_video",
+        has_edited_first_frame:
+          inputMode === "edit_video"
+            ? editVideoSelectedReferenceIds.length > 0
+            : Boolean(firstFrameVariantId && firstFrameVariantId !== "original"),
+        has_last_frame: inputMode === "start_end",
+        app_required_markers: config.requiredMarkers,
+        supports_negative_prompt: false as const,
+        duration_seconds: selectedSegment ? selectedSegment.durationSec : null,
+        aspect_ratio: selectedSegment?.crop?.aspect ?? null,
+        luma_mode: modelName === "ray-3.2-720p" || modelName === "ray-3.2-1080p" ? lumaModeBucket(advancedMode) : null,
+        user_visible_model_name: config.dropdownName,
+        first_frame_variant_id: firstFrameVariantId,
+        selected_reference_ids: inputMode === "edit_video" ? editVideoSelectedReferenceIds.slice(0, editVideoReferenceLimitByModel || 3) : [],
+      };
+      const response = await apiClient.improveSegmentPrompt(selectedTaskId, selectedSegmentId, requestPayload);
+      const result = validatePromptWizardResult(response.result, config.requiredMarkers);
+      const recommendedPrompt = result.recommended_prompt.trim();
+      return {
+        prompt: recommendedPrompt || trimmedPrompt,
+        result,
+      };
+    },
+    [
+      advancedMode,
+      compareVariantIds.first,
+      editVideoReferenceLimitByModel,
+      editVideoSelectedReferenceIds,
+      refineSourceVariantIds.first,
+      selectedSegment,
+      selectedSegmentId,
+      selectedTaskId,
+    ],
+  );
+
+  const improvePromptWizardMutation = useMutation({
+    mutationFn: async (): Promise<PromptWizardResult> => {
+      const { result } = await runPromptWizardForModel({
+        modelName: lumaModel,
+        inputMode: generationInputMode,
+        draftPrompt: lumaPrompt,
       });
+      if (!result) {
+        throw new Error("Prompt Wizard is not configured for this model and mode.");
+      }
+      return result;
+    },
+  });
+
+  const generateSegmentMutation = useMutation({
+    mutationFn: async () => {
+      if (!selectedTaskId || !selectedSegmentId) throw new Error("Select a segment");
+      const selectedMode = resolveSelectedGenerationMode();
+      return apiClient.generateSegment(selectedTaskId, selectedSegmentId, buildSegmentGeneratePayload(lumaModel, selectedMode));
     },
     onSuccess: async (result) => {
       setJobIds((prev) => appendTrackedJobId(prev, result.jobId));
@@ -4088,12 +4289,12 @@ export default function App() {
     sourceCacheKey: mergeOriginalSourceCacheKey,
   });
   const lumaHardLimit = useMemo(() => {
-    const constraints = videoModelDurationConstraints(lumaModel);
+    const constraints = videoModelDurationConstraints(lumaModel, generationInputMode);
     return {
       maxSeconds: constraints.maxSeconds,
       maxFrames: Math.round(constraints.maxSeconds * (constraints.frameBudgetFps ?? fpsValue(task))),
     };
-  }, [lumaModel, task]);
+  }, [generationInputMode, lumaModel, task]);
   const hasHardDurationLimit = Boolean(lumaHardLimit);
   const lumaHardLimitSeconds = lumaHardLimit?.maxSeconds ?? 0;
   const lumaHardLimitFrames = lumaHardLimit?.maxFrames ?? 0;
@@ -4129,8 +4330,8 @@ export default function App() {
 
   const selectedSegmentLimit = useMemo(() => {
     if (!selectedSegment) return null;
-    return assessVideoModelDurationLimit(lumaModel, selectedSegment.durationFrames, selectedSegment.durationSec, fpsValue(task));
-  }, [lumaModel, selectedSegment, task]);
+    return assessVideoModelDurationLimit(lumaModel, selectedSegment.durationFrames, selectedSegment.durationSec, fpsValue(task), generationInputMode);
+  }, [generationInputMode, lumaModel, selectedSegment, task]);
   const selectedSegmentOverLimit = Boolean(selectedSegmentLimit?.overLimit);
   const selectedSegmentLimitMessage = selectedSegmentLimit?.message ?? null;
   const generationModeConfig = useMemo(() => getGenerationModeConfig(generationInputMode), [generationInputMode]);
@@ -4150,6 +4351,21 @@ export default function App() {
       requiresEndFrameForRoute,
       lumaPrompt,
     });
+  const supportsAutoModelTest = isSourceVideoWorkflow && autoModelTestOptions.length > 0;
+  const autoModelTestWarning = useMemo(() => {
+    if (!supportsAutoModelTest) return "Auto model test is currently available only on VFX Generate steps.";
+    if (!selectedTaskId || !selectedSegmentId || !selectedSegment) return "Select a working range first.";
+    if (missingRouteInputsMessage) return missingRouteInputsMessage;
+    if (!lumaPrompt.trim()) return "Write a prompt first.";
+    return null;
+  }, [
+    lumaPrompt,
+    missingRouteInputsMessage,
+    selectedSegment,
+    selectedSegmentId,
+    selectedTaskId,
+    supportsAutoModelTest,
+  ]);
 
   const {
     editedFrameAssets,
@@ -4680,13 +4896,7 @@ export default function App() {
     pageHiddenAtRef.current = Date.now();
   }, [isPageVisible, isReportTab, refreshSignedUrlsForTask, reportTaskId, selectedTaskId]);
 
-  const openNewTaskWithAutomationDefaults = useCallback((workflowId: TaskWorkflowId = "source_video_flow") => {
-    setAutomationEnabled(false);
-    setAutomationStartPrompt("");
-    setAutomationEndPrompt("");
-    setAutomationVideoPrompt("");
-    setAutomationSelectedVideoOptionIds(AUTOMATION_VIDEO_OPTIONS.map((option) => option.id));
-    setAutomationUiError(null);
+  const openNewTaskFlow = useCallback((workflowId: TaskWorkflowId = "source_video_flow") => {
     if (workflowId !== "canvas_workflow") {
       goHome();
       setTaskPickerWorkflowId(null);
@@ -4772,446 +4982,183 @@ export default function App() {
     [appendAutomationLog],
   );
 
-  const requestAutomationSelection = useCallback(
-    (selection: AutomationSelectionState) =>
-      new Promise<{ startVariantId: string; endVariantId: string | null; cancelled: boolean }>((resolve) => {
-        automationSelectionResolverRef.current = resolve;
-        setAutomationSelectionState(selection);
-      }),
-    [],
-  );
-
-  const resolveAutomationSelection = useCallback((choice: { startVariantId: string; endVariantId: string | null; cancelled: boolean }) => {
-    const resolver = automationSelectionResolverRef.current;
-    automationSelectionResolverRef.current = null;
-    setAutomationSelectionState(null);
-    if (resolver) {
-      resolver(choice);
+  const runAutoModelTest = useCallback(async (selectedModelIds: string[]) => {
+    if (!selectedTaskId || !selectedSegmentId || !selectedSegment) {
+      setAutoModelTestError("Select a working range first.");
+      return;
     }
-  }, []);
+    if (autoModelTestWarning) {
+      setAutoModelTestError(autoModelTestWarning);
+      return;
+    }
+    if (!autoModelTestOptions.length) {
+      setAutoModelTestError("No eligible models are available for this workflow.");
+      return;
+    }
+    const selectedOptions = autoModelTestOptions.filter((option) => selectedModelIds.includes(option.id));
+    if (!selectedOptions.length) {
+      setAutoModelTestError("Select at least one model.");
+      return;
+    }
+    const blockedSelection = autoModelTestModels.find(
+      (choice) => selectedModelIds.includes(choice.id) && choice.disabledReason,
+    );
+    if (blockedSelection?.disabledReason) {
+      setAutoModelTestError(blockedSelection.disabledReason);
+      return;
+    }
 
-  useEffect(() => {
-    return () => {
-      const resolver = automationSelectionResolverRef.current;
-      if (resolver) {
-        resolver({ startVariantId: "", endVariantId: null, cancelled: true });
-        automationSelectionResolverRef.current = null;
+    automationCancelRef.current = false;
+    setAutoModelTestError(null);
+    setAutomationRunState({
+      isOpen: true,
+      taskId: selectedTaskId,
+      phase: "Auto model test",
+      detail: `Running ${selectedOptions.length} models sequentially...`,
+      cancelRequested: false,
+      terminal: false,
+      logs: [
+        formatAutomationLogEntry("Auto model test started."),
+        formatAutomationLogEntry(`Models: ${selectedOptions.map((option) => option.label).join(" | ")}`),
+      ],
+    });
+
+    const throwIfCancelled = () => {
+      if (automationCancelRef.current) {
+        throw new Error(AUTOMATION_CANCELLED);
       }
     };
-  }, []);
 
-  const runAutomatedPipeline = useCallback(
-    async ({
-      taskId,
-      startPrompt,
-      endPrompt,
-      videoPrompt,
-      selectedVideoOptions,
-    }: {
-      taskId: string;
-      startPrompt: string;
-      endPrompt: string;
-      videoPrompt: string;
-      selectedVideoOptions: AutomationVideoRunOption[];
-    }) => {
-      automationCancelRef.current = false;
-      setAutomationUiError(null);
-        setAutomationRunState({
-          isOpen: true,
-          taskId,
-          phase: "Preparing automation",
-          detail: "Loading ingested task metadata...",
-          cancelRequested: false,
-          terminal: false,
-          logs: [
-            formatAutomationLogEntry("Automation started."),
-            formatAutomationLogEntry(
-              `Selected video model runs: ${selectedVideoOptions.length ? selectedVideoOptions.map((option) => option.label).join(" | ") : "none"}`,
-            ),
-          ],
-        });
-
-      const imageModels: Array<{ model: "nano_banana_pro" | "chatgpt" | "chatgpt_latest"; label: string }> = [
-        { model: "nano_banana_pro", label: "Nano Banana Pro" },
-        { model: "chatgpt", label: "ChatGPT-image 1.5" },
-        { model: "chatgpt_latest", label: "ChatGPT-image 2.0" },
-      ];
-
-      const throwIfCancelled = () => {
-        if (automationCancelRef.current) {
-          throw new Error(AUTOMATION_CANCELLED);
-        }
-      };
-
-      try {
-        setSelectedTaskId(taskId);
-        setTab("frames", taskId, true);
-
-        const loadReadyTask = async () => {
-          for (let attempt = 0; attempt < 20; attempt += 1) {
-            throwIfCancelled();
-            const current = await apiClient.getTask(taskId);
-            const hasVideo = Boolean(current.video?.editSource?.downloadUrl && current.video?.editSource?.frameCount);
-            if (hasVideo) return current;
-            await sleep(1500);
-          }
-          throw new Error("Task ingest did not become ready in time.");
-        };
-
-        let currentTask = await loadReadyTask();
-        const totalFrames = Math.max(1, currentTask.video?.editSource?.frameCount ?? 0);
-
-        setAutomationRunState((previous) => ({
-          ...previous,
-          phase: "Segment setup",
-          detail: "Creating or reusing full-clip segment...",
-        }));
-
-        let segment = currentTask.segments.find((item) => item.startFrame === 0 && item.endFrameExclusive === totalFrames) ?? null;
-        if (!segment) {
-          const created = await apiClient.createSegment(taskId, { startFrameIndex: 0, durationSeconds: 1 });
-          await apiClient.patchSegment(taskId, created.segmentId, { startFrameIndex: 0, endFrameExclusive: totalFrames });
-          setSelectedSegmentId(created.segmentId);
-        } else {
-          setSelectedSegmentId(segment.segmentId);
-        }
-
-        await queryClient.invalidateQueries({ queryKey: ["task", taskId] });
-        currentTask = await apiClient.getTask(taskId);
-        segment = currentTask.segments.find((item) => item.startFrame === 0 && item.endFrameExclusive === totalFrames) ?? null;
-        if (!segment) {
-          throw new Error("Automation could not prepare the full-clip segment.");
-        }
-
-        setAutomationRunState((previous) => ({
-          ...previous,
-          phase: "Frame capture",
-          detail: "Capturing start and end frames...",
-        }));
-        const startCapture = await apiClient.captureFrame(taskId, segment.startFrame);
-        const endCapture = await apiClient.captureFrame(taskId, Math.max(segment.startFrame, segment.endFrameExclusive - 1));
-        setFirstFrameId(startCapture.frameId);
-        setLastFrameId(endCapture.frameId);
-        setSelectedFrameId(startCapture.frameId);
-
-        const runFullEditsForFrame = async (frameId: string, promptValue: string, frameLabel: string) => {
-          if (!promptValue.trim()) return [] as Array<{ variantId: string; model: string }>;
-          const variants: Array<{ variantId: string; model: string }> = [];
-          const maxAttemptsPerModel = 3;
-          for (let index = 0; index < imageModels.length; index += 1) {
-            throwIfCancelled();
-            const modelEntry = imageModels[index];
-            let modelSucceeded = false;
-            for (let attempt = 1; attempt <= maxAttemptsPerModel; attempt += 1) {
-              throwIfCancelled();
-              setAutomationRunState((previous) => ({
-                ...previous,
-                phase: `Editing ${frameLabel} frame`,
-                detail: `Queueing ${modelEntry.label} (${index + 1}/${imageModels.length}) attempt ${attempt}/${maxAttemptsPerModel}...`,
-              }));
-              try {
-                const created = await apiClient.fullEdit(taskId, frameId, {
-                  model: modelEntry.model,
-                  prompt: promptValue,
-                  sourceVariantId: "original",
-                });
-                setJobIds((previous) => appendTrackedJobId(previous, created.jobId));
-                appendAutomationLog(`Queued ${frameLabel} frame edit: ${modelEntry.label} (job ${created.jobId}).`);
-                const completed = await waitForAutomationJob(
-                  created.jobId,
-                  `Editing ${frameLabel} frame (${modelEntry.model})`,
-                );
-                const variantId = completed.resultRefs?.variantId;
-                if (typeof variantId === "string" && variantId) {
-                  variants.push({ variantId, model: modelEntry.model });
-                  appendAutomationLog(`Produced ${frameLabel} frame variant ${variantId} (${modelEntry.model}).`);
-                } else {
-                  appendAutomationLog(`Completed ${frameLabel} frame edit (${modelEntry.model}) but no variantId was returned.`);
-                }
-                modelSucceeded = true;
-                break;
-              } catch (error) {
-                const reason = error instanceof Error ? error.message : String(error);
-                const retryable = /(429|too many|rate|throttl|timeout|temporar|5\d\d)/i.test(reason);
-                if (attempt < maxAttemptsPerModel && retryable && reason !== AUTOMATION_CANCELLED) {
-                  const backoffMs = 1500 * attempt;
-                  appendAutomationLog(
-                    `${modelEntry.label} ${frameLabel} edit failed (attempt ${attempt}): ${reason}. Retrying in ${(
-                      backoffMs / 1000
-                    ).toFixed(1)}s.`,
-                  );
-                  await sleep(backoffMs);
-                  continue;
-                }
-                appendAutomationLog(`Failed ${frameLabel} frame edit (${modelEntry.model}): ${reason}`);
-                break;
-              }
-            }
-            if (index < imageModels.length - 1) {
-              await sleep(750);
-            }
-            if (!modelSucceeded) {
-              setAutomationRunState((previous) => ({
-                ...previous,
-                phase: `Editing ${frameLabel} frame`,
-                detail: `${modelEntry.label} did not produce a variant. Continuing...`,
-              }));
-            }
-          }
-          return variants;
-        };
-
-        const trimmedEndPrompt = endPrompt.trim();
-        if (!trimmedEndPrompt) {
-          appendAutomationLog("No end-frame prompt provided, skipping end-frame model edits.");
-        }
-        const startEdits = await runFullEditsForFrame(startCapture.frameId, startPrompt, "start");
-        const endEdits = trimmedEndPrompt ? await runFullEditsForFrame(endCapture.frameId, trimmedEndPrompt, "end") : [];
-        if (!startEdits.length) {
-          throw new Error("Automation did not produce any edited start-frame variants.");
-        }
-
-        await queryClient.invalidateQueries({ queryKey: ["task", taskId] });
-        currentTask = await apiClient.getTask(taskId);
-
-        const buildChoices = (frameId: string, variants: Array<{ variantId: string; model: string }>): AutomationVariantChoice[] => {
-          const frame = currentTask.frames[frameId];
-          if (!frame) return [];
-          const choices: AutomationVariantChoice[] = [];
-          for (const variantRef of variants) {
-            const variant = frame.variants.find((item) => item.variantId === variantRef.variantId);
-            if (!variant?.imageUrl) continue;
-            choices.push({
-              frameId,
-              variantId: variant.variantId,
-              imageUrl: variant.imageUrl,
-              model: String(variant.model),
-              createdAt: variant.createdAt,
-            });
-          }
-          return choices.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-        };
-
-        const startChoices = buildChoices(startCapture.frameId, startEdits);
-        const endChoices = buildChoices(endCapture.frameId, endEdits);
-        if (!startChoices.length) {
-          throw new Error("Automation could not load edited start-frame previews.");
-        }
-
-        setAutomationRunState((previous) => ({ ...previous, isOpen: false }));
-        const choice = await requestAutomationSelection({
-          taskId,
-          segmentId: segment.segmentId,
-          startFrameId: startCapture.frameId,
-          endFrameId: endCapture.frameId,
-          startChoices,
-          endChoices,
-          startSelectedVariantId: startChoices[0]?.variantId ?? null,
-          endSelectedVariantId: endChoices[0]?.variantId ?? null,
-        });
-        if (choice.cancelled) {
-          throw new Error(AUTOMATION_CANCELLED);
-        }
-        if (!choice.startVariantId) {
-          throw new Error("Select a start-frame variant to continue automation.");
-        }
-
-        setAutomationRunState((previous) => ({
-          ...previous,
-          isOpen: true,
-          taskId,
-          phase: "Video generation",
-          detail: "Queueing model runs...",
-          cancelRequested: false,
-          terminal: false,
-          logs: [...previous.logs, formatAutomationLogEntry("Frame selection confirmed. Starting video generation queue.")].slice(-200),
-        }));
-
-        try {
-          await apiClient.selectVariant(taskId, startCapture.frameId, choice.startVariantId);
-          if (choice.endVariantId) {
-            await apiClient.selectVariant(taskId, endCapture.frameId, choice.endVariantId);
-          }
-        } catch {
-          // Non-fatal: these are convenience selections only.
-        }
-        setCompareVariantIds({
-          first: choice.startVariantId,
-          last: choice.endVariantId,
-        });
-        setEditSourceVariantIds({
-          first: choice.startVariantId,
-          last: choice.endVariantId,
-        });
-        setRefineSourceVariantIds({
-          first: choice.startVariantId,
-          last: choice.endVariantId,
-        });
-
-        const generationJobs: Array<{ option: AutomationVideoRunOption; jobId: string }> = [];
-        const queueFailures: string[] = [];
-        for (let index = 0; index < selectedVideoOptions.length; index += 1) {
-          throwIfCancelled();
-          const option = selectedVideoOptions[index];
-          setAutomationRunState((previous) => ({
-            ...previous,
-            phase: "Video generation",
-            detail: `Queueing ${option.label} (${index + 1}/${selectedVideoOptions.length})...`,
-          }));
-          try {
-            const created = await apiClient.generateSegment(taskId, segment.segmentId, {
-              lumaModel: option.lumaModel,
-              mode: option.mode as VideoModeId,
-              prompt: videoPrompt || undefined,
-              firstFrameVariantId: choice.startVariantId,
-              lastFrameVariantId: option.inputMode === "start_end" ? choice.endVariantId ?? undefined : undefined,
-            });
-            generationJobs.push({ option, jobId: created.jobId });
-            setJobIds((previous) => appendTrackedJobId(previous, created.jobId));
-            appendAutomationLog(`Queued ${option.label} (job ${created.jobId}).`);
-          } catch (error) {
-            const message = error instanceof Error ? error.message : "Unknown generation queue error";
-            queueFailures.push(`${option.label}: ${message}`);
-            setAutomationRunState((previous) => ({
-              ...previous,
-              detail: `Failed to queue ${option.label}: ${message}`,
-            }));
-            appendAutomationLog(`Failed to queue ${option.label}: ${message}`);
-          }
-        }
-
-        if (!generationJobs.length) {
-          throw new Error("No automated video generations were queued.");
-        }
-
-        const generationResults = await Promise.allSettled(
-          generationJobs.map((entry) => waitForAutomationJob(entry.jobId, `Generating ${entry.option.label}`, 35 * 60 * 1000)),
-        );
+    try {
+      const successes: Array<{ option: AutomationVideoOption; genId: string }> = [];
+      const failures: string[] = [];
+      for (let index = 0; index < selectedOptions.length; index += 1) {
         throwIfCancelled();
-        const failedRuns: string[] = [...queueFailures];
-        const fulfilledGenerationIds: Array<{ option: AutomationVideoRunOption; genId: string }> = [];
-        generationResults.forEach((result, index) => {
-          if (result.status === "fulfilled") {
-            const genId = result.value.resultRefs?.genId;
-            if (typeof genId === "string" && genId) {
-              fulfilledGenerationIds.push({ option: generationJobs[index].option, genId });
-            } else {
-              const noGenMessage = `${generationJobs[index].option.label}: job completed but no generation ID was returned`;
-              failedRuns.push(noGenMessage);
-              appendAutomationLog(`Generation verification failed for ${noGenMessage}`);
+        const option = selectedOptions[index];
+        setAutomationRunState((previous) => ({
+          ...previous,
+          phase: "Auto model test",
+          detail: `Running ${option.label} (${index + 1}/${selectedOptions.length})...`,
+        }));
+        try {
+          let promptForModel = lumaPrompt.trim();
+          try {
+            const rewritten = await runPromptWizardForModel({
+              modelName: option.lumaModel,
+              inputMode: option.inputMode,
+              draftPrompt: promptForModel,
+            });
+            promptForModel = rewritten.prompt;
+            if (rewritten.result) {
+              appendAutomationLog(
+                promptForModel === lumaPrompt.trim()
+                  ? `${option.label}: prompt checked with Prompt Wizard.`
+                  : `${option.label}: prompt rewritten with Prompt Wizard for provider syntax.`,
+              );
             }
-            return;
+          } catch (wizardError) {
+            const wizardMessage = wizardError instanceof Error ? wizardError.message : "Prompt Wizard rewrite failed";
+            appendAutomationLog(`${option.label}: Prompt Wizard unavailable, using draft prompt (${wizardMessage}).`);
           }
-          const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
-          failedRuns.push(`${generationJobs[index].option.label}: ${reason}`);
-          appendAutomationLog(`Generation failed for ${generationJobs[index].option.label}: ${reason}`);
-        });
-
-        await queryClient.invalidateQueries({ queryKey: ["task", taskId] });
-        await queryClient.invalidateQueries({ queryKey: ["task", "report", taskId] });
-        const refreshedTask = await apiClient.getTask(taskId);
-        const confirmedSuccesses = fulfilledGenerationIds.filter((entry) => {
-          const generation = refreshedTask.segmentGenerations?.[entry.genId];
-          const valid = Boolean(generation && generation.status === "complete" && generation.outputKey);
-          if (!valid) {
-            const reason = `${entry.option.label}: job completed but output asset is missing`;
-            failedRuns.push(reason);
-            appendAutomationLog(`Generation verification failed for ${reason}`);
-          }
-          return valid;
-        });
-        const succeededCount = confirmedSuccesses.length;
-        if (!succeededCount) {
-          throw new Error(
-            failedRuns.length
-              ? `All automated video generations failed. ${failedRuns.join(" | ")}`
-              : "All automated video generations failed.",
+          const payload = {
+            ...buildSegmentGeneratePayload(option.lumaModel, option.mode, "auto_model_test"),
+            prompt: promptForModel || undefined,
+          };
+          const created = await apiClient.generateSegment(
+            selectedTaskId,
+            selectedSegmentId,
+            payload,
           );
+          setJobIds((previous) => appendTrackedJobId(previous, created.jobId));
+          appendAutomationLog(`Queued ${option.label} (job ${created.jobId}).`);
+          const completed = await waitForAutomationJob(created.jobId, `Auto test ${option.label}`, 35 * 60 * 1000);
+          const genId = completed.resultRefs?.genId;
+          if (typeof genId === "string" && genId) {
+            successes.push({ option, genId });
+            appendAutomationLog(`${option.label}: saved generation ${genId}.`);
+          } else {
+            const missingGenMessage = `${option.label}: job completed but no generation ID was returned`;
+            failures.push(missingGenMessage);
+            appendAutomationLog(missingGenMessage);
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown generation error";
+          if (message === AUTOMATION_CANCELLED) {
+            throw error;
+          }
+          failures.push(`${option.label}: ${message}`);
+          appendAutomationLog(`Failed ${option.label}: ${message}`);
         }
-
-        setSelectedTaskId(taskId);
-        setSelectedSegmentId(segment.segmentId);
-        goToReport(taskId, "reports", null, true);
-        setAutomationRunState((previous) => ({
-          ...previous,
-          isOpen: true,
-          taskId,
-          phase: "Completed",
-          detail:
-            failedRuns.length > 0
-              ? `Automation complete. ${succeededCount} of ${selectedVideoOptions.length} selected model runs produced saved outputs.`
-              : `Automation complete. ${succeededCount} of ${generationJobs.length} video generations succeeded.`,
-          cancelRequested: false,
-          terminal: true,
-          logs: [
-            ...previous.logs,
-            ...failedRuns.map((item) => formatAutomationLogEntry(`Model failed: ${item}`)),
-            formatAutomationLogEntry(`Automation completed with ${succeededCount} successful video generations.`),
-          ].slice(-200),
-        }));
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "Automation failed";
-        const cancelled = message === AUTOMATION_CANCELLED;
-        setAutomationRunState((previous) => ({
-          ...previous,
-          isOpen: true,
-          phase: cancelled ? "Cancelled" : "Failed",
-          detail: cancelled
-            ? "Automation stopped. Already-started jobs continue in the background."
-            : message,
-          terminal: true,
-          logs: [...previous.logs, formatAutomationLogEntry(cancelled ? "Automation cancelled." : `Automation failed: ${message}`)].slice(-200),
-        }));
       }
-    },
-    [
-      appendAutomationLog,
-      fpsValue,
-      goToReport,
-      queryClient,
-      requestAutomationSelection,
-      setSelectedFrameId,
-      setSelectedSegmentId,
-      setSelectedTaskId,
-      setTab,
-      waitForAutomationJob,
-    ],
-  );
+
+      await queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
+      await queryClient.invalidateQueries({ queryKey: ["task", "report", selectedTaskId] });
+      await queryClient.invalidateQueries({ queryKey: ["task", "assets", selectedTaskId] });
+
+      if (!successes.length) {
+        throw new Error(
+          failures.length ? `All model runs failed. ${failures.join(" | ")}` : "All model runs failed.",
+        );
+      }
+
+      const latestSuccess = successes[successes.length - 1];
+      selectSegmentGeneration(latestSuccess.genId);
+      setTab("outputs", selectedTaskId, true);
+      setAutomationRunState((previous) => ({
+        ...previous,
+        phase: "Completed",
+        detail:
+          failures.length > 0
+            ? `Auto model test complete. ${successes.length} of ${selectedOptions.length} model runs produced outputs.`
+            : `Auto model test complete. ${successes.length} model runs produced outputs.`,
+        cancelRequested: false,
+        terminal: true,
+        logs: [
+          ...previous.logs,
+          ...failures.map((item) => formatAutomationLogEntry(`Model failed: ${item}`)),
+          formatAutomationLogEntry(`Auto model test completed with ${successes.length} successful runs.`),
+        ].slice(-200),
+      }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Auto model test failed";
+      const cancelled = message === AUTOMATION_CANCELLED;
+      if (!cancelled) {
+        setAutoModelTestError(message);
+      }
+      setAutomationRunState((previous) => ({
+        ...previous,
+        isOpen: true,
+        phase: cancelled ? "Cancelled" : "Failed",
+        detail: cancelled
+          ? "Auto model test stopped. Already-started jobs continue in the background."
+          : message,
+        terminal: true,
+        logs: [
+          ...previous.logs,
+          formatAutomationLogEntry(cancelled ? "Auto model test cancelled." : `Auto model test failed: ${message}`),
+        ].slice(-200),
+      }));
+    }
+  }, [
+    appendAutomationLog,
+    autoModelTestOptions,
+    autoModelTestModels,
+    autoModelTestWarning,
+    buildSegmentGeneratePayload,
+    lumaPrompt,
+    queryClient,
+    runPromptWizardForModel,
+    selectSegmentGeneration,
+    selectedSegment,
+    selectedSegmentId,
+    selectedTaskId,
+    setTab,
+    waitForAutomationJob,
+  ]);
 
   const handleNewTaskSubmit = useCallback(() => {
-    setAutomationUiError(null);
-    if (automationEnabled) {
-      if (!automationStartPrompt.trim()) {
-        setAutomationUiError("Automation requires a start-frame edit prompt.");
-        return;
-      }
-      if (!selectedAutomationVideoOptions.length) {
-        setAutomationUiError("Select at least one video model variant for automation.");
-        return;
-      }
-    }
-    const startPrompt = automationStartPrompt.trim();
-    const endPrompt = automationEndPrompt.trim();
-    const videoPrompt = automationVideoPrompt.trim();
-    const selectedVideoOptions = [...selectedAutomationVideoOptions];
-    void handleCreateTaskWithUpload(
-      automationEnabled
-        ? {
-            onIngestComplete: async (taskId) => {
-              await runAutomatedPipeline({ taskId, startPrompt, endPrompt, videoPrompt, selectedVideoOptions });
-            },
-          }
-        : undefined,
-    );
-  }, [
-    automationEnabled,
-    automationEndPrompt,
-    automationStartPrompt,
-    automationVideoPrompt,
-    handleCreateTaskWithUpload,
-    runAutomatedPipeline,
-    selectedAutomationVideoOptions,
-  ]);
+    void handleCreateTask();
+  }, [handleCreateTask]);
 
   async function ensureSegmentForSelectedFrames(): Promise<string | null> {
     if (!task || !selectedRange) return null;
@@ -5396,6 +5343,14 @@ export default function App() {
 
   async function handleTabChange(nextTab: TabId) {
     if (nextTab === tab) return;
+    const nextSection = workflowSectionForTab(nextTab);
+    if (currentWorkflowRequiresSourceMedia && !sourceMediaReady && nextSection && disabledWorkflowSections.includes(nextSection)) {
+      setAppUiError("Select and ingest source media before opening later workflow steps.");
+      if (selectedTaskId) {
+        setTab("timeline", selectedTaskId, true);
+      }
+      return;
+    }
     const leavingPostProcess = tab === "merge" && nextTab !== "merge";
     if (leavingPostProcess) {
       setMotionSyncModalExportId(null);
@@ -5596,6 +5551,7 @@ export default function App() {
 
   const updatePrevizTask = useCallback(
     async (patch: {
+      description?: string | null;
       scenePrompt?: string | null;
       sceneAspectRatio?: string | null;
       selectedReferenceIds?: string[];
@@ -5604,7 +5560,7 @@ export default function App() {
     }): Promise<void> => {
       if (!selectedTaskId) throw new Error("No task selected");
       const previousPreviz: NonNullable<TaskDetail["previz"]> = {
-        scenePrompt: previzState?.scenePrompt ?? "",
+        scenePrompt: typeof task?.description === "string" ? task.description : previzState?.scenePrompt ?? "",
         sceneAspectRatio: previzState?.sceneAspectRatio ?? null,
         selectedReferenceIds: Array.isArray(previzState?.selectedReferenceIds) ? [...previzState.selectedReferenceIds] : [],
         frameReferenceIds: Array.isArray(previzState?.frameReferenceIds) ? [...previzState.frameReferenceIds] : [],
@@ -5619,6 +5575,16 @@ export default function App() {
         selectedFrameIds: patch.selectedFrameIds ?? previousPreviz.selectedFrameIds ?? [],
       };
       setPrevizStateInTaskCache(selectedTaskId, optimisticPreviz);
+      if (patch.scenePrompt !== undefined || patch.description !== undefined) {
+        queryClient.setQueryData<TaskDetail | undefined>(["task", selectedTaskId], (previous) =>
+          previous
+            ? {
+                ...previous,
+                description: (patch.description ?? patch.scenePrompt ?? previous.description ?? "").trim(),
+              }
+            : previous,
+        );
+      }
       try {
         const result = await apiClient.updatePrevizTask(selectedTaskId, patch);
         setPrevizStateInTaskCache(selectedTaskId, result.previz);
@@ -6161,6 +6127,32 @@ export default function App() {
         });
       },
       sourceMediaKind,
+      sourceReady: sourceMediaReady,
+      sourceStatus: task?.status ?? "created",
+      sourceSelectionBusy,
+      sourceSelectionError,
+      currentSourcePreviewUrl:
+        task?.sourceMedia?.previewSource?.downloadUrl ??
+        task?.sourceMedia?.editSource?.downloadUrl ??
+        task?.video?.previewSource?.downloadUrl ??
+        task?.video?.editSource?.downloadUrl ??
+        null,
+      currentSourceWaveformUrl: task?.sourceMedia?.waveform?.downloadUrl ?? task?.video?.editSource?.waveformUrl ?? null,
+      currentSourceTitle:
+        task?.sourceMedia?.original?.filename ??
+        task?.video?.original?.filename ??
+        (requiredSourceMediaKind === "audio" ? "Source audio" : "Source video"),
+      currentSourceSubtitle: task?.sourceMedia?.linkedSourceTaskId
+        ? `Linked from task ${task.sourceMedia.linkedSourceTaskId}`
+        : task?.sourceMedia?.original?.s3Key || task?.video?.original?.s3Key
+          ? "Uploaded source media"
+          : null,
+      canReplaceSourceMedia,
+      sourceReplacementBlockedReason,
+      openSourcePicker: () => setIsSourceMediaPickerOpen(true),
+      uploadSourceFile: async (file) => {
+        await uploadTaskSourceMediaMutation.mutateAsync(file);
+      },
       sourceWaveformUrl,
       frameCount,
       task,
@@ -6206,6 +6198,12 @@ export default function App() {
       availableProjects,
       effectiveCurrentProjectId,
       sourceMediaKind,
+      sourceMediaReady,
+      sourceSelectionBusy,
+      sourceSelectionError,
+      canReplaceSourceMedia,
+      sourceReplacementBlockedReason,
+      requiredSourceMediaKind,
       sourceWaveformUrl,
       task,
       currentFrameIndex,
@@ -6235,6 +6233,8 @@ export default function App() {
       saveSegmentCropMutation.isPending,
       setCurrentFrameIndex,
       setSelectedSegmentId,
+      setIsSourceMediaPickerOpen,
+      uploadTaskSourceMediaMutation,
       updateTaskProjectMutation,
     ],
   );
@@ -6523,7 +6523,7 @@ export default function App() {
   const previzGenerateTabCtx = useMemo<PrevizGenerateTabCtx>(
     () => ({
       sceneAspectRatio: previzSceneAspectRatio ?? "16:9",
-      scenePrompt: typeof previzState?.scenePrompt === "string" ? previzState.scenePrompt : "",
+      scenePrompt: typeof task?.description === "string" ? task.description : "",
       selectedFrames: previzSelectedFramePreview.map((item) => ({
         referenceId: item.referenceId,
         imageUrl: item.imageUrl,
@@ -6572,7 +6572,7 @@ export default function App() {
       previzGeneratePrompt,
       previzSceneAspectRatio,
       previzSelectedFramePreview,
-      previzState?.scenePrompt,
+      task?.description,
       previzVisibleGenerations,
       selectSegmentGeneration,
       selectedPreviewGeneration?.genId,
@@ -6644,6 +6644,12 @@ export default function App() {
       generationPromptPlaceholder,
       generationPromptError,
       missingRouteInputsMessage,
+      autoModelTestSupported: supportsAutoModelTest,
+      autoModelTestModels,
+      autoModelTestWarning,
+      autoModelTestError,
+      runAutoModelTest,
+      isAutoModelTestRunning: automationRunState.isOpen && !automationRunState.terminal,
       generationInputNote,
       generationHelp,
       selectedSegmentOverLimit,
@@ -6733,6 +6739,13 @@ export default function App() {
       generationPromptPlaceholder,
       generationPromptError,
       missingRouteInputsMessage,
+      supportsAutoModelTest,
+      autoModelTestModels,
+      autoModelTestWarning,
+      autoModelTestError,
+      runAutoModelTest,
+      automationRunState.isOpen,
+      automationRunState.terminal,
       generationInputNote,
       generationHelp,
       selectedSegmentOverLimit,
@@ -7097,7 +7110,7 @@ export default function App() {
       taskPreviewUrlsById={taskPickerPreviewUrlsById}
       onClose={() => setTaskPickerWorkflowId(null)}
       onSelectTask={openTaskFromPicker}
-      onNewTask={openNewTaskWithAutomationDefaults}
+      onNewTask={openNewTaskFlow}
     />
   );
 
@@ -7109,49 +7122,33 @@ export default function App() {
       workflowId={newTaskWorkflowId}
       normalizedTaskName={normalizedNewTaskName}
       showTaskNameExistsWarning={showTaskNameExistsWarning}
-      taskNameAlreadyExists={taskNameAlreadyExists}
-      scenePrompt={newTaskScenePrompt}
-      uploadPercent={newTaskUploadPercent}
-      ingestProgress={pendingCreateJobQuery.data?.progress ?? 0}
-      ingestStatus={pendingCreateJobQuery.data?.status ?? "queued"}
-      error={automationUiError ?? newTaskError}
-      canSubmit={
-        !newTaskName.trim()
-          ? false
-          : isPrevizWorkflowId(newTaskWorkflowId)
-            ? Boolean(normalizedNewTaskName && newTaskScenePrompt.trim())
-            : Boolean(normalizedNewTaskName && newTaskFile)
-      }
-      automationEnabled={automationEnabled}
-      automationStartPrompt={automationStartPrompt}
-      automationEndPrompt={automationEndPrompt}
-      automationVideoPrompt={automationVideoPrompt}
-      automationVideoOptions={automationVideoOptions}
-      automationSelectedVideoOptionIds={automationSelectedVideoOptionIds}
+      description={newTaskDescription}
+      error={newTaskError}
       onClose={() => {
-        setAutomationUiError(null);
         setIsNewTaskModalOpen(false);
       }}
       onTaskNameChange={setNewTaskName}
-      onScenePromptChange={setNewTaskScenePrompt}
-      onFileSelect={handleNewTaskFileSelect}
-      onAutomationEnabledChange={(value) => {
-        setAutomationEnabled(value);
-        if (!value) {
-          setAutomationUiError(null);
+      onDescriptionChange={setNewTaskDescription}
+      onSubmit={handleNewTaskSubmit}
+    />
+  );
+  const sourceMediaPickerNode = (
+    <SourceMediaPickerModal
+      isOpen={isSourceMediaPickerOpen}
+      mediaKind={requiredSourceMediaKind ?? "video"}
+      items={sourceMediaPickerItems}
+      hasProjectScope={Boolean(effectiveCurrentProjectId)}
+      isSaving={isSourceMediaPickerSaving}
+      onClose={() => setIsSourceMediaPickerOpen(false)}
+      onConfirm={async (sourceTaskId) => {
+        setIsSourceMediaPickerSaving(true);
+        try {
+          await bindTaskSourceMediaMutation.mutateAsync(sourceTaskId);
+          setIsSourceMediaPickerOpen(false);
+        } finally {
+          setIsSourceMediaPickerSaving(false);
         }
       }}
-      onAutomationStartPromptChange={(value) => {
-        setAutomationStartPrompt(value);
-        if (automationUiError) setAutomationUiError(null);
-      }}
-      onAutomationEndPromptChange={setAutomationEndPrompt}
-      onAutomationVideoPromptChange={setAutomationVideoPrompt}
-      onAutomationVideoSelectionChange={(selectedIds) => {
-        setAutomationSelectedVideoOptionIds(selectedIds);
-        if (automationUiError) setAutomationUiError(null);
-      }}
-      onSubmit={handleNewTaskSubmit}
     />
   );
 
@@ -7176,12 +7173,12 @@ export default function App() {
           cards={workflowHomeCardsWithPreview}
           onSelectTask={openTaskPickerForWorkflow}
           onOpenLatestTask={openTaskAtSelectStep}
-          onNewTask={openNewTaskWithAutomationDefaults}
+          onNewTask={openNewTaskFlow}
           onSignOut={() => {
             void logout();
           }}
         />
-        <>{taskPickerModalNode}{newTaskModalNode}</>
+        <>{taskPickerModalNode}{newTaskModalNode}{sourceMediaPickerNode}</>
       </>
     );
   }
@@ -7197,13 +7194,13 @@ export default function App() {
           latestTaskThumbnailUrl={workflowLandingLatestTaskThumbnailUrl}
           onSelectTask={openTaskPickerForWorkflow}
           onOpenLatestTask={openTaskAtSelectStep}
-          onNewTask={openNewTaskWithAutomationDefaults}
+          onNewTask={openNewTaskFlow}
           onGoHome={() => goHome()}
           onSignOut={() => {
             void logout();
           }}
         />
-        <>{taskPickerModalNode}{newTaskModalNode}</>
+        <>{taskPickerModalNode}{newTaskModalNode}{sourceMediaPickerNode}</>
       </>
     );
   }
@@ -7220,7 +7217,7 @@ export default function App() {
             void logout();
           }}
           onGoHome={() => goHome()}
-          onOpenNewTask={() => openNewTaskWithAutomationDefaults(currentTaskWorkflowId)}
+          onOpenNewTask={() => openNewTaskFlow(currentTaskWorkflowId)}
           onOpenTaskReport={openTaskReport}
           onSelectTask={openTaskAtSelectStep}
           onDeleteTask={(taskId) => deleteTaskMutation.mutate(taskId)}
@@ -7282,6 +7279,7 @@ export default function App() {
                     <WorkflowTabs
                       tabs={primaryTabs}
                       activeTab={activeWorkflowSection ?? "source"}
+                      disabledTabs={disabledWorkflowSections}
                       onSelect={(sectionId) => {
                         handlePrimaryWorkflowSectionChange(sectionId as PrimaryWorkflowSection);
                       }}
@@ -7980,10 +7978,10 @@ export default function App() {
       {automationRunState.isOpen ? (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/55 p-4">
           <div className="w-full max-w-2xl rounded-2xl border border-ink/15 bg-card p-5 shadow-xl">
-            <h3 className="text-lg font-semibold">{automationRunState.phase || "Running automation"}</h3>
+            <h3 className="text-lg font-semibold">{automationRunState.phase || "Running auto model test"}</h3>
             <p className="mt-2 text-sm text-ink/75">{automationRunState.detail || "Working..."}</p>
             <div className="mt-3 rounded-lg border border-ink/10 bg-white/80 p-2">
-              <p className="text-xs font-semibold uppercase tracking-wide text-ink/60">Automation log</p>
+              <p className="text-xs font-semibold uppercase tracking-wide text-ink/60">Auto model test log</p>
               <div className="mt-2 max-h-52 space-y-1 overflow-y-auto rounded border border-ink/10 bg-bg/60 p-2">
                 {automationRunState.logs.length ? (
                   automationRunState.logs.map((entry, index) => (
@@ -8017,145 +8015,9 @@ export default function App() {
                   disabled={automationRunState.cancelRequested}
                   onClick={cancelAutomationRun}
                 >
-                  {automationRunState.cancelRequested ? "Cancelling..." : "Cancel automation"}
+                  {automationRunState.cancelRequested ? "Cancelling..." : "Cancel auto model test"}
                 </button>
               )}
-            </div>
-          </div>
-        </div>
-      ) : null}
-      {automationSelectionState ? (
-        <div className="fixed inset-0 z-[61] flex items-center justify-center bg-black/55 p-4">
-          <div className="max-h-[90vh] w-full max-w-6xl overflow-y-auto rounded-2xl border border-ink/15 bg-card p-5 shadow-xl">
-            <div className="mb-3 flex items-start justify-between gap-2">
-              <div>
-                <h3 className="text-lg font-semibold">Automation: Choose edited frames</h3>
-                <p className="text-sm text-ink/70">
-                  Select one edited start frame and an optional edited end frame before batch video generation.
-                </p>
-              </div>
-              <button
-                type="button"
-                className="rounded border border-ink/20 bg-white px-2 py-1 text-sm"
-                onClick={() => resolveAutomationSelection({ startVariantId: "", endVariantId: null, cancelled: true })}
-              >
-                Cancel
-              </button>
-            </div>
-
-            <section className="space-y-2">
-              <h4 className="text-sm font-semibold">Start frame variants</h4>
-              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                {automationSelectionState.startChoices.map((choice) => {
-                  const isSelected = automationSelectionState.startSelectedVariantId === choice.variantId;
-                  return (
-                    <button
-                      key={`automation-start-${choice.variantId}`}
-                      type="button"
-                      onClick={() =>
-                        setAutomationSelectionState((previous) =>
-                          previous
-                            ? {
-                                ...previous,
-                                startSelectedVariantId: choice.variantId,
-                              }
-                            : previous,
-                        )
-                      }
-                      className={`overflow-hidden rounded-lg border text-left ${
-                        isSelected ? "border-accent bg-accent/10" : "border-ink/15 bg-white"
-                      }`}
-                    >
-                      <img src={choice.imageUrl} alt={`Start ${choice.model}`} className="aspect-video w-full bg-bg object-contain" />
-                      <div className="space-y-1 p-2">
-                        <p className="text-sm font-medium">{choice.model}</p>
-                        <p className="text-xs text-ink/60">{formatCompactTimestamp(choice.createdAt)}</p>
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-            </section>
-
-            <section className="mt-4 space-y-2">
-              <h4 className="text-sm font-semibold">End frame variants (optional)</h4>
-              {automationSelectionState.endChoices.length ? (
-                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setAutomationSelectionState((previous) =>
-                        previous
-                          ? {
-                              ...previous,
-                              endSelectedVariantId: null,
-                            }
-                          : previous,
-                      )
-                    }
-                    className={`rounded-lg border p-3 text-left ${
-                      automationSelectionState.endSelectedVariantId == null ? "border-accent bg-accent/10" : "border-ink/15 bg-white"
-                    }`}
-                  >
-                    <p className="text-sm font-medium">Use original end frame</p>
-                    <p className="text-xs text-ink/60">No edited end frame will be sent.</p>
-                  </button>
-                  {automationSelectionState.endChoices.map((choice) => {
-                    const isSelected = automationSelectionState.endSelectedVariantId === choice.variantId;
-                    return (
-                      <button
-                        key={`automation-end-${choice.variantId}`}
-                        type="button"
-                        onClick={() =>
-                          setAutomationSelectionState((previous) =>
-                            previous
-                              ? {
-                                  ...previous,
-                                  endSelectedVariantId: choice.variantId,
-                                }
-                              : previous,
-                          )
-                        }
-                        className={`overflow-hidden rounded-lg border text-left ${
-                          isSelected ? "border-accent bg-accent/10" : "border-ink/15 bg-white"
-                        }`}
-                      >
-                        <img src={choice.imageUrl} alt={`End ${choice.model}`} className="aspect-video w-full bg-bg object-contain" />
-                        <div className="space-y-1 p-2">
-                          <p className="text-sm font-medium">{choice.model}</p>
-                          <p className="text-xs text-ink/60">{formatCompactTimestamp(choice.createdAt)}</p>
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-              ) : (
-                <p className="text-sm text-ink/60">No edited end-frame variants were generated. Original end frame will be used.</p>
-              )}
-            </section>
-
-            <div className="mt-5 flex items-center justify-end gap-2">
-              <button
-                type="button"
-                className="rounded border border-ink/20 bg-white px-3 py-2 text-sm"
-                onClick={() => resolveAutomationSelection({ startVariantId: "", endVariantId: null, cancelled: true })}
-              >
-                Cancel automation
-              </button>
-              <button
-                type="button"
-                className="rounded bg-accent px-4 py-2 text-sm text-white disabled:cursor-not-allowed disabled:opacity-50"
-                disabled={!automationSelectionState.startSelectedVariantId}
-                onClick={() =>
-                  resolveAutomationSelection({
-                    startVariantId: automationSelectionState.startSelectedVariantId ?? "",
-                    endVariantId: automationSelectionState.endSelectedVariantId ?? null,
-                    cancelled: false,
-                  })
-                }
-              >
-                Continue to video generation
-              </button>
             </div>
           </div>
         </div>
@@ -8225,7 +8087,7 @@ export default function App() {
           await queryClient.invalidateQueries({ queryKey: ["task", "assets", selectedTaskId] });
         }}
       />
-      <>{taskPickerModalNode}{newTaskModalNode}</>
+      <>{taskPickerModalNode}{newTaskModalNode}{sourceMediaPickerNode}</>
     </main>
   );
 }

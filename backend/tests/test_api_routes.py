@@ -1,10 +1,19 @@
 from __future__ import annotations
 
 import json
+from io import BytesIO
 from types import SimpleNamespace
+
+from PIL import Image
 
 from src import api_handler
 from src.api.routes_external_api import handle_external_api_routes
+
+
+def _valid_png_bytes(width: int = 512, height: int = 512) -> bytes:
+    buffer = BytesIO()
+    Image.new("RGB", (width, height), (120, 120, 120)).save(buffer, format="PNG")
+    return buffer.getvalue()
 
 
 def _event(method: str, path: str, body: dict | None = None) -> dict:
@@ -80,7 +89,7 @@ def test_admin_prompt_wizard_route_returns_config_for_owner(monkeypatch) -> None
     assert result["statusCode"] == 200
     payload = json.loads(result["body"])
     assert payload["config"]["systemPrompt"] == "Owner prompt"
-    assert payload["access"]["isOwner"] is True
+    assert payload["access"]["isAdmin"] is True
 
 
 def test_admin_prompt_wizard_route_updates_config_with_pin(monkeypatch) -> None:
@@ -336,6 +345,8 @@ def test_external_api_full_image_edit_preserves_reference_asset_key_order_and_du
         validate_video_model_prompt_fn=lambda model, prompt: None,
         get_video_model_capability_fn=lambda model: None,
         segment_generation_provider_name_fn=lambda model: "openai",
+        claims={"email": "user@example.com", "cognito:username": "user-1"},
+        is_admin_claims_fn=lambda _claims: False,
     )
 
     assert result is not None
@@ -435,6 +446,8 @@ def test_external_api_patch_image_edit_prefers_plural_reference_asset_keys_over_
         validate_video_model_prompt_fn=lambda model, prompt: None,
         get_video_model_capability_fn=lambda model: None,
         segment_generation_provider_name_fn=lambda model: "openai",
+        claims={"email": "user@example.com", "cognito:username": "user-1"},
+        is_admin_claims_fn=lambda _claims: False,
     )
 
     assert result is not None
@@ -481,25 +494,31 @@ def test_create_task_route_persists_and_returns_task_id(monkeypatch) -> None:
 def test_delete_task_route_marks_task_deleted(monkeypatch) -> None:
     task = {"taskId": "task_1", "status": "ready"}
     saved: list[dict] = []
+    saved_jobs: list[dict] = []
 
     class _Store:
         def save_task(self, task_payload: dict):
             saved.append(task_payload.copy())
             return task_payload
 
+        def save_job(self, job: dict):
+            saved_jobs.append(job)
+            return job
+
     monkeypatch.setattr(api_handler, "get_user_id", lambda _event: "user-1")
     monkeypatch.setattr(api_handler, "get_user_claims", lambda _event: {"email": "u@example.com"})
     monkeypatch.setattr(api_handler, "S3JsonStore", lambda _bucket: _Store())
     monkeypatch.setattr(api_handler, "AssetStore", lambda _bucket, _region: object())
-    monkeypatch.setattr(api_handler, "JobQueue", lambda _url: object())
+    monkeypatch.setattr(api_handler, "JobQueue", lambda _url: SimpleNamespace(enqueue=lambda _message: None))
     monkeypatch.setattr(api_handler, "_load_task_or_404", lambda _store, _user_id, _task_id: task)
 
     result = api_handler._route(_event("DELETE", "/tasks/task_1"))
     assert result["statusCode"] == 200
     payload = json.loads(result["body"])
     assert payload["ok"] is True
-    assert saved and saved[0]["status"] == "error"
+    assert saved and saved[0]["status"] == "deleting"
     assert "deletedAt" in saved[0]
+    assert saved_jobs and saved_jobs[0]["type"] == "task_purge"
 
 
 def test_get_task_detail_route_returns_task_payload(monkeypatch) -> None:
@@ -660,8 +679,11 @@ def test_task_delete_upload_asset_route_removes_original(monkeypatch) -> None:
             return task_payload
 
     class _AssetStore:
-        def delete_object(self, key: str):
+        def delete_object(self, key: str, purge_versions: bool = False):
             deleted_keys.append(key)
+
+        def delete_prefix(self, prefix: str, purge_versions: bool = False):
+            deleted_keys.append(prefix)
 
     monkeypatch.setattr(api_handler, "get_user_id", lambda _event: "user-1")
     monkeypatch.setattr(api_handler, "get_user_claims", lambda _event: {"email": "u@example.com"})
@@ -672,7 +694,10 @@ def test_task_delete_upload_asset_route_removes_original(monkeypatch) -> None:
 
     result = api_handler._route(_event("DELETE", "/tasks/task_1/assets", {"assetType": "upload"}))
     assert result["statusCode"] == 200
-    assert deleted_keys == ["users/user-1/tasks/task_1/uploads/original/input.mp4"]
+    assert deleted_keys == [
+        "users/user-1/tasks/task_1/uploads/original/input.mp4",
+        "users/user-1/tasks/task_1/thumbs/",
+    ]
     assert saved
     assert "original" not in saved[-1]["video"]
     assert saved[-1]["status"] == "created"
@@ -877,7 +902,8 @@ def test_character_animate_generate_route_returns_job_and_gen(monkeypatch) -> No
             return task_payload
 
     class _AssetStore:
-        pass
+        def read_bytes(self, _key: str) -> bytes:
+            return _valid_png_bytes()
 
     monkeypatch.setattr(api_handler, "get_user_id", lambda _event: "user-1")
     monkeypatch.setattr(api_handler, "get_user_claims", lambda _event: {"email": "u@example.com"})
@@ -1100,11 +1126,11 @@ def test_segment_generation_extend_route_adjusts_late_alignment_to_model_minimum
     monkeypatch.setattr(api_handler, "AssetStore", lambda _bucket, _region: _AssetStore())
     monkeypatch.setattr(api_handler, "JobQueue", lambda _url: object())
     monkeypatch.setattr(api_handler, "_load_task_or_404", lambda _store, _user_id, _task_id: task)
-    monkeypatch.setattr(api_handler, "supports_generation_extension", lambda _model: True)
+    monkeypatch.setattr(api_handler, "supports_chunked_generation", lambda _model: True)
     monkeypatch.setattr(api_handler, "get_video_model_capability", lambda _model: SimpleNamespace(max_seconds=10, min_seconds=4))
     monkeypatch.setattr(api_handler, "_resolve_segment_frames", lambda _task, start, end_frame_exclusive: (start, end_frame_exclusive, end_frame_exclusive - start))
 
-    def _create_segment_record(*, task: dict, start: int, end_excl: int, dur_frames: int, asset_store: object):
+    def _create_segment_record(*, task: dict, start: int, end_excl: int, dur_frames: int, asset_store: object, internal_only: bool = False):
         segment = {
             "segmentId": "seg_next",
             "startFrame": start,

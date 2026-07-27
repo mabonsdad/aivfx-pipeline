@@ -57,6 +57,27 @@ VIDEO_MODELS: dict[str, VideoModelCapability] = {
         source_video_profile="default_source_video",
         provider_input_namespace="luma",
     ),
+    "gemini-omni-flash-preview": VideoModelCapability(
+        model="gemini-omni-flash-preview",
+        label="Gemini Omni Flash",
+        provider="gemini",
+        allowed_modes=frozenset(
+            {
+                "gemini_omni_start_video",
+                "gemini_omni_start_end",
+                "gemini_omni_start_only",
+                "gemini_omni_edit_video",
+            }
+        ),
+        max_seconds=10,
+        min_seconds=3,
+        input_fps_cap=Fraction(24, 1),
+        requires_prompt=True,
+        uses_source_video=False,
+        first_frame_profile="runway_standard_720",
+        source_video_profile="gemini_omni_video",
+        provider_input_namespace="gemini",
+    ),
     "runway-gen4.5": VideoModelCapability(
         model="runway-gen4.5",
         label="Runway Gen-4.5",

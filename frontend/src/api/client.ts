@@ -71,6 +71,7 @@ type SegmentGenerateApiPayload = Omit<SegmentGeneratePayload, "lumaModel" | "mod
   wan27Resolution?: Wan27ResolutionId | null;
   sora2Resolution?: Sora2ResolutionId | null;
   happyHorseResolution?: HappyHorseResolutionId | null;
+  toolOrigin?: string | null;
 };
 type ChunkedSegmentGenerateApiPayload = Omit<ChunkedSegmentGeneratePayload, "lumaModel" | "mode"> & {
   lumaModel: VideoModelId;
@@ -250,11 +251,16 @@ export const apiClient = {
   createTask: (
     name: string,
     workflowId: TaskWorkflowId = DEFAULT_TASK_WORKFLOW_ID,
-    options?: { scenePrompt?: string | null },
+    options?: { description?: string | null; scenePrompt?: string | null },
   ) =>
     api<{ taskId: string }>("/tasks", {
       method: "POST",
-      body: JSON.stringify({ name, workflowId, scenePrompt: options?.scenePrompt ?? null }),
+      body: JSON.stringify({
+        name,
+        workflowId,
+        description: options?.description ?? options?.scenePrompt ?? null,
+        scenePrompt: options?.scenePrompt ?? null,
+      }),
     }),
   setTaskProject: (taskId: string, payload: { projectId?: string | null }) =>
     api<{ taskId: string; projectId?: string | null; projectName?: string | null }>(`/tasks/${taskId}/project`, {
@@ -272,6 +278,7 @@ export const apiClient = {
   updatePrevizTask: (
     taskId: string,
     payload: {
+      description?: string | null;
       scenePrompt?: string | null;
       sceneAspectRatio?: string | null;
       selectedReferenceIds?: string[];
@@ -292,6 +299,8 @@ export const apiClient = {
     }),
   createVideoUpload: (taskId: string, payload: { filename: string; contentType: string; sizeBytes: number }) =>
     api<{ uploadUrl: string; s3Key: string }>(`/tasks/${taskId}/uploads/video`, { method: "POST", body: JSON.stringify(payload) }),
+  bindTaskSourceMedia: (taskId: string, payload: { sourceTaskId: string }) =>
+    api<{ jobId: string }>(`/tasks/${taskId}/source-media/bind`, { method: "POST", body: JSON.stringify(payload) }),
   initGenerationAudioReferenceUpload: (taskId: string, payload: { filename: string; contentType: string; sizeBytes?: number }) =>
     api<{ referenceId: string; key: string; uploadUrl: string }>(`/tasks/${taskId}/generation-audio-reference/upload/init`, {
       method: "POST",

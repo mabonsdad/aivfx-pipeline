@@ -8,6 +8,7 @@ from src.workers.dispatch import JobHandler
 def build_job_handlers(
     *,
     handle_ingest_fn: Callable[..., Any],
+    handle_bind_source_media_fn: Callable[..., Any],
     handle_full_edit_fn: Callable[..., Any],
     handle_patch_edit_fn: Callable[..., Any],
     handle_api_image_edit_full_fn: Callable[..., Any],
@@ -36,6 +37,12 @@ def build_job_handlers(
 ) -> dict[str, JobHandler]:
     return {
         "ingest_video": lambda **kwargs: handle_ingest_fn(**kwargs),
+        "bind_source_media": lambda **kwargs: handle_bind_source_media_fn(
+            job=kwargs["job"],
+            store=kwargs["store"],
+            task=kwargs["task"],
+            settings=kwargs["settings"],
+        ),
         "edit_full": lambda **kwargs: handle_full_edit_fn(**kwargs),
         "edit_patch": lambda **kwargs: handle_patch_edit_fn(**kwargs),
         "api_image_edit_full": lambda **kwargs: handle_api_image_edit_full_fn(

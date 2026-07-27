@@ -3,6 +3,7 @@
 export const VIDEO_MODEL_IDS = [
   "ray-3.2-720p",
   "ray-3.2-1080p",
+  "gemini-omni-flash-preview",
   "runway-gen4.5",
   "sora-2-image-to-video",
   "happy-horse-video-edit",
@@ -31,6 +32,10 @@ export const VIDEO_MODE_IDS = [
   "reimagine_1",
   "reimagine_2",
   "reimagine_3",
+  "gemini_omni_start_video",
+  "gemini_omni_start_end",
+  "gemini_omni_start_only",
+  "gemini_omni_edit_video",
   "runway_i2v",
   "sora_i2v",
   "happy_horse_video_edit",

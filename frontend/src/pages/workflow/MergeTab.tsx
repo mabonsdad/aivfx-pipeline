@@ -265,8 +265,8 @@ function statusLabelForGeneration(generation: SegmentGeneration): string {
   return status;
 }
 
-const START_END_MODES = new Set(["kling_start_end", "veo_start_end", "wan27_i2v_start_end", "ltx23_i2v_start_end"]);
-const START_ONLY_MODES = new Set(["kling_start_only", "veo_start_only", "wan27_i2v_start_only", "runway_i2v", "sora_i2v", "happy_horse_i2v", "wan_a14b_i2v"]);
+const START_END_MODES = new Set(["kling_start_end", "veo_start_end", "wan27_i2v_start_end", "ltx23_i2v_start_end", "gemini_omni_start_end"]);
+const START_ONLY_MODES = new Set(["kling_start_only", "veo_start_only", "wan27_i2v_start_only", "runway_i2v", "sora_i2v", "happy_horse_i2v", "wan_a14b_i2v", "gemini_omni_start_only"]);
 const CLIP_LENGTHEN_MODEL_OPTIONS: Record<
   "start_end" | "edit_video",
   Record<"start" | "end", Array<{ value: string; label: string }>>
@@ -305,6 +305,8 @@ function inferGenerationInputMode(generation: SegmentGeneration | null, fallback
   const mode = String(generation?.luma.mode ?? "");
   if (START_END_MODES.has(mode)) return "start_end";
   if (START_ONLY_MODES.has(mode)) return "start_only";
+  if (mode === "gemini_omni_edit_video") return "edit_video";
+  if (mode === "gemini_omni_start_video") return "start_video";
   return fallback;
 }
 

@@ -199,6 +199,11 @@ def handle_task_segment_routes(
                     raise ValueError("Seedance 2.0 Reference to Video requires a prompt that references @Video1.")
                 if "@Video1" not in prompt:
                     raise ValueError("Seedance 2.0 Reference to Video prompt must include @Video1.")
+            elif req.lumaModel == "gemini-omni-flash-preview" and req.inputMode in {"start_video", "edit_video"}:
+                duration_sec = float(segment.get("durationSec") or 0.0)
+                if duration_sec > 3.0 + 1e-6:
+                    raise ValueError("Gemini Omni Flash currently supports source-video and edit-video flows only for working ranges up to 3 seconds.")
+                validate_video_model_prompt_fn(req.lumaModel, prompt)
             else:
                 validate_video_model_prompt_fn(req.lumaModel, prompt)
         except ValueError as exc:
@@ -236,6 +241,7 @@ def handle_task_segment_routes(
                 "selectedReferenceIds": list(req.selectedReferenceIds or []),
                 "audioReferenceId": req.audioReferenceId,
                 "preserveFrames": bool(req.preserveFrames),
+                "toolOrigin": req.toolOrigin,
             },
         )
         task.setdefault("segmentGenerations", {})[gen_id] = {
@@ -259,7 +265,7 @@ def handle_task_segment_routes(
             "origin": build_asset_origin(
                 workflow_id=str(task.get("workflowId") or "source_video_flow"),
                 step_origin="generate",
-                tool_origin="segment_generate",
+                tool_origin=req.toolOrigin or "segment_generate",
                 creation_mode=req.inputMode,
             ),
             "status": "queued",

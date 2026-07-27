@@ -4,8 +4,44 @@ from typing import Any, Callable
 
 from botocore.exceptions import ClientError
 
+from src.core.projects import can_access_project
 from src.core.task_workflows import is_character_animate_workflow_id
-from src.models.schemas import AssetDeleteRequest, ExternalQcPairUploadRequest, UploadVideoRequest
+from src.models.schemas import AssetDeleteRequest, ExternalQcPairUploadRequest, SourceMediaBindRequest, UploadVideoRequest
+
+
+def _required_source_media_kind(task: dict[str, Any]) -> str:
+    workflow_id = str(task.get("workflowId") or "").strip()
+    if workflow_id == "character_animate_audio_workflow":
+        return "audio"
+    return "video"
+
+
+def _task_has_derived_source_work(task: dict[str, Any]) -> bool:
+    if task.get("segments"):
+        return True
+    if task.get("frames"):
+        return True
+    if task.get("segmentGenerations"):
+        return True
+    return False
+
+
+def _clear_task_source_media(task: dict[str, Any]) -> None:
+    task.setdefault("video", {})
+    task.setdefault("sourceMedia", {})
+    task["video"].pop("original", None)
+    task["video"].pop("editSource", None)
+    task["video"].pop("previewSource", None)
+    task["sourceMedia"].pop("original", None)
+    task["sourceMedia"].pop("editSource", None)
+    task["sourceMedia"].pop("previewSource", None)
+    task["sourceMedia"].pop("waveform", None)
+    task["sourceMedia"].pop("linkedSourceTaskId", None)
+    task["sourceMedia"].pop("linkedSourceUserId", None)
+
+
+def _key_belongs_to_task_prefix(key: str | None, task_prefix: str) -> bool:
+    return bool(key and key.startswith(f"{task_prefix}/"))
 
 
 def handle_task_asset_routes(
@@ -15,6 +51,8 @@ def handle_task_asset_routes(
     parts: list[str],
     event: dict[str, Any],
     origin: str | None,
+    user_id: str,
+    claims: dict[str, Any],
     task: dict[str, Any],
     store,
     asset_store,
@@ -23,11 +61,13 @@ def handle_task_asset_routes(
     error_response_fn: Callable[..., dict[str, Any]],
     new_id_fn: Callable[[str], str],
     now_iso_fn: Callable[[], str],
+    queue_job_fn: Callable[..., str],
     max_upload_bytes: int,
     presigned_get_ttl_seconds: int,
     logger,
     asset_paths_for_task_fn: Callable[[dict[str, Any]], Any],
     cleanup_custom_reports_fn: Callable[[dict[str, Any]], bool],
+    is_admin_claims_fn: Callable[[dict[str, Any]], bool],
 ) -> dict[str, Any] | None:
     if method == "POST" and len(parts) == 4 and parts[2] == "uploads" and parts[3] == "video":
         req = json_model(UploadVideoRequest, event)
@@ -37,6 +77,8 @@ def handle_task_asset_routes(
         is_audio = req.contentType.startswith("audio/")
         if not is_video and not (is_audio and is_character_animate_workflow_id(str(task.get("workflowId") or ""))):
             return error_response_fn(400, "Invalid content type", origin=origin)
+        if task.get("sourceMedia", {}).get("original") and _task_has_derived_source_work(task):
+            return error_response_fn(400, "This task already contains derived work tied to its current source media.", origin=origin)
 
         key = asset_paths_for_task_fn(task).original_video(req.filename)
         upload_url = asset_store.presign_put(key, expires=900, content_type=req.contentType)
@@ -58,6 +100,48 @@ def handle_task_asset_routes(
         task["status"] = "created"
         store.save_task(task)
         return response_fn(200, {"uploadUrl": upload_url, "s3Key": key}, origin=origin)
+
+    if method == "POST" and len(parts) == 4 and parts[2] == "source-media" and parts[3] == "bind":
+        req = json_model(SourceMediaBindRequest, event)
+        if str(task.get("taskId") or "") == req.sourceTaskId:
+            return error_response_fn(400, "Choose a different task source to bind", origin=origin)
+        if task.get("sourceMedia", {}).get("original") and _task_has_derived_source_work(task):
+            return error_response_fn(400, "This task already contains derived work tied to its current source media.", origin=origin)
+
+        source_task = store.load_task_any(req.sourceTaskId)
+        if not isinstance(source_task, dict) or source_task.get("deletedAt"):
+            return error_response_fn(404, "Source task not found", origin=origin)
+
+        source_owner_id = str(source_task.get("userId") or "").strip()
+        source_project_id = str(source_task.get("projectId") or "").strip()
+        is_admin = is_admin_claims_fn(claims)
+        can_access = source_owner_id == user_id
+        if not can_access and source_project_id:
+            project = store.load_project(source_project_id)
+            can_access = can_access_project(project, user_id=user_id, is_admin=is_admin)
+        if not can_access and not is_admin:
+            return error_response_fn(403, "Source task access denied", origin=origin)
+
+        source_media = source_task.get("sourceMedia") if isinstance(source_task.get("sourceMedia"), dict) else {}
+        if not source_media:
+            return error_response_fn(400, "Selected task does not have source media", origin=origin)
+        source_kind = str(source_media.get("kind") or source_task.get("video", {}).get("editSource", {}).get("mediaType") or "video")
+        if source_kind != _required_source_media_kind(task):
+            expected_label = "audio" if _required_source_media_kind(task) == "audio" else "video"
+            return error_response_fn(400, f"Selected task must provide a {expected_label} source", origin=origin)
+        if not source_media.get("original") or not source_media.get("editSource") or not source_media.get("previewSource"):
+            return error_response_fn(400, "Selected task source media is not ready to reuse yet", origin=origin)
+
+        task["status"] = "ingesting"
+        store.save_task(task)
+        job_id = queue_job_fn(
+            store=store,
+            user_id=user_id,
+            task_id=task_id,
+            job_type="bind_source_media",
+            payload={"sourceTaskId": req.sourceTaskId},
+        )
+        return response_fn(202, {"jobId": job_id}, origin=origin)
 
     if method == "POST" and len(parts) == 5 and parts[2] == "external-qc" and parts[3] == "pairs" and parts[4] == "uploads":
         req = json_model(ExternalQcPairUploadRequest, event)
@@ -154,26 +238,26 @@ def handle_task_asset_routes(
     if req.assetType == "upload":
         source_media = task.setdefault("sourceMedia", {})
         video = task.setdefault("video", {})
+        task_prefix = asset_paths_for_task_fn(task).task_prefix()
         original = task.get("video", {}).get("original", {})
         if not original:
             original = task.get("sourceMedia", {}).get("original", {})
         key = original.get("s3Key")
         if not key:
             return error_response_fn(404, "Upload not found", origin=origin)
-        _delete_key_if_present(key)
+        if _key_belongs_to_task_prefix(key, task_prefix):
+            _delete_key_if_present(key)
         edit_source = video.get("editSource") if isinstance(video.get("editSource"), dict) else {}
         preview_source = video.get("previewSource") if isinstance(video.get("previewSource"), dict) else {}
-        _delete_key_if_present(edit_source.get("s3Key"))
-        _delete_key_if_present(preview_source.get("s3Key"))
-        _delete_key_if_present(source_media.get("waveform", {}).get("s3Key") if isinstance(source_media.get("waveform"), dict) else None)
+        if _key_belongs_to_task_prefix(edit_source.get("s3Key"), task_prefix):
+            _delete_key_if_present(edit_source.get("s3Key"))
+        if _key_belongs_to_task_prefix(preview_source.get("s3Key"), task_prefix):
+            _delete_key_if_present(preview_source.get("s3Key"))
+        waveform_key = source_media.get("waveform", {}).get("s3Key") if isinstance(source_media.get("waveform"), dict) else None
+        if _key_belongs_to_task_prefix(waveform_key, task_prefix):
+            _delete_key_if_present(waveform_key)
         _delete_prefix_if_present(f"{asset_paths_for_task_fn(task).thumbs_prefix()}/")
-        video.pop("original", None)
-        video.pop("editSource", None)
-        video.pop("previewSource", None)
-        source_media.pop("original", None)
-        source_media.pop("editSource", None)
-        source_media.pop("previewSource", None)
-        source_media.pop("waveform", None)
+        _clear_task_source_media(task)
         if not task.get("video", {}).get("editSource"):
             task["status"] = "created"
         store.save_task(task)

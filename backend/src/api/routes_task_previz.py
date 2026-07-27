@@ -57,6 +57,9 @@ def handle_task_previz_route(
     changed = False
     if req.scenePrompt is not None:
         next_prompt = req.scenePrompt.strip()
+        if str(task.get("description") or "").strip() != next_prompt:
+            task["description"] = next_prompt
+            changed = True
         if previz.get("scenePrompt") != next_prompt:
             previz["scenePrompt"] = next_prompt
             changed = True

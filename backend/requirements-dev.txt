@@ -1,0 +1,5 @@
+-r requirements.txt
+# boto3 is provided by the AWS Lambda runtime (so it is intentionally absent
+# from requirements.txt), but tests import api_handler which imports boto3.
+boto3==1.35.99
+pytest==9.0.2
