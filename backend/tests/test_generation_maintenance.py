@@ -54,6 +54,7 @@ def test_reconcile_segment_generation_job_states_updates_completed_generation() 
         store,
         now_iso_fn=lambda: "2026-05-05T10:01:00Z",
         append_history_event_fn=lambda _task, entry: events.append(entry),
+        stale_running_job_max_age_seconds=3600,
     )
 
     assert changed is True
@@ -111,6 +112,7 @@ def test_maintain_segment_generations_runs_full_pipeline() -> None:
         now_iso_fn=lambda: "2026-05-05T12:00:00Z",
         append_history_event_fn=lambda _task, entry: events.append(entry),
         stale_generation_max_age_seconds=60,
+        stale_running_job_max_age_seconds=3600,
     )
 
     assert changed is True
